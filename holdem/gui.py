@@ -99,6 +99,8 @@ class Holdem:
         self.level_started = 0.0
         self.straddle_armed = False
         self.rabbit_cards = None
+        self.paused = False
+        self.settings_win = None
 
         # per-hand ui state
         self.result = None
@@ -212,6 +214,14 @@ class Holdem:
                       font=("Segoe UI", 13, "bold"), width=20, pady=6,
                       activebackground=t["gold"], cursor="hand2")
         b.grid(row=r, column=0, columnspan=4, pady=(20, 0))
+        self.b_deal = b
+        self.b_resume = tk.Button(box, text="Resume current game",
+                                  command=lambda: self._show(self.table),
+                                  bg=t["btn"], fg=t["btn_text"],
+                                  relief="flat", font=("Segoe UI", 9),
+                                  cursor="hand2")
+        self.b_resume.grid(row=r + 1, column=0, columnspan=4, pady=(10, 0))
+        self.b_resume.grid_remove()
 
     def _build_table(self):
         t = self.theme
@@ -223,7 +233,7 @@ class Holdem:
         self.l_summary = tk.Label(top, text="", bg=t["bg"], fg=t["dim"],
                                   font=("Segoe UI", 9))
         self.l_summary.pack(side="left")
-        tk.Button(top, text="Settings", command=lambda: self._show(self.setup),
+        tk.Button(top, text="Settings", command=self.open_settings,
                   bg=t["btn"], fg=t["btn_text"], relief="flat",
                   font=("Segoe UI", 9), cursor="hand2").pack(side="right")
         self.l_blinds = tk.Label(top, text="", bg=t["bg"], fg=t["gold"],
@@ -247,6 +257,7 @@ class Holdem:
             self.root.bind(f"<Key-{k}>", self._hotkey)
             self.root.bind(f"<Key-{k.upper()}>", self._hotkey)
         self.root.bind("<space>", self._hotkey)
+        self.root.bind("<Escape>", self._esc)
 
     def _build_side(self, side):
         t = self.theme
@@ -288,7 +299,7 @@ class Holdem:
                          ("fold", t["dim"]), ("raise", t["loss"]),
                          ("bet", t["text"]), ("check", t["dim"]),
                          ("pot", t["win"]), ("blind", t["dim"]),
-                         ("you", t["accent"])):
+                         ("you", t["accent"]), ("show", t["text"])):
             self.log.tag_config(tag, foreground=col)
 
         tk.Label(side, text="SHOWDOWN", bg=t["panel"], fg=t["dim"],
@@ -426,6 +437,8 @@ class Holdem:
         self.level_idx = 0
         self.straddle_armed = False
         self.rabbit_cards = None
+        self.paused = False
+        self.settings_win = None
         self.game_over = False
         self.hand_over = True
         self.result = None
@@ -463,6 +476,8 @@ class Holdem:
             w.configure(bg=t["bg"])
 
     def deal(self):
+        if self._defer(self.deal):
+            return
         e = self.engine
         if e is None or self.game_over or not self.hand_over:
             return
@@ -551,6 +566,8 @@ class Holdem:
     # ------------------------------------------------------------- the loop
 
     def loop(self):
+        if self._defer(self.loop):
+            return
         e = self.engine
         if e is None:
             return
@@ -592,6 +609,8 @@ class Holdem:
 
     def _forced(self, action):
         """A protocol action taken for the hero: sit-out or clock timeout."""
+        if self._defer(lambda a=action: self._forced(a)):
+            return
         e = self.engine
         if e is None or e.actor != HERO:
             return
@@ -603,6 +622,8 @@ class Holdem:
     def locked_runout(self):
         """No more betting possible, board incomplete: table the hands and
         settle in one run or two."""
+        if self._defer(self.locked_runout):
+            return
         e = self.engine
         self.lock()
         self.reveal |= {p.idx for p in e.contested()}     # force-table
@@ -628,6 +649,8 @@ class Holdem:
                                                           tabled=True))
 
     def ai_turn(self, i):
+        if self._defer(lambda i=i: self.ai_turn(i)):
+            return
         e = self.engine
         if e is None or e.actor != i:
             return
@@ -745,6 +768,9 @@ class Holdem:
     # ------------------------------------------------------------ showdown
 
     def showdown(self, runs=1, tabled=False):
+        if self._defer(lambda r=runs, tb=tabled:
+                       self.showdown(runs=r, tabled=tb)):
+            return
         e = self.engine
         self.lock()
         self.stop_clock()
@@ -963,6 +989,249 @@ class Holdem:
         self.say("street", "Rabbit: "
                  + " ".join(str(c) for c in self.rabbit_cards))
         self.redraw()
+
+
+    # ------------------------------------------------------------ settings
+
+    THEMEABLE = ("background", "foreground", "activebackground",
+                 "activeforeground", "selectcolor", "troughcolor",
+                 "insertbackground", "highlightbackground")
+
+    def _defer(self, fn):
+        """While the settings pause is up, requeue game callbacks."""
+        if self.paused:
+            self.root.after(200, fn)
+            return True
+        return False
+
+    def _walk(self, w):
+        yield w
+        for c in w.winfo_children():
+            yield from self._walk(c)
+
+    def apply_theme(self, name):
+        old = self.theme
+        new = THEMES[name]
+        if new is old:
+            return
+        remap = {old[k]: new[k] for k in new if k in old}
+        roots = [self.root]
+        if self.settings_win is not None and self.settings_win.winfo_exists():
+            roots.append(self.settings_win)
+        for r in roots:
+            for w in self._walk(r):
+                for opt in self.THEMEABLE:
+                    try:
+                        cur = str(w.cget(opt))
+                    except tk.TclError:
+                        continue
+                    if cur in remap:
+                        try:
+                            w.config(**{opt: remap[cur]})
+                        except tk.TclError:
+                            pass
+        self.theme = new
+        # palette values can collide across roles (accent == win in one
+        # theme, accent == gold in the other); pin the widgets whose role
+        # matters after the generic remap
+        for w, opt, key in ((self.b_next, "bg", "accent"),
+                            (self.b_deal, "bg", "accent"),
+                            (self.b_deal, "activebackground", "gold"),
+                            (self.l_status, "fg", "accent"),
+                            (self.l_clock, "fg", "accent"),
+                            (self.l_blinds, "fg", "gold"),
+                            (self.l_stack, "fg", "gold"),
+                            (self.l_hint, "fg", "gold")):
+            try:
+                w.config(**{opt: new[key]})
+            except tk.TclError:
+                pass
+        for tag, key in (("hand", "accent"), ("street", "gold"),
+                         ("fold", "dim"), ("raise", "loss"),
+                         ("bet", "text"), ("check", "dim"),
+                         ("pot", "win"), ("blind", "dim"),
+                         ("you", "accent"), ("show", "text")):
+            self.log.tag_config(tag, foreground=new[key])
+        self.redraw()
+        self.draw_equity()
+
+    def _esc(self, _ev=None):
+        if (self.settings_win is not None
+                and self.settings_win.winfo_exists()):
+            self.close_settings()
+        elif (self.engine is not None and not self.game_over
+                and self.table.winfo_ismapped()):
+            self.open_settings()
+
+    def open_settings(self):
+        if (self.settings_win is not None
+                and self.settings_win.winfo_exists()):
+            self.settings_win.lift()
+            return
+        self.paused = True
+        self.stop_clock()
+        t = self.theme
+        win = tk.Toplevel(self.root)
+        self.settings_win = win
+        win.title("Settings")
+        win.configure(bg=t["panel"])
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", self.close_settings)
+        win.bind("<Escape>", lambda _e: self.close_settings())
+        self.root.update_idletasks()
+        x = self.root.winfo_rootx() + self.root.winfo_width() // 2 - 260
+        y = self.root.winfo_rooty() + self.root.winfo_height() // 2 - 230
+        win.geometry(f"520x460+{max(0, x)}+{max(0, y)}")
+
+        tk.Label(win, text="SETTINGS", bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 15, "bold")).pack(pady=(14, 6))
+
+        body = tk.Frame(win, bg=t["panel"])
+        body.pack(fill="both", expand=True, padx=14)
+        nav = tk.Frame(body, bg=t["panel"])
+        nav.pack(side="left", fill="y", padx=(0, 12))
+        pane = tk.Frame(body, bg=t["bg"])
+        pane.pack(side="left", fill="both", expand=True)
+
+        pages = {}
+        navbtns = {}
+
+        def page(name):
+            f = tk.Frame(pane, bg=t["bg"])
+            pages[name] = f
+            return f
+
+        def show(name):
+            for f in pages.values():
+                f.pack_forget()
+            pages[name].pack(fill="both", expand=True, padx=14, pady=10)
+            for nm, btn in navbtns.items():
+                btn.config(fg=t["accent"] if nm == name else t["dim"])
+
+        for name in ("Display", "Table"):
+            b = tk.Button(nav, text=name.upper(), relief="flat",
+                          bg=t["panel"], fg=t["dim"],
+                          activebackground=t["panel"],
+                          activeforeground=t["accent"],
+                          font=("Segoe UI", 10, "bold"), anchor="w",
+                          cursor="hand2", width=9,
+                          command=lambda n=name: show(n))
+            b.pack(anchor="w", pady=2)
+            navbtns[name] = b
+
+        d = page("Display")
+
+        def lab(parent, txt, top=8):
+            tk.Label(parent, text=txt, bg=t["bg"], fg=t["text"],
+                     font=("Segoe UI", 9)).pack(anchor="w", pady=(top, 1))
+
+        lab(d, "Theme", 4)
+        cb_theme = ttk.Combobox(d, values=list(THEMES), state="readonly",
+                                width=20)
+        cb_theme.set(self.v_theme.get())
+        cb_theme.pack(anchor="w")
+        cb_theme.bind("<<ComboboxSelected>>",
+                      lambda _e: (self.v_theme.set(cb_theme.get()),
+                                  self.apply_theme(cb_theme.get())))
+        lab(d, "Game speed")
+        ttk.Combobox(d, textvariable=self.v_speed, values=list(SPEEDS),
+                     state="readonly", width=20).pack(anchor="w")
+        tk.Label(d, text="Theme changes apply immediately.",
+                 bg=t["bg"], fg=t["dim"],
+                 font=("Segoe UI", 8)).pack(anchor="w", pady=(14, 0))
+
+        tb = page("Table")
+        for txt, var in (("Action clock (25s + time bank)", self.v_clock),
+                         ("Coaching hints", self.v_hint),
+                         ("Live equity readout", self.v_odds),
+                         ("Rabbit hunting", self.v_rabbit),
+                         ("Auto-deal next hand", self.v_auto),
+                         ("Allow straddles (cash)", self.v_straddles),
+                         ("AI auto top-up (cash)", self.v_topup)):
+            tk.Checkbutton(tb, text=txt, variable=var, bg=t["bg"],
+                           fg=t["text"], selectcolor=t["panel"],
+                           activebackground=t["bg"],
+                           activeforeground=t["text"],
+                           font=("Segoe UI", 9)).pack(anchor="w", pady=1)
+        lab(tb, "Show cards at")
+        ttk.Combobox(tb, textvariable=self.v_reveal,
+                     values=["Winner only", "Realistic (muck losers)",
+                             "Everyone"],
+                     state="readonly", width=22).pack(anchor="w")
+        lab(tb, "Run it twice")
+        ttk.Combobox(tb, textvariable=self.v_rit,
+                     values=["Ask", "Always", "Never"],
+                     state="readonly", width=22).pack(anchor="w")
+
+        show("Display")
+
+        bar = tk.Frame(win, bg=t["panel"])
+        bar.pack(fill="x", padx=14, pady=12)
+        tk.Button(bar, text="Quit to desktop", relief="flat",
+                  bg="#5c2333", fg="#ffe8ee", font=("Segoe UI", 9, "bold"),
+                  cursor="hand2", padx=10, pady=4,
+                  command=self.quit_to_desktop).pack(side="left")
+        tk.Button(bar, text="Resume", relief="flat", bg=t["accent"],
+                  fg="#04040c", font=("Segoe UI", 10, "bold"),
+                  cursor="hand2", padx=16, pady=4,
+                  command=self.close_settings).pack(side="right")
+        tk.Button(bar, text="New game\u2026", relief="flat", bg=t["btn"],
+                  fg=t["btn_text"], font=("Segoe UI", 9),
+                  cursor="hand2", padx=10, pady=4,
+                  command=self.abandon_to_setup).pack(side="right", padx=8)
+        try:
+            win.grab_set()
+        except tk.TclError:
+            pass                        # not yet viewable; transient is enough
+
+    def close_settings(self):
+        if self.settings_win is not None:
+            try:
+                self.settings_win.grab_release()
+                self.settings_win.destroy()
+            except tk.TclError:
+                pass
+            self.settings_win = None
+        self.paused = False
+        if not self.v_hint.get():
+            self.l_hint.config(text="")
+        if not self.v_odds.get():
+            self.eq_text = "-"
+            self.eq_bars = (0, 0, 1)
+            self.draw_equity()
+        e = self.engine
+        cash = self.v_mode.get() == "Cash"
+        can_straddle = (cash and self.v_straddles.get()
+                        and self.v_struct.get() != "Fixed-Limit"
+                        and e is not None and len(e.players) >= 3)
+        self.b_straddle.config(
+            state="normal" if can_straddle else "disabled")
+        if (e is not None and e.actor == HERO and not self.hand_over
+                and not self.v_observe.get()
+                and not e.players[HERO].sitting_out):
+            self.start_clock()
+
+    def _sync_resume(self):
+        if self.engine is not None and not self.game_over:
+            self.b_resume.grid()
+        else:
+            self.b_resume.grid_remove()
+
+    def abandon_to_setup(self):
+        if self.engine is not None and not self.game_over:
+            if not messagebox.askyesno(
+                    "New game", "Abandon the current game?",
+                    parent=self.settings_win):
+                return
+        self.close_settings()
+        self._sync_resume()
+        self._show(self.setup)
+
+    def quit_to_desktop(self):
+        if messagebox.askyesno("Quit", "Quit to desktop?",
+                               parent=self.settings_win):
+            self.root.destroy()
 
     # -------------------------------------------------------------- equity
 
