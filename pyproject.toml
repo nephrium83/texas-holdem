@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "holdem"
+version = "1.0.0"
+description = "Texas Hold'em (No-Limit, Pot-Limit, Fixed-Limit) with a Tkinter table and a headless, heavily tested game engine"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Adam LeRoux" }]
+keywords = ["poker", "texas-holdem", "tkinter", "game"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Games/Entertainment",
+]
+
+[project.urls]
+Repository = "https://github.com/nephrium83/texas-holdem"
+
+[project.gui-scripts]
+holdem = "holdem.gui:main"
+
+[tool.setuptools]
+packages = ["holdem"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

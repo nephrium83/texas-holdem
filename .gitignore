@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+# local launcher with a machine-specific interpreter path
+Play Poker.bat
