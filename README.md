@@ -29,6 +29,17 @@ library.
   brute-force oracle.
 - **Responsive UI** — live equity runs on a background thread and stale
   results are discarded; the table never blocks on math.
+- **Real table procedure** — the dead-button rule (busted blinds never
+  let anyone skip a post), sit-out with owed blinds on return (post now
+  or wait for the big blind), an action clock with a time bank that
+  tops up each orbit, and showdown order with mucking: the river
+  aggressor shows first, beaten hands muck, and all-in hands are always
+  tabled.
+- **Modern extras** — big blind ante and clock-based blind levels in
+  tournaments, run it twice on all-in pots (ask, always, or never),
+  UTG straddles in big-bet cash games, rabbit hunting, and cash-game
+  table stakes: 40-100 BB buy-ins with top-ups and auto-rebuying
+  opponents.
 - **Table options** — 2 to 9 seats, cash or tournament blinds, bet
   slider with pot-fraction presets, coaching hints, live equity bar,
   winner highlighting, two themes, adjustable speed, and F/C/R/N
@@ -75,10 +86,13 @@ python tests/gui_smoke.py   # boots the real UI (needs a display)
 The suite cross-checks the evaluator against a brute-force reference on
 20,000 random 7-card deals, pins known hands and Chen scores, verifies
 side-pot amounts, eligibility, and refunds on a deterministic three-way
-all-in, and includes regression tests for the under-raise rule. A fuzz
-pass plays full games across every structure and seat count asserting
-three invariants: chips are conserved, no illegal action is ever taken,
-and every betting round closes with all live bets matched. CI runs the
+all-in, and includes regression tests for the under-raise rule, the
+dead-button rule under busts, big-blind-ante accounting (including the
+orphaned-ante side-pot case), straddle option order, run-it-twice pot
+splitting, showdown order and mucking, and owed blinds across sit-outs.
+A fuzz pass plays full games across every structure and seat count
+asserting three invariants: chips are conserved, no illegal action is
+ever taken, and every betting round closes with all live bets matched. CI runs the
 engine suite on Python 3.10/3.12/3.13 and boots the GUI under Xvfb to
 play 15 hands headless.
 

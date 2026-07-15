@@ -222,6 +222,290 @@ def test_heads_up_positions():
     assert e.actor == e.button
 
 
+
+
+def _play_out(e, brain):
+    while True:
+        if len(e.contested()) <= 1 or e.street == "showdown":
+            break
+        if e.actor is None:
+            e.next_street()
+            continue
+        a, m = brain.decide(e, e.actor)
+        e.act(e.actor, a, m)
+    return e.settle()
+
+
+def test_dead_button_sb_busts():
+    """SB busts -> next hand the button sits on the vacated seat and the
+    old BB posts the SB; nobody skips a blind."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(4)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(5))
+    e.button = 3
+    e.start_hand()                       # btn 0, sb 1, bb 2
+    assert (e.button, e.sb_seat, e.bb_seat) == (0, 1, 2)
+    e.settle()
+    ps[1].stack = 0                      # the SB busts
+    e.start_hand()
+    assert e.bb_seat == 3                # BB advanced one seat
+    assert e.sb_seat == 2 and e.sb_i == 2   # old BB posts SB
+    assert e.button == 1                 # dead button on the vacated seat
+    assert not ps[1].in_seat
+
+
+def test_dead_small_blind_bb_busts():
+    """BB busts -> next hand has a dead small blind (nobody posts it)."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(4)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(5))
+    e.button = 3
+    e.start_hand()                       # btn 0, sb 1, bb 2
+    e.settle()
+    ps[2].stack = 0                      # the BB busts
+    e.start_hand()
+    assert e.bb_seat == 3
+    assert e.sb_seat == 2 and e.sb_i is None    # dead SB, not posted
+    assert e.button == 1
+    assert sum(p.total for p in ps) == e.bb     # only the BB is in
+
+
+def test_bb_never_posts_twice_in_a_row():
+    """Fuzz busts between hands; the BB anchor must advance every hand."""
+    rng = random.Random(11)
+    for seed in range(20):
+        ps = [Player(i, f"P{i}", 1000) for i in range(6)]
+        e = Engine(ps, 10, 20, "No-Limit", random.Random(seed))
+        brain = Brain(random.Random(seed))
+        last_bb = None
+        for _ in range(15):
+            live = [p for p in ps if p.stack > 0]
+            if len(live) > 2 and rng.random() < 0.25:
+                rng.choice(live).stack = 0          # simulate a bust
+            if sum(1 for p in ps if p.stack > 0) < 2:
+                break
+            if not e.start_hand():
+                break
+            if last_bb is not None and sum(1 for p in ps if p.in_seat) >= 3:
+                assert e.bb_seat != last_bb, "same seat posted BB twice"
+            last_bb = e.bb_seat
+            _play_out(e, brain)
+
+
+def test_bb_ante_math():
+    """BB posts blind first then ante; ante is dead (never refunded) but
+    plays in the pot; walks still net the BB only the SB."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(2), bb_ante=True)
+    e.button = 2
+    e.start_hand()                       # btn 0, sb 1, bb 2
+    bb = ps[e.bb_seat]
+    assert bb.total_live == 20 and bb.total_dead == 20
+    # everyone folds to the BB: walk
+    e.act(0, "fold")
+    e.act(1, "fold")
+    res = e.settle()
+    assert sum(p.stack for p in ps) == 3000
+    assert bb.stack == 1010              # wins the SB, ante comes home in pot
+    assert res["refund"] == (bb.idx, 10) # live refund only (BB bet vs SB 10)
+
+
+def test_bb_ante_short_stack():
+    """Blind before ante when the stack can't cover both."""
+    ps = [Player(0, "A", 1000), Player(1, "B", 1000), Player(2, "C", 25)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(2), bb_ante=True)
+    e.button = 2                         # bb lands on seat 2 (25 chips)
+    e.start_hand()
+    c = ps[2]
+    assert c.total_live == 20 and c.total_dead == 5 and c.all_in
+
+
+def test_straddle():
+    ps = [Player(i, f"P{i}", 1000) for i in range(4)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(3))
+    e.button = 3
+    e.start_hand(straddle_fn=lambda utg: True)
+    assert e.straddler == 3              # utg after bb seat 2
+    assert e.current_bet == 40
+    assert e.actor == 0                  # action starts left of the straddle
+    lg = e.legal(0)
+    assert lg["to_call"] == 40 and lg["min_to"] == 80
+    # fold to the straddler: they must get their option
+    e.act(0, "fold")
+    e.act(1, "call")                     # sb calls 30 more
+    e.act(2, "call")                     # bb calls 20 more
+    assert e.actor == 3                  # straddler's option
+    assert e.legal(3)["can_check"]
+
+
+def test_no_straddle_heads_up_or_limit():
+    ps = [Player(i, f"P{i}", 1000) for i in range(2)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(3))
+    e.start_hand(straddle_fn=lambda utg: True)
+    assert e.straddler is None
+    ps = [Player(i, f"P{i}", 1000) for i in range(4)]
+    e = Engine(ps, 10, 20, "Fixed-Limit", random.Random(3))
+    e.start_hand(straddle_fn=lambda utg: True)
+    assert e.straddler is None
+
+
+def test_run_it_twice():
+    """Two runs share no cards, each awards half the pot, chips conserved."""
+    ps = [Player(0, "A", 500), Player(1, "B", 500), Player(2, "C", 500)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(9))
+    e.button = 2
+    e.start_hand()
+    e.act(0, "raise", 500)
+    e.act(1, "raise", 500)
+    e.act(2, "fold")
+    assert e.betting_locked()
+    res = e.settle(runs=2)
+    assert e.board2 is not None
+    assert len(e.board) == 5 and len(e.board2) == 5
+    ids = {(c.v, c.s) for c in e.board} | {(c.v, c.s) for c in e.board2}
+    assert len(ids) == 10 or len(e.board) + len(e.board2) - len(ids) == 0
+    assert len(res["runs"]) == 2
+    main = res["pots"][0]
+    assert sum(r["amount"] for r in main["runs"]) == main["amount"]
+    assert sum(p.stack for p in ps) == 1500
+
+
+def test_run_it_twice_conservation_fuzz():
+    for seed in range(25):
+        rng = random.Random(seed)
+        ps = [Player(i, f"P{i}", 300, style=rng.choice(AI_STYLES))
+              for i in range(4)]
+        e = Engine(ps, 10, 20, "No-Limit", rng, bb_ante=True)
+        brain = Brain(rng)
+        for _ in range(10):
+            if sum(1 for p in ps if p.stack > 0) < 2:
+                break
+            if not e.start_hand():
+                break
+            while True:
+                if len(e.contested()) <= 1 or e.street == "showdown":
+                    break
+                if e.actor is None:
+                    if e.betting_locked() and len(e.board) < 5:
+                        break            # settle with two runs
+                    e.next_street()
+                    continue
+                a, m = brain.decide(e, e.actor)
+                e.act(e.actor, a, m)
+            runs = 2 if (e.betting_locked() and len(e.board) < 5) else 1
+            e.settle(runs=runs)
+            e.drain()
+            assert sum(p.stack for p in ps) == 1200, f"seed {seed}"
+
+
+def test_showdown_order_and_muck():
+    """River aggressor shows first; beaten non-winners muck."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(4))
+    e.button = 2                         # btn 0, sb 1, bb 2, first actor 0
+    e.start_hand()
+    e.act(0, "call"); e.act(1, "call"); e.act(2, "call")
+    e.next_street(); e.act(e.actor, "call"); e.act(e.actor, "call"); e.act(e.actor, "call")
+    e.next_street(); e.act(e.actor, "call"); e.act(e.actor, "call"); e.act(e.actor, "call")
+    e.next_street()                      # river
+    first = e.actor
+    e.act(first, "raise", 60)            # river bet
+    aggr = first
+    while e.actor is not None:
+        e.act(e.actor, "call")
+    res = e.settle()
+    assert res["order"][0] == aggr
+    assert res["winners"] <= res["shown"]
+    for j in res["mucked"]:
+        assert j not in res["winners"]
+        sc = res["runs"][0]["scores"]
+        assert any(sc[k] > sc[j] for k in res["shown"])
+    assert res["shown"] | res["mucked"] == set(res["order"])
+
+
+def test_all_in_hands_are_tabled():
+    ps = [Player(0, "A", 300), Player(1, "B", 300)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(6))
+    e.start_hand()
+    e.act(e.actor, "raise", 300)
+    e.act(e.actor, "call")
+    res = e.settle()
+    assert res["tabled"]
+    assert res["mucked"] == set()
+    assert res["shown"] == {0, 1}
+
+
+def test_sitting_out_owes_blinds():
+    """A cash player sitting out through their blinds owes them on return."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(4)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(8))
+    e.button = 3
+    brain = Brain(random.Random(8))
+    e.start_hand()                       # btn 0 sb 1 bb 2
+    _play_out(e, brain)
+    e.sit_out(3)                         # seat 3 is next BB
+    e.start_hand()                       # BB skips seat 3 -> lands on 0
+    assert e.bb_seat == 0
+    assert not ps[3].in_seat and ps[3].owes_bb
+    _play_out(e, brain)
+    e.sit_in(3, post_now=True)
+    bank = sum(p.stack for p in ps)
+    e.start_hand()
+    assert ps[3].in_seat
+    assert ps[3].total_live == e.bb      # posted a live BB from position
+    _play_out(e, brain)
+    assert sum(p.stack for p in ps) == bank
+
+
+def test_wait_for_bb():
+    ps = [Player(i, f"P{i}", 1000) for i in range(4)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(8))
+    e.button = 3
+    brain = Brain(random.Random(8))
+    e.start_hand(); _play_out(e, brain)          # bb seat 2
+    e.sit_out(0)
+    e.start_hand(); _play_out(e, brain)          # bb seat 3
+    e.start_hand(); _play_out(e, brain)          # bb skips 0 -> seat 1
+    assert e.bb_seat == 1 and ps[0].owes_bb      # blind passed them
+    e.sit_in(0, post_now=False)                  # wait for the natural BB
+    assert ps[0].wait_for_bb
+    e.start_hand()                               # bb seat 2; 0 still out
+    assert not ps[0].in_seat
+    _play_out(e, brain)
+    e.start_hand(); _play_out(e, brain)          # bb seat 3
+    e.start_hand()                               # bb reaches seat 0
+    assert e.bb_seat == 0 and ps[0].in_seat
+    assert not ps[0].owes_bb and not ps[0].wait_for_bb
+    _play_out(e, brain)
+
+
+def test_add_chips_only_between_hands():
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(1))
+    assert e.add_chips(0, 500)
+    assert ps[0].stack == 1500
+    e.start_hand()
+    assert not e.add_chips(0, 500)       # rejected mid-hand
+    assert ps[0].stack in (1500, 1490, 1480)     # only blinds moved it
+
+
+def test_rabbit_peek_matches_deal():
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(12))
+    e.button = 2
+    e.start_hand()
+    peek = e.peek_runout()
+    assert len(peek) == 5
+    before = list(e.deck.cards)
+    peek2 = e.peek_runout()
+    assert e.deck.cards == before        # non-mutating
+    assert [(c.v, c.s) for c in peek] == [(c.v, c.s) for c in peek2]
+    e.next_street()
+    assert [(c.v, c.s) for c in e.board] == [(c.v, c.s) for c in peek[:3]]
+    e.next_street()
+    assert (e.board[3].v, e.board[3].s) == (peek[3].v, peek[3].s)
+    e.next_street()
+    assert (e.board[4].v, e.board[4].s) == (peek[4].v, peek[4].s)
+
+
 if __name__ == "__main__":
     fns = [(k, v) for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

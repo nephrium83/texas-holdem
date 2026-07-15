@@ -1,11 +1,17 @@
 import math
 import random
 import threading
+import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR)
+
+CLOCK_BASE = 25          # seconds per action
+BANK_START = 60          # starting time bank
+BANK_TOPUP = 10          # added each time you post the BB
+BANK_CAP = 120
 
 # ----------------------------------------------------------------- themes
 
@@ -68,7 +74,7 @@ class Holdem:
         self.v_struct = tk.StringVar(value="No-Limit")
         self.v_level = tk.IntVar(value=2)
         self.v_chaos = tk.BooleanVar(value=True)
-        self.v_reveal = tk.StringVar(value="Winner + callers")
+        self.v_reveal = tk.StringVar(value="Realistic (muck losers)")
         self.v_odds = tk.BooleanVar(value=True)
         self.v_hint = tk.BooleanVar(value=True)
         self.v_theme = tk.StringVar(value="Cyberpunk")
@@ -76,6 +82,23 @@ class Holdem:
         self.v_auto = tk.BooleanVar(value=False)
         self.v_observe = tk.BooleanVar(value=False)
         self.v_bet = tk.IntVar(value=0)
+        self.v_ante = tk.BooleanVar(value=True)       # BB ante (tournament)
+        self.v_lvlmin = tk.IntVar(value=8)            # minutes per level
+        self.v_clock = tk.BooleanVar(value=True)      # action clock
+        self.v_rit = tk.StringVar(value="Ask")        # run it twice
+        self.v_straddles = tk.BooleanVar(value=False) # allow straddles (cash)
+        self.v_rabbit = tk.BooleanVar(value=True)     # rabbit hunting
+        self.v_topup = tk.BooleanVar(value=True)      # AI auto top-up (cash)
+
+        # session state
+        self.buyin = 0
+        self.bank = float(BANK_START)
+        self.clock_job = None
+        self.clock_until = 0.0
+        self.clock_phase = "off"        # off | base | bank
+        self.level_started = 0.0
+        self.straddle_armed = False
+        self.rabbit_cards = None
 
         # per-hand ui state
         self.result = None
@@ -153,24 +176,35 @@ class Holdem:
         r += 1
         row("AI skill (1-3)", spin(self.v_level, 1, 3))
         row("Show cards at", combo(self.v_reveal,
-                                   ["Winner only", "Winner + callers",
+                                   ["Winner only",
+                                    "Realistic (muck losers)",
                                     "Everyone"]), 2)
         r += 1
         row("Theme", combo(self.v_theme, list(THEMES)))
         row("Speed", combo(self.v_speed, list(SPEEDS)), 2)
         r += 1
+        row("Run it twice", combo(self.v_rit, ["Ask", "Always", "Never"]))
+        row("Level minutes", spin(self.v_lvlmin, 3, 30), 2)
+        r += 1
 
         checks = tk.Frame(box, bg=t["bg"])
         checks.grid(row=r, column=0, columnspan=4, pady=(14, 4))
-        for txt, var in (("Mixed AI skill levels", self.v_chaos),
-                         ("Live equity readout", self.v_odds),
-                         ("Coaching hints", self.v_hint),
-                         ("Auto-deal next hand", self.v_auto),
-                         ("Observe mode (AI plays your seat)", self.v_observe)):
+        opts = (("Mixed AI skill levels", self.v_chaos),
+                ("Live equity readout", self.v_odds),
+                ("Coaching hints", self.v_hint),
+                ("Auto-deal next hand", self.v_auto),
+                ("Observe mode (AI plays your seat)", self.v_observe),
+                ("Action clock (25s + time bank)", self.v_clock),
+                ("Big blind ante (tournament)", self.v_ante),
+                ("Allow straddles (cash, big-bet)", self.v_straddles),
+                ("Rabbit hunting", self.v_rabbit),
+                ("AI auto top-up (cash)", self.v_topup))
+        for k, (txt, var) in enumerate(opts):
             tk.Checkbutton(checks, text=txt, variable=var, bg=t["bg"],
                            fg=t["text"], selectcolor=t["panel"],
                            activebackground=t["bg"], activeforeground=t["text"],
-                           font=("Segoe UI", 9)).pack(anchor="w")
+                           font=("Segoe UI", 9)).grid(
+                row=k % 5, column=k // 5, sticky="w", padx=(0, 18))
         r += 1
 
         b = tk.Button(box, text="DEAL ME IN", command=self.new_game,
@@ -273,13 +307,32 @@ class Holdem:
 
         left = tk.Frame(bar, bg=t["panel"])
         left.pack(side="left", padx=16, pady=10)
-        self.l_stack = tk.Label(left, text="", bg=t["panel"], fg=t["gold"],
+        toprow = tk.Frame(left, bg=t["panel"])
+        toprow.pack(anchor="w")
+        self.l_stack = tk.Label(toprow, text="", bg=t["panel"], fg=t["gold"],
                                 font=("Segoe UI", 14, "bold"))
-        self.l_stack.pack(anchor="w")
+        self.l_stack.pack(side="left")
+        self.l_clock = tk.Label(toprow, text="", bg=t["panel"], fg=t["accent"],
+                                font=("Segoe UI", 11, "bold"))
+        self.l_clock.pack(side="left", padx=(14, 0))
         self.l_keys = tk.Label(
             left, text="F fold   C check/call   R raise   N next hand",
             bg=t["panel"], fg=t["dim"], font=("Segoe UI", 8))
         self.l_keys.pack(anchor="w")
+        btnrow = tk.Frame(left, bg=t["panel"])
+        btnrow.pack(anchor="w", pady=(3, 0))
+
+        def small(txt, cmd):
+            b = tk.Button(btnrow, text=txt, command=cmd, relief="flat",
+                          bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
+                          cursor="hand2", padx=6)
+            b.pack(side="left", padx=(0, 5))
+            return b
+
+        self.b_sit = small("Sit out", self.toggle_sit)
+        self.b_add = small("Add chips", self.add_chips_dialog)
+        self.b_straddle = small("Straddle: off", self.toggle_straddle)
+        self.b_rabbit = small("Rabbit", self.rabbit)
 
         right = tk.Frame(bar, bg=t["panel"])
         right.pack(side="right", padx=16, pady=8)
@@ -287,7 +340,7 @@ class Holdem:
         sizes = tk.Frame(right, bg=t["panel"])
         sizes.grid(row=0, column=0, columnspan=4, sticky="e", pady=(0, 4))
         self.size_btns = []
-        for label, frac in (("\u00bd pot", 0.5), ("\u00be pot", 0.75),
+        for label, frac in (("½ pot", 0.5), ("¾ pot", 0.75),
                             ("Pot", 1.0), ("All-in", None)):
             b = tk.Button(sizes, text=label, width=6, relief="flat",
                           bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
@@ -348,9 +401,12 @@ class Holdem:
 
     def new_game(self):
         n = max(2, min(9, self.v_players.get()))
-        stack = max(20, self.v_stack.get())
         sb = max(1, self.v_sb.get())
         bb = max(sb + 1, self.v_bb.get())
+        cash = self.v_mode.get() == "Cash"
+        stack = max(20, self.v_stack.get())
+        if cash:                                  # table stakes: 40-100 BB
+            stack = max(40 * bb, min(stack, 100 * bb))
         self.theme = THEMES[self.v_theme.get()]
 
         base = self.v_level.get()
@@ -361,13 +417,30 @@ class Holdem:
                                   style=self.rng.choice(AI_STYLES), level=lvl))
 
         self.engine = Engine(players, sb=sb, bb=bb,
-                             structure=self.v_struct.get(), rng=self.rng)
+                             structure=self.v_struct.get(), rng=self.rng,
+                             bb_ante=(not cash) and self.v_ante.get(),
+                             deal_sitting_out=not cash)
+        self.buyin = stack
+        self.bank = float(BANK_START)
+        self.level_started = time.time()
         self.level_idx = 0
+        self.straddle_armed = False
+        self.rabbit_cards = None
         self.game_over = False
         self.hand_over = True
         self.result = None
         self.reveal = set()
         self.highlight = set()
+        self.stop_clock()
+
+        self.b_sit.config(text="Sit out")
+        self.b_straddle.config(text="Straddle: off")
+        can_straddle = (cash and self.v_straddles.get()
+                        and self.v_struct.get() != "Fixed-Limit" and n >= 3)
+        self.b_straddle.config(
+            state="normal" if can_straddle else "disabled")
+        self.b_add.config(state="disabled")
+        self.b_rabbit.config(state="disabled")
 
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
@@ -375,10 +448,13 @@ class Holdem:
 
         self._retheme()
         self.l_summary.config(
-            text=f"{n}-handed  \u00b7  {self.v_struct.get()}  \u00b7  {self.v_mode.get()}"
-                 f"  \u00b7  AI {'mixed' if self.v_chaos.get() else base}")
+            text=f"{n}-handed  ·  {self.v_struct.get()}  ·  {self.v_mode.get()}"
+                 f"  ·  AI {'mixed' if self.v_chaos.get() else base}")
         self._show(self.table)
         self.say("hand", "=== New game ===")
+        self.level_gen = getattr(self, "level_gen", 0) + 1
+        if self.v_mode.get() == "Tournament":
+            self.root.after(1000, lambda g=self.level_gen: self._level_tick(g))
         self.root.after(120, self.deal)
 
     def _retheme(self):
@@ -390,13 +466,31 @@ class Holdem:
         e = self.engine
         if e is None or self.game_over or not self.hand_over:
             return
+        cash = self.v_mode.get() == "Cash"
+
+        if cash and self.v_topup.get():           # AI auto top-up
+            for p in e.players:
+                if not p.human and 0 <= p.stack < self.buyin:
+                    e.add_chips(p.idx, self.buyin - p.stack)
+
+        hero = e.players[HERO]
+        if cash and hero.stack == 0 and not hero.sitting_out:
+            if messagebox.askyesno(
+                    "Rebuy", f"You're felted. Rebuy for {self.buyin:,}?"):
+                e.add_chips(HERO, self.buyin)
+            else:
+                e.sit_out(HERO)
+                self.b_sit.config(text="I'm back")
+
         live = [p for p in e.players if p.stack > 0]
         if len(live) < 2:
             self.finish_game(live)
             return
 
-        if self.v_mode.get() == "Tournament":
-            want = min(len(BLIND_LEVELS) - 1, e.hand_no // 8)
+        if not cash:                              # timed blind levels
+            mins = max(1, self.v_lvlmin.get())
+            want = min(len(BLIND_LEVELS) - 1,
+                       int((time.time() - self.level_started) // (mins * 60)))
             if want != self.level_idx:
                 self.level_idx = want
                 e.sb, e.bb = BLIND_LEVELS[want]
@@ -405,27 +499,47 @@ class Holdem:
         self.result = None
         self.reveal = set()
         self.highlight = set()
+        self.rabbit_cards = None
+        self.b_rabbit.config(state="disabled")
         self.eq_text = "-"
         self.eq_bars = (0, 0, 1)
         self.l_show.config(text="-")
         self.hand_over = False
 
-        if not e.start_hand():
+        allow_straddle = (cash and self.v_straddles.get()
+                          and str(self.b_straddle["state"]) == "normal")
+
+        def straddle_fn(utg):
+            if not allow_straddle:
+                return False
+            p = e.players[utg]
+            if p.human:
+                return self.straddle_armed and not self.v_observe.get()
+            return self.rng.random() < {"Maniac": 0.4, "Loose": 0.15}.get(
+                p.style, 0.0)
+
+        if not e.start_hand(straddle_fn=straddle_fn):
             self.finish_game(live)
             return
+        if e.bb_i == HERO and e.players[HERO].in_seat:
+            self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
         self.flush_log()
-        self.l_blinds.config(text=f"Blinds {e.sb}/{e.bb}")
+        self.l_blinds.config(
+            text=f"Blinds {e.sb}/{e.bb}"
+                 + (f" · ante {e.bb}" if e.bb_ante else ""))
         self.b_next.config(state="disabled")
+        self.b_add.config(state="disabled")
         self.loop()
 
     def finish_game(self, live):
+        self.stop_clock()
         self.game_over = True
         self.hand_over = True
         self.lock()
         self.b_next.config(state="disabled")
         if live and live[0].idx == HERO:
             self.l_status.config(text="You took the whole table. Nice.")
-            self.say("pot", "*** You win \u2014 everyone else is broke. ***")
+            self.say("pot", "*** You win — everyone else is broke. ***")
         else:
             who = live[0].name if live else "nobody"
             self.l_status.config(
@@ -442,10 +556,13 @@ class Holdem:
             return
 
         if len(e.contested()) <= 1 or e.street == "showdown":
-            self.showdown()
+            self.showdown(tabled=e.betting_locked())
             return
 
         if e.actor is None:                     # betting round closed
+            if e.betting_locked() and len(e.board) < 5:
+                self.locked_runout()
+                return
             e.next_street()
             self.flush_log()
             self.redraw()
@@ -456,13 +573,59 @@ class Holdem:
         i = e.actor
         self.redraw()
 
+        hero = e.players[HERO]
+        if i == HERO and hero.sitting_out:      # sitting out: check or fold
+            self.lock()
+            act = "call" if e.legal(HERO)["can_check"] else "fold"
+            self.root.after(max(60, self.delay // 3),
+                            lambda a=act: self._forced(a))
+            return
+
         if i == HERO and not self.v_observe.get():
             self.start_equity()
             self.unlock()
+            self.start_clock()
         else:
             self.lock()
             self.root.after(self.delay,
                             lambda seat=i: self.ai_turn(seat))
+
+    def _forced(self, action):
+        """A protocol action taken for the hero: sit-out or clock timeout."""
+        e = self.engine
+        if e is None or e.actor != HERO:
+            return
+        e.act(HERO, action, 0)
+        self.flush_log()
+        self.redraw()
+        self.root.after(max(60, self.delay // 3), self.loop)
+
+    def locked_runout(self):
+        """No more betting possible, board incomplete: table the hands and
+        settle in one run or two."""
+        e = self.engine
+        self.lock()
+        self.reveal |= {p.idx for p in e.contested()}     # force-table
+        self.redraw()
+
+        runs = 1
+        board_left = len(e.board) < 5
+        if board_left:
+            mode = self.v_rit.get()
+            hero_in = (any(p.idx == HERO for p in e.contested())
+                       and not self.v_observe.get()
+                       and not e.players[HERO].sitting_out)
+            if mode == "Always":
+                runs = 2
+            elif mode == "Ask":
+                if hero_in:
+                    runs = 2 if messagebox.askyesno(
+                        "Run it twice",
+                        "All in. Run the board twice?") else 1
+                else:
+                    runs = 2                     # the AIs always consent
+        self.root.after(self.delay, lambda: self.showdown(runs=runs,
+                                                          tabled=True))
 
     def ai_turn(self, i):
         e = self.engine
@@ -517,7 +680,7 @@ class Holdem:
 
         self._sync_raise_label()
         self.l_status.config(
-            text=f"{e.street.capitalize()} \u2014 your move."
+            text=f"{e.street.capitalize()} — your move."
                  + (f"  {lg['to_call']} to call." if lg["to_call"] else ""))
         if self.v_hint.get():
             self.l_hint.config(text="Hint: " + self.hint(lg))
@@ -554,6 +717,7 @@ class Holdem:
         e = self.engine
         if e is None or e.actor != HERO or self.v_observe.get():
             return
+        self.stop_clock()
         amt = self.v_bet.get() if action == "raise" else 0
         self.lock()
         e.act(HERO, action, amt)
@@ -580,10 +744,11 @@ class Holdem:
 
     # ------------------------------------------------------------ showdown
 
-    def showdown(self):
+    def showdown(self, runs=1, tabled=False):
         e = self.engine
         self.lock()
-        res = e.settle()
+        self.stop_clock()
+        res = e.settle(runs=runs, force_tabled=tabled)
         self.result = res
         self.flush_log()
         self.hand_over = True
@@ -593,23 +758,37 @@ class Holdem:
         if len(alive) > 1:
             if mode == "Everyone":
                 self.reveal = {p.idx for p in e.players if p.in_seat}
-            elif mode == "Winner + callers":
-                self.reveal = {p.idx for p in alive}
-            else:
+            elif mode == "Winner only":
                 self.reveal = set(res["winners"])
+            else:                                # Realistic (muck losers)
+                self.reveal = set(res["shown"])
         else:
             self.reveal = set()
 
-        for i in res["winners"]:
-            if i in res["best"]:
-                self.highlight |= {(c.v, c.s) for c in res["best"][i]}
+        for pt in res["pots"]:
+            for r_idx, run in enumerate(pt.get("runs", [])):
+                if r_idx >= len(res["runs"]):
+                    continue
+                info = res["runs"][r_idx]
+                for w in run["winners"]:
+                    if w in info["best"]:
+                        self.highlight |= {(c.v, c.s)
+                                           for c in info["best"][w]}
 
         lines = []
+        nruns = len(res["runs"])
         for p in sorted(alive, key=lambda q: -q.won):
-            sc = res["scores"].get(p.idx)
             tag = "WIN " if p.idx in res["winners"] else "    "
             nm = "You" if p.idx == HERO else p.name
-            if sc:
+            if p.idx in res.get("mucked", ()):
+                lines.append(f"    {nm:<4} mucks")
+            elif nruns >= 2:
+                names = "/".join(hand_name(r["scores"][p.idx])
+                                 for r in res["runs"])
+                lines.append(f"{tag}{nm:<4} {names}"
+                             + (f"  +{p.won}" if p.won else ""))
+            elif nruns == 1:
+                sc = res["runs"][0]["scores"].get(p.idx)
                 lines.append(f"{tag}{nm:<4} {hand_name(sc)}"
                              + (f"  +{p.won}" if p.won else ""))
             else:
@@ -619,12 +798,23 @@ class Holdem:
         if HERO in res["winners"]:
             self.l_status.config(text=f"You win {e.players[HERO].won}.")
         elif not e.players[HERO].in_seat:
-            self.l_status.config(text="You're out \u2014 the table plays on.")
+            if e.players[HERO].sitting_out or e.players[HERO].wait_for_bb:
+                self.l_status.config(text="Sitting out.")
+            else:
+                self.l_status.config(text="You're out — the table plays on.")
         elif e.players[HERO].folded:
             self.l_status.config(text="You folded. Next hand?")
         else:
             self.l_status.config(text="You lose the pot.")
         self.l_hint.config(text="")
+
+        if (self.v_rabbit.get() and len(e.board) < 5
+                and self.v_mode.get() == "Cash"):
+            self.b_rabbit.config(state="normal")
+        if self.v_mode.get() == "Cash":
+            hero = e.players[HERO]
+            if hero.stack + hero.total < 100 * e.bb:
+                self.b_add.config(state="normal")
         self.redraw()
 
         alive_next = [p for p in e.players if p.stack > 0]
@@ -633,10 +823,142 @@ class Holdem:
                             lambda: self.finish_game(alive_next))
             return
 
-        hero_out = e.players[HERO].stack <= 0
+        hero = e.players[HERO]
+        hero_idle = (hero.stack <= 0 and self.v_mode.get() != "Cash") \
+            or hero.sitting_out or hero.wait_for_bb
         self.b_next.config(state="normal")
-        if self.v_auto.get() or self.v_observe.get() or hero_out:
+        if self.v_auto.get() or self.v_observe.get() or hero_idle \
+                or (hero.stack <= 0 and self.v_mode.get() == "Cash"):
             self.root.after(max(900, self.delay * 3), self.deal)
+
+
+    # --------------------------------------------------------------- clock
+
+    def start_clock(self):
+        self.stop_clock()
+        e = self.engine
+        if (not self.v_clock.get() or self.v_observe.get() or e is None
+                or e.players[HERO].sitting_out):
+            return
+        self.clock_phase = "base"
+        self.clock_until = time.time() + CLOCK_BASE
+        self._clock_tick()
+
+    def stop_clock(self):
+        if self.clock_job is not None:
+            try:
+                self.root.after_cancel(self.clock_job)
+            except Exception:
+                pass
+            self.clock_job = None
+        if self.clock_phase == "bank":
+            self.bank = max(0.0, self.clock_until - time.time())
+        self.clock_phase = "off"
+        if hasattr(self, "l_clock"):
+            self.l_clock.config(text="")
+
+    def _clock_tick(self):
+        e = self.engine
+        if e is None or e.actor != HERO or self.clock_phase == "off":
+            return
+        now = time.time()
+        left = self.clock_until - now
+        if left <= 0:
+            if self.clock_phase == "base" and self.bank > 0.5:
+                self.clock_phase = "bank"
+                self.clock_until = now + self.bank
+                left = self.bank
+            else:
+                if self.clock_phase == "bank":
+                    self.bank = 0.0
+                self.clock_phase = "off"
+                self.l_clock.config(text="0:00")
+                lg = e.legal(HERO)
+                self.say("fold", "Your clock ran out.")
+                self._forced("call" if lg["can_check"] else "fold")
+                return
+        m, s = divmod(int(left + 0.999), 60)
+        txt = f"{m}:{s:02d}"
+        if self.clock_phase == "base" and self.bank > 0.5:
+            bm, bs = divmod(int(self.bank), 60)
+            txt += f"  \u00b7  bank {bm}:{bs:02d}"
+        elif self.clock_phase == "bank":
+            txt = f"bank {txt}"
+        self.l_clock.config(text=txt)
+        self.clock_job = self.root.after(200, self._clock_tick)
+
+    def _level_tick(self, gen):
+        e = self.engine
+        if (gen != self.level_gen or e is None or self.game_over
+                or self.v_mode.get() == "Cash"):
+            return
+        mins = max(1, self.v_lvlmin.get())
+        if self.level_idx >= len(BLIND_LEVELS) - 1:
+            suffix = ""
+        else:
+            nxt = ((self.level_idx + 1) * mins * 60
+                   - (time.time() - self.level_started))
+            m, s = divmod(max(0, int(nxt)), 60)
+            suffix = f"  \u00b7  next {m}:{s:02d}"
+        self.l_blinds.config(
+            text=f"Blinds {e.sb}/{e.bb}"
+                 + (f" \u00b7 ante {e.bb}" if e.bb_ante else "") + suffix)
+        self.root.after(1000, lambda: self._level_tick(gen))
+
+    # ------------------------------------------------------- table actions
+
+    def toggle_sit(self):
+        e = self.engine
+        if e is None or self.game_over:
+            return
+        hero = e.players[HERO]
+        if not hero.sitting_out:
+            e.sit_out(HERO)
+            self.b_sit.config(text="I'm back")
+            self.say("fold", "You sit out.")
+        else:
+            if self.v_mode.get() == "Cash" and (hero.owes_bb or hero.owes_sb):
+                post = messagebox.askyesno(
+                    "Return", "Post the missed blinds now?\n"
+                              "(No = wait for the big blind)")
+                e.sit_in(HERO, post_now=post)
+            else:
+                e.sit_in(HERO)
+            self.b_sit.config(text="Sit out")
+            self.say("hand", "You're back.")
+
+    def add_chips_dialog(self):
+        e = self.engine
+        if e is None or not self.hand_over or self.v_mode.get() != "Cash":
+            return
+        hero = e.players[HERO]
+        cap = 100 * e.bb - hero.stack
+        if cap <= 0:
+            messagebox.showinfo("Add chips", "You're at the table max.")
+            return
+        amt = simpledialog.askinteger(
+            "Add chips", f"Add how much? (max {cap:,})",
+            minvalue=1, maxvalue=cap,
+            initialvalue=min(cap, self.buyin))
+        if amt and e.add_chips(HERO, amt):
+            self.say("pot", f"You add {amt:,}.")
+            self.redraw()
+
+    def toggle_straddle(self):
+        self.straddle_armed = not self.straddle_armed
+        self.b_straddle.config(
+            text="Straddle: on" if self.straddle_armed else "Straddle: off")
+
+    def rabbit(self):
+        e = self.engine
+        if (e is None or not self.hand_over or not self.v_rabbit.get()
+                or len(e.board) >= 5):
+            return
+        self.rabbit_cards = e.peek_runout()
+        self.b_rabbit.config(state="disabled")
+        self.say("street", "Rabbit: "
+                 + " ".join(str(c) for c in self.rabbit_cards))
+        self.redraw()
 
     # -------------------------------------------------------------- equity
 
@@ -758,21 +1080,45 @@ class Holdem:
         cv.create_oval(cx - rx, cy - ry, cx + rx, cy + ry,
                        fill=t["felt"], outline=t["felt_edge"], width=2)
 
-        # board
-        cw, ch = 58, 82
-        gap = 8
-        bx = cx - (5 * cw + 4 * gap) / 2
-        by = cy - ch / 2 - 6
-        for k in range(5):
-            c = e.board[k] if k < len(e.board) else None
-            self.card(bx + k * (cw + gap), by, cw, ch, c, face_up=True,
-                      glow=(c is not None and (c.v, c.s) in self.highlight))
+        # board (one row, or two smaller rows when the pot ran twice)
+        if e.board2:
+            cw, ch, gap = 46, 65, 7
+            bx = cx - (5 * cw + 4 * gap) / 2
+            for r, brd in enumerate((e.board, e.board2)):
+                by_r = cy - ch - 12 + r * (ch + 10)
+                cv.create_text(bx - 14, by_r + ch / 2, text=f"R{r+1}",
+                               fill=t["dim"], font=("Segoe UI", 8, "bold"))
+                for k in range(5):
+                    c = brd[k] if k < len(brd) else None
+                    self.card(bx + k * (cw + gap), by_r, cw, ch, c,
+                              face_up=True,
+                              glow=(c is not None
+                                    and (c.v, c.s) in self.highlight))
+            by = cy + 8
+            ch = 65
+        else:
+            cw, ch = 58, 82
+            gap = 8
+            bx = cx - (5 * cw + 4 * gap) / 2
+            by = cy - ch / 2 - 6
+            for k in range(5):
+                c = e.board[k] if k < len(e.board) else None
+                if c is None and self.rabbit_cards:
+                    kk = k - len(e.board)
+                    if 0 <= kk < len(self.rabbit_cards):
+                        self.card(bx + k * (cw + gap), by, cw, ch,
+                                  self.rabbit_cards[kk], face_up=True,
+                                  dim=True)
+                        continue
+                self.card(bx + k * (cw + gap), by, cw, ch, c, face_up=True,
+                          glow=(c is not None
+                                and (c.v, c.s) in self.highlight))
 
         pot = e.pot
         cv.create_text(cx, by + ch + 22, text=f"POT  {pot}", fill=t["accent"],
                        font=("Segoe UI", 15, "bold"))
         if self.result and len(self.result["pots"]) > 1:
-            parts = " \u00b7 ".join(f"{p['amount']}" for p in self.result["pots"])
+            parts = " · ".join(f"{p['amount']}" for p in self.result["pots"])
             cv.create_text(cx, by + ch + 40, text=f"side pots: {parts}",
                            fill=t["dim"], font=("Segoe UI", 8))
 
@@ -810,8 +1156,16 @@ class Holdem:
         if not p.in_seat:
             rrect(cv, x - w / 2, y - h / 2, x + w / 2, y + h / 2, 10,
                   fill=t["seat_fold"], outline=t["rail"], width=1)
-            cv.create_text(x, y, text="empty", fill=t["dim"],
-                           font=("Segoe UI", 9))
+            if p.stack > 0:
+                nm = "You" if hero else p.name
+                what = ("waiting for BB" if p.wait_for_bb else "sitting out")
+                cv.create_text(x, y - 8, text=f"{nm}  {p.stack:,}",
+                               fill=t["dim"], font=("Segoe UI", 9, "bold"))
+                cv.create_text(x, y + 10, text=what, fill=t["dim"],
+                               font=("Segoe UI", 8))
+            else:
+                cv.create_text(x, y, text="empty", fill=t["dim"],
+                               font=("Segoe UI", 9))
             return
 
         active = e.actor == p.idx and not self.hand_over
@@ -876,6 +1230,10 @@ class Holdem:
             cv.create_text(x - w / 2 + 10, y + h / 2 - 12, anchor="w",
                            text=p.last_action, fill=col,
                            font=("Segoe UI", 8, "bold"))
+        if self.result and p.idx in self.result.get("mucked", ()):
+            cv.create_text(x + w / 2 - 8, y + h / 2 - 12, anchor="e",
+                           text="muck", fill=t["dim"],
+                           font=("Segoe UI", 8, "bold"))
 
         if p.bet > 0:
             f = 0.40
@@ -899,30 +1257,30 @@ class Holdem:
             from .engine import chen
             sc = chen(p.hole)
             if sc >= 12:
-                return "premium \u2014 raise for value"
+                return "premium — raise for value"
             if sc >= 9:
-                return "strong \u2014 raise, or 3-bet a single raiser"
+                return "strong — raise, or 3-bet a single raiser"
             if sc >= 7:
-                return "playable \u2014 open in late position, fold to heat"
+                return "playable — open in late position, fold to heat"
             if call == 0:
                 return "weak, but checking is free"
-            return "weak \u2014 folding is fine"
+            return "weak — folding is fine"
 
-        win, tie = self.eq_bars[0], self.eq_bars[1]
+        win, tie, eq = self.eq_bars[0], self.eq_bars[1], 0
         eq = win + tie / 2
         if call == 0:
             if eq > 0.7:
-                return f"~{eq*100:.0f}% equity \u2014 bet for value"
+                return f"~{eq*100:.0f}% equity — bet for value"
             if eq > 0.45:
-                return f"~{eq*100:.0f}% \u2014 a small bet or a check both work"
-            return f"~{eq*100:.0f}% \u2014 check and see a free card"
+                return f"~{eq*100:.0f}% — a small bet or a check both work"
+            return f"~{eq*100:.0f}% — check and see a free card"
         odds = call / (pot + call)
         if eq > odds + 0.12:
-            return (f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds \u2014 "
+            return (f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds — "
                     f"call, raising is fine too")
         if eq > odds:
-            return f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds \u2014 thin call"
-        return f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds \u2014 fold"
+            return f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds — thin call"
+        return f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds — fold"
 
 
 def main():

@@ -285,28 +285,48 @@ class Player:
         self.hole = []
         self.folded = False
         self.all_in = False
-        self.in_seat = True       # has chips, dealt into this hand
-        self.bet = 0              # chips in front this street
-        self.total = 0            # chips committed this hand
+        self.in_seat = True       # dealt into this hand
+        self.bet = 0              # live chips in front this street
+        self.total_live = 0       # live chips committed this hand
+        self.total_dead = 0       # dead money this hand (antes, dead blinds)
         self.last_action = ""
         self.won = 0
+        # table lifecycle
+        self.sitting_out = False
+        self.owes_bb = False      # missed a big blind while sitting out
+        self.owes_sb = False      # missed a small blind while sitting out
+        self.wait_for_bb = False  # entering/returning: wait for natural BB
+        self.post_entry = False   # entering/returning: post now instead
+
+    @property
+    def total(self):
+        """Everything this player has put in the pot this hand."""
+        return self.total_live + self.total_dead
 
 
 # ----------------------------------------------------------------- engine
 
 class Engine:
-    """Pure game state. The GUI polls `actor`, calls `act()`, then `step()`."""
+    """Pure game state. The GUI polls `actor`, calls `act()`, then loops."""
 
     def __init__(self, players, sb=10, bb=20, structure="No-Limit",
-                 rng: random.Random | None = None):
+                 rng: random.Random | None = None, bb_ante=False,
+                 deal_sitting_out=False):
         self.players = players
         self.rng = rng or random.Random()
         self.sb = sb
         self.bb = bb
         self.structure = structure
-        self.button = len(players) - 1     # so hand 1 puts the button on seat 0
+        self.bb_ante = bb_ante                  # BB posts a bb-sized ante
+        self.deal_sitting_out = deal_sitting_out  # tournaments deal them in
+        self.button = len(players) - 1          # seat index; may be vacated
+        self.bb_seat = None                     # forward-moving anchor
+        self.sb_seat = None
+        self.sb_i = None                        # posting occupant or None
+        self.bb_i = None
         self.deck = None
         self.board = []
+        self.board2 = None                      # second run-it-twice board
         self.street = "idle"
         self.current_bet = 0
         self.min_raise = bb
@@ -315,7 +335,8 @@ class Engine:
         self.hand_no = 0
         self.raises_this_street = 0
         self.no_raise = set()     # seats facing an under-raise: call/fold only
-        self.sb_i = self.bb_i = None
+        self.river_aggr = None    # last bettor/raiser on the river
+        self.straddler = None
         self.events = []          # (kind, text) for the log
 
     # -- helpers -----------------------------------------------------------
@@ -332,6 +353,12 @@ class Engine:
 
     def can_act(self, p):
         return p.in_seat and not p.folded and not p.all_in and p.stack > 0
+
+    def betting_locked(self):
+        """No further betting possible but the hand is still contested."""
+        alive = self.contested()
+        movers = [p for p in alive if not p.all_in and p.stack > 0]
+        return len(alive) > 1 and len(movers) <= 1 and self.actor is None
 
     def _next(self, i, pred):
         n = len(self.players)
@@ -357,16 +384,107 @@ class Engine:
         self.events = []
         return out
 
+    # -- table lifecycle ---------------------------------------------------
+
+    def add_chips(self, i, amount):
+        """Buy-in top-up. Only between hands."""
+        if self.street != "idle" or amount <= 0:
+            return False
+        self.players[i].stack += int(amount)
+        return True
+
+    def sit_out(self, i):
+        self.players[i].sitting_out = True
+
+    def sit_in(self, i, post_now=False):
+        p = self.players[i]
+        p.sitting_out = False
+        if p.owes_bb or p.owes_sb:
+            if post_now:
+                p.post_entry = True
+            else:
+                p.wait_for_bb = True
+
     # -- hand setup --------------------------------------------------------
 
-    def start_hand(self):
+    def _has_chips(self, p):
+        return p.stack > 0
+
+    def _blind_eligible(self, p):
+        """May the BB anchor land on this seat?"""
+        if p.stack <= 0:
+            return False
+        if p.sitting_out and not self.deal_sitting_out:
+            return False
+        return True
+
+    def _dealt(self, p):
+        """Is this player dealt into the coming hand?"""
+        if p.stack <= 0:
+            return False
+        if p.sitting_out and not self.deal_sitting_out:
+            return False
+        if p.wait_for_bb and not p.post_entry:
+            return False               # cleared when the BB reaches them
+        return True
+
+    def _advance_positions(self):
+        """Dead-button rule: the BB moves forward exactly one eligible seat;
+        the SB and button trail it and may land on vacated seats."""
+        n = len(self.players)
+
+        if self.bb_seat is None:                       # first hand
+            self.button = self._next(self.button, self._dealt)
+            dealt = [p for p in self.players if self._dealt(p)]
+            if len(dealt) == 2:
+                self.sb_seat = self.button
+                self.bb_seat = self._next(self.button, self._dealt)
+            else:
+                self.sb_seat = self._next(self.button, self._dealt)
+                self.bb_seat = self._next(self.sb_seat, self._dealt)
+            return
+
+        prev_bb, prev_sb = self.bb_seat, self.sb_seat
+
+        # scan forward from the old BB; skipped live-but-out seats owe blinds
+        new_bb = None
+        for k in range(1, n + 1):
+            s = (prev_bb + k) % n
+            q = self.players[s]
+            if self._blind_eligible(q):
+                new_bb = s
+                break
+            if q.stack > 0 and q.sitting_out:
+                q.owes_bb = True
+
+        self.bb_seat = new_bb
+        q = self.players[new_bb]
+        q.wait_for_bb = False                          # their BB has arrived
+        q.owes_bb = q.owes_sb = False
+
+        dealt = [p for p in self.players if self._dealt(p)]
+        if len(dealt) == 2:                            # heads-up override
+            other = next(p for p in dealt if p.idx != new_bb)
+            self.sb_seat = other.idx
+            self.button = other.idx
+        else:
+            self.sb_seat = prev_bb                     # chain: BB -> SB -> BTN
+            self.button = prev_sb if prev_sb is not None else self.button
+            sbp = self.players[self.sb_seat]
+            if sbp.stack > 0 and sbp.sitting_out and not self.deal_sitting_out:
+                sbp.owes_sb = True                     # dead small blind
+
+    def start_hand(self, straddle_fn=None):
+        self._advance_positions()
+
         for p in self.players:
-            p.in_seat = p.stack > 0
+            p.in_seat = self._dealt(p)
             p.hole = []
             p.folded = not p.in_seat
             p.all_in = False
             p.bet = 0
-            p.total = 0
+            p.total_live = 0
+            p.total_dead = 0
             p.last_action = ""
             p.won = 0
 
@@ -376,42 +494,75 @@ class Engine:
 
         self.deck = Deck(self.rng)
         self.board = []
+        self.board2 = None
         self.street = "preflop"
         self.current_bet = 0
         self.min_raise = self.bb
         self.raises_this_street = 0
+        self.river_aggr = None
+        self.straddler = None
         self.hand_no += 1
 
-        self.button = self._next(self.button, lambda p: p.in_seat)
+        self.emit("hand", f"--- Hand #{self.hand_no}  ({self.sb}/{self.bb}"
+                          + (" +ante" if self.bb_ante else "") + ") ---")
 
-        if len(live) == 2:                      # heads-up: button is the SB
-            self.sb_i = self.button
-            self.bb_i = self._next(self.button, lambda p: p.in_seat)
+        # blinds
+        self.sb_i = None
+        sbp = self.players[self.sb_seat]
+        if sbp.in_seat:
+            self._post(self.sb_seat, self.sb, "SB")
+            self.sb_i = self.sb_seat
         else:
-            self.sb_i = self._next(self.button, lambda p: p.in_seat)
-            self.bb_i = self._next(self.sb_i, lambda p: p.in_seat)
+            self.emit("blind", "small blind is dead")
+        self.bb_i = self.bb_seat
+        self._post(self.bb_seat, self.bb, "BB")
 
-        self.emit("hand", f"--- Hand #{self.hand_no}  ({self.sb}/{self.bb}) ---")
+        # big blind ante (posted after the blind, TDA order)
+        if self.bb_ante:
+            self._post_dead(self.bb_seat, self.bb, "ante")
 
-        self._post(self.sb_i, self.sb, "SB")
-        self._post(self.bb_i, self.bb, "BB")
+        # entry/return posts from any position
+        for p in live:
+            if p.post_entry and p.idx not in (self.sb_seat, self.bb_seat):
+                self._post(p.idx, self.bb, "post")
+                if p.owes_sb:
+                    self._post_dead(p.idx, self.sb, "dead SB")
+            p.post_entry = False
+            p.owes_bb = p.owes_sb = False
+            p.wait_for_bb = False
+
         self.current_bet = max(p.bet for p in self.players)
 
-        order = [self.sb_i]
-        j = self.sb_i
-        while True:
-            j = self._next(j, lambda p: p.in_seat)
-            if j == self.sb_i:
-                break
-            order.append(j)
+        # optional UTG straddle (3+ handed, big-bet games only)
+        first = None
+        if (straddle_fn is not None and len(live) >= 3
+                and self.structure != "Fixed-Limit"):
+            utg = self._next(self.bb_seat, lambda q: q.in_seat)
+            u = self.players[utg]
+            if u.stack > 0 and not u.all_in and straddle_fn(utg):
+                self._post(utg, 2 * self.bb, "STR")
+                self.straddler = utg
+                self.current_bet = max(self.current_bet, u.bet)
+                self.min_raise = max(self.min_raise, 2 * self.bb)
+                self.emit("blind", f"{u.name} straddles to {u.bet}")
+                first = self._next(utg, lambda q: q.in_seat)
+
+        # deal, starting left of the button seat
+        order = []
+        j = self.button
+        for _ in range(len(self.players)):
+            j = (j + 1) % len(self.players)
+            if self.players[j].in_seat:
+                order.append(j)
         for _ in range(2):
             for i in order:
                 self.players[i].hole += self.deck.deal(1)
 
-        if len(live) == 2:
-            first = self.button                 # HU: SB/button acts first preflop
-        else:
-            first = self._next(self.bb_i, lambda p: p.in_seat)
+        if first is None:
+            if len(live) == 2:
+                first = self.button        # HU: button/SB acts first preflop
+            else:
+                first = self._next(self.bb_seat, lambda q: q.in_seat)
         self._open_round(first)
         return True
 
@@ -423,11 +574,21 @@ class Engine:
         self.emit("blind", f"{p.name} posts {label} {amt}"
                            + (" (all-in)" if p.all_in else ""))
 
+    def _post_dead(self, i, amount, label):
+        p = self.players[i]
+        amt = min(amount, p.stack)
+        p.stack -= amt
+        p.total_dead += amt
+        if p.stack == 0:
+            p.all_in = True
+        self.emit("blind", f"{p.name} posts {label} {amt}"
+                           + (" (all-in)" if p.all_in else ""))
+
     def _commit(self, p, amt):
         amt = max(0, min(amt, p.stack))
         p.stack -= amt
         p.bet += amt
-        p.total += amt
+        p.total_live += amt
         if p.stack == 0:
             p.all_in = True
 
@@ -518,6 +679,8 @@ class Engine:
             if reopened:
                 self.current_bet = p.bet
                 self.raises_this_street += 1
+                if self.street == "river":
+                    self.river_aggr = i
                 if full:
                     self.min_raise = raise_size
                     self.no_raise.clear()
@@ -572,22 +735,44 @@ class Engine:
                   f"[{' '.join(str(c) for c in self.board)}] ===")
         self._open_round((self.button + 1) % len(self.players))
 
+    # -- rabbit hunt -------------------------------------------------------
+
+    def peek_runout(self):
+        """The cards that would have completed the board. Non-mutating."""
+        need = 5 - len(self.board)
+        if need <= 0 or self.deck is None:
+            return []
+        cards = list(self.deck.cards)
+        out = []
+        take = min(3 if len(self.board) == 0 else 1, need)
+        while need > 0:
+            out += cards[-take:]
+            del cards[-take:]
+            need -= take
+            take = min(1, need) or 1
+            if need <= 0:
+                break
+        return out
+
     # -- settlement --------------------------------------------------------
 
-    def settle(self):
-        """Award the pot. Returns a result dict for the UI."""
+    def settle(self, runs=1, force_tabled=False):
+        """Award the pot. `runs=2` runs the remaining board twice and splits
+        each pot between the runs (all-in situations only). `force_tabled`
+        marks hands as tabled when betting locked with a complete board."""
         result = {"pots": [], "refund": None, "winners": set(),
-                  "scores": {}, "best": {}}
+                  "runs": [], "order": [], "shown": set(), "mucked": set(),
+                  "tabled": force_tabled}
 
-        # 1. return an uncalled bet (bettor put in more than anyone matched)
-        totals = sorted((p.total for p in self.players if p.total > 0),
-                        reverse=True)
-        if len(totals) >= 2 and totals[0] > totals[1]:
-            top = [p for p in self.players if p.total == totals[0]]
+        # 1. return an uncalled live bet (dead money never comes back)
+        lives = sorted((p.total_live for p in self.players
+                        if p.total_live > 0), reverse=True)
+        if len(lives) >= 2 and lives[0] > lives[1]:
+            top = [p for p in self.players if p.total_live == lives[0]]
             if len(top) == 1:
                 p = top[0]
-                back = totals[0] - totals[1]
-                p.total -= back
+                back = lives[0] - lives[1]
+                p.total_live -= back
                 p.stack += back
                 p.all_in = p.stack == 0
                 result["refund"] = (p.idx, back)
@@ -595,21 +780,41 @@ class Engine:
 
         alive = self.contested()
 
-        # 2. if the hand ends with the board incomplete (e.g. a multi-way
-        #    all-in with no further action), run out the remaining streets
+        # 2. complete the board if the hand ended before the river
+        boards = []
         if len(alive) > 1:
-            while len(self.board) < 5:
-                self.next_street()
-            self.street = "showdown"
+            if runs == 2 and len(self.board) < 5:
+                base = list(self.board)
+                need = 5 - len(base)
+                b1 = base + self.deck.deal(need)
+                b2 = base + self.deck.deal(need)
+                self.board = b1
+                self.board2 = b2
+                boards = [b1, b2]
+                result["tabled"] = True
+                self.emit("street", "=== RUN 1  ["
+                          + " ".join(str(c) for c in b1) + "] ===")
+                self.emit("street", "=== RUN 2  ["
+                          + " ".join(str(c) for c in b2) + "] ===")
+            else:
+                if len(self.board) < 5:
+                    result["tabled"] = True
+                    while len(self.board) < 5:
+                        self.next_street()
+                self.street = "showdown"
+                boards = [self.board]
+        else:
+            boards = [self.board]
 
-        # 3. score every player still in
+        # 3. score every player still in, per run
         if len(alive) > 1:
-            for p in alive:
-                sc = evaluate(p.hole + self.board)
-                result["scores"][p.idx] = sc
-                result["best"][p.idx] = best_five(p.hole + self.board)
+            for b in boards:
+                scores = {p.idx: evaluate(p.hole + b) for p in alive}
+                best = {p.idx: best_five(p.hole + b) for p in alive}
+                result["runs"].append({"board": b, "scores": scores,
+                                       "best": best})
 
-        # 4. layered side pots
+        # 4. layered side pots (dead money plays: totals include antes)
         levels = sorted({p.total for p in self.players if p.total > 0})
         prev = 0
         for lvl in levels:
@@ -625,47 +830,102 @@ class Engine:
             else:
                 result["pots"].append({"amount": amount, "eligible": eligible})
 
-        # 5. award
+        # dead money stacked above every live stake (a folded BB's ante,
+        # say) has no eligible layer of its own; it belongs to the top pot
+        committed = sum(p.total for p in self.players)
+        built = sum(pt["amount"] for pt in result["pots"])
+        if result["pots"] and committed > built:
+            result["pots"][-1]["amount"] += committed - built
+
+        # 5. award, split across runs
+        nruns = max(1, len(result["runs"])) if len(alive) > 1 else 1
         for k, pot in enumerate(result["pots"]):
             elig = pot["eligible"]
-            if len(alive) == 1:
-                winners = [alive[0].idx]
+            pot["runs"] = []
+            union = set()
+            shares = [pot["amount"] // nruns] * nruns
+            shares[0] += pot["amount"] - sum(shares)     # odd chip to run 1
+            for r in range(nruns):
+                if len(alive) == 1:
+                    winners = [alive[0].idx]
+                else:
+                    sc = result["runs"][r]["scores"]
+                    best = max(sc[i] for i in elig)
+                    winners = [i for i in elig if sc[i] == best]
+                pot["runs"].append({"winners": winners,
+                                    "amount": shares[r]})
+                union.update(winners)
+
+                share, rem = divmod(shares[r], len(winners))
+                for i in winners:
+                    self.players[i].won += share
+                    self.players[i].stack += share
+                # odd chips go to the first winner left of the button
+                j = self.button
+                while rem > 0:
+                    j = (j + 1) % len(self.players)
+                    if j in winners:
+                        self.players[j].won += 1
+                        self.players[j].stack += 1
+                        rem -= 1
+
+            pot["winners"] = sorted(union)
+            result["winners"].update(union)
+
+        # 6. showdown order and mucking
+        if len(alive) > 1:
+            if self.river_aggr is not None and not result["tabled"]:
+                start = self.river_aggr
             else:
-                best = max(result["scores"][i] for i in elig)
-                winners = [i for i in elig if result["scores"][i] == best]
-            pot["winners"] = winners
-            result["winners"].update(winners)
+                start = self._next(self.button,
+                                   lambda q: q.in_seat and not q.folded)
+            order = []
+            n = len(self.players)
+            for k in range(n):
+                j = (start + k) % n
+                if self.players[j].in_seat and not self.players[j].folded:
+                    order.append(j)
+            result["order"] = order
 
-            share, rem = divmod(pot["amount"], len(winners))
-            for i in winners:
-                self.players[i].won += share
-                self.players[i].stack += share
-            # odd chips go to the first winner left of the button
-            j = self.button
-            while rem > 0:
-                j = (j + 1) % len(self.players)
-                if j in winners:
-                    self.players[j].won += 1
-                    self.players[j].stack += 1
-                    rem -= 1
+            best_so_far = None
+            sc0 = result["runs"][0]["scores"]
+            for j in order:
+                must_show = (result["tabled"] or j in result["winners"]
+                             or best_so_far is None
+                             or sc0[j] >= best_so_far)
+                if must_show:
+                    result["shown"].add(j)
+                    if best_so_far is None or sc0[j] > best_so_far:
+                        best_so_far = sc0[j]
+                    nm = hand_name(sc0[j])
+                    self.emit("show", f"{self.players[j].name} shows {nm}")
+                else:
+                    result["mucked"].add(j)
+                    self.emit("fold", f"{self.players[j].name} mucks")
 
+        # 7. narrate the pots
+        for k, pot in enumerate(result["pots"]):
             name = "Main pot" if k == 0 else f"Side pot {k}"
-            who = ", ".join(self.players[i].name for i in winners)
             if len(alive) == 1:
+                who = self.players[pot["runs"][0]["winners"][0]].name
                 self.emit("pot", f"{who} wins {pot['amount']} "
                                  f"(everyone else folded)")
-            else:
-                lab = hand_name(result["scores"][winners[0]])
-                self.emit("pot", f"{name} {pot['amount']} -> {who} ({lab})")
+                continue
+            for r, run in enumerate(pot["runs"]):
+                who = ", ".join(self.players[i].name for i in run["winners"])
+                lab = hand_name(result["runs"][r]["scores"]
+                                [run["winners"][0]])
+                tag = f" (run {r+1})" if nruns > 1 else ""
+                self.emit("pot",
+                          f"{name}{tag} {run['amount']} -> {who} ({lab})")
 
         for p in self.players:
-            p.total = 0
+            p.total_live = 0
+            p.total_dead = 0
             p.bet = 0
         self.street = "idle"
         return result
 
-
-# --------------------------------------------------------------------- AI
 
 class Brain:
     """Decides for one AI seat. Returns ('fold'|'call'|'raise', amount)."""
