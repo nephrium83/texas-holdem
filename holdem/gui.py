@@ -874,8 +874,12 @@ class Holdem:
                 self.clock_phase = "off"
                 self.l_clock.config(text="0:00")
                 lg = e.legal(HERO)
-                self.say("fold", "Your clock ran out.")
-                self._forced("call" if lg["can_check"] else "fold")
+                if lg["can_check"]:
+                    self.say("check", "Clock ran out — checked.")
+                    self._forced("call")
+                else:
+                    self.say("fold", "Clock ran out — folded.")
+                    self._forced("fold")
                 return
         m, s = divmod(int(left + 0.999), 60)
         txt = f"{m}:{s:02d}"
