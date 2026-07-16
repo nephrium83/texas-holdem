@@ -79,6 +79,11 @@ SPEC = {
     "ai_level":     dict(scope=CLIENT, kind="int", default=2,
                          label="AI skill (1-3)", lo=1, hi=3,
                          note="single-player only"),
+    "fullscreen":   dict(scope=CLIENT, kind="bool", default=True,
+                         label="Fullscreen (F11 to toggle)",
+                         note="window launches maximised; persists across "
+                              "sessions; F11 toggles between maximised and "
+                              "normal windowed mode"),
 
     # ---- onboarding / player identity (CLIENT, local machine) -------
     "nickname":     dict(scope=CLIENT, kind="str", default="",

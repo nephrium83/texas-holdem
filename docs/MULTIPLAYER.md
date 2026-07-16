@@ -173,7 +173,10 @@ multiplayer-ready:
 
 - **CLIENT** — this machine only: theme, animation speed, local
   conveniences, and single-player-only aids. Persisted to a per-user
-  config file (which also fixes settings resetting each launch).
+  config file (which also fixes settings resetting each launch). One
+  notable CLIENT key: **`fullscreen`** (bool, default `true`) — the
+  window launches maximised; the value persists across sessions and is
+  toggled at any time with F11.
 - **TABLE_RULE** — the contract every seat plays under: stakes,
   structure, timing (clock and time-bank parameters live here — the
   clock is the liveness rule, not a preference), and which extras are
@@ -236,9 +239,15 @@ adversarial-dropper bot — yanking simulated players at every protocol
 step and asserting the hand always terminates with conserved chips —
 doubles as the integration fuzzer.
 
-**Phase 4 — clients.** The existing Tkinter app becomes the offline
-single-player mode; a browser client (canvas rendering, tracker
-signaling) is the zero-install path for everyone else.
+**Phase 4 — multiplayer client and packaging.** The Tkinter app is the
+multiplayer client — not an offline fallback. Phase 4 wires libp2p
+(py-libp2p, falling back to the Go sidecar per the Phase 3 decision
+rule) into the existing GUI, makes the lobby do real DHT-based table
+discovery and joining, and runs actual multiplayer game sessions over
+the Phase 1 signed wire format with Phase 2 mental poker shuffles. No
+browser client; that path was considered and reversed — the desktop
+app is the product. The deliverable is a PyInstaller-packaged binary:
+one download, no Python required. See the Phase 4 spec section below.
 
 The current single-player engine and GUI are not throwaway: the engine
 is the authoritative rules core the protocol wraps, and its determinism
@@ -1354,3 +1363,164 @@ protocol or test harness.
 > wraps a libp2p stream, and the Phase 1 codec above sees no difference. Reticulum
 > requires `rnsd` to be running and configured by the user, which is why it is not
 > the primary target for general online play.
+
+---
+
+## Phase 4 — Multiplayer client and packaging
+
+Phase 4 is the integration and distribution phase. The Tkinter GUI, the
+Phase 1 signed action log, and the Phase 3 transport are wired together
+into a single runnable application that a user can download and play
+without installing Python or configuring anything.
+
+---
+
+### 1. libp2p node startup on launch
+
+When the application starts, before the onboarding screens appear, it
+initialises a libp2p node in a background thread:
+
+```python
+import threading
+from holdem.p2p import start_node   # Phase 4 module
+
+def main():
+    node = start_node()          # generates or loads keypair; binds a port
+    threading.Thread(target=node.run, daemon=True).start()
+    root = tk.Tk()
+    ...
+```
+
+`start_node()` calls `load_or_create_identity()` (Phase 3 §2), binds a
+QUIC listener on an OS-assigned ephemeral port, and returns a node
+handle. All subsequent DHT and connection operations go through this
+handle. The node runs for the life of the process; no teardown step is
+needed because it is a daemon thread. The node handle is injected into
+`OnboardingFlow` and `Holdem` as a constructor argument so neither class
+imports networking directly.
+
+---
+
+### 2. DHT bootstrap peers
+
+The Kademlia DHT is useless until the node has at least one peer to
+contact. The application ships with a small hardcoded bootstrap list —
+well-known long-running nodes, operated by early users with stable
+public IPs rather than by a single authority:
+
+```python
+BOOTSTRAP_PEERS = [
+    "/ip4/51.158.75.17/tcp/4001/p2p/QmBootstrap1...",
+    "/ip4/178.62.244.176/tcp/4001/p2p/QmBootstrap2...",
+    # ...
+]
+```
+
+On startup, `start_node()` dials each bootstrap peer in parallel and
+performs a Kademlia bootstrap walk (find_node queries toward the local
+peer ID) to populate its routing table. The walk runs in the background;
+the lobby UI appears immediately and shows a "Connecting…" status label
+until the DHT is ready. If no bootstrap peer is reachable (offline LAN
+mode), the node falls back to mDNS local discovery — sufficient for a
+home-network game, and requiring no configuration from the user.
+
+---
+
+### 3. Lobby ↔ DHT integration
+
+The lobby screen (`_show_lobby()` in `onboarding.py`) is extended to
+perform live DHT operations. The existing Treeview that currently holds
+a placeholder row becomes a live table browser.
+
+**Browsing open tables.** Every two seconds the lobby calls
+`node.dht_find_providers(LOBBY_TOPIC)` (Phase 3 §3) and, for each
+provider found, dials the `/poker/lobby/1.0.0` stream and requests a
+signed `table_info` envelope. The Treeview is updated in-place; stale
+entries that have not refreshed within 10 s are removed. The entire
+walk is non-blocking: it runs in a daemon thread and posts results back
+to the Tk event loop via `root.after(0, callback)`.
+
+**Creating and advertising a table.** When the host clicks "Create
+Table", the node calls `node.dht_provide(table_topic(join_code))` and
+`node.dht_provide(LOBBY_TOPIC)` and begins serving `table_info`
+responses on `/poker/lobby/1.0.0`. The join code (encoding the rules
+hash) is displayed in the Create Table dialog so the host can share it
+out-of-band for private games. The "Create Table" dialog fields map
+directly onto `TABLE_RULE` settings; the rules hash is computed via
+`settings.rules_hash()` and embedded in the join code.
+
+**Joining a table.** Clicking "Join Table" with a row selected, or
+entering a join code directly, triggers
+`node.dht_find_providers(table_topic(join_code))`, dials the host
+using the Phase 3 connection sequence (direct → DCUtR → circuit relay),
+and opens a `/poker/game/1.0.0` stream. A successful connection
+transitions out of the onboarding flow and into `Holdem` in multiplayer
+mode, with the peer handle passed in.
+
+---
+
+### 4. Game session lifecycle
+
+Once all seats are filled and the host starts the first hand, each hand
+follows this sequence:
+
+**`player_info` broadcast.** Every peer sends a `player_info` envelope
+(Phase 1 §1 action types) immediately after the DKG handshake completes.
+The Tkinter GUI updates the corresponding seat's display name and avatar
+from the received payload, using the same `avatar_b64` field written
+during onboarding. Peers that cannot decode the avatar fall back to the
+colored-circle placeholder used for AI seats.
+
+**DKG handshake.** The per-hand key generation (Phase 1 §3) runs over
+the `/poker/game/1.0.0` streams. The GUI shows a "Shuffling…" overlay
+and locks the action controls until all `dkg_verify` acknowledgements
+are in. The cooperative shuffle (Phase 2 §2) follows immediately;
+progress is shown as each seat's `deal_step`/`"shuffle"` envelope
+arrives.
+
+**Round loop.** Signed action envelopes from each player arrive over the
+game stream, are verified by the Phase 1 codec, and are fed into the
+deterministic engine. The local engine drives the GUI exactly as in
+single-player mode — the difference is that `hero()` signs and sends the
+envelope over the stream before calling `engine.act()`, and actions from
+other seats arrive from the stream rather than from `Brain.decide()`.
+Phase 2 cooperative partial-decrypt envelopes are interleaved with the
+round loop at the dealing moments (hole cards → flop → turn → river →
+showdown).
+
+**Reconnect and dropout.** The Phase 1 dropout state machine (§4) runs
+on every peer locally. If a peer's action clock expires the remaining
+active peers co-sign a `timeout_attest` and the auto-fold fires
+automatically. A reconnecting peer sends a signed `session_resume`
+envelope and replays the hash-chained log to resync; the GUI returns to
+the normal round loop without interrupting play.
+
+---
+
+### 5. PyInstaller packaging
+
+The deliverable is a single-directory PyInstaller bundle targeting
+Windows (x86-64), macOS (x86-64 and arm64), and Linux (x86-64). The
+spec file bundles everything needed to run without an installed Python:
+
+```python
+# holdem.spec (abridged)
+a = Analysis(
+    ["holdem/__main__.py"],
+    hiddenimports=["ristretto255", "cryptography"],
+    datas=[("holdem/assets", "holdem/assets")],
+)
+# Include Go libp2p sidecar binary if py-libp2p fails the Phase 3 gate test.
+# go_sidecar_path is set by the build script; omit the entry if None.
+if go_sidecar_path:
+    a.binaries += [(go_sidecar_path, "go-libp2p-sidecar", "BINARY")]
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, a.binaries, a.datas,
+          name="holdem", console=False, onefile=False)
+```
+
+The app detects the sidecar path at runtime via `sys._MEIPASS` when
+frozen. A CI step runs PyInstaller in a clean virtual environment,
+produces the bundle, and smoke-tests it: the binary must launch,
+complete the onboarding flow, deal one hand of single-player, and exit
+cleanly — all without a Python interpreter on PATH.

@@ -106,6 +106,7 @@ class Holdem:
         self.v_rabbit = tk.BooleanVar(value=True)     # rabbit hunting
         self.v_topup = tk.BooleanVar(value=True)      # AI auto top-up (cash)
         self.v_training = tk.BooleanVar(value=True)   # table rule: aids ok
+        self.v_fullscreen = tk.BooleanVar(value=True)  # CLIENT: start zoomed
 
         # option key -> tk var, scopes per holdem.settings.SPEC
         self._varmap = {
@@ -115,6 +116,7 @@ class Holdem:
             "clock_on": self.v_clock, "observe": self.v_observe,
             "ai_topup": self.v_topup, "ai_mixed": self.v_chaos,
             "ai_level": self.v_level,
+            "fullscreen": self.v_fullscreen,
             "mode": self.v_mode, "structure": self.v_struct,
             "sb": self.v_sb, "bb": self.v_bb, "stack": self.v_stack,
             "players": self.v_players, "bb_ante": self.v_ante,
@@ -1736,9 +1738,41 @@ class Holdem:
 def main():
     root = tk.Tk()
 
+    # Apply persisted fullscreen preference; default is maximised (zoomed).
+    # True fullscreen (no taskbar) is intentionally avoided — zoomed is
+    # friendlier and still honours the user's taskbar.
+    _stored = cfg.load()
+    _fs_active: list[bool] = [bool(_stored["client"].get("fullscreen", True))]
+    if _fs_active[0]:
+        root.state("zoomed")
+
+    # Reference to the Holdem instance, set once onboarding completes.
+    _holdem_ref: list = [None]
+
+    def _toggle_fullscreen(event=None):
+        """F11 toggles between zoomed/maximised and normal windowed mode."""
+        _fs_active[0] = not _fs_active[0]
+        root.state("zoomed" if _fs_active[0] else "normal")
+        app = _holdem_ref[0]
+        if app is not None:
+            # Keep the tk var in sync so save_config() persists the right value.
+            app.v_fullscreen.set(_fs_active[0])
+            app.save_config()
+        else:
+            # Toggled during onboarding — persist directly.
+            s = cfg.load()
+            s["client"]["fullscreen"] = _fs_active[0]
+            cfg.save(s["client"], s["last_table"])
+
+    root.bind("<F11>", _toggle_fullscreen)
+
     def _start_solo(nickname: str, avatar_idx: int, avatar_path: str) -> None:
         """Called by OnboardingFlow when the user clicks Practice (Solo)."""
         app = Holdem(root)
+        _holdem_ref[0] = app
+        # Sync the tk var with the actual window state (the user may have
+        # toggled F11 during onboarding before this callback fires).
+        app.v_fullscreen.set(_fs_active[0])
         app.nickname    = nickname
         app.avatar_idx  = avatar_idx
         app.avatar_path = avatar_path
