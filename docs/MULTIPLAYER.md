@@ -146,18 +146,22 @@ artifact, and any divergence between clients is pinned to a signature.
 ## Transport (rendezvous)
 
 Trust and transport are independent; transport can be swapped without
-touching the protocol. Options, from "nothing but us" outward:
+touching the protocol. The chosen primary is **libp2p**: Kademlia DHT
+for peer and table discovery, QUIC/TCP for data, circuit relay v2 for
+NAT traversal — all without a server we operate. Options, from "nothing
+but us" outward:
 
-- **Direct / LAN** — hand a link to friends. Zero third parties.
-- **DHT hole-punching** (Hyperswarm-style): a table is a topic hash
-  derived from a join code. The DHT is a public commons, nobody's
-  authoritative server, and self-hostable.
-- **WebRTC + tracker signaling** (browser-friendly): reaches phones with
-  zero install, which is what "online multiplayer" means to most people.
+- **Direct / LAN** — hand a join code to friends on the same network.
+  Zero third parties.
+- **libp2p (primary)** — Kademlia DHT maps a join code to peer
+  multiaddrs; circuit relays contributed by other app users handle
+  symmetric NAT without port-forwarding or a TURN server fleet. A user
+  downloads the app and starts playing — no IP address to enter, no
+  server to run.
 - **Reticulum** — identities are keys, links are end-to-end encrypted,
-  transports span TCP down to LoRa radio. A table is just a destination
-  hash used as the join code. (Overlaps directly with the mesh-radio
-  work already in flight elsewhere.)
+  transports span TCP down to LoRa radio. The right choice for
+  mesh-radio and offline LAN use cases; slots behind the same Phase 1
+  stream interface once the libp2p path is working. (See Phase 3 spec.)
 
 ---
 
@@ -218,17 +222,19 @@ no-leak assertion (no serialized payload for seat N ever contains
 another seat's cards). Expect this to be the single hardest piece;
 library support is thin and much of it is built from the papers.
 
-**Phase 3 — transport.** WebRTC + a lightweight public signalling server
-is the primary target: it reaches any browser or phone with zero install,
-which is what "online multiplayer" means to the general public. A table
-is a join code that encodes the rules hash; the signalling server relays
-SDP offers/answers but never sees game traffic (the Phase 1 action log is
-end-to-end signed; the transport is untrusted by design). An adversarial-
-dropper bot — yanking simulated players at every protocol step and asserting
-the hand always terminates with conserved chips — doubles as the integration
-fuzzer. Reticulum (mesh radio, offline LAN) is a secondary transport for
-niche use cases and can slot in behind the same Phase 1 interface once the
-WebRTC path is working.
+**Phase 3 — transport.** libp2p is the primary target: a user downloads
+the app and starts playing with no IP to enter and no server to run.
+Peer discovery uses the Kademlia DHT; NAT traversal uses circuit relays
+contributed by peers already in the swarm, with DCUtR hole-punching
+attempted first. A table is a join code that encodes the rules hash; the
+DHT maps that code to the multiaddrs of the hosting peer. Signed action
+envelopes from Phase 1 flow over libp2p streams — the transport sees
+opaque signed bytes and is untrusted by design. Implementation is Python
+(py-libp2p) with a Go libp2p sidecar subprocess as the fallback if
+py-libp2p's circuit relay or DHT coverage proves insufficient. An
+adversarial-dropper bot — yanking simulated players at every protocol
+step and asserting the hand always terminates with conserved chips —
+doubles as the integration fuzzer.
 
 **Phase 4 — clients.** The existing Tkinter app becomes the offline
 single-player mode; a browser client (canvas rendering, tracker
@@ -1071,3 +1077,261 @@ each injects a `chain_fault` entry into the log. Property 4 must run for every s
 across a minimum 6-seat hand scenario (producing at least 12 hole-card privacy
 assertions per run). Property 5 must be exercised at all three dropout timing points
 for n = 4 seats (t = 3) and n = 6 seats (t = 4).
+
+---
+
+## Phase 3 — Transport
+
+The Phase 3 deliverable is a working P2P transport layer that lets strangers find
+each other, establish connections, and exchange signed game messages with no server
+we operate and no configuration from the user. The Phase 1 action log is the payload;
+the transport carries it as opaque signed bytes. Nothing in this section touches the
+cryptographic protocol.
+
+---
+
+### 1. Why libp2p
+
+The design goal is **"download and play"**: a user installs the app and joins a
+table with strangers without typing an IP address or running a server. Two transport
+requirements fall out of this directly.
+
+*Peer discovery without a central authority.* Strangers must be able to find open
+tables without a matchmaking server we run and pay for indefinitely. A DHT is the
+right tool: it is a public commons where any node contributes capacity, no single
+operator is authoritative, and the directory scales with the user base rather than
+with our infrastructure spend.
+
+*NAT traversal without user configuration.* Most home connections sit behind NAT.
+Players should not need to forward ports or touch a router. The standard fix —
+TURN relays — requires a relay fleet we operate. libp2p's circuit relay v2 model
+achieves the same result without a dedicated server: any node in the swarm that
+supports the relay protocol can serve as a relay, and that node is just another app
+user.
+
+libp2p satisfies both requirements in a single stack. Its Kademlia DHT handles
+discovery; circuit relay v2 handles NAT traversal; DCUtR (Direct Connection Upgrade
+through Relay) attempts a direct hole-punch before committing to a relayed path. The
+whole stack is protocol-agnostic: it carries byte streams, which maps cleanly onto the
+Phase 1 signed action envelopes.
+
+WebRTC was the prior primary candidate. It was removed because every practical WebRTC
+deployment requires a signalling server for SDP exchange and a TURN server for
+symmetric NAT — both of which must be operated indefinitely. libp2p's circuit relay
+achieves the same NAT traversal with no dedicated server fleet: relays are contributed
+by peers in the swarm, and the relay sees only encrypted signed bytes it cannot
+interpret.
+
+Reticulum is the right transport for mesh-radio and offline LAN scenarios — its
+transports span TCP down to LoRa radio and it requires no internet connectivity. It
+is not the primary target because it requires the Reticulum daemon (`rnsd`) to be
+running and configured, which violates the zero-setup goal for general online play.
+It slots behind the same Phase 1 stream interface once the libp2p path is working,
+with no changes to the game protocol. (See note at end of this section.)
+
+---
+
+### 2. Peer identity
+
+On first launch the app generates an **Ed25519 keypair** and persists it to the
+user's data directory. This keypair serves two roles simultaneously.
+
+*Protocol identity (Phase 1).* The `pubkey` field in every signed action envelope;
+the signing key for all game messages. Defined in Phase 1 §1.
+
+*libp2p peer ID.* libp2p derives a peer ID from the public key using the standard
+`multihash("identity", pubkey_bytes)` encoding. The peer ID is therefore the
+player's cryptographic identity at both the game-protocol layer and the network
+layer — no separate key material to manage, no second onboarding step.
+
+Generating the keypair on first launch is the full "setup" the user performs. The
+keypair is stable across sessions so that a reconnecting player presents the same
+peer ID and pubkey the other seats already have in their logs.
+
+```python
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+import base64, json, pathlib
+
+def load_or_create_identity(path: pathlib.Path) -> Ed25519PrivateKey:
+    """Load the persisted keypair, or generate and save a fresh one."""
+    if path.exists():
+        raw = json.loads(path.read_text())
+        return Ed25519PrivateKey.from_private_bytes(
+            base64.b64decode(raw["ed25519_private"])
+        )
+    key = Ed25519PrivateKey.generate()
+    path.write_text(json.dumps({
+        "ed25519_private": base64.b64encode(
+            key.private_bytes_raw()
+        ).decode()
+    }))
+    return key
+```
+
+The corresponding 32-byte public key, hex-encoded, is the `pubkey` used in Phase 1
+envelopes. The libp2p peer ID is derived from the same bytes; the two are
+interchangeable given knowledge of the other.
+
+---
+
+### 3. Lobby and game discovery
+
+Open tables are advertised on the DHT under a **topic key** derived from the join
+code. The join code is a short human-readable string (e.g. `"RIVER-7"`) that a
+table host shares out-of-band with specific players, or publishes to the open lobby.
+It encodes the rules hash so every peer that finds the table can verify it is playing
+the same game.
+
+```python
+import hashlib
+
+def table_topic(join_code: str) -> bytes:
+    """DHT key under which a table's peer multiaddrs are advertised."""
+    return hashlib.sha256(b"poker.table.v1:" + join_code.encode()).digest()
+```
+
+The table host calls `dht.provide(table_topic(join_code))` to announce the table.
+A joining player calls `dht.find_providers(table_topic(join_code))` to retrieve the
+peer IDs and multiaddrs of the host (and any other players already seated), then dials
+them directly.
+
+For **open lobby discovery** — a player browsing for a game rather than entering a
+specific join code — a well-known global topic is used:
+
+```python
+LOBBY_TOPIC = hashlib.sha256(b"poker.lobby.v1").digest()
+```
+
+Any host advertising an open table additionally provides `LOBBY_TOPIC`. A browsing
+player calls `dht.find_providers(LOBBY_TOPIC)`, receives a set of peer IDs running
+open tables, dials each over the `/poker/lobby/1.0.0` protocol, and requests table
+metadata. The response is a single signed envelope:
+
+```json
+{
+  "v":          1,
+  "action":     "table_info",
+  "pubkey":     "<host pubkey>",
+  "seq":        0,
+  "ts":         0,
+  "payload": {
+    "join_code":   "RIVER-7",
+    "rules_hash":  "<10-hex>",
+    "seats_total": 6,
+    "seats_taken": 2
+  },
+  "sig": "<sig>"
+}
+```
+
+The browsing player verifies the signature, displays the table list, and dials the
+chosen table. No matchmaking server is involved at any step.
+
+---
+
+### 4. Connection establishment
+
+The dial sequence for joining a table is:
+
+1. **Derive the topic key** from the join code: `table_topic(join_code)`.
+2. **Resolve providers** via `dht.find_providers(topic_key)`. The DHT returns a
+   list of `(peer_id, multiaddrs)` pairs for peers already at the table.
+3. **Attempt direct dial** to each multiaddr in preference order (QUIC preferred
+   over TCP for lower latency and built-in encryption). Direct dial succeeds for
+   peers behind full-cone NAT or with a public address.
+4. **DCUtR hole-punch** if direct dial fails. The relay coordinates a
+   simultaneous-open between the two peers; this succeeds for a majority of
+   symmetric NAT configurations and removes the relay from the data path when
+   it works.
+5. **Circuit relay fallback** if DCUtR fails. The joining peer asks a relay-capable
+   node in the swarm (discovered via the DHT's `circuit-relay-v2` provider
+   advertisement) to relay the connection. The relay forwards encrypted signed
+   bytes and cannot read game content.
+6. **Open a game stream** on the `/poker/game/1.0.0` protocol once the underlying
+   connection is established.
+
+The relay supply scales with the player base: any peer with a public address or
+full-cone NAT that has been running the app is a potential relay. No relay fleet
+needs to be operated or paid for.
+
+---
+
+### 5. Message transport
+
+Once a `/poker/game/1.0.0` stream is open, signed action envelopes from Phase 1
+flow over it as length-prefixed binary frames:
+
+```
+4 bytes (big-endian uint32) — frame length N
+N bytes                     — UTF-8 JSON of the signed envelope
+```
+
+The transport carries opaque signed bytes. It does not validate signatures, does
+not interpret action types, and does not reorder messages beyond what the underlying
+QUIC or TCP stream guarantees. All game logic — signature verification, chain
+linkage, turn-order enforcement, FSM transitions — is handled by the Phase 1 codec
+above the transport layer. The transport is untrusted by design; a compromised relay
+or a man-in-the-middle cannot forge a valid signed envelope.
+
+**Stream multiplexing.** Each peer pair maintains a single multiplexed connection
+(yamux or mplex). Game streams (`/poker/game/1.0.0`) and lobby streams
+(`/poker/lobby/1.0.0`) are distinct stream IDs within that connection. A reconnecting
+peer dials the same peer IDs, opens a new game stream, and sends a Phase 1
+`session_resume` envelope as the first message.
+
+**Broadcast model.** At a table of n ≤ 9 players, each peer maintains direct (or
+relayed) connections to every other peer — a full mesh. When a peer sends a signed
+action envelope, it sends it directly to all n−1 peers. There is no routing hop; no
+peer is in a privileged "hub" position. For n ≤ 9 the fan-out cost is negligible, and
+the full mesh means that no single peer's dropout can partition the table.
+
+---
+
+### 6. py-libp2p vs Go libp2p sidecar
+
+Two implementation paths are available in Python.
+
+**py-libp2p** is a native Python implementation. It covers Kademlia DHT, QUIC,
+circuit relay v2, and yamux, and has matured considerably since its initial
+development. The advantage is a single-language stack: no subprocess, no IPC, no
+cross-platform binary bundling. The disadvantage is maturity relative to the Go
+implementation: py-libp2p sees less adversarial production use, some protocol
+versions lag the specification, and performance under load is untested for this
+use case.
+
+**Go libp2p sidecar** spawns a small Go binary as a subprocess. The Go implementation
+is the reference: it is used in production by IPFS, Filecoin, and Ethereum's consensus
+layer. The sidecar exposes a thin local interface over a Unix socket or named pipe:
+
+```
+Operations: dial, listen, send, recv, dht_provide, dht_find_providers
+Protocol: newline-delimited JSON-RPC
+```
+
+The Python app calls these six operations; the sidecar handles all libp2p protocol
+details. The IPC layer is intentionally minimal — under 200 lines of Go for the
+sidecar server and under 200 lines of Python for the client shim. The disadvantage
+is distribution: the sidecar binary must be compiled for each target platform
+(Windows, macOS, Linux × amd64/arm64) and bundled with the installer.
+
+**Decision rule.** Start with py-libp2p. Gate the decision on a specific integration
+test: two peers behind simulated symmetric NAT must establish a game stream (via
+circuit relay or DCUtR) and exchange 1 000 signed action envelopes without loss,
+and the open lobby discovery must work across a 5-peer local DHT. If py-libp2p
+passes those tests, it ships. If it fails on circuit relay or DHT stability, switch
+to the Go sidecar. The Phase 1 interface boundary — signed byte strings in, signed
+byte strings out — means the switch touches only the transport module, not the game
+protocol or test harness.
+
+---
+
+> **Note — Reticulum.** For offline and mesh-radio scenarios — a group playing over
+> LoRa radio without internet, or a local tournament on an isolated LAN — Reticulum
+> is the natural fit. Identities are keys, links are end-to-end encrypted by
+> construction, and a table is simply a Reticulum destination hash used as the join
+> code. It does not require the DHT or relay machinery above; it is a self-contained
+> transport. The integration point is the same `/poker/game/1.0.0` stream interface:
+> the Reticulum transport module wraps an RNS link the same way the libp2p module
+> wraps a libp2p stream, and the Phase 1 codec above sees no difference. Reticulum
+> requires `rnsd` to be running and configured by the user, which is why it is not
+> the primary target for general online play.
