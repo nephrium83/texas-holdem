@@ -403,17 +403,42 @@ class Holdem:
         right = tk.Frame(bar, bg=t["panel"])
         right.pack(side="right", padx=16, pady=8)
 
-        sizes = tk.Frame(right, bg=t["panel"])
-        sizes.grid(row=0, column=0, columnspan=4, sticky="e", pady=(0, 4))
+        self.sizes = tk.Frame(right, bg=t["panel"])
+        self.sizes.grid(row=0, column=0, columnspan=6, sticky="e", pady=(0, 4))
         self.size_btns = []
         for label, frac in (("½ pot", 0.5), ("¾ pot", 0.75),
                             ("Pot", 1.0), ("All-in", None)):
-            b = tk.Button(sizes, text=label, width=6, relief="flat",
+            b = tk.Button(self.sizes, text=label, width=6, relief="flat",
                           bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
                           cursor="hand2",
                           command=lambda fr=frac: self.preset(fr))
             b.pack(side="left", padx=2)
             self.size_btns.append(b)
+
+        # Pre-action checkboxes (shown when it is NOT the human player's turn)
+        self.v_pre_cf = tk.BooleanVar(value=False)   # Check / Fold
+        self.v_pre_fa = tk.BooleanVar(value=False)   # Fold to any bet
+        self.v_pre_ca = tk.BooleanVar(value=False)   # Call any
+        self._pre_vars = [self.v_pre_cf, self.v_pre_fa, self.v_pre_ca]
+
+        self.pre_row = tk.Frame(right, bg=t["panel"])
+        # placed at same row as sizes; grid_remove() until needed
+        self.pre_row.grid(row=0, column=0, columnspan=6, sticky="e",
+                          pady=(0, 4))
+        self.pre_row.grid_remove()
+
+        def _pre_select(chosen):
+            """Radio-button behaviour: clear siblings when one is ticked."""
+            for v in self._pre_vars:
+                if v is not chosen:
+                    v.set(False)
+
+        for txt, var in (("Check / Fold", self.v_pre_cf),
+                         ("Fold to any bet", self.v_pre_fa),
+                         ("Call any", self.v_pre_ca)):
+            ttk.Checkbutton(self.pre_row, text=txt, variable=var,
+                            command=lambda v=var: _pre_select(v)).pack(
+                side="left", padx=6)
 
         self.slider = tk.Scale(right, from_=0, to=100, orient="horizontal",
                                variable=self.v_bet, length=250, showvalue=False,
@@ -664,6 +689,8 @@ class Holdem:
 
         if i == HERO and not self.v_observe.get():
             self.start_equity()
+            if self._maybe_fire_pre_action():
+                return    # pre-action fired; loop() will be called again
             self.unlock()
             self.start_clock()
         else:
@@ -726,15 +753,74 @@ class Holdem:
 
     # --------------------------------------------------------- hero actions
 
+    def _show_pre_actions(self, show: bool) -> None:
+        """Toggle between the size-preset buttons and pre-action checkboxes."""
+        if show:
+            self.sizes.grid_remove()
+            self.pre_row.grid(row=0, column=0, columnspan=6,
+                              sticky="e", pady=(0, 4))
+        else:
+            self.pre_row.grid_remove()
+            self.sizes.grid(row=0, column=0, columnspan=6,
+                            sticky="e", pady=(0, 4))
+
+    def _clear_pre_actions(self) -> None:
+        for v in self._pre_vars:
+            v.set(False)
+
+    def _maybe_fire_pre_action(self) -> bool:
+        """If a pre-action checkbox is armed and still valid, fire it.
+        Returns True if an action was dispatched (caller should return)."""
+        e = self.engine
+        if e is None or e.actor != HERO or self.v_observe.get():
+            return False
+        lg = e.legal(HERO)
+
+        if self.v_pre_cf.get():
+            # Check / Fold: check when free, otherwise fold
+            action = "call" if lg["can_check"] else "fold"
+            self._clear_pre_actions()
+            self._fire_pre_action(action)
+            return True
+
+        if self.v_pre_fa.get():
+            self._clear_pre_actions()
+            self._fire_pre_action("fold")
+            return True
+
+        if self.v_pre_ca.get():
+            self._clear_pre_actions()
+            self._fire_pre_action("call")
+            return True
+
+        return False
+
+    def _fire_pre_action(self, action: str) -> None:
+        """Execute a pre-selected action for the hero."""
+        e = self.engine
+        if e is None or e.actor != HERO:
+            return
+        self.stop_clock()
+        self.lock()
+        e.act(HERO, action, 0)
+        self.flush_log()
+        self.redraw()
+        self.root.after(max(80, self.delay // 3), self.loop)
+
     def lock(self):
         for b in (self.b_fold, self.b_call, self.b_raise, *self.size_btns):
             b.config(state="disabled")
         self.slider.config(state="disabled")
+        # Show pre-action checkboxes only while a hand is actively running
+        self._show_pre_actions(not self.hand_over)
 
     def unlock(self):
         e = self.engine
         lg = e.legal(HERO)
         t = self.theme
+
+        # Hero's turn: switch back to size-preset buttons
+        self._show_pre_actions(False)
 
         for b in (self.b_fold, self.b_call):
             b.config(state="normal")
