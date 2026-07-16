@@ -8,6 +8,7 @@ from tkinter import messagebox, simpledialog, ttk
 from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR)
 from . import settings as cfg
+from .onboarding import OnboardingFlow
 
 CLOCK_BASE = 25          # seconds per action
 BANK_START = 60          # starting time bank
@@ -451,7 +452,8 @@ class Holdem:
         self.theme = THEMES[self.v_theme.get()]
 
         base = self.v_level.get()
-        players = [Player(0, "You", stack, style="Hero", level=3, human=True)]
+        hero_name = getattr(self, "nickname", None) or "You"
+        players = [Player(0, hero_name, stack, style="Hero", level=3, human=True)]
         for i in range(1, n):
             lvl = self.rng.randint(1, 3) if self.v_chaos.get() else base
             players.append(Player(i, f"P{i+1}", stack,
@@ -1037,7 +1039,11 @@ class Holdem:
         return out
 
     def save_config(self):
-        cfg.save(self._bucket(cfg.CLIENT), self._bucket(cfg.TABLE_RULE))
+        # Load existing first so onboarding keys (nickname, avatar_*) are
+        # preserved — they're not in _varmap and would otherwise be wiped.
+        existing = cfg.load()
+        client_data = {**existing["client"], **self._bucket(cfg.CLIENT)}
+        cfg.save(client_data, self._bucket(cfg.TABLE_RULE))
 
     def aids_ok(self):
         """Training aids (hints, live equity) are a table rule; the client
@@ -1674,13 +1680,25 @@ class Holdem:
 
 def main():
     root = tk.Tk()
-    app = Holdem(root)
 
-    def on_close():
-        app.save_config()
+    def _start_solo(nickname: str, avatar_idx: int, avatar_path: str) -> None:
+        """Called by OnboardingFlow when the user clicks Practice (Solo)."""
+        app = Holdem(root)
+        app.nickname    = nickname
+        app.avatar_idx  = avatar_idx
+        app.avatar_path = avatar_path
+
+        def on_close():
+            app.save_config()
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", on_close)
+
+    def on_close_during_onboarding():
         root.destroy()
 
-    root.protocol("WM_DELETE_WINDOW", on_close)
+    root.protocol("WM_DELETE_WINDOW", on_close_during_onboarding)
+    OnboardingFlow(root, on_solo=_start_solo)
     root.mainloop()
 
 

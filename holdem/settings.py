@@ -80,6 +80,14 @@ SPEC = {
                          label="AI skill (1-3)", lo=1, hi=3,
                          note="single-player only"),
 
+    # ---- onboarding / player identity (CLIENT, local machine) -------
+    "nickname":     dict(scope=CLIENT, kind="str", default="",
+                         maxlen=20, label="Nickname"),
+    "avatar_idx":   dict(scope=CLIENT, kind="int", default=0,
+                         label="Avatar (built-in index)", lo=0, hi=15),
+    "avatar_path":  dict(scope=CLIENT, kind="str", default="",
+                         maxlen=512, label="Avatar (custom image path)"),
+
     # ---- table rules ------------------------------------------------
     "mode":         dict(scope=TABLE_RULE, kind="choice", default="Cash",
                          choices=["Cash", "Tournament"], label="Game"),
@@ -144,6 +152,10 @@ def _valid(key, value):
     if s is None:
         return None
     kind = s["kind"]
+    if kind == "str":
+        if not isinstance(value, str):
+            return None
+        return value[:s.get("maxlen", 512)]
     if kind == "bool":
         return bool(value) if isinstance(value, bool) else None
     if kind == "int":
