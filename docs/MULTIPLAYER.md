@@ -1524,3 +1524,57 @@ frozen. A CI step runs PyInstaller in a clean virtual environment,
 produces the bundle, and smoke-tests it: the binary must launch,
 complete the onboarding flow, deal one hand of single-player, and exit
 cleanly — all without a Python interpreter on PATH.
+
+
+---
+
+### §7 Room Invite Code Format
+
+Room invite codes give two players a shared secret rendezvous point without
+any server. The code encodes three fields: a **version byte**, a **peer-id
+prefix** (first 8 bytes of the host's libp2p peer ID), and a **rendezvous
+key** (8 random bytes used as the DHT topic or relay cookie). A **flags byte**
+reserves capacity for future features (e.g. password-protected rooms, spectator
+mode, tournament codes).
+
+#### Binary layout (18 bytes total)
+
+| Offset | Length | Field           | Notes                                      |
+|--------|--------|-----------------|--------------------------------------------|
+| 0      | 1      | `version`       | `0x01` for this format                     |
+| 1      | 8      | `peer_id_prefix`| First 8 bytes of host's libp2p peer ID    |
+| 9      | 8      | `rendezvous_key`| Random; used as DHT topic / relay cookie   |
+| 17     | 1      | `flags`         | Reserved; `0x00` for standard games        |
+
+The 18-byte payload is Base32-encoded (RFC 4648, no padding), producing
+29 characters, then grouped into 4-character blocks separated by `-`:
+
+```
+XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XX
+```
+
+#### Python reference (holdem/p2p/invite.py)
+
+```python
+from holdem.p2p.invite import generate_room_code, parse_room_code, format_code, strip_code
+
+# Host creates a code:
+code = generate_room_code()          # e.g. "AEYO-UKVC-O6HS-FF7C-T7HT-F7NB-NHBA-A"
+
+# Guest parses it:
+info = parse_room_code(code)
+# {
+#   "version": 1,
+#   "peer_id_prefix": "30ea2aa2778f2297",
+#   "rendezvous_key": "e29fcf32fda169c2",
+#   "flags": 0
+# }
+```
+
+The host passes `rendezvous_key` as the DHT discovery topic (Phase 3 §3).
+Joiners discover the host via `node.dht_find_providers(rendezvous_key)`.
+The `peer_id_prefix` lets joiners verify they connected to the right host
+before the DKG handshake begins.
+
+The `flags` byte is currently unused but **must be forwarded unchanged**
+by all implementations so future flag bits remain round-trippable.

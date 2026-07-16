@@ -18,6 +18,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import settings as cfg
+from .p2p.invite import generate_room_code, parse_room_code
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -567,12 +568,78 @@ class OnboardingFlow:
                  parent=self.root),
              state="disabled").pack(side="left")
 
+        # P2P invite code buttons
+        _btn(btn_row, "Create Game",
+             self._create_game_dialog).pack(side="left", padx=(16, 0))
+        _btn(btn_row, "Join Game",
+             self._join_game_dialog).pack(side="left", padx=(4, 0))
+
         _btn(btn_row, "← Back",
              self._show_avatar).pack(side="right", padx=(8, 0))
         _btn(btn_row, "Practice  (Solo)",
              self._start_solo, accent=True).pack(side="right")
 
     # ---- create-table dialog
+
+    def _create_game_dialog(self) -> None:
+        """Generate a P2P room invite code and show it in a dialog."""
+        code = generate_room_code()
+        win = tk.Toplevel(self.root)
+        win.title("Create Game")
+        win.configure(bg=_PANEL)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        self.root.update_idletasks()
+        dw, dh = 420, 200
+        rx = self.root.winfo_rootx() + self.root.winfo_width() // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0,rx)}+{max(0,ry)}")
+        tk.Label(win, text="Your Room Code",
+                 bg=_PANEL, fg=_ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 6))
+        tk.Label(win, text=code,
+                 bg=_PANEL, fg=_GOLD,
+                 font=("Consolas", 13, "bold")).pack(pady=(0, 14))
+        bar = tk.Frame(win, bg=_PANEL)
+        bar.pack(fill="x", padx=20, pady=8)
+        def _copy():
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+        _btn(bar, "Copy to clipboard", _copy).pack(side="left")
+        _btn(bar, "Close", win.destroy).pack(side="right")
+
+    def _join_game_dialog(self) -> None:
+        """Show a dialog to paste a room invite code."""
+        win = tk.Toplevel(self.root)
+        win.title("Join Game")
+        win.configure(bg=_PANEL)
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        self.root.update_idletasks()
+        dw, dh = 420, 200
+        rx = self.root.winfo_rootx() + self.root.winfo_width() // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0,rx)}+{max(0,ry)}")
+        tk.Label(win, text="Enter Room Code",
+                 bg=_PANEL, fg=_ACCENT,
+                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 8))
+        v_code = tk.StringVar()
+        tk.Entry(win, textvariable=v_code, width=36,
+                 bg=_BG, fg=_TEXT, insertbackground=_TEXT,
+                 relief="flat", font=("Consolas", 11),
+                 justify="center").pack(pady=(0, 12))
+        bar = tk.Frame(win, bg=_PANEL)
+        bar.pack(fill="x", padx=20, pady=8)
+        def _connect():
+            messagebox.showinfo(
+                "Coming in Phase 3",
+                "P2P transport not yet wired. Paste this code when prompted "
+                "after the libp2p layer is connected.",
+                parent=win)
+        _btn(bar, "Connect", _connect, accent=True).pack(side="right")
+        _btn(bar, "Cancel", win.destroy).pack(side="left")
 
     def _create_table_dialog(self) -> None:
         win = tk.Toplevel(self.root)
