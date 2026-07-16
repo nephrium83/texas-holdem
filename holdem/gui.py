@@ -11,6 +11,7 @@ from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR)
 from . import settings as cfg
 from .onboarding import OnboardingFlow
+from .hand_history import HandLogger, open_history_viewer
 
 try:
     from PIL import Image, ImageTk as _ImageTk
@@ -150,6 +151,7 @@ class Holdem:
         self.rabbit_cards = None
         self.paused = False
         self.settings_win = None
+        self.hand_logger = HandLogger()
 
         # per-hand ui state
         self.result = None
@@ -285,6 +287,10 @@ class Holdem:
         tk.Button(top, text="Settings", command=self.open_settings,
                   bg=t["btn"], fg=t["btn_text"], relief="flat",
                   font=("Segoe UI", 9), cursor="hand2").pack(side="right")
+        tk.Button(top, text="Last hand", command=self.open_history,
+                  bg=t["btn"], fg=t["btn_text"], relief="flat",
+                  font=("Segoe UI", 9), cursor="hand2").pack(
+            side="right", padx=(0, 6))
         self.l_blinds = tk.Label(top, text="", bg=t["bg"], fg=t["gold"],
                                  font=("Segoe UI", 9, "bold"))
         self.l_blinds.pack(side="right", padx=14)
@@ -454,8 +460,10 @@ class Holdem:
         self.log.config(state="disabled")
 
     def flush_log(self):
-        for kind, text in self.engine.drain():
+        evts = self.engine.drain()
+        for kind, text in evts:
             self.say(kind, text)
+        self.hand_logger.feed(evts)
 
     # ---------------------------------------------------------- game set-up
 
@@ -591,6 +599,7 @@ class Holdem:
         if not e.start_hand(straddle_fn=straddle_fn):
             self.finish_game(live)
             return
+        self.hand_logger.on_hand_start(e.players, e)
         if e.bb_i == HERO and e.players[HERO].in_seat:
             self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
         self.flush_log()
@@ -832,6 +841,7 @@ class Holdem:
         res = e.settle(runs=runs, force_tabled=tabled)
         self.result = res
         self.flush_log()
+        self.hand_logger.on_settle(res, e)
         self.hand_over = True
 
         alive = [p for p in e.players if p.in_seat and not p.folded]
@@ -1696,6 +1706,11 @@ class Holdem:
         if self.result and p.won > 0:
             cv.create_text(x, y - h / 2 - 12, text=f"+{p.won:,}",
                            fill=t["win"], font=("Segoe UI", 11, "bold"))
+
+    # ------------------------------------------------------- hand history
+
+    def open_history(self):
+        open_history_viewer(self.root, self.hand_logger, self.theme)
 
     # ---------------------------------------------------------------- hints
 
