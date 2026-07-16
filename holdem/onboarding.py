@@ -212,7 +212,7 @@ class OnboardingFlow:
     # -------------------------------------------------- construction
 
     def __init__(self, root: tk.Tk, on_solo,
-                 on_online=None) -> None:
+                 on_online=None, on_mp_start=None) -> None:
         """
         Parameters
         ----------
@@ -221,9 +221,10 @@ class OnboardingFlow:
                     when the user chooses *Practice (Solo)*.
         on_online   Callable for future P2P join (currently unused).
         """
-        self.root      = root
-        self.on_solo   = on_solo
-        self.on_online = on_online
+        self.root         = root
+        self.on_solo      = on_solo
+        self.on_online    = on_online
+        self.on_mp_start  = on_mp_start
 
         root.title("Texas Hold'em")
         root.configure(bg=_BG)
@@ -681,26 +682,27 @@ class OnboardingFlow:
                 w.destroy()
             player_labels.clear()
             for p in players:
-                tag = "  [HOST]" if p.is_host else ""
+                tag      = "  [HOST]" if p.is_host else ""
+                rdy_sym  = "  ✓" if p.ready else "  ○"
                 lbl = tk.Label(
                     player_frame,
-                    text=f"  {p.nickname}{tag}",
-                    bg=_FELT, fg=_TEXT,
+                    text=f"  {p.nickname}{tag}{rdy_sym}",
+                    bg=_FELT,
+                    fg=_ACCENT if p.ready else _TEXT,
                     font=("Segoe UI", 10),
                     anchor="w",
                 )
                 lbl.pack(fill="x", padx=8, pady=2)
                 player_labels[p.conn_id] = lbl
-            # Enable Start button when at least 1 other player is connected
-            others = [p for p in players if not p.is_host]
-            start_btn.config(state="normal" if others else "disabled")
+            # Enable Start Game only when all players ready and >= 2 seated
+            start_btn.config(state="normal" if sess.all_ready else "disabled")
 
         sess.on_player_list_changed = _refresh_players
 
-        # Host's own entry
+        # Host's own entry (host is always ready)
         host_lbl = tk.Label(
             player_frame,
-            text=f"  {self.nickname}  [HOST]",
+            text=f"  {self.nickname}  [HOST]  ✓",
             bg=_FELT, fg=_ACCENT,
             font=("Segoe UI", 10),
             anchor="w",
@@ -717,6 +719,12 @@ class OnboardingFlow:
             win.destroy()
 
         def _start_game():
+            if not sess.all_ready:
+                messagebox.showwarning(
+                    "Not ready",
+                    "All players must be ready before the host can start.",
+                    parent=win)
+                return
             table_settings = {
                 "sb": 10, "bb": 20, "stack": 1000,
                 "clock_base": 25,
@@ -727,12 +735,8 @@ class OnboardingFlow:
                 messagebox.showerror("Error", str(exc), parent=win)
                 return
             win.destroy()
-            # TODO Phase 4: transition to Holdem multiplayer mode
-            messagebox.showinfo(
-                "Game started",
-                "Game starting!  (Full hand loop wired in Phase 4.)",
-                parent=self.root,
-            )
+            self._launch_mp_game(sess, is_host=True, local_seat=0,
+                                 table_settings=table_settings)
 
         _btn(bar, "Cancel", _close).pack(side="left")
         start_btn = _btn(bar, "Start Game  →", _start_game,
@@ -786,7 +790,11 @@ class OnboardingFlow:
         status_lbl = tk.Label(win, text="",
                                bg=_PANEL, fg=_DIM,
                                font=("Segoe UI", 9))
-        status_lbl.pack(pady=(0, 6))
+        status_lbl.pack(pady=(0, 4))
+
+        # Player list (shown after connecting)
+        join_player_frame = tk.Frame(win, bg=_FELT)
+        join_player_frame.pack(fill="x", padx=20, pady=(0, 4))
 
         bar = tk.Frame(win, bg=_PANEL)
         bar.pack(fill="x", padx=20, pady=(0, 14))
@@ -835,6 +843,7 @@ class OnboardingFlow:
                         return
 
                     conn_id = _transport.connect(host_addr)
+                    _conn_id_ref[0] = conn_id
 
                     # Build our session
                     sess = _session_mod.Session(
@@ -846,11 +855,11 @@ class OnboardingFlow:
                     _transport.on_message(sess.handle_message)
 
                     # Send our identity to the host
+                    import json as _json
                     info_msg = _wire.pack("player_info", {
                         "nickname":   self.nickname,
                         "avatar_b64": getattr(self, "avatar_b64", ""),
                     })
-                    import json as _json
                     _transport.send(conn_id, _json.loads(info_msg))
 
                     def _on_game_start(payload):
@@ -866,30 +875,60 @@ class OnboardingFlow:
                         text="Connected — waiting for host to start…",
                         fg=_ACCENT,
                     ))
+                    win.after(0, _show_ready_btn)
 
                 except Exception as exc:
                     win.after(0, lambda e=exc: _on_error("Connection failed", str(e)))
+
+            _ready_btn_ref = [None]
+            _conn_id_ref   = [None]
 
             def _on_error(title, msg):
                 connect_btn.config(state="normal")
                 status_lbl.config(text="Connection failed.", fg="#e33b6d")
                 messagebox.showerror(title, msg, parent=win)
 
+            def _show_ready_btn():
+                if _ready_btn_ref[0] is not None:
+                    return
+                def _send_ready():
+                    import json as _json
+                    ready_msg = _json.loads(
+                        _wire.pack("ready", {"ready": True}))
+                    _transport.broadcast(ready_msg)
+                    status_lbl.config(
+                        text="Ready! Waiting for host to start…",
+                        fg=_ACCENT)
+                    _ready_btn_ref[0].config(state="disabled")
+                btn = _btn(bar, "I'm Ready  ✓", _send_ready, accent=True)
+                btn.pack(side="left", padx=(8, 0))
+                _ready_btn_ref[0] = btn
+
             def _update_joined_ui(players):
-                status_lbl.config(
-                    text="Players: " + ", ".join(p.nickname for p in players),
-                    fg=_TEXT,
-                )
+                for w in join_player_frame.winfo_children():
+                    w.destroy()
+                for p in players:
+                    sym = "✓" if p.ready else "○"
+                    clr = _ACCENT if p.ready else _TEXT
+                    tk.Label(join_player_frame,
+                             text=f"  {p.nickname}  {sym}",
+                             bg=_FELT, fg=clr,
+                             font=("Segoe UI", 9), anchor="w").pack(
+                        fill="x", padx=6, pady=1)
 
             def _handle_start(payload):
+                seat_order = payload.get("seat_order", [])
+                local_cid  = _conn_id_ref[0]
+                local_seat = (seat_order.index(local_cid)
+                              if local_cid in seat_order else 1)
+                ts = payload.get("table_settings",
+                                 {"sb": 10, "bb": 20, "stack": 1000})
                 win.destroy()
-                # TODO Phase 4: transition to Holdem multiplayer mode
-                messagebox.showinfo(
-                    "Game started",
-                    "The host started the game!  (Full hand loop wired in Phase 4.)",
-                    parent=self.root,
-                )
+                self._launch_mp_game(sess, is_host=False,
+                                     local_seat=local_seat,
+                                     table_settings=ts)
 
+            # _ready_btn_ref / _conn_id_ref already declared above _do_connect
             threading.Thread(target=_do_connect, daemon=True).start()
 
         connect_btn = _btn(bar, "Connect  →", _connect, accent=True)
@@ -968,6 +1007,19 @@ class OnboardingFlow:
                      parent=win),
                  win.destroy()),
              accent=True).pack(side="right")
+
+    # ---- multiplayer game launch
+
+    def _launch_mp_game(self, sess, is_host: bool, local_seat: int,
+                        table_settings: dict) -> None:
+        """Tear down onboarding and hand control to the multiplayer Holdem."""
+        self._save()
+        cb       = self.on_mp_start
+        nickname = self.nickname
+        avatar_b64 = getattr(self, "avatar_b64", "")
+        self.frame.destroy()
+        if cb:
+            cb(sess, is_host, local_seat, table_settings, nickname, avatar_b64)
 
     # ---- start solo
 
