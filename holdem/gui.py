@@ -634,6 +634,7 @@ class Holdem:
         self.eq_bars = (0, 0, 1)
         self.l_show.config(text="-")
         self.hand_over = False
+        self._cashout_offered = False
 
         allow_straddle = (cash and self.v_straddles.get()
                           and str(self.b_straddle["state"]) == "normal")
@@ -752,10 +753,12 @@ class Holdem:
         runs = 1
         board_left = len(e.board) < 5
         if board_left:
-            mode = self.v_rit.get()
             hero_in = (any(p.idx == HERO for p in e.contested())
                        and not self.v_observe.get()
                        and not e.players[HERO].sitting_out)
+            if hero_in and self._maybe_offer_cashout(e):
+                return   # hand settled via EV cashout
+            mode = self.v_rit.get()
             if mode == "Always":
                 runs = 2
             elif mode == "Ask":
@@ -1312,6 +1315,89 @@ class Holdem:
                  + " ".join(str(c) for c in self.rabbit_cards))
         self.redraw()
 
+    # ---------------------------------------------------- EV cashout
+
+    def _maybe_offer_cashout(self, e):
+        """Offer a 1%-fee EV cashout when the hero is all-in with ≥55% equity
+        and the pot ≥ 10 BB.  Returns True if accepted (hand settled),
+        False otherwise.  Must be called from the main (Tkinter) thread."""
+        if self._cashout_offered:
+            return False
+        hero = e.players[HERO]
+        if not hero.all_in or hero.folded or not hero.in_seat:
+            return False
+        if self.v_observe.get() or hero.sitting_out:
+            return False
+        pot = e.pot
+        if pot < 10 * e.bb:
+            return False
+        opp = [p for p in e.contested() if p.idx != HERO]
+        n_opp = len(opp)
+        if n_opp == 0:
+            return False
+
+        # Compute hero equity synchronously (small sim count for speed)
+        from .engine import equity as _equity
+        result = _equity(list(hero.hole), list(e.board),
+                         n_opp, 800, random.Random())
+        if result is None:
+            return False
+        _, _, hero_eq = result
+        if hero_eq < 0.55:
+            return False
+
+        self._cashout_offered = True
+        gross = int(hero_eq * pot)
+        net = int(gross * 0.99)
+
+        msg = (f"Cash out for {net:,} chips?\n\n"
+               f"Your equity: {hero_eq:.0%} × {pot:,} pot = {gross:,} chips\n"
+               f"After 1% fee: {net:,} chips\n\n"
+               f"Yes = take the money now\n"
+               f"No  = run it out")
+        if not messagebox.askyesno("EV Cashout", msg):
+            return False
+
+        # --- Award chips ---
+        hero.stack += net
+        hero.won = net
+        remaining = pot - net
+        per_opp, leftover = divmod(remaining, n_opp) if n_opp else (0, 0)
+        for k, opp_p in enumerate(opp):
+            share = per_opp + (1 if k < leftover else 0)
+            opp_p.stack += share
+            opp_p.won = share
+
+        # Clear all betting state (bypassing engine.settle)
+        for p in e.players:
+            p.total_live = 0
+            p.total_dead = 0
+            p.bet = 0
+            p.all_in = (p.stack == 0)
+        e.street = "idle"
+
+        self.hand_over = True
+        self.result = {
+            "winners": {HERO}, "pots": [], "runs": [],
+            "shown": {HERO}, "mucked": set(),
+            "order": [HERO], "refund": None, "tabled": False,
+        }
+        self.l_status.config(text=f"Cashed out for {net:,}  "
+                                   f"({hero_eq:.0%} equity).")
+        self.l_hint.config(text="")
+        self.b_next.config(state="normal")
+        self.say("pot",
+                 f"EV cashout: You take {net:,} "
+                 f"({hero_eq:.0%} × {pot:,} − 1% fee)")
+        self.redraw()
+
+        alive_next = [p for p in e.players if p.stack > 0]
+        if len(alive_next) < 2:
+            self.root.after(self.delay * 2,
+                            lambda: self.finish_game(alive_next))
+        elif self.v_auto.get() or self.v_observe.get():
+            self.root.after(max(900, self.delay * 3), self.deal)
+        return True
 
     # ------------------------------------------------------- persistence
 
