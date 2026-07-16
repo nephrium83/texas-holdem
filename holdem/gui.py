@@ -169,6 +169,9 @@ class Holdem:
         self.game_over = False
         self.level_idx = 0
         self.pending = None
+        self._cashout_offered = False
+        self._tourn_tick_gen = 0
+        self._tourn_overlay_ids = []
 
         self.wrap = tk.Frame(root)
         self.wrap.pack(fill="both", expand=True)
@@ -404,6 +407,18 @@ class Holdem:
         self.b_add = small("Add chips", self.add_chips_dialog)
         self.b_straddle = small("Straddle: off", self.toggle_straddle)
         self.b_rabbit = small("Rabbit", self.rabbit)
+
+        # Emote / reaction tray (hidden until the human's turn)
+        self._emote_frame = tk.Frame(bar, bg=t["panel"])
+        self._emote_frame.pack(side="left", padx=8, pady=6)
+        for _em in ("\U0001f44d", "\U0001f62e", "\U0001f602",
+                    "\U0001f624", "\U0001f911", "\U0001fae0"):
+            tk.Button(self._emote_frame, text=_em,
+                      font=("Segoe UI", 16), bg=t["panel"],
+                      relief="flat", cursor="hand2", bd=0,
+                      command=lambda em=_em: self._show_emote(HERO, em)
+                      ).pack(side="left", padx=1)
+        self._emote_frame.pack_forget()
 
         right = tk.Frame(bar, bg=t["panel"])
         right.pack(side="right", padx=16, pady=8)
@@ -762,6 +777,25 @@ class Holdem:
         e.act(i, act, amt)
         self.flush_log()
         self.redraw()
+        # ~20% chance of a contextual emote from this AI seat
+        if random.random() < 0.20:
+            _p = e.players[i]
+            _emote = None
+            if _p.style == "Maniac":
+                _emote = ("\U0001f911" if act == "raise"
+                          else ("\U0001f624" if act == "fold" else None))
+            elif _p.style == "Nit":
+                if act in ("call", "fold"):
+                    _emote = "\U0001f624"
+            elif _p.style == "Loose":
+                _emote = "\U0001f602"
+            elif _p.style == "Solid":
+                if act == "raise":
+                    _emote = "\U0001f44d"
+            if _emote:
+                self.root.after(
+                    max(60, self.delay // 2),
+                    lambda si=i, em=_emote: self._show_emote(si, em))
         self.root.after(max(60, self.delay // 3), self.loop)
 
     # --------------------------------------------------------- hero actions
@@ -840,6 +874,8 @@ class Holdem:
         self.slider.config(state="disabled")
         # Show pre-action checkboxes only while a hand is actively running
         self._show_pre_actions(not self.hand_over)
+        if hasattr(self, '_emote_frame'):
+            self._emote_frame.pack_forget()
 
     def unlock(self):
         e = self.engine
@@ -886,6 +922,42 @@ class Holdem:
             self.l_hint.config(text="Hint: " + self.hint(lg))
         else:
             self.l_hint.config(text="")
+        self._emote_frame.pack(side="left", padx=8, pady=6)
+
+    def _show_emote(self, seat_idx, emoji):
+        """Animate an emoji floating up from the given seat position."""
+        e = self.engine
+        if e is None:
+            return
+        cv = self.cv
+        W = max(cv.winfo_width(), 600)
+        H = max(cv.winfo_height(), 420)
+        cx, cy = W / 2, H * 0.46
+        rx, ry = W * 0.36, H * 0.27
+        srx, sry = rx * 1.08, ry * 1.32
+        n = len(e.players)
+        ang = math.pi / 2 - seat_idx * 2 * math.pi / n
+        sx = cx + srx * math.cos(ang)
+        sy = cy + sry * math.sin(ang)
+        item = cv.create_text(sx, sy - 55, text=emoji,
+                              font=("Segoe UI", 22), tags="emote")
+        steps = 12          # 12 steps × 100 ms = 1.2 s total
+        dy = 30.0 / steps   # 30 px upward total
+
+        def _move(step):
+            if step >= steps:
+                try:
+                    cv.delete(item)
+                except Exception:
+                    pass
+                return
+            try:
+                cv.move(item, 0, -dy)
+            except Exception:
+                return
+            self.root.after(100, lambda: _move(step + 1))
+
+        self.root.after(100, lambda: _move(0))
 
     def _sync_raise_label(self):
         e = self.engine
