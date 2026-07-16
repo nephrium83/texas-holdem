@@ -10,6 +10,7 @@ Covers:
 - full-game fuzzing: chip conservation, action legality, and the
   round-close invariant (every live bet matched when a street ends)
 """
+import os
 import random
 import sys
 from itertools import combinations
@@ -506,10 +507,100 @@ def test_rabbit_peek_matches_deal():
     assert (e.board[4].v, e.board[4].s) == (peek[4].v, peek[4].s)
 
 
+
+
+def test_settings_scopes_partition():
+    from holdem import settings as cfg
+    assert set(cfg.CLIENT_KEYS).isdisjoint(cfg.TABLE_RULE_KEYS)
+    seat = [k for k, s in cfg.SPEC.items() if s["scope"] == cfg.SEAT]
+    assert "sit_out" in seat
+    for k in seat:
+        assert k not in cfg.CLIENT_KEYS and k not in cfg.TABLE_RULE_KEYS
+    # every non-action option carries a default
+    for k, s in cfg.SPEC.items():
+        if s["kind"] != "action":
+            assert "default" in s, k
+
+
+def test_settings_persistence_roundtrip(tmp_path, monkeypatch):
+    from holdem import settings as cfg
+    monkeypatch.setenv("HOLDEM_CONFIG_DIR", str(tmp_path))
+    cl = cfg.defaults(cfg.CLIENT); tb = cfg.defaults(cfg.TABLE_RULE)
+    cl["theme"] = "Classic Felt"; cl["hints"] = False
+    tb["sb"] = 25; tb["bb"] = 50; tb["straddles"] = True
+    assert cfg.save(cl, tb)
+    got = cfg.load()
+    assert got["client"]["theme"] == "Classic Felt"
+    assert got["client"]["hints"] is False
+    assert got["last_table"]["sb"] == 25
+    assert got["last_table"]["straddles"] is True
+
+
+def test_settings_load_tolerates_garbage(tmp_path, monkeypatch):
+    from holdem import settings as cfg
+    monkeypatch.setenv("HOLDEM_CONFIG_DIR", str(tmp_path))
+    cfg.config_dir().mkdir(parents=True, exist_ok=True)
+    cfg.config_path().write_text("{ not valid json ]")
+    d = cfg.load()                       # must not raise
+    assert d["client"]["theme"] == "Cyberpunk"
+    # unknown keys and invalid values are dropped/clamped on save+load
+    cfg.save({"theme": "Nope", "bogus": 1, "hints": True}, {"sb": -5})
+    d2 = cfg.load()
+    assert d2["client"]["theme"] == "Cyberpunk"
+    assert "bogus" not in d2["client"]
+    assert d2["last_table"]["sb"] == cfg.SPEC["sb"]["lo"]
+
+
+def test_rules_hash_canonical_and_sensitive():
+    from holdem import settings as cfg
+    a = cfg.table_rules(sb=10, bb=20, structure="No-Limit")
+    b = cfg.table_rules(bb=20, structure="No-Limit", sb=10)
+    assert cfg.rules_hash(a) == cfg.rules_hash(b)     # order-independent
+    assert len(cfg.rules_hash(a)) == 10
+    c = cfg.table_rules(sb=10, bb=20, structure="Pot-Limit")
+    assert cfg.rules_hash(a) != cfg.rules_hash(c)     # rule change -> new id
+    # a client-scoped value can never be in the hashed contract
+    assert "theme" not in cfg.TABLE_RULE_KEYS
+    assert "speed" not in cfg.TABLE_RULE_KEYS
+
+
+
 if __name__ == "__main__":
+    import inspect
+    import tempfile
+    import types
+
+    class _Patch:
+        """Minimal monkeypatch shim for running without pytest."""
+        def __init__(self):
+            self._env = []
+
+        def setenv(self, k, v):
+            self._env.append((k, os.environ.get(k)))
+            os.environ[k] = v
+
+        def undo(self):
+            for k, old in reversed(self._env):
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
+
     fns = [(k, v) for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]
     for name, fn in fns:
-        fn()
+        params = inspect.signature(fn).parameters
+        kw = {}
+        patch = None
+        if "tmp_path" in params:
+            kw["tmp_path"] = Path(tempfile.mkdtemp())
+        if "monkeypatch" in params:
+            patch = _Patch()
+            kw["monkeypatch"] = patch
+        try:
+            fn(**kw)
+        finally:
+            if patch is not None:
+                patch.undo()
         print(f"  {name}: ok")
     print(f"ALL PASS ({len(fns)} tests)")

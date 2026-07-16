@@ -7,6 +7,7 @@ from tkinter import messagebox, simpledialog, ttk
 
 from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR)
+from . import settings as cfg
 
 CLOCK_BASE = 25          # seconds per action
 BANK_START = 60          # starting time bank
@@ -63,7 +64,7 @@ class Holdem:
         self.rng = random.Random()
         self.brain = Brain(self.rng)
         self.engine = None
-        self.theme = THEMES["Cyberpunk"]
+        self.theme = THEMES["Cyberpunk"]   # replaced after config load below
 
         # settings
         self.v_players = tk.IntVar(value=6)
@@ -89,6 +90,31 @@ class Holdem:
         self.v_straddles = tk.BooleanVar(value=False) # allow straddles (cash)
         self.v_rabbit = tk.BooleanVar(value=True)     # rabbit hunting
         self.v_topup = tk.BooleanVar(value=True)      # AI auto top-up (cash)
+        self.v_training = tk.BooleanVar(value=True)   # table rule: aids ok
+
+        # option key -> tk var, scopes per holdem.settings.SPEC
+        self._varmap = {
+            "theme": self.v_theme, "speed": self.v_speed,
+            "reveal": self.v_reveal, "hints": self.v_hint,
+            "odds": self.v_odds, "auto_deal": self.v_auto,
+            "clock_on": self.v_clock, "observe": self.v_observe,
+            "ai_topup": self.v_topup, "ai_mixed": self.v_chaos,
+            "ai_level": self.v_level,
+            "mode": self.v_mode, "structure": self.v_struct,
+            "sb": self.v_sb, "bb": self.v_bb, "stack": self.v_stack,
+            "players": self.v_players, "bb_ante": self.v_ante,
+            "level_minutes": self.v_lvlmin, "rit": self.v_rit,
+            "straddles": self.v_straddles, "rabbit": self.v_rabbit,
+            "training_aids": self.v_training,
+        }
+        stored = cfg.load()
+        for key, val in {**stored["client"], **stored["last_table"]}.items():
+            var = self._varmap.get(key)
+            if var is not None:
+                var.set(val)
+        self.table_rules = cfg.table_rules(**stored["last_table"])
+        self.joined_table = False     # True once seated at a live P2P table
+        self.theme = THEMES.get(self.v_theme.get(), THEMES["Cyberpunk"])
 
         # session state
         self.buyin = 0
@@ -411,13 +437,17 @@ class Holdem:
     # ---------------------------------------------------------- game set-up
 
     def new_game(self):
-        n = max(2, min(9, self.v_players.get()))
-        sb = max(1, self.v_sb.get())
-        bb = max(sb + 1, self.v_bb.get())
-        cash = self.v_mode.get() == "Cash"
-        stack = max(20, self.v_stack.get())
-        if cash:                                  # table stakes: 40-100 BB
-            stack = max(40 * bb, min(stack, 100 * bb))
+        self.table_rules = cfg.table_rules(**self._bucket(cfg.TABLE_RULE))
+        self.save_config()
+        r = self.table_rules
+        n = r["players"]
+        sb = r["sb"]
+        bb = max(sb + 1, r["bb"])
+        cash = r["mode"] == "Cash"
+        stack = r["stack"]
+        if cash:                                  # table stakes rule
+            stack = max(r["buyin_min_bb"] * bb,
+                        min(stack, r["buyin_max_bb"] * bb))
         self.theme = THEMES[self.v_theme.get()]
 
         base = self.v_level.get()
@@ -462,7 +492,8 @@ class Holdem:
         self._retheme()
         self.l_summary.config(
             text=f"{n}-handed  ·  {self.v_struct.get()}  ·  {self.v_mode.get()}"
-                 f"  ·  AI {'mixed' if self.v_chaos.get() else base}")
+                 f"  ·  AI {'mixed' if self.v_chaos.get() else base}"
+                 f"  ·  table #{cfg.rules_hash(self.table_rules)}")
         self._show(self.table)
         self.say("hand", "=== New game ===")
         self.level_gen = getattr(self, "level_gen", 0) + 1
@@ -705,7 +736,7 @@ class Holdem:
         self.l_status.config(
             text=f"{e.street.capitalize()} — your move."
                  + (f"  {lg['to_call']} to call." if lg["to_call"] else ""))
-        if self.v_hint.get():
+        if self.v_hint.get() and self.aids_ok():
             self.l_hint.config(text="Hint: " + self.hint(lg))
         else:
             self.l_hint.config(text="")
@@ -839,7 +870,8 @@ class Holdem:
             self.b_rabbit.config(state="normal")
         if self.v_mode.get() == "Cash":
             hero = e.players[HERO]
-            if hero.stack + hero.total < 100 * e.bb:
+            cap_bb = self.table_rules.get("buyin_max_bb", 100)
+            if hero.stack + hero.total < cap_bb * e.bb:
                 self.b_add.config(state="normal")
         self.redraw()
 
@@ -962,7 +994,7 @@ class Holdem:
         if e is None or not self.hand_over or self.v_mode.get() != "Cash":
             return
         hero = e.players[HERO]
-        cap = 100 * e.bb - hero.stack
+        cap = self.table_rules.get("buyin_max_bb", 100) * e.bb - hero.stack
         if cap <= 0:
             messagebox.showinfo("Add chips", "You're at the table max.")
             return
@@ -990,6 +1022,27 @@ class Holdem:
                  + " ".join(str(c) for c in self.rabbit_cards))
         self.redraw()
 
+
+    # ------------------------------------------------------- persistence
+
+    def _bucket(self, scope):
+        out = {}
+        for key, var in self._varmap.items():
+            if cfg.SPEC[key]["scope"] != scope:
+                continue
+            try:
+                out[key] = var.get()
+            except tk.TclError:
+                pass
+        return out
+
+    def save_config(self):
+        cfg.save(self._bucket(cfg.CLIENT), self._bucket(cfg.TABLE_RULE))
+
+    def aids_ok(self):
+        """Training aids (hints, live equity) are a table rule; the client
+        toggles only apply where the table allows them."""
+        return bool(self.table_rules.get("training_aids", True))
 
     # ------------------------------------------------------------ settings
 
@@ -1080,9 +1133,9 @@ class Holdem:
         win.protocol("WM_DELETE_WINDOW", self.close_settings)
         win.bind("<Escape>", lambda _e: self.close_settings())
         self.root.update_idletasks()
-        x = self.root.winfo_rootx() + self.root.winfo_width() // 2 - 260
-        y = self.root.winfo_rooty() + self.root.winfo_height() // 2 - 230
-        win.geometry(f"520x460+{max(0, x)}+{max(0, y)}")
+        x = self.root.winfo_rootx() + self.root.winfo_width() // 2 - 280
+        y = self.root.winfo_rooty() + self.root.winfo_height() // 2 - 280
+        win.geometry(f"560x560+{max(0, x)}+{max(0, y)}")
 
         tk.Label(win, text="SETTINGS", bg=t["panel"], fg=t["accent"],
                  font=("Segoe UI", 15, "bold")).pack(pady=(14, 6))
@@ -1109,24 +1162,47 @@ class Holdem:
             for nm, btn in navbtns.items():
                 btn.config(fg=t["accent"] if nm == name else t["dim"])
 
-        for name in ("Display", "Table"):
+        for name in ("Client", "Table rules"):
             b = tk.Button(nav, text=name.upper(), relief="flat",
                           bg=t["panel"], fg=t["dim"],
                           activebackground=t["panel"],
                           activeforeground=t["accent"],
                           font=("Segoe UI", 10, "bold"), anchor="w",
-                          cursor="hand2", width=9,
+                          cursor="hand2", width=11,
                           command=lambda n=name: show(n))
             b.pack(anchor="w", pady=2)
             navbtns[name] = b
-
-        d = page("Display")
 
         def lab(parent, txt, top=8):
             tk.Label(parent, text=txt, bg=t["bg"], fg=t["text"],
                      font=("Segoe UI", 9)).pack(anchor="w", pady=(top, 1))
 
-        lab(d, "Theme", 4)
+        def check(parent, key, on_change=None):
+            s = cfg.SPEC[key]
+            b = tk.Checkbutton(parent, text=s["label"],
+                               variable=self._varmap[key], bg=t["bg"],
+                               fg=t["text"], selectcolor=t["panel"],
+                               activebackground=t["bg"],
+                               activeforeground=t["text"],
+                               font=("Segoe UI", 9),
+                               command=on_change)
+            b.pack(anchor="w", pady=1)
+            return b
+
+        def choice(parent, key, on_change=None, width=22):
+            s = cfg.SPEC[key]
+            lab(parent, s["label"])
+            c = ttk.Combobox(parent, textvariable=self._varmap[key],
+                             values=s["choices"], state="readonly",
+                             width=width)
+            c.pack(anchor="w")
+            if on_change:
+                c.bind("<<ComboboxSelected>>", lambda _e: on_change())
+            return c
+
+        # ---- CLIENT: this machine only, persisted -------------------
+        d = page("Client")
+        lab(d, cfg.SPEC["theme"]["label"], 4)
         cb_theme = ttk.Combobox(d, values=list(THEMES), state="readonly",
                                 width=20)
         cb_theme.set(self.v_theme.get())
@@ -1134,37 +1210,74 @@ class Holdem:
         cb_theme.bind("<<ComboboxSelected>>",
                       lambda _e: (self.v_theme.set(cb_theme.get()),
                                   self.apply_theme(cb_theme.get())))
-        lab(d, "Game speed")
-        ttk.Combobox(d, textvariable=self.v_speed, values=list(SPEEDS),
-                     state="readonly", width=20).pack(anchor="w")
-        tk.Label(d, text="Theme changes apply immediately.",
-                 bg=t["bg"], fg=t["dim"],
-                 font=("Segoe UI", 8)).pack(anchor="w", pady=(14, 0))
+        choice(d, "speed", width=20)
+        choice(d, "reveal")
+        b_hints = check(d, "hints")
+        b_odds = check(d, "odds")
+        check(d, "auto_deal")
+        check(d, "clock_on")
+        check(d, "ai_topup")
+        tk.Label(d, text="Saved to " + str(cfg.config_path()),
+                 bg=t["bg"], fg=t["dim"], wraplength=250, justify="left",
+                 font=("Segoe UI", 7)).pack(anchor="w", pady=(10, 0))
 
-        tb = page("Table")
-        for txt, var in (("Action clock (25s + time bank)", self.v_clock),
-                         ("Coaching hints", self.v_hint),
-                         ("Live equity readout", self.v_odds),
-                         ("Rabbit hunting", self.v_rabbit),
-                         ("Auto-deal next hand", self.v_auto),
-                         ("Allow straddles (cash)", self.v_straddles),
-                         ("AI auto top-up (cash)", self.v_topup)):
-            tk.Checkbutton(tb, text=txt, variable=var, bg=t["bg"],
-                           fg=t["text"], selectcolor=t["panel"],
-                           activebackground=t["bg"],
-                           activeforeground=t["text"],
-                           font=("Segoe UI", 9)).pack(anchor="w", pady=1)
-        lab(tb, "Show cards at")
-        ttk.Combobox(tb, textvariable=self.v_reveal,
-                     values=["Winner only", "Realistic (muck losers)",
-                             "Everyone"],
-                     state="readonly", width=22).pack(anchor="w")
-        lab(tb, "Run it twice")
-        ttk.Combobox(tb, textvariable=self.v_rit,
-                     values=["Ask", "Always", "Never"],
-                     state="readonly", width=22).pack(anchor="w")
+        # ---- TABLE RULES: the contract every seat plays under -------
+        tb = page("Table rules")
+        l_hash = tk.Label(tb, text="", bg=t["bg"], fg=t["gold"],
+                          font=("Consolas", 9, "bold"))
+        l_hash.pack(anchor="w", pady=(2, 4))
+        r = self.table_rules
+        contract = (f"{r['mode']} · {r['structure']} · "
+                    f"blinds {r['sb']}/{r['bb']}\n"
+                    f"{r['players']} seats · stack {r['stack']:,} · "
+                    f"buy-in {r['buyin_min_bb']}-{r['buyin_max_bb']} BB\n"
+                    f"clock {r['clock_base']}s · bank {r['bank_start']}s "
+                    f"(+{r['bank_topup']}/orbit, cap {r['bank_cap']})"
+                    + (f"\nBB ante · {r['level_minutes']} min levels"
+                       if r["mode"] == "Tournament" else ""))
+        tk.Label(tb, text=contract, bg=t["bg"], fg=t["dim"],
+                 justify="left", font=("Segoe UI", 8)).pack(anchor="w")
 
-        show("Display")
+        def sync_aids():
+            state = "normal" if self.v_training.get() else "disabled"
+            b_hints.config(state=state)
+            b_odds.config(state=state)
+
+        def amend():
+            """Live table-rule change (single-player only): update the
+            contract and its hash. At a live table this needs unanimous
+            signed consent instead."""
+            self.table_rules = cfg.table_rules(
+                **self._bucket(cfg.TABLE_RULE))
+            l_hash.config(
+                text=f"Table #{cfg.rules_hash(self.table_rules)}")
+            base = self.l_summary.cget("text").rsplit("  ·  table #", 1)[0]
+            self.l_summary.config(
+                text=base + f"  ·  table #{cfg.rules_hash(self.table_rules)}")
+            sync_aids()
+
+        lab(tb, "Amendable between hands", 10)
+        live_widgets = [
+            choice(tb, "rit", on_change=amend),
+            check(tb, "straddles", on_change=amend),
+            check(tb, "rabbit", on_change=amend),
+            check(tb, "training_aids", on_change=amend),
+        ]
+        if self.joined_table:
+            for w in live_widgets:
+                w.config(state="disabled")
+            tk.Label(tb, text="Fixed by the join code at a live table.",
+                     bg=t["bg"], fg=t["dim"],
+                     font=("Segoe UI", 8)).pack(anchor="w", pady=(8, 0))
+        else:
+            tk.Label(tb, text="Everything else is fixed for this game;\n"
+                              "start a new game to change it.",
+                     bg=t["bg"], fg=t["dim"], justify="left",
+                     font=("Segoe UI", 8)).pack(anchor="w", pady=(8, 0))
+        amend()
+        sync_aids()
+
+        show("Client")
 
         bar = tk.Frame(win, bg=t["panel"])
         bar.pack(fill="x", padx=14, pady=12)
@@ -1186,6 +1299,7 @@ class Holdem:
             pass                        # not yet viewable; transient is enough
 
     def close_settings(self):
+        self.save_config()
         if self.settings_win is not None:
             try:
                 self.settings_win.grab_release()
@@ -1231,6 +1345,7 @@ class Holdem:
     def quit_to_desktop(self):
         if messagebox.askyesno("Quit", "Quit to desktop?",
                                parent=self.settings_win):
+            self.save_config()
             self.root.destroy()
 
     # -------------------------------------------------------------- equity
@@ -1240,7 +1355,8 @@ class Holdem:
         self.eq_gen += 1
         gen = self.eq_gen
         hero = e.players[HERO]
-        if not self.v_odds.get() or not hero.hole or hero.folded:
+        if (not self.v_odds.get() or not self.aids_ok()
+                or not hero.hole or hero.folded):
             self.eq_text = "-"
             self.eq_bars = (0, 0, 1)
             return
@@ -1558,7 +1674,13 @@ class Holdem:
 
 def main():
     root = tk.Tk()
-    Holdem(root)
+    app = Holdem(root)
+
+    def on_close():
+        app.save_config()
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
 
 

@@ -96,6 +96,24 @@ ever taken, and every betting round closes with all live bets matched. CI runs t
 engine suite on Python 3.10/3.12/3.13 and boots the GUI under Xvfb to
 play 15 hands headless.
 
+## Settings
+
+Every option has a scope — `CLIENT`, `TABLE_RULE`, or `SEAT` — defined in
+[`holdem/settings.py`](holdem/settings.py). Client settings (theme, speed,
+local aids) persist to a per-user config file; table rules (stakes,
+structure, timing) form a contract reducible to a short canonical hash.
+In-game, Settings (or Esc) pauses and opens a dialog split along those
+scopes; it never restarts the match.
+
+## Multiplayer
+
+The intended direction is serverless, peer-to-peer, play-money poker
+built on mental-poker cryptography — no central server, no trusted
+dealer. The full design and phased roadmap are in
+[docs/MULTIPLAYER.md](docs/MULTIPLAYER.md). The scope tags and rules hash
+above are the first piece of that plan: a table's join code will embed
+the rules hash so every client can verify it is playing the same game.
+
 ## License
 
 MIT
