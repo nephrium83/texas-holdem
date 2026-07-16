@@ -579,6 +579,9 @@ class Holdem:
         self.level_gen = getattr(self, "level_gen", 0) + 1
         if self.v_mode.get() == "Tournament":
             self.root.after(1000, lambda g=self.level_gen: self._level_tick(g))
+            self._tourn_tick_gen += 1
+            _ttg = self._tourn_tick_gen
+            self.root.after(1000, lambda g=_ttg: self._tick_tournament_overlay(g))
         self.root.after(120, self.deal)
 
     def _retheme(self):
@@ -1190,6 +1193,70 @@ class Holdem:
                  + (f" \u00b7 ante {e.bb}" if e.bb_ante else "") + suffix)
         self.root.after(1000, lambda: self._level_tick(gen))
 
+    def _draw_tournament_overlay(self):
+        """Draw tournament info (blinds, countdown, rank) in the canvas
+        top-right corner.  No-ops when not in tournament mode."""
+        if self.v_mode.get() != "Tournament" or self.engine is None:
+            self._tourn_overlay_ids = []
+            return
+        e = self.engine
+        cv = self.cv
+        t = self.theme
+        W = max(cv.winfo_width(), 600)
+
+        # Countdown to next level
+        mins = max(1, self.v_lvlmin.get())
+        if self.level_idx < len(BLIND_LEVELS) - 1:
+            nxt_secs = max(0.0, ((self.level_idx + 1) * mins * 60
+                                 - (time.time() - self.level_started)))
+            m, s = divmod(int(nxt_secs), 60)
+            countdown = f"Next level: {m}:{s:02d}"
+        else:
+            countdown = "Final level"
+
+        # Rank (1 = chip leader) among all players
+        ranked = sorted(e.players, key=lambda p: p.stack, reverse=True)
+        rank = next((i + 1 for i, p in enumerate(ranked) if p.idx == HERO),
+                    "-")
+        total = len(e.players)
+
+        # Box coordinates (top-right corner)
+        ox2, oy1 = W - 12, 12
+        ox1, oy2 = ox2 - 200, oy1 + 80
+
+        ids = []
+        ids.append(rrect(cv, ox1, oy1, ox2, oy2, 8,
+                         fill=t["panel"], outline=t["dim"], width=1,
+                         stipple="gray50"))
+        ids.append(cv.create_text(ox1 + 10, oy1 + 14, anchor="w",
+                                  text=f"Blinds {e.sb}/{e.bb}",
+                                  fill=t["gold"],
+                                  font=("Segoe UI", 9, "bold")))
+        ids.append(cv.create_text(ox1 + 10, oy1 + 36, anchor="w",
+                                  text=countdown,
+                                  fill=t["text"],
+                                  font=("Segoe UI", 9)))
+        ids.append(cv.create_text(ox1 + 10, oy1 + 58, anchor="w",
+                                  text=f"Rank: {rank}/{total}",
+                                  fill=t["accent"],
+                                  font=("Segoe UI", 9)))
+        self._tourn_overlay_ids = ids
+
+    def _tick_tournament_overlay(self, gen):
+        """Refresh just the tournament overlay canvas items every second."""
+        if (gen != self._tourn_tick_gen or self.engine is None
+                or self.game_over
+                or self.v_mode.get() != "Tournament"):
+            return
+        for iid in getattr(self, '_tourn_overlay_ids', []):
+            try:
+                self.cv.delete(iid)
+            except Exception:
+                pass
+        self._tourn_overlay_ids = []
+        self._draw_tournament_overlay()
+        self.root.after(1000, lambda: self._tick_tournament_overlay(gen))
+
     # ------------------------------------------------------- table actions
 
     def toggle_sit(self):
@@ -1762,6 +1829,7 @@ class Holdem:
         self.l_stack.config(text=f"{hero.stack:,}"
                             + ("  ALL-IN" if hero.all_in else ""))
         self.draw_equity()
+        self._draw_tournament_overlay()
 
     def seat(self, p, x, y, cx, cy):
         e = self.engine
