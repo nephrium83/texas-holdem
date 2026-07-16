@@ -468,6 +468,14 @@ class OnboardingFlow:
                  bg=_PANEL, fg=_TEXT,
                  font=("Segoe UI", 15, "bold")).pack(side="left")
 
+        # Persistent level + bankroll
+        _level = cfg.get("player_level")
+        _bankroll = cfg.get("bankroll")
+        tk.Label(header,
+                 text=f"Lv. {_level}  \u00b7  {_bankroll:,} chips",
+                 bg=_PANEL, fg=_GOLD,
+                 font=("Segoe UI", 9)).pack(side="left", padx=(10, 0))
+
         tk.Label(header, text="TEXAS HOLD'EM  ·  LOBBY",
                  bg=_PANEL, fg=_ACCENT,
                  font=("Segoe UI", 10, "bold")).pack(side="right", padx=24)

@@ -91,6 +91,19 @@ SPEC = {
     "sound_volume":   dict(scope=CLIENT, kind="int",  default=70,
                            label="Sound volume (0–100)", lo=0, hi=100),
 
+    # ---- bankroll / XP / progression (CLIENT) ----------------------
+    "bankroll":              dict(scope=CLIENT, kind="int", default=10000,
+                                  label="Bankroll", lo=0, hi=100_000_000),
+    "xp":                    dict(scope=CLIENT, kind="int", default=0,
+                                  label="XP", lo=0, hi=100_000_000),
+    "player_level":          dict(scope=CLIENT, kind="int", default=1,
+                                  label="Player level", lo=1, hi=50),
+    "hands_played_total":    dict(scope=CLIENT, kind="int", default=0,
+                                  label="Hands played (all-time)", lo=0,
+                                  hi=100_000_000),
+    "last_daily_bonus_date": dict(scope=CLIENT, kind="str", default="",
+                                  maxlen=10, label="Last daily bonus date"),
+
     # ---- onboarding / player identity (CLIENT, local machine) -------
     "nickname":     dict(scope=CLIENT, kind="str", default="",
                          maxlen=20, label="Nickname"),
@@ -220,6 +233,24 @@ def load() -> dict:
     return {"client": client, "last_table": table}
 
 
+def get(key: str):
+    """Read a single CLIENT key from the persisted file (or its default)."""
+    spec = SPEC.get(key)
+    if spec is None or spec["scope"] != CLIENT:
+        raise KeyError(key)
+    return load()["client"].get(key, spec["default"])
+
+
+def set(key: str, value) -> bool:
+    """Write a single CLIENT key atomically. Returns True on success."""
+    spec = SPEC.get(key)
+    if spec is None or spec["scope"] != CLIENT:
+        raise KeyError(key)
+    stored = load()
+    stored["client"][key] = value
+    return save(stored["client"], stored["last_table"])
+
+
 def save(client: dict, last_table: dict) -> bool:
     """Atomically persist both buckets. Best-effort: never raises."""
     out = {
@@ -256,7 +287,7 @@ def table_rules(**values) -> dict:
 
 def rules_hash(rules: dict) -> str:
     """Ten hex chars identifying the contract. Canonical (sorted keys,
-    compact separators) so every client derives the same value — this is
+    compact separators) so every client derives the same value -- this is
     what a multiplayer join code embeds."""
     canon = json.dumps({k: rules[k] for k in sorted(TABLE_RULE_KEYS)},
                        separators=(',', ':'), sort_keys=True)

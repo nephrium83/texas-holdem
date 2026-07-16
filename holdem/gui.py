@@ -3,6 +3,7 @@ import io
 import math
 import random
 import threading
+import datetime
 import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -146,6 +147,17 @@ class Holdem:
         self._last_hero_eq = 0.0    # most recent win equity fraction for hero
         self._allin_announced: set = set()  # seats already given allin sound
 
+        # daily bonus
+        today = datetime.date.today().isoformat()
+        if cfg.get('last_daily_bonus_date') != today:
+            level = cfg.get('player_level')
+            bonus = 500 * level
+            cfg.set('bankroll', cfg.get('bankroll') + bonus)
+            cfg.set('last_daily_bonus_date', today)
+            self._pending_daily_bonus_msg = f'Daily bonus! +{bonus:,} chips'
+        else:
+            self._pending_daily_bonus_msg = ''
+
         # avatar – loaded from settings (written by onboarding); may be
         # overridden by main() after OnboardingFlow sets it.
         self.avatar_b64: str = stored["client"].get("avatar_b64", "")
@@ -198,6 +210,25 @@ class Holdem:
         for f in (self.setup, self.table):
             f.pack_forget()
         frame.pack(fill="both", expand=True)
+
+    def _maybe_show_daily_bonus(self):
+        msg = getattr(self, "_pending_daily_bonus_msg", "")
+        if not msg:
+            return
+        self._pending_daily_bonus_msg = ''
+        cv = self.cv
+        W = max(cv.winfo_width(), 400)
+        t = self.theme
+        item = cv.create_text(W // 2, 40, text=msg,
+                              fill=t["gold"], font=("Segoe UI", 12, "bold"),
+                              tags="daily_bonus")
+        def _fade(step=0):
+            if step >= 30:
+                try: cv.delete(item)
+                except Exception: pass
+                return
+            self.root.after(100, lambda: _fade(step + 1))
+        self.root.after(3000, _fade)
 
     def _build_setup(self):
         t = self.theme
@@ -332,6 +363,9 @@ class Holdem:
             self.root.bind(f"<Key-{k.upper()}>", self._hotkey)
         self.root.bind("<space>", self._hotkey)
         self.root.bind("<Escape>", self._esc)
+
+        # fire daily bonus toast after UI is ready
+        self.root.after(800, self._maybe_show_daily_bonus)
 
     def _build_side(self, side):
         t = self.theme
@@ -550,6 +584,10 @@ class Holdem:
                              bb_ante=(not cash) and self.v_ante.get(),
                              deal_sitting_out=not cash)
         self.buyin = stack
+        # deduct buy-in from persistent bankroll (cash only)
+        if cash:
+            br = cfg.get('bankroll')
+            cfg.set('bankroll', max(0, br - stack))
         self.bank = float(BANK_START)
         self.level_started = time.time()
         self.level_idx = 0
@@ -599,6 +637,16 @@ class Holdem:
         t = self.theme
         for w in (self.table, self.cv):
             w.configure(bg=t["bg"])
+
+
+    # -------------------------------------------------------- XP / level
+
+    def update_xp(self, hands=0, pots_won=0, tourney_won=False):
+        """Award XP and recompute level; persist immediately."""
+        xp = cfg.get("xp") + 10 * hands + 50 * pots_won + (200 if tourney_won else 0)
+        level = min(50, int(math.sqrt(xp / 100)) + 1)
+        cfg.set("xp", xp)
+        cfg.set("player_level", level)
 
     def deal(self):
         if self._defer(self.deal):
@@ -669,6 +717,8 @@ class Holdem:
         self._allin_announced = set()
         self._last_hero_eq = 0.0
         _audio.play("deal")
+        cfg.set('hands_played_total', cfg.get('hands_played_total') + 1)
+        self.update_xp(hands=1)
         if e.bb_i == HERO and e.players[HERO].in_seat:
             self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
         self.flush_log()
@@ -1118,6 +1168,11 @@ class Holdem:
         if HERO in res["winners"]:
             self.l_status.config(text=f"You win {e.players[HERO].won}.")
             _audio.play("win")
+            # update persistent bankroll with winnings
+            won = e.players[HERO].won
+            if won > 0:
+                cfg.set('bankroll', cfg.get('bankroll') + won)
+            self.update_xp(pots_won=1)
         elif not e.players[HERO].in_seat:
             if e.players[HERO].sitting_out or e.players[HERO].wait_for_bb:
                 self.l_status.config(text="Sitting out.")
@@ -2051,7 +2106,7 @@ class Holdem:
         # ---- name + stack (shifted right to clear the avatar) -------------
         txt_off = av_pad + av_size + 4   # = 37 px from left edge of seat
         name = "You" if hero else p.name
-        sub = "" if hero else f"  {p.style[0]}{p.level}"
+        sub = f" Lv.{cfg.get('player_level')}" if hero else f"  {p.style[0]}{p.level}"
         cv.create_text(x - w / 2 + txt_off, y - h / 2 + 13, anchor="w",
                        text=name + sub,
                        fill=t["dim"] if p.folded else t["text"],
