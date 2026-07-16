@@ -17,8 +17,16 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import threading
+
 from . import settings as cfg
 from .p2p.invite import generate_room_code, parse_room_code
+from .p2p import identity as _identity
+from .p2p import transport as _transport
+from .p2p import wire as _wire
+from .p2p import session as _session_mod
+from .p2p import _session  # noqa: F401 -- re-exported for callers
+import holdem.p2p as _p2p_pkg
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -582,35 +590,162 @@ class OnboardingFlow:
     # ---- create-table dialog
 
     def _create_game_dialog(self) -> None:
-        """Generate a P2P room invite code and show it in a dialog."""
+        """Start hosting: bind transport, generate invite code, open lobby."""
+        # Start transport host and generate the invite code
+        try:
+            listen_addr = _transport.start_host()
+        except Exception as exc:
+            messagebox.showerror("Transport error",
+                                 f"Could not start network listener:\n{exc}",
+                                 parent=self.root)
+            return
+
         code = generate_room_code()
+        parsed = parse_room_code(code)
+        rendezvous_key = parsed["rendezvous_key"]
+
+        # Build a session and register it globally
+        sess = _session_mod.Session(
+            is_host    = True,
+            nickname   = self.nickname,
+            avatar_b64 = getattr(self, "avatar_b64", ""),
+        )
+        _p2p_pkg._session = sess
+
+        # Wire transport callbacks
+        _transport.on_message(sess.handle_message)
+        _transport.on_connect(lambda cid, addr: sess.add_local_player(cid)
+                              if not sess.players else None)
+
+        # Announce on LAN multicast in background
+        threading.Thread(
+            target=_transport.announce,
+            args=(rendezvous_key, listen_addr),
+            daemon=True,
+        ).start()
+
+        # ---- Build the lobby window ----
         win = tk.Toplevel(self.root)
-        win.title("Create Game")
+        win.title("Create Game — Lobby")
         win.configure(bg=_PANEL)
         win.resizable(False, False)
         win.transient(self.root)
         win.grab_set()
         self.root.update_idletasks()
-        dw, dh = 420, 200
-        rx = self.root.winfo_rootx() + self.root.winfo_width() // 2 - dw // 2
+        dw, dh = 480, 380
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
         ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
-        win.geometry(f"{dw}x{dh}+{max(0,rx)}+{max(0,ry)}")
-        tk.Label(win, text="Your Room Code",
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        # Header
+        tk.Label(win, text="WAITING FOR PLAYERS",
                  bg=_PANEL, fg=_ACCENT,
-                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 6))
-        tk.Label(win, text=code,
+                 font=("Segoe UI", 13, "bold")).pack(pady=(16, 4))
+
+        # Room code display
+        code_frame = tk.Frame(win, bg=_PANEL)
+        code_frame.pack(fill="x", padx=20)
+        tk.Label(code_frame, text="Room Code:",
+                 bg=_PANEL, fg=_DIM,
+                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(code_frame, text=code,
                  bg=_PANEL, fg=_GOLD,
-                 font=("Consolas", 13, "bold")).pack(pady=(0, 14))
-        bar = tk.Frame(win, bg=_PANEL)
-        bar.pack(fill="x", padx=20, pady=8)
+                 font=("Consolas", 11, "bold")).pack(side="left", padx=8)
+
         def _copy():
             self.root.clipboard_clear()
             self.root.clipboard_append(code)
-        _btn(bar, "Copy to clipboard", _copy).pack(side="left")
-        _btn(bar, "Close", win.destroy).pack(side="right")
+        _btn(code_frame, "Copy", _copy).pack(side="left")
+
+        # Listen address (for manual internet connections)
+        tk.Label(win, text=f"LAN address: {listen_addr}",
+                 bg=_PANEL, fg=_DIM,
+                 font=("Segoe UI", 8)).pack(pady=(2, 8))
+
+        # Player list
+        tk.Label(win, text="PLAYERS IN LOBBY",
+                 bg=_PANEL, fg=_DIM,
+                 font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=20)
+
+        player_frame = tk.Frame(win, bg=_FELT, pady=6)
+        player_frame.pack(fill="both", expand=True, padx=20, pady=(4, 8))
+
+        player_labels: dict[str, tk.Label] = {}
+
+        def _refresh_players(players):
+            # Called from background thread — schedule on Tk main thread
+            win.after(0, lambda: _update_player_ui(players))
+
+        def _update_player_ui(players):
+            for w in player_frame.winfo_children():
+                w.destroy()
+            player_labels.clear()
+            for p in players:
+                tag = "  [HOST]" if p.is_host else ""
+                lbl = tk.Label(
+                    player_frame,
+                    text=f"  {p.nickname}{tag}",
+                    bg=_FELT, fg=_TEXT,
+                    font=("Segoe UI", 10),
+                    anchor="w",
+                )
+                lbl.pack(fill="x", padx=8, pady=2)
+                player_labels[p.conn_id] = lbl
+            # Enable Start button when at least 1 other player is connected
+            others = [p for p in players if not p.is_host]
+            start_btn.config(state="normal" if others else "disabled")
+
+        sess.on_player_list_changed = _refresh_players
+
+        # Host's own entry
+        host_lbl = tk.Label(
+            player_frame,
+            text=f"  {self.nickname}  [HOST]",
+            bg=_FELT, fg=_ACCENT,
+            font=("Segoe UI", 10),
+            anchor="w",
+        )
+        host_lbl.pack(fill="x", padx=8, pady=2)
+
+        # Bottom bar
+        bar = tk.Frame(win, bg=_PANEL)
+        bar.pack(fill="x", padx=20, pady=(0, 14))
+
+        def _close():
+            _transport.stop()
+            _p2p_pkg._session = None
+            win.destroy()
+
+        def _start_game():
+            table_settings = {
+                "sb": 10, "bb": 20, "stack": 1000,
+                "clock_base": 25,
+            }
+            try:
+                sess.start_game(table_settings)
+            except Exception as exc:
+                messagebox.showerror("Error", str(exc), parent=win)
+                return
+            win.destroy()
+            # TODO Phase 4: transition to Holdem multiplayer mode
+            messagebox.showinfo(
+                "Game started",
+                "Game starting!  (Full hand loop wired in Phase 4.)",
+                parent=self.root,
+            )
+
+        _btn(bar, "Cancel", _close).pack(side="left")
+        start_btn = _btn(bar, "Start Game  →", _start_game,
+                         accent=True, state="disabled")
+        start_btn.pack(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", _close)
 
     def _join_game_dialog(self) -> None:
-        """Show a dialog to paste a room invite code."""
+        """Show a dialog to paste a room invite code and connect to a host."""
+        stored = cfg.load()
+        last_code = stored["client"].get("last_room_code", "")
+
         win = tk.Toplevel(self.root)
         win.title("Join Game")
         win.configure(bg=_PANEL)
@@ -618,27 +753,147 @@ class OnboardingFlow:
         win.transient(self.root)
         win.grab_set()
         self.root.update_idletasks()
-        dw, dh = 420, 200
-        rx = self.root.winfo_rootx() + self.root.winfo_width() // 2 - dw // 2
+        dw, dh = 480, 300
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
         ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
-        win.geometry(f"{dw}x{dh}+{max(0,rx)}+{max(0,ry)}")
-        tk.Label(win, text="Enter Room Code",
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text="Join Game",
                  bg=_PANEL, fg=_ACCENT,
-                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 8))
-        v_code = tk.StringVar()
-        tk.Entry(win, textvariable=v_code, width=36,
-                 bg=_BG, fg=_TEXT, insertbackground=_TEXT,
+                 font=("Segoe UI", 13, "bold")).pack(pady=(18, 4))
+
+        # Room code entry
+        tk.Label(win, text="Room code (from host):",
+                 bg=_PANEL, fg=_TEXT,
+                 font=("Segoe UI", 9)).pack(pady=(8, 2))
+        v_code = tk.StringVar(value=last_code)
+        tk.Entry(win, textvariable=v_code, width=38,
+                 bg=_BG, fg=_GOLD, insertbackground=_TEXT,
                  relief="flat", font=("Consolas", 11),
-                 justify="center").pack(pady=(0, 12))
+                 justify="center").pack(pady=(0, 8), padx=20)
+
+        # Optional manual host:port override (for internet play)
+        tk.Label(win,
+                 text="Host address override (optional, for internet play):",
+                 bg=_PANEL, fg=_DIM,
+                 font=("Segoe UI", 8)).pack(pady=(4, 2))
+        v_addr = tk.StringVar()
+        tk.Entry(win, textvariable=v_addr, width=30,
+                 bg=_BG, fg=_TEXT, insertbackground=_TEXT,
+                 relief="flat", font=("Segoe UI", 10),
+                 justify="center").pack(pady=(0, 8))
+
+        status_lbl = tk.Label(win, text="",
+                               bg=_PANEL, fg=_DIM,
+                               font=("Segoe UI", 9))
+        status_lbl.pack(pady=(0, 6))
+
         bar = tk.Frame(win, bg=_PANEL)
-        bar.pack(fill="x", padx=20, pady=8)
+        bar.pack(fill="x", padx=20, pady=(0, 14))
+
         def _connect():
-            messagebox.showinfo(
-                "Coming in Phase 3",
-                "P2P transport not yet wired. Paste this code when prompted "
-                "after the libp2p layer is connected.",
-                parent=win)
-        _btn(bar, "Connect", _connect, accent=True).pack(side="right")
+            code = v_code.get().strip()
+            if not code:
+                messagebox.showwarning("Room code required",
+                                       "Please enter the room code from the host.",
+                                       parent=win)
+                return
+
+            try:
+                parsed = parse_room_code(code)
+            except ValueError as exc:
+                messagebox.showerror("Invalid code", str(exc), parent=win)
+                return
+
+            rendezvous_key = parsed["rendezvous_key"]
+
+            # Persist the code for next time
+            stored2 = cfg.load()
+            stored2["client"]["last_room_code"] = code
+            cfg.save(stored2["client"], stored2["last_table"])
+
+            addr_override = v_addr.get().strip()
+            connect_btn.config(state="disabled")
+            status_lbl.config(text="Searching for host…", fg=_DIM)
+            win.update_idletasks()
+
+            def _do_connect():
+                try:
+                    if addr_override:
+                        host_addr = addr_override
+                    else:
+                        # LAN multicast discovery
+                        host_addr = _transport.find_peer(rendezvous_key, timeout=15)
+
+                    if not host_addr:
+                        win.after(0, lambda: _on_error(
+                            "Host not found",
+                            "Could not locate the host on the local network.\n\n"
+                            "If the host is on a different network, ask them for "
+                            "their public IP:port and enter it in the address override field.",
+                        ))
+                        return
+
+                    conn_id = _transport.connect(host_addr)
+
+                    # Build our session
+                    sess = _session_mod.Session(
+                        is_host    = False,
+                        nickname   = self.nickname,
+                        avatar_b64 = getattr(self, "avatar_b64", ""),
+                    )
+                    _p2p_pkg._session = sess
+                    _transport.on_message(sess.handle_message)
+
+                    # Send our identity to the host
+                    info_msg = _wire.pack("player_info", {
+                        "nickname":   self.nickname,
+                        "avatar_b64": getattr(self, "avatar_b64", ""),
+                    })
+                    import json as _json
+                    _transport.send(conn_id, _json.loads(info_msg))
+
+                    def _on_game_start(payload):
+                        win.after(0, lambda: _handle_start(payload))
+
+                    def _on_players(players):
+                        win.after(0, lambda: _update_joined_ui(players))
+
+                    sess.on_player_list_changed = _on_players
+                    sess.on_game_start          = _on_game_start
+
+                    win.after(0, lambda: status_lbl.config(
+                        text="Connected — waiting for host to start…",
+                        fg=_ACCENT,
+                    ))
+
+                except Exception as exc:
+                    win.after(0, lambda e=exc: _on_error("Connection failed", str(e)))
+
+            def _on_error(title, msg):
+                connect_btn.config(state="normal")
+                status_lbl.config(text="Connection failed.", fg="#e33b6d")
+                messagebox.showerror(title, msg, parent=win)
+
+            def _update_joined_ui(players):
+                status_lbl.config(
+                    text="Players: " + ", ".join(p.nickname for p in players),
+                    fg=_TEXT,
+                )
+
+            def _handle_start(payload):
+                win.destroy()
+                # TODO Phase 4: transition to Holdem multiplayer mode
+                messagebox.showinfo(
+                    "Game started",
+                    "The host started the game!  (Full hand loop wired in Phase 4.)",
+                    parent=self.root,
+                )
+
+            threading.Thread(target=_do_connect, daemon=True).start()
+
+        connect_btn = _btn(bar, "Connect  →", _connect, accent=True)
+        connect_btn.pack(side="right")
         _btn(bar, "Cancel", win.destroy).pack(side="left")
 
     def _create_table_dialog(self) -> None:

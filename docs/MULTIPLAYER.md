@@ -1366,6 +1366,34 @@ protocol or test harness.
 
 ---
 
+### 4. Internet play — Phase 3.5 limitation
+
+**Current status (Phase 3 implementation):** the transport uses asyncio TCP with
+LAN multicast rendezvous (UDP group `239.255.77.77:7777`). This works automatically
+for players on the same local network segment. Two players on different networks
+(different homes, offices, etc.) cannot reach each other via multicast.
+
+**Workaround until Phase 3.5:** the host shares their LAN or public IP address and
+listen port manually. The "Join Game" dialog has an optional *Host address override*
+field (`host:port`) for exactly this purpose. Steps:
+
+1. Host clicks **Create Game** — the dialog shows the LAN listen address
+   (e.g. `0.0.0.0:41337`; the actual port is OS-assigned).
+2. Host finds their public IP (e.g. via `api.ipify.org`) and forwards the
+   listen port through their router.
+3. Host shares the **room code** (for identity verification) *and*
+   **public-ip:port** (for routing) with the joiner out-of-band.
+4. Joiner pastes the room code, enters `public-ip:port` in the override
+   field, and clicks **Connect**.
+
+**Phase 3.5 plan:** wire STUN (`stun.l.google.com:19302`) to discover the public
+IP automatically, add DCUtR hole-punching for symmetric NAT traversal, and fall back
+to a community-contributed circuit relay for cases where hole-punching fails. Once
+this is complete the address-override field becomes unnecessary for internet play and
+the multicast rendezvous becomes the LAN fast-path only.
+
+---
+
 ## Phase 4 — Multiplayer client and packaging
 
 Phase 4 is the integration and distribution phase. The Tkinter GUI, the

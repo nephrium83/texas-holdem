@@ -113,6 +113,8 @@ SPEC = {
                          maxlen=512, label="Avatar (custom image path)"),
     "avatar_b64":   dict(scope=CLIENT, kind="str", default="",
                          maxlen=12000, label="Avatar (base64 PNG thumbnail)"),
+    "last_room_code": dict(scope=CLIENT, kind="str", default="",
+                           maxlen=64, label="Last used room code (Join pre-fill)"),
 
     # ---- table rules ------------------------------------------------
     "mode":         dict(scope=TABLE_RULE, kind="choice", default="Cash",
