@@ -218,12 +218,17 @@ no-leak assertion (no serialized payload for seat N ever contains
 another seat's cards). Expect this to be the single hardest piece;
 library support is thin and much of it is built from the papers.
 
-**Phase 3 — transport.** Reticulum first (it overlaps existing work),
-tables as destination hashes, under the current trusted-host assumption
-so the crypto can be swapped in behind it. An adversarial-dropper bot —
-yanking simulated players at every protocol step and asserting the hand
-always terminates with conserved chips — doubles as the integration
-fuzzer.
+**Phase 3 — transport.** WebRTC + a lightweight public signalling server
+is the primary target: it reaches any browser or phone with zero install,
+which is what "online multiplayer" means to the general public. A table
+is a join code that encodes the rules hash; the signalling server relays
+SDP offers/answers but never sees game traffic (the Phase 1 action log is
+end-to-end signed; the transport is untrusted by design). An adversarial-
+dropper bot — yanking simulated players at every protocol step and asserting
+the hand always terminates with conserved chips — doubles as the integration
+fuzzer. Reticulum (mesh radio, offline LAN) is a secondary transport for
+niche use cases and can slot in behind the same Phase 1 interface once the
+WebRTC path is working.
 
 **Phase 4 — clients.** The existing Tkinter app becomes the offline
 single-player mode; a browser client (canvas rendering, tracker
@@ -566,3 +571,503 @@ The only legitimate full-refund path remains **unanimous signed abort**
 (`action: "abort"` with every active seat's signature in `attestations`).
 No other protocol path returns committed chips — which is, by design, what
 closes the undo-button exploit described in the threshold-keys section above.
+
+---
+
+## Phase 2 — Joint shuffle prototype
+
+The four components below are the Phase 2 deliverable. All code runs in-process:
+simulated peers exchange byte strings through function calls, with no network, no
+sockets, and no threads. The canonical test harness provisions n simulated seats,
+drives them through a full hand (DKG → shuffle → deal → showdown), and asserts the
+properties defined in §4. Nothing here invalidates Phase 1; the `deal_step` action
+introduced in §1.1 of Phase 1 is fully specified in §2.1 below.
+
+---
+
+### 1. Cipher suite and deck encoding
+
+**Group.** All public-key operations use **Ristretto255**, the prime-order group of
+order q = 2²⁵² + 27742317777372353535851937790883648493 constructed over Curve25519.
+Ristretto encodes group elements unambiguously as 32-byte strings, sidesteps the
+cofactor subtleties that afflict the raw Curve25519 group, and is supported by the
+`ristretto255` Python package. Every point in this protocol is transmitted as a
+64-character hex string (32 bytes, lowercase).
+
+**ElGamal encryption.** A ciphertext is a pair (C0, C1), both Ristretto255 points:
+
+- **Encrypt.** Choose a random scalar r ∈ [1, q−1]; compute C0 = r·G and
+  C1 = M + r·PK, where G is the Ristretto255 base point and PK is the joint
+  public key produced by the Phase 1 DKG handshake.
+- **Re-encrypt.** Given (C0, C1) and a fresh scalar r′, compute
+  (C0 + r′·G, C1 + r′·PK). The underlying plaintext is unchanged; this is
+  homomorphic re-randomisation, and it is how each seat's shuffle round works.
+- **Partial decrypt.** Seat i contributes Di = xᵢ·C0, where xᵢ is its DKG
+  private share.
+- **Full decrypt.** M = C1 − Σ Dᵢ, summing the partial contributions of every
+  participating seat. (Minus is group subtraction: add the negation of the sum.)
+
+**Deck encoding.** Fifty-two cards must map injectively to Ristretto255 points in a
+way that is deterministic, public, and free of known discrete-log relations between
+cards. The encoding is fixed for all time; no per-hand negotiation is needed.
+
+```python
+import ristretto255 as rist
+
+SUITS = "cdhs"           # clubs, diamonds, hearts, spades
+RANKS = "23456789TJQKA"
+CARDS = [r + s for s in SUITS for r in RANKS]   # 52 strings, canonical order
+
+def card_point(card: str) -> bytes:
+    """Return the canonical 32-byte Ristretto255 encoding for a card label."""
+    idx = CARDS.index(card)                       # 0..51
+    label = f"poker.card.v1:{idx}:{card}".encode()
+    return rist.hash_to_group(label)              # RFC 9380 / hash_to_ristretto255
+```
+
+`rist.hash_to_group` applies the Elligator2 + Ristretto hash-to-curve construction
+specified in RFC 9380, producing a uniformly distributed point with no known
+discrete-log relation to G or to any other card point. The 52 resulting points are
+pre-computed once at module load and cached; they are invariant across hands and
+sessions and may be published as a test vector.
+
+---
+
+### 2. Sequential shuffle and re-encryption
+
+**Overview.** Once the DKG handshake completes, every active seat takes a shuffle
+turn. Seat 0 (the hand initiator) goes first: it encrypts each of the 52 card points
+under the joint public key PK with independent random scalars, producing the initial
+deck. Seats then shuffle in ascending seat order. Each shuffle round applies a secret
+permutation to the deck and re-encrypts every ciphertext with a fresh random scalar.
+After all n seats have shuffled, the deck is locked under every player's share in an
+order nobody knows — no single player, and no coalition smaller than t, can infer
+which ciphertext corresponds to which card.
+
+**Initial encryption (seat 0).**
+
+```python
+def make_initial_deck(pk: bytes) -> list[tuple[bytes, bytes]]:
+    """Encrypt each of the 52 card points under the joint public key pk."""
+    deck = []
+    for card in CARDS:
+        r = rist.random_scalar()
+        C0 = rist.mul(r, rist.G)
+        C1 = rist.add(card_point(card), rist.mul(r, pk))
+        deck.append((C0, C1))
+    return deck   # 52 (C0, C1) pairs; each element is a 32-byte bytes object
+```
+
+Seat 0 broadcasts this initial deck as its `deal_step` envelope (round 0) and
+simultaneously produces a verifiable-shuffle proof (§2.2) relative to the trivially
+ordered identity permutation, making even the first mover's action auditable.
+
+**Shuffle round.** Each seat i, on receiving the previous round's deck from the log,
+applies a secret permutation πᵢ and re-encrypts every card with an independent fresh
+scalar, then broadcasts the resulting deck together with a proof:
+
+```python
+import secrets
+
+def shuffle_deck(
+    prev: list[tuple[bytes, bytes]],
+    pk: bytes,
+) -> tuple[list[tuple[bytes, bytes]], list[bytes], list[int]]:
+    """
+    Returns:
+        next_deck  – 52 re-encrypted, permuted ciphertexts
+        r_scalars  – 52 fresh re-encryption scalars (kept secret; needed for proof)
+        perm       – the secret permutation as a list of source indices (never sent)
+    """
+    perm = list(range(52))
+    secrets.SystemRandom().shuffle(perm)
+    next_deck, r_scalars = [], []
+    for src in perm:
+        C0, C1 = prev[src]
+        r = rist.random_scalar()
+        next_deck.append((
+            rist.add(C0, rist.mul(r, rist.G)),
+            rist.add(C1, rist.mul(r, pk)),
+        ))
+        r_scalars.append(r)
+    return next_deck, r_scalars, perm
+```
+
+`r_scalars` and `perm` are kept in the seat's local memory and never transmitted.
+What goes onto the wire is the shuffled deck and a zero-knowledge verifiable-shuffle
+proof that binds the output to the input without disclosing either.
+
+**`deal_step` wire format.** The `deal_step` action type (declared in Phase 1 §1.1
+with payload TBD) carries all shuffle and reveal messages. Its payload is typed by a
+`"step"` field:
+
+```json
+{
+  "step":  "shuffle",
+  "round": 0,
+  "deck": [
+    ["<C0 hex>", "<C1 hex>"],
+    "..."
+  ],
+  "proof": "<hex-encoded verifiable-shuffle proof blob>"
+}
+```
+
+- **`step`** — one of `"shuffle"` (§2), `"partial_decrypt"` (§3), or
+  `"partial_decrypt_reconstruct"` (§3.3).
+- **`round`** — shuffle round index. Round 0 is seat 0's initial encryption; rounds
+  1 through n are the per-seat shuffles in seat order.
+- **`deck`** — array of exactly 52 two-element arrays, each `[C0_hex, C1_hex]`.
+  Both points must be valid, canonical Ristretto255 encodings; receivers reject any
+  envelope containing a non-canonical or low-order point.
+- **`proof`** — the verifiable-shuffle proof blob (§2.2), hex-encoded.
+
+The entire envelope is signed and hash-chained exactly like any other action. Because
+the log is append-only, the input deck for round k is unambiguously the `deck` field
+of the round k−1 entry at its logged position; no out-of-band reference is needed.
+
+**Shuffle order and completion.** Seats shuffle in ascending seat-number order.
+Completion is defined as n+1 valid `deal_step`/`"shuffle"` entries in the log:
+seat 0's initial encryption (round 0) followed by one shuffle per seat (rounds 1..n).
+A seat that fails to produce its shuffle entry within the DKG step timeout (TABLE_RULE,
+default 10 s) is KICKED per Phase 1 §4. The remaining seats co-sign a DKG restart
+with n′ = n − 1 and the shuffle sequence restarts from round 0. A seat that triggers
+two restarts within one hand is barred from future hands under that pubkey, as with
+the DKG re-run limit.
+
+---
+
+### 2.2 Verifiable-shuffle proof
+
+A seat that shuffles the deck must prove the output is a re-encryption of some
+permutation of the input without revealing which permutation or which re-encryption
+scalars it used. Producing a forged proof must be computationally infeasible: a
+forgery would allow a seat to swap in card points not present in the input, changing
+the deck's contents undetectably.
+
+**Construction.** The proof follows the Bayer–Groth (2012) argument for ElGamal
+shuffles over a prime-order group, instantiated over Ristretto255. It proceeds in two
+parts.
+
+*Permutation commitment.* The shuffler commits to its permutation π by publishing a
+commitment vector (c₀, …, c₅₁) where each cₖ = π(k)·h + ρₖ·G, with ρₖ a random
+blinding scalar and h a publicly fixed second base point: `h =
+hash_to_ristretto255("poker.shuffle.h.v1")`. The commitment is perfectly hiding
+(ρₖ is never sent) and computationally binding (opening requires solving a discrete log).
+
+*Product argument.* The shuffler proves — using a series of challenge-response rounds
+derived by Fiat-Shamir — that the committed permutation and the claimed re-encryption
+scalars jointly transform the input deck into the output deck. The Fiat-Shamir
+challenge is derived as:
+
+```python
+import hashlib, json
+
+def shuffle_challenge(
+    prev_deck: list[tuple[bytes, bytes]],
+    next_deck: list[tuple[bytes, bytes]],
+    commits:   list[bytes],
+) -> bytes:
+    def encode_deck(d):
+        return [[c.hex() for c in pair] for pair in d]
+
+    preimage = json.dumps({
+        "tag":      "poker.shuffle.challenge.v1",
+        "prev":     encode_deck(prev_deck),
+        "next":     encode_deck(next_deck),
+        "commits":  [c.hex() for c in commits],
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(preimage).digest()
+```
+
+Receivers re-derive the challenge from the two decks already in the log (the previous
+round's `deck` field and the current one) plus the commitment vector in the proof
+blob, then verify all response equations. No additional trust is required. A single
+verification pass costs O(|deck|) group multiplications — well under 1 s for 52 cards
+on current hardware.
+
+**Proof blob encoding.**
+
+```
+4  bytes (LE uint32) — total blob length in bytes
+52 × 32 bytes        — permutation commitment vector (c₀…c₅₁), Ristretto255 points
+32 bytes             — Fiat-Shamir challenge (SHA-256 output)
+52 × 32 bytes        — per-card response scalars
+64 bytes             — two auxiliary response scalars for the product argument
+──────────────────────────────────────────────────────────────────
+Total: 4 + 1664 + 32 + 1664 + 64 = 3 428 bytes per shuffle proof
+```
+
+A receiver that cannot verify a shuffle proof broadcasts a signed `"chain_fault"`
+(Phase 1 §2) referencing the offending `deal_step` entry, naming the specific failing
+verification equation, and including the Fiat-Shamir preimage it recomputed. The
+faulty shuffler is immediately KICKED.
+
+---
+
+### 3. Selective decryption for dealing
+
+Once the shuffle is complete, the deck is a list of 52 ciphertexts in an unknown
+permutation. The game engine assigns card positions to seats (two hole cards each,
+then community cards) by index into that list. Decryption is cooperative and
+selective: who contributes partial decryptions determines who learns the plaintext.
+
+**Partial decryption shares.** To reveal the card at encrypted position k, every
+seat i that is *not* the sole recipient contributes:
+
+```python
+def partial_decrypt(C0: bytes, xi: bytes) -> bytes:
+    """Compute Dᵢ = xᵢ · C0, seat i's partial decryption share."""
+    return rist.mul(xi, C0)
+```
+
+Seat i broadcasts this share as a `deal_step` envelope:
+
+```json
+{
+  "step":       "partial_decrypt",
+  "card_index": 7,
+  "recipient":  2,
+  "share":      "<Dᵢ hex, 32 bytes>",
+  "proof":      "<DLEQ proof hex, 64 bytes>"
+}
+```
+
+- **`card_index`** — index into the shuffled deck (0–51).
+- **`recipient`** — seat number of the player who will decrypt, or `null` for a
+  community card where all seats are recipients simultaneously.
+- **`share`** — the partial decryption point Dᵢ = xᵢ · C0.
+- **`proof`** — a DLEQ (discrete-log equality) proof that the same scalar xᵢ was
+  used to compute both Dᵢ = xᵢ · C0 and the seat's DKG public-key share
+  Xᵢ = xᵢ · G. This prevents a seat from submitting a garbage share while appearing
+  to cooperate.
+
+**DLEQ proof.** The proof is a standard Chaum-Pedersen sigma protocol, compressed
+by Fiat-Shamir:
+
+```python
+def dleq_prove(xi: bytes, C0: bytes, G: bytes) -> bytes:
+    k  = rist.random_scalar()
+    R1 = rist.mul(k, G)               # k · G
+    R2 = rist.mul(k, C0)              # k · C0
+    Xi = rist.mul(xi, G)              # public key share
+    Di = rist.mul(xi, C0)             # partial decrypt
+
+    ch_input = b"poker.dleq.v1|" + G + Xi + C0 + Di + R1 + R2
+    c  = int.from_bytes(hashlib.sha256(ch_input).digest(), "little") % rist.Q
+    s  = (int.from_bytes(k, "little") - int.from_bytes(xi, "little") * c) % rist.Q
+    return c.to_bytes(32, "little") + s.to_bytes(32, "little")   # 64 bytes
+
+def dleq_verify(Xi: bytes, Di: bytes, C0: bytes, G: bytes, proof: bytes) -> bool:
+    c  = int.from_bytes(proof[:32], "little")
+    s  = int.from_bytes(proof[32:], "little")
+    R1 = rist.add(rist.mul(s, G),  rist.mul(c, Xi))   # s·G + c·Xᵢ
+    R2 = rist.add(rist.mul(s, C0), rist.mul(c, Di))   # s·C0 + c·Dᵢ
+    ch_input = b"poker.dleq.v1|" + G + Xi + C0 + Di + R1 + R2
+    return c == int.from_bytes(hashlib.sha256(ch_input).digest(), "little") % rist.Q
+```
+
+A seat that broadcasts a partial decryption with an invalid DLEQ proof is KICKED. A
+seat that simply omits its required partial decryption within the dealing timeout
+(equal to the DKG step timeout, TABLE_RULE default 10 s) is treated as a TIMED_OUT
+action and auto-folded per §4 of Phase 1 — except that a seat which is already
+ALL_IN_ABSENT bypasses auto-fold and instead triggers threshold reconstruction (§3.3).
+
+**Final decryption by the recipient.** Once seat j holds all n−1 valid partial
+decryption shares from the other seats, it combines them with its own contribution:
+
+```python
+def final_decrypt(
+    C0: bytes,
+    C1: bytes,
+    xj: bytes,
+    others: list[bytes],   # Dᵢ = xᵢ · C0 for each i ≠ j
+) -> bytes:
+    """Return the plaintext point M."""
+    own  = rist.mul(xj, C0)           # seat j's own contribution
+    total = own
+    for D in others:
+        total = rist.add(total, D)
+    return rist.sub(C1, total)         # M = C1 − Σ xᵢ · C0
+```
+
+The result is a 32-byte Ristretto255 point. The recipient looks it up in the
+pre-computed card-point table. If no card matches — indicating the deck was
+maliciously constructed during a shuffle — the recipient broadcasts a `"chain_fault"`
+referencing the shuffle `deal_step` that introduced the anomalous ciphertext, and the
+faulty shuffler is KICKED.
+
+The recipient never publishes the plaintext point during normal play. The card is
+known only to seat j until showdown or voluntary reveal, provided no coalition of t
+or more other seats combines their DKG shares to reconstruct xj — the same
+liveness-privacy tradeoff as the DKG threshold.
+
+**Community card reveal.** For a community card (flop, turn, river), all n seats
+contribute their partial decryption shares. Because every share appears in the log,
+any observer can assemble M. The payload is identical to the hole-card
+`"partial_decrypt"` step except `"recipient"` is `null`. The game engine triggers
+this dealing step in sequence: all five community cards are treated as successive
+cooperative decryption rounds, each producing one card point visible to all.
+
+**Mucking.** A seat that folds and declines to reveal its hole cards at showdown
+simply never requests partial decryptions for those card positions. The ciphertexts
+remain opaque in the log permanently. No information about the mucked cards leaks
+from the transcript.
+
+**Showdown reveal.** A seat wishing to claim a portion of the pot at showdown
+broadcasts a `"showdown_declare"` envelope (new action type defined below), listing
+the encrypted deck positions of its hole cards. The remaining active seats respond
+with `deal_step`/`"partial_decrypt"` envelopes for each listed position. The
+declaring seat publishes the recovered plaintext points as a final confirmation
+envelope. Failure to produce a valid final confirmation within the dealing timeout
+voids the declare; the seat's hand is treated as mucked.
+
+New action type added to the Phase 1 §1.1 action-type list:
+
+- **`"showdown_declare"`** — seat announces intent to reveal hole cards at showdown.
+  Payload: `{"seat": <int>, "card_indices": [k₁, k₂]}`, where k₁ and k₂ are the
+  encrypted deck positions assigned to that seat during the deal phase.
+
+---
+
+### 3.3 Threshold reconstruction for absent seats
+
+A seat in state ALL_IN_ABSENT or FOLDED_AUTO cannot contribute partial decryption
+shares. For hole cards belonging to that seat, active seats substitute threshold
+reconstruction for its direct participation.
+
+The DKG output includes, for each seat j, encrypted share fragments from the other
+seats (the `Sᵢⱼ` values broadcast during the `dkg_reveal` phase). Any t = ⌈2n/3⌉
+active seats can reconstruct seat j's private DKG share xⱼ by Lagrange interpolation
+over the Shamir shares they each received:
+
+```python
+def reconstruct_share(
+    seat_j:  int,
+    t_shares: dict[int, int],   # {seat_i: Sᵢⱼ} for t distinct active seats
+    q:        int,
+) -> int:
+    """Return xⱼ mod q via Lagrange interpolation."""
+    nodes = list(t_shares.keys())
+    acc   = 0
+    for i in nodes:
+        num = den = 1
+        for m in nodes:
+            if m != i:
+                num = (num * (0 - m - 1)) % q
+                den = (den * (i - m)) % q
+        coeff = (num * pow(den, q - 2, q)) % q
+        acc   = (acc + t_shares[i] * coeff) % q
+    return acc
+```
+
+Once xⱼ is reconstructed, the designating seat (lowest active seat number by
+convention) does *not* publish xⱼ directly. Instead it computes and broadcasts the
+partial decryption Dⱼ = xⱼ_reconstructed · C0 for each required card position, with
+a DLEQ proof demonstrating consistency with seat j's public DKG commitment Xⱼ. The
+remaining active seats verify the proof and countersign a `timeout_attest` referencing
+the `deal_step` entry, establishing t-of-active-seats consensus that the reconstruction
+is correct before it is accepted as a valid partial decryption. The envelope that
+carries a reconstructed share uses step type `"partial_decrypt_reconstruct"` in place
+of `"partial_decrypt"`, and adds a field `"reconstructed_for": <seat_j>`.
+
+**Privacy under reconstruction.** The t seats that perform reconstruction learn xⱼ
+in full, giving them the ability to read all of seat j's hole cards for this hand. As
+stated in the threshold-keys section of the main document, this is the unavoidable
+liveness-privacy dial: the reconstruction threshold is chosen so that a coalition
+large enough to rescue a hand from a dropout is also large enough that it could have
+broken hole-card privacy anyway through the DKG shares alone. The protocol cannot
+improve on this bound.
+
+---
+
+### 4. Test harness and no-leak invariant
+
+Phase 2 is — as the roadmap notes — the single hardest piece in the project. Library
+support for verifiable ElGamal shuffles over Ristretto255 is sparse; much of the
+implementation derives directly from Bayer–Groth (2012) and the Barnett–Smart (2003)
+exposition. The test suite compensates with aggressive property-based and adversarial
+coverage; passing it is the definition of a correct Phase 2 implementation.
+
+All tests run in-process. Peers are simulated as objects sharing a list representing
+the action log; signing and verification use real Ed25519 keys generated fresh per
+test run. No network layer exists at this phase.
+
+**Property 1 — Replay determinism.** Fix the PRNG seed for every seat's shuffle
+scalars, permutation, and DKG randomness. A full hand driven with the same seeds must
+produce a byte-for-byte identical action log on every run. Tested by running each
+scenario twice and asserting `SHA-256(log₁) == SHA-256(log₂)`. Any non-determinism
+in the cipher suite or proof construction is a bug, not a property to tolerate.
+
+**Property 2 — Shuffle soundness (adversarial oracle).** A shuffler that produces
+output not corresponding to any valid permutation + re-encryption of its input must
+generate a proof that fails verification. The test harness injects malformed
+`deal_step`/`"shuffle"` entries covering at least the following eight variants:
+(a) deck permuted but not re-encrypted; (b) deck re-encrypted but not permuted;
+(c) deck with one card replaced by a fresh encryption of a different card;
+(d) proof commitment vector mismatched to actual permutation; (e) Fiat-Shamir
+challenge tampered; (f) response scalars zeroed; (g) proof copied verbatim from a
+previous round (replay); (h) proof generated for a different input deck. Every active
+peer must detect each fault within one verification pass and broadcast a `chain_fault`.
+
+**Property 3 — Correct full decryption.** After a clean n-seat shuffle with known
+seeds, the test oracle knows the composition of all permutations and can compute the
+expected card at every deck position. Cooperative decryption of all 52 positions must
+recover the expected card point at each. Any mismatch indicates a bug in the shuffle,
+the partial-decrypt arithmetic, or the deck encoding.
+
+**Property 4 — No-leak assertion.** This is the canonical privacy test and the most
+important property in the suite. For each seat j, extract every log entry that is not
+seat j's own final-decrypt output for a hole card assigned to j, and assert that none
+of those entries, when serialised to bytes, contains the hex encoding of either of
+seat j's hole-card plaintext points:
+
+```python
+import json, hashlib
+
+def assert_no_leak(
+    log:          list[dict],
+    seat_j:       int,
+    j_pubkey:     str,
+    hole_points:  list[bytes],
+) -> None:
+    hole_hexes = {p.hex() for p in hole_points}
+    for entry in log:
+        env = entry["envelope"]
+        payload = env.get("payload", {})
+        # Skip the entry where seat j publishes its own recovered plaintext
+        if (env["action"] == "deal_step"
+                and payload.get("step") == "partial_decrypt"
+                and payload.get("recipient") == seat_j
+                and env["pubkey"] == j_pubkey):
+            continue
+        blob = json.dumps(entry, sort_keys=True, separators=(",", ":"))
+        for h in hole_hexes:
+            assert h not in blob, (
+                f"PRIVACY VIOLATION: card {h} for seat {seat_j} "
+                f"leaked in entry seq={env.get('seq')}"
+            )
+```
+
+Run for every seat across every test scenario. A failure is a protocol design flaw,
+not an implementation bug, and is an unconditional release blocker.
+
+**Property 5 — Threshold dropout recovery.** With n seats and threshold t, simulate
+the simultaneous dropout of n − t seats at each of the following moments:
+(a) after the shuffle is complete but before any hole cards are dealt;
+(b) after hole cards are dealt but before the flop;
+(c) immediately before showdown. Assert that in each case: the remaining t seats
+complete threshold reconstruction of the absent seats' partial decryptions; all
+community cards and the absent seats' hole cards are recovered to the correct values;
+and chip accounting satisfies conservation (total chips in stacks plus pots equals
+the session buy-in sum) with the absent seats treated as having folded or, if already
+all-in, as eligible for the side pot.
+
+**Coverage requirements.** The test suite must reach 100% branch coverage on the
+cipher-suite module (§1), the shuffle-and-proof module (§2), and the
+selective-decryption module (§3). The shuffle-soundness adversarial test (Property 2)
+must exercise all eight specified malformed-proof variants, confirmed by checking that
+each injects a `chain_fault` entry into the log. Property 4 must run for every seat
+across a minimum 6-seat hand scenario (producing at least 12 hole-card privacy
+assertions per run). Property 5 must be exercised at all three dropout timing points
+for n = 4 seats (t = 3) and n = 6 seats (t = 4).
