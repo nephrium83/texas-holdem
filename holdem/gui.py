@@ -12,6 +12,7 @@ from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
 from . import settings as cfg
 from .onboarding import OnboardingFlow
 from .hand_history import HandLogger, open_history_viewer
+from .session_stats import SessionStats
 
 try:
     from PIL import Image, ImageTk as _ImageTk
@@ -152,6 +153,10 @@ class Holdem:
         self.paused = False
         self.settings_win = None
         self.hand_logger = HandLogger()
+        self.session_stats = SessionStats()
+        # track whether VPIP/PFR already counted this hand for each seat
+        self._vpip_counted: set[int] = set()
+        self._pfr_counted: set[int] = set()
 
         # per-hand ui state
         self.result = None
@@ -532,6 +537,9 @@ class Holdem:
         self.reveal = set()
         self.highlight = set()
         self.stop_clock()
+        self.session_stats = SessionStats()
+        self._vpip_counted = set()
+        self._pfr_counted = set()
 
         self.b_sit.config(text="Sit out")
         self.b_straddle.config(text="Straddle: off")
@@ -625,6 +633,9 @@ class Holdem:
             self.finish_game(live)
             return
         self.hand_logger.on_hand_start(e.players, e)
+        self.session_stats.record_hand_start(e.players)
+        self._vpip_counted = set()
+        self._pfr_counted = set()
         if e.bb_i == HERO and e.players[HERO].in_seat:
             self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
         self.flush_log()
@@ -746,6 +757,8 @@ class Holdem:
         if e is None or e.actor != i:
             return
         act, amt = self.brain.decide(e, i)
+        if e.street == "preflop":
+            self._record_vpip_pfr(i, act, e.legal(i))
         e.act(i, act, amt)
         self.flush_log()
         self.redraw()
@@ -802,10 +815,24 @@ class Holdem:
             return
         self.stop_clock()
         self.lock()
+        if e.street == "preflop":
+            self._record_vpip_pfr(HERO, action, e.legal(HERO))
         e.act(HERO, action, 0)
         self.flush_log()
         self.redraw()
         self.root.after(max(80, self.delay // 3), self.loop)
+
+    def _record_vpip_pfr(self, seat_idx: int, action: str, lg: dict) -> None:
+        """Update session VPIP/PFR counters for one preflop action.
+        Guards against double-counting within the same hand via _vpip_counted
+        and _pfr_counted sets."""
+        if action == "raise" and seat_idx not in self._pfr_counted:
+            self.session_stats.record_pfr(seat_idx)
+            self._pfr_counted.add(seat_idx)
+        voluntary = action == "raise" or (action == "call" and lg["to_call"] > 0)
+        if voluntary and seat_idx not in self._vpip_counted:
+            self.session_stats.record_voluntary_action(seat_idx)
+            self._vpip_counted.add(seat_idx)
 
     def lock(self):
         for b in (self.b_fold, self.b_call, self.b_raise, *self.size_btns):
@@ -893,6 +920,8 @@ class Holdem:
         self.stop_clock()
         amt = self.v_bet.get() if action == "raise" else 0
         self.lock()
+        if e.street == "preflop":
+            self._record_vpip_pfr(HERO, action, e.legal(HERO))
         e.act(HERO, action, amt)
         self.flush_log()
         self.redraw()
@@ -928,6 +957,8 @@ class Holdem:
         self.result = res
         self.flush_log()
         self.hand_logger.on_settle(res, e)
+        for w_idx in res.get("winners", set()):
+            self.session_stats.record_win(w_idx)
         self.hand_over = True
 
         alive = [p for p in e.players if p.in_seat and not p.folded]
@@ -1755,6 +1786,18 @@ class Holdem:
                        text=stack_txt,
                        fill=t["dim"] if p.folded else t["gold"],
                        font=("Segoe UI", 10, "bold"))
+
+        # ---- session HUD stats (VPIP% · hands) ----------------------------
+        hud = self.session_stats.hud_line(p.idx)
+        if hud:
+            # right-align against the card zone so text never overlaps cards
+            cwid_hud, _chg = (40, 56) if hero else (32, 45)
+            cxx_hud = x + w / 2 - (cwid_hud * 2 + 5) - 8
+            hud_color = t["accent"] if hero else t["dim"]
+            cv.create_text(cxx_hud - 4, y - h / 2 + 42, anchor="e",
+                           text=hud,
+                           fill=hud_color,
+                           font=("Segoe UI", 9))
 
         # hole cards
         show = (hero or p.idx in self.reveal) and not p.folded
