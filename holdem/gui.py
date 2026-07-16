@@ -13,6 +13,7 @@ from . import settings as cfg
 from .onboarding import OnboardingFlow
 from .hand_history import HandLogger, open_history_viewer
 from .session_stats import SessionStats
+import holdem.audio as _audio
 
 try:
     from PIL import Image, ImageTk as _ImageTk
@@ -109,6 +110,8 @@ class Holdem:
         self.v_topup = tk.BooleanVar(value=True)      # AI auto top-up (cash)
         self.v_training = tk.BooleanVar(value=True)   # table rule: aids ok
         self.v_fullscreen = tk.BooleanVar(value=True)  # CLIENT: start zoomed
+        self.v_sounds_enabled = tk.BooleanVar(value=True)
+        self.v_sound_volume = tk.IntVar(value=70)
 
         # option key -> tk var, scopes per holdem.settings.SPEC
         self._varmap = {
@@ -119,6 +122,8 @@ class Holdem:
             "ai_topup": self.v_topup, "ai_mixed": self.v_chaos,
             "ai_level": self.v_level,
             "fullscreen": self.v_fullscreen,
+            "sounds_enabled": self.v_sounds_enabled,
+            "sound_volume": self.v_sound_volume,
             "mode": self.v_mode, "structure": self.v_struct,
             "sb": self.v_sb, "bb": self.v_bb, "stack": self.v_stack,
             "players": self.v_players, "bb_ante": self.v_ante,
@@ -134,6 +139,12 @@ class Holdem:
         self.table_rules = cfg.table_rules(**stored["last_table"])
         self.joined_table = False     # True once seated at a live P2P table
         self.theme = THEMES.get(self.v_theme.get(), THEMES["Cyberpunk"])
+
+        # audio
+        _audio.set_enabled(self.v_sounds_enabled.get())
+        _audio.set_volume(self.v_sound_volume.get() / 100)
+        self._last_hero_eq = 0.0    # most recent win equity fraction for hero
+        self._allin_announced: set = set()  # seats already given allin sound
 
         # avatar – loaded from settings (written by onboarding); may be
         # overridden by main() after OnboardingFlow sets it.
@@ -655,6 +666,9 @@ class Holdem:
         self.session_stats.record_hand_start(e.players)
         self._vpip_counted = set()
         self._pfr_counted = set()
+        self._allin_announced = set()
+        self._last_hero_eq = 0.0
+        _audio.play("deal")
         if e.bb_i == HERO and e.players[HERO].in_seat:
             self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
         self.flush_log()
@@ -781,6 +795,9 @@ class Holdem:
         if e.street == "preflop":
             self._record_vpip_pfr(i, act, e.legal(i))
         e.act(i, act, amt)
+        if e.players[i].all_in and i not in self._allin_announced:
+            self._allin_announced.add(i)
+            _audio.play("allin")
         self.flush_log()
         self.redraw()
         # ~20% chance of a contextual emote from this AI seat
@@ -855,9 +872,14 @@ class Holdem:
             return
         self.stop_clock()
         self.lock()
+        lg = e.legal(HERO)
         if e.street == "preflop":
-            self._record_vpip_pfr(HERO, action, e.legal(HERO))
+            self._record_vpip_pfr(HERO, action, lg)
         e.act(HERO, action, 0)
+        if action == "fold":
+            _audio.play("fold")
+        elif action == "call":
+            _audio.play("check" if lg["can_check"] else "call")
         self.flush_log()
         self.redraw()
         self.root.after(max(80, self.delay // 3), self.loop)
@@ -997,10 +1019,22 @@ class Holdem:
             return
         self.stop_clock()
         amt = self.v_bet.get() if action == "raise" else 0
+        lg = e.legal(HERO)
         self.lock()
         if e.street == "preflop":
-            self._record_vpip_pfr(HERO, action, e.legal(HERO))
+            self._record_vpip_pfr(HERO, action, lg)
         e.act(HERO, action, amt)
+        # sound effects
+        if action == "fold":
+            _audio.play("fold")
+        elif action == "call":
+            _audio.play("check" if lg["can_check"] else "call")
+        elif action == "raise":
+            if e.players[HERO].all_in and HERO not in self._allin_announced:
+                self._allin_announced.add(HERO)
+                _audio.play("allin")
+            else:
+                _audio.play("raise_sound")
         self.flush_log()
         self.redraw()
         self.root.after(max(80, self.delay // 3), self.loop)
@@ -1083,6 +1117,7 @@ class Holdem:
 
         if HERO in res["winners"]:
             self.l_status.config(text=f"You win {e.players[HERO].won}.")
+            _audio.play("win")
         elif not e.players[HERO].in_seat:
             if e.players[HERO].sitting_out or e.players[HERO].wait_for_bb:
                 self.l_status.config(text="Sitting out.")
@@ -1092,6 +1127,8 @@ class Holdem:
             self.l_status.config(text="You folded. Next hand?")
         else:
             self.l_status.config(text="You lose the pot.")
+            if self._last_hero_eq > 0.70:
+                _audio.play("bad_beat")
         self.l_hint.config(text="")
 
         if (self.v_rabbit.get() and len(e.board) < 5
@@ -1597,6 +1634,30 @@ class Holdem:
         check(d, "auto_deal")
         check(d, "clock_on")
         check(d, "ai_topup")
+
+        # Sound settings
+        lab(d, "Audio", 10)
+        def _on_sounds_toggle():
+            _audio.set_enabled(self.v_sounds_enabled.get())
+        tk.Checkbutton(d, text=cfg.SPEC["sounds_enabled"]["label"],
+                       variable=self.v_sounds_enabled, bg=t["bg"],
+                       fg=t["text"], selectcolor=t["panel"],
+                       activebackground=t["bg"], activeforeground=t["text"],
+                       font=("Segoe UI", 9),
+                       command=_on_sounds_toggle).pack(anchor="w", pady=1)
+        vol_row = tk.Frame(d, bg=t["bg"])
+        vol_row.pack(anchor="w", pady=(2, 0))
+        tk.Label(vol_row, text="Volume:", bg=t["bg"], fg=t["text"],
+                 font=("Segoe UI", 9)).pack(side="left")
+        def _on_vol_change(_v=None):
+            _audio.set_volume(self.v_sound_volume.get() / 100)
+        tk.Scale(vol_row, variable=self.v_sound_volume,
+                 from_=0, to=100, orient="horizontal", length=160,
+                 showvalue=True, bg=t["bg"], fg=t["text"],
+                 troughcolor=t["panel"], highlightthickness=0,
+                 activebackground=t["accent"], relief="flat",
+                 command=_on_vol_change).pack(side="left", padx=(6, 0))
+
         tk.Label(d, text="Saved to " + str(cfg.config_path()),
                  bg=t["bg"], fg=t["dim"], wraplength=250, justify="left",
                  font=("Segoe UI", 7)).pack(anchor="w", pady=(10, 0))
@@ -1765,6 +1826,7 @@ class Holdem:
                         f"({'opponent' if opp == 1 else 'opponents'})   "
                         f"win {win*100:.0f} / tie {tie*100:.0f}\n"
                         f"{'Holding: ' + made if made != '-' else ''}")
+        self._last_hero_eq = eq   # track for bad-beat detection
         self.draw_equity()
 
     def draw_equity(self):

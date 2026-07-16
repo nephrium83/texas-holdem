@@ -85,6 +85,12 @@ SPEC = {
                               "sessions; F11 toggles between maximised and "
                               "normal windowed mode"),
 
+    # ---- audio (CLIENT) --------------------------------------------
+    "sounds_enabled": dict(scope=CLIENT, kind="bool", default=True,
+                           label="Sound effects"),
+    "sound_volume":   dict(scope=CLIENT, kind="int",  default=70,
+                           label="Sound volume (0–100)", lo=0, hi=100),
+
     # ---- onboarding / player identity (CLIENT, local machine) -------
     "nickname":     dict(scope=CLIENT, kind="str", default="",
                          maxlen=20, label="Nickname"),
@@ -250,7 +256,7 @@ def table_rules(**values) -> dict:
 
 def rules_hash(rules: dict) -> str:
     """Ten hex chars identifying the contract. Canonical (sorted keys,
-    compact separators) so every client derives the same value \u2014 this is
+    compact separators) so every client derives the same value — this is
     what a multiplayer join code embeds."""
     canon = json.dumps({k: rules[k] for k in sorted(TABLE_RULE_KEYS)},
                        separators=(',', ':'), sort_keys=True)
