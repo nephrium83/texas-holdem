@@ -315,6 +315,25 @@ missing keys.
 - `"abort"` — unanimous signed table abort; requires every active seat to
   have contributed a signature in `attestations`. Payload: `{"reason":
   "<string>", "attestations": ["<sig>", ...]}`.
+- `"player_info"` — identity advertisement broadcast by a peer immediately
+  after the DKG handshake completes. Payload:
+  ```json
+  {
+    "nickname":   "<display name, max 20 chars>",
+    "avatar_b64": "<base64-encoded 64×64 PNG, max ~10 KB>",
+    "pubkey":     "<Ed25519 hex (redundant with envelope field, explicit here for self-description)>"
+  }
+  ```
+  When a peer joins a table, it broadcasts a `player_info` action
+  immediately after receiving a valid `dkg_verify` acknowledgement from
+  every other seat. All peers store the received avatar bytes keyed by the
+  sender's `pubkey` and display them at the corresponding seat. The
+  `pubkey` field in the payload must equal the `pubkey` field in the
+  enclosing envelope; receivers drop any `player_info` where they differ.
+  `avatar_b64` is the output of `onboarding.compute_avatar_b64()` — a
+  64×64 PNG thumbnail rendered and base64-encoded during onboarding.
+  Receivers that cannot decode the field (bad base64, non-PNG, oversized)
+  silently fall back to the colored-circle placeholder used for AI seats.
 
 **Canonical serialization for signing.** The pre-image is the envelope
 minus the `"sig"` key, serialized with sorted keys, compact separators

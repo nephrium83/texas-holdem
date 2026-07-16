@@ -11,11 +11,19 @@ the caller can create ``Holdem(root)`` in its place.
 """
 from __future__ import annotations
 
+import base64
+import io
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from . import settings as cfg
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PIL_OK = True
+except ImportError:
+    _PIL_OK = False
 
 # ----------------------------------------------------------------- avatars
 
@@ -104,6 +112,89 @@ def _load_photo(path: str, target: int) -> tk.PhotoImage | None:
         return None
 
 
+# -------------------------------------------------- avatar thumbnail helpers
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _render_builtin_avatar_b64(avatar_idx: int, size: int = 64) -> str:
+    """Render built-in avatar *avatar_idx* to a ``size×size`` PNG and return
+    the base64 string.  Requires Pillow; returns ``""`` if unavailable."""
+    if not _PIL_OK:
+        return ""
+    if 0 <= avatar_idx < len(AVATARS):
+        bg_hex, fg_hex, sym, _ = AVATARS[avatar_idx]
+    else:
+        bg_hex, fg_hex, sym = _ACCENT, _BG, "?"
+    bg_rgb = _hex_to_rgb(bg_hex)
+    fg_rgb = _hex_to_rgb(fg_hex)
+
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    margin = 2
+    draw.ellipse([margin, margin, size - margin - 1, size - margin - 1],
+                 fill=bg_rgb)
+
+    # Try platform fonts; fall back to PIL built-in.
+    font = None
+    fsize = max(12, size // 3)
+    for fname in ("segoeui.ttf", "SegoeUI.ttf", "Arial.ttf", "arial.ttf",
+                  "DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
+        try:
+            font = ImageFont.truetype(fname, fsize)
+            break
+        except Exception:
+            pass
+    if font is None:
+        try:
+            font = ImageFont.load_default(size=fsize)
+        except Exception:
+            font = ImageFont.load_default()
+
+    bbox = draw.textbbox((0, 0), sym, font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx = (size - tw) / 2 - bbox[0]
+    ty = (size - th) / 2 - bbox[1]
+    draw.text((tx, ty), sym, fill=fg_rgb, font=font)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _render_custom_avatar_b64(path: str, size: int = 64) -> str:
+    """Open *path* with Pillow, center-crop, resize to ``size×size``, and
+    return a base64-encoded PNG.  Returns ``""`` on any failure."""
+    if not _PIL_OK or not path or not os.path.isfile(path):
+        return ""
+    try:
+        img = Image.open(path).convert("RGBA")
+        w, h = img.size
+        if w != h:
+            s = min(w, h)
+            left = (w - s) // 2
+            top = (h - s) // 2
+            img = img.crop((left, top, left + s, top + s))
+        img = img.resize((size, size), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
+
+def compute_avatar_b64(avatar_idx: int, avatar_path: str,
+                       size: int = 64) -> str:
+    """Return a base64 PNG thumbnail for the current avatar choice."""
+    if avatar_path and os.path.isfile(avatar_path):
+        result = _render_custom_avatar_b64(avatar_path, size)
+        if result:
+            return result
+    return _render_builtin_avatar_b64(avatar_idx, size)
+
+
 # --------------------------------------------------------------- main class
 
 class OnboardingFlow:
@@ -135,6 +226,7 @@ class OnboardingFlow:
         self.nickname:    str = cl.get("nickname",   "")
         self.avatar_idx:  int = cl.get("avatar_idx", 0)
         self.avatar_path: str = cl.get("avatar_path", "")
+        self.avatar_b64:  str = cl.get("avatar_b64",  "")
 
         # Outer frame; owns the window during onboarding
         self.frame = tk.Frame(root, bg=_BG)
@@ -154,6 +246,7 @@ class OnboardingFlow:
         cl["nickname"]    = self.nickname
         cl["avatar_idx"]  = self.avatar_idx
         cl["avatar_path"] = self.avatar_path
+        cl["avatar_b64"]  = getattr(self, "avatar_b64", "")
         cfg.save(cl, stored["last_table"])
 
     # ----------------------------------------------- screen management
@@ -350,6 +443,7 @@ class OnboardingFlow:
 
     def _avatar_next(self) -> None:
         self.avatar_idx = self._av_selected
+        self.avatar_b64 = compute_avatar_b64(self.avatar_idx, self.avatar_path)
         self._save()
         self._show_lobby()
 

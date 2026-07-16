@@ -1,3 +1,5 @@
+import base64
+import io
 import math
 import random
 import threading
@@ -9,6 +11,18 @@ from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR)
 from . import settings as cfg
 from .onboarding import OnboardingFlow
+
+try:
+    from PIL import Image, ImageTk as _ImageTk
+    _PIL_OK = True
+except ImportError:
+    _PIL_OK = False
+
+# Placeholder colors for AI seat avatars (one per seat index, cycling).
+_AI_AVATAR_COLORS = [
+    "#e33b6d", "#2a4a8c", "#226b45", "#8c2f39",
+    "#ffd166", "#39e7ff", "#c62828", "#4b3a24", "#3f3f86",
+]
 
 CLOCK_BASE = 25          # seconds per action
 BANK_START = 60          # starting time bank
@@ -116,6 +130,12 @@ class Holdem:
         self.table_rules = cfg.table_rules(**stored["last_table"])
         self.joined_table = False     # True once seated at a live P2P table
         self.theme = THEMES.get(self.v_theme.get(), THEMES["Cyberpunk"])
+
+        # avatar – loaded from settings (written by onboarding); may be
+        # overridden by main() after OnboardingFlow sets it.
+        self.avatar_b64: str = stored["client"].get("avatar_b64", "")
+        # PhotoImage refs for seat avatars, rebuilt on every redraw() call.
+        self._seat_photo_refs: list = []
 
         # session state
         self.buyin = 0
@@ -1462,6 +1482,7 @@ class Holdem:
         cv = self.cv
         t = self.theme
         cv.delete("all")
+        self._seat_photo_refs = []   # release previous-frame PhotoImage refs
         if e is None:
             return
         W = max(cv.winfo_width(), 600)
@@ -1578,9 +1599,43 @@ class Holdem:
         rrect(cv, x - w / 2, y - h / 2, x + w / 2, y + h / 2, 10,
               fill=fill, outline=edge, width=ew)
 
+        # ---- avatar (28×28 px, top-left corner of the seat box) ----------
+        av_size = 28
+        av_pad  = 5
+        av_x1   = x - w / 2 + av_pad
+        av_y1   = y - h / 2 + av_pad
+        av_x2   = av_x1 + av_size
+        av_y2   = av_y1 + av_size
+        av_cx   = (av_x1 + av_x2) / 2
+        av_cy   = (av_y1 + av_y2) / 2
+
+        avatar_drawn = False
+        if hero and _PIL_OK and getattr(self, "avatar_b64", ""):
+            try:
+                raw = base64.b64decode(self.avatar_b64)
+                pil_img = Image.open(io.BytesIO(raw)).convert("RGBA")
+                pil_img = pil_img.resize((av_size, av_size), Image.LANCZOS)
+                photo = _ImageTk.PhotoImage(pil_img)
+                self._seat_photo_refs.append(photo)
+                cv.create_image(av_cx, av_cy, image=photo, anchor="center")
+                avatar_drawn = True
+            except Exception:
+                pass
+        if not avatar_drawn:
+            # Colored circle placeholder: accent tint for hero, unique per AI.
+            av_color = (t.get("accent", "#00ffd0") if hero
+                        else _AI_AVATAR_COLORS[p.idx % len(_AI_AVATAR_COLORS)])
+            cv.create_oval(av_x1, av_y1, av_x2, av_y2,
+                           fill=av_color, outline=t["panel"], width=1)
+            init = "Y" if hero else p.name[:1].upper()
+            cv.create_text(av_cx, av_cy, text=init,
+                           fill=t["text"], font=("Segoe UI", 9, "bold"))
+
+        # ---- name + stack (shifted right to clear the avatar) -------------
+        txt_off = av_pad + av_size + 4   # = 37 px from left edge of seat
         name = "You" if hero else p.name
         sub = "" if hero else f"  {p.style[0]}{p.level}"
-        cv.create_text(x - w / 2 + 10, y - h / 2 + 13, anchor="w",
+        cv.create_text(x - w / 2 + txt_off, y - h / 2 + 13, anchor="w",
                        text=name + sub,
                        fill=t["dim"] if p.folded else t["text"],
                        font=("Segoe UI", 9, "bold"))
@@ -1598,7 +1653,7 @@ class Holdem:
                                                            "bold"))
 
         stack_txt = "ALL-IN" if p.all_in and p.stack == 0 else f"{p.stack:,}"
-        cv.create_text(x - w / 2 + 10, y - h / 2 + 28, anchor="w",
+        cv.create_text(x - w / 2 + txt_off, y - h / 2 + 28, anchor="w",
                        text=stack_txt,
                        fill=t["dim"] if p.folded else t["gold"],
                        font=("Segoe UI", 10, "bold"))

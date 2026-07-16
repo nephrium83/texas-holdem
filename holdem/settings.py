@@ -87,6 +87,8 @@ SPEC = {
                          label="Avatar (built-in index)", lo=0, hi=15),
     "avatar_path":  dict(scope=CLIENT, kind="str", default="",
                          maxlen=512, label="Avatar (custom image path)"),
+    "avatar_b64":   dict(scope=CLIENT, kind="str", default="",
+                         maxlen=12000, label="Avatar (base64 PNG thumbnail)"),
 
     # ---- table rules ------------------------------------------------
     "mode":         dict(scope=TABLE_RULE, kind="choice", default="Cash",
@@ -243,8 +245,8 @@ def table_rules(**values) -> dict:
 
 def rules_hash(rules: dict) -> str:
     """Ten hex chars identifying the contract. Canonical (sorted keys,
-    compact separators) so every client derives the same value — this is
+    compact separators) so every client derives the same value \u2014 this is
     what a multiplayer join code embeds."""
     canon = json.dumps({k: rules[k] for k in sorted(TABLE_RULE_KEYS)},
-                       separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:10]
+                       separators=(',', ':'), sort_keys=True)
+    return hashlib.sha256(canon.encode('utf-8')).hexdigest()[:10]
