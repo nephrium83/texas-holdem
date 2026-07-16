@@ -232,3 +232,337 @@ signaling) is the zero-install path for everyone else.
 The current single-player engine and GUI are not throwaway: the engine
 is the authoritative rules core the protocol wraps, and its determinism
 is the property the whole design leans on.
+
+
+---
+
+## Phase 1 — Protocol spec
+
+The four components below are the Phase 1 deliverable. Each is
+transport-agnostic and independently testable. The canonical test harness
+runs multiple simulated peers in-process, feeding signed byte strings
+directly to codec functions and asserting round-trip fidelity, chain
+validity, and FSM state invariants with no network involved.
+
+---
+
+### 1. Signed action wire format
+
+Every game event — player action or dealing step — travels as a **signed
+envelope**. The envelope is a JSON object with the following required fields.
+No optional fields exist; receivers reject any envelope with unknown or
+missing keys.
+
+```json
+{
+  "v":       1,
+  "action":  "<action_type>",
+  "hand_id": "<uuid-v4>",
+  "pubkey":  "<hex Ed25519 public key, 32 bytes / 64 hex chars>",
+  "seq":     0,
+  "ts":      0,
+  "payload": {},
+  "sig":     "<hex Ed25519 signature, 64 bytes / 128 hex chars>"
+}
+```
+
+- **`v`** — envelope version; this spec defines version `1`.
+- **`action`** — one of the action types listed below.
+- **`hand_id`** — opaque identifier for the hand; derived in §3.
+- **`pubkey`** — the sender's long-term Ed25519 public key, hex-encoded.
+- **`seq`** — a per-seat unsigned 64-bit integer, strictly increasing with
+  every envelope a seat sends. Receivers reject any `seq` not greater than
+  the last seen `seq` from that `pubkey`.
+- **`ts`** — Unix time in milliseconds (UTC). Receivers reject envelopes
+  whose `ts` is more than 60 000 ms from their own wall clock.
+- **`payload`** — action-specific data (defined per action type below).
+- **`sig`** — Ed25519 signature over the canonical pre-image (see below).
+
+**Action types and their payloads:**
+
+- `"bet"` — place a wager. Payload: `{"amount": <chips>}`.
+- `"call"` — match the current bet. Payload: `{}`.
+- `"check"` — decline to bet when no bet is owed. Payload: `{}`.
+- `"fold"` — discard the hand. Payload: `{}`.
+- `"raise"` — increase the current bet. Payload: `{"amount": <total chips
+  committed this street>}`.
+- `"allin"` — commit all remaining chips. Payload: `{"amount": <total chips
+  committed>}`.
+- `"dkg_commit"` — DKG phase-1 commitment (§3). Payload: `{"commit": "<Ci>"}`.
+- `"dkg_reveal"` — DKG phase-2 reveal (§3). Payload: `{"reveal": "<Ri>",
+  "shares": {"<seat_j>": "<Sij>", ...}}`.
+- `"dkg_verify"` — DKG phase-3 acknowledgment. Payload: `{"ok": true}` or
+  `{"ok": false, "reason": "bad_share:<seat_i>"}`.
+- `"deal_step"` — one seat's contribution to the cooperative shuffle or
+  deal; payload structure defined in Phase 2.
+- `"hand_start"` — genesis action; sent once by the table initiator at hand
+  open (payload defined in §2).
+- `"timeout_attest"` — co-signed attestation that a seat has timed out.
+  Payload: `{"seat": <int>, "seq_expected": <uint64>, "attestations":
+  ["<sig>", ...]}`. Requires `t` valid attestations from distinct active
+  seats before the fold is recorded.
+- `"abort"` — unanimous signed table abort; requires every active seat to
+  have contributed a signature in `attestations`. Payload: `{"reason":
+  "<string>", "attestations": ["<sig>", ...]}`.
+
+**Canonical serialization for signing.** The pre-image is the envelope
+minus the `"sig"` key, serialized with sorted keys, compact separators
+(`","` and `":"`), no whitespace, UTF-8 encoded:
+
+```python
+import json
+
+def canonical(envelope: dict) -> bytes:
+    body = {k: v for k, v in envelope.items() if k != "sig"}
+    return json.dumps(
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+```
+
+The signature is `Ed25519.sign(private_key, canonical(envelope))`. Receivers
+call `Ed25519.verify(envelope["pubkey"], canonical(envelope), envelope["sig"])`
+and drop any envelope that fails.
+
+---
+
+### 2. Hash-chained action log
+
+Every signature-valid envelope is wrapped in a **chain entry** before being
+appended to the local log. Chain entries link each action irrevocably to its
+predecessor, making any tampering attributable to a specific signature.
+
+**Chain entry structure:**
+
+```json
+{
+  "prev":     "<SHA-256 hex of canonical bytes of previous chain entry>",
+  "envelope": {}
+}
+```
+
+The canonical bytes of a chain entry are computed identically to the envelope
+pre-image: `json.dumps(entry, sort_keys=True, separators=(",", ":"),
+ensure_ascii=False).encode("utf-8")`.
+
+**Genesis entry.** The first entry of every hand has a synthetic predecessor
+that encodes the hand identity:
+
+```json
+{
+  "prev": "<hand_id>:genesis",
+  "envelope": {
+    "v":       1,
+    "action":  "hand_start",
+    "hand_id": "<hand_id>",
+    "pubkey":  "<initiator pubkey>",
+    "seq":     0,
+    "ts":      1234567890000,
+    "payload": {
+      "rules_hash": "<10-hex from settings.rules_hash()>",
+      "seats": [
+        {"seat": 0, "pubkey": "<hex>", "stack": 1000},
+        {"seat": 1, "pubkey": "<hex>", "stack": 1000}
+      ]
+    },
+    "sig": "<sig over canonical of above minus sig>"
+  }
+}
+```
+
+The `hand_id` is derived deterministically:
+`SHA-256(rules_hash + "|" + seat_pubkeys_sorted_joined_by_"|" + "|" +
+timestamp_ms_as_string)`, hex-encoded, first 32 characters. This is
+collision-resistant across all hands a session will ever produce, and any
+peer can verify it from the `hand_start` payload alone.
+
+**Verification algorithm.** Peers run this on receipt of any entry batch,
+on reconnect, or to audit the full hand log:
+
+```python
+import hashlib, json
+
+def verify_chain(entries: list[dict], hand_id: str) -> bool:
+    expected_prev = f"{hand_id}:genesis"
+    for entry in entries:
+        # 1. Linkage check
+        if entry["prev"] != expected_prev:
+            return False
+        # 2. Signature check
+        env = entry["envelope"]
+        if not ed25519_verify(env["pubkey"], canonical(env), env["sig"]):
+            return False
+        # 3. Advance the cursor
+        raw = json.dumps(
+            entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        expected_prev = hashlib.sha256(raw).hexdigest()
+    return True
+```
+
+A peer that receives a chain entry breaking the linkage or carrying an
+invalid signature broadcasts a signed accusation (action `"chain_fault"`,
+payload: the offending entry) and stops accepting actions from that `pubkey`
+for the remainder of the hand. **Forks** — two entries with the same `prev`
+— are resolved by the rule that the entry with the lower `seq` from the
+acting seat wins; the other is dropped and its sender is flagged as a griever.
+
+The full hand transcript — genesis entry through final showdown — is a
+self-verifying artifact. Any third party with the participants' public keys
+can replay and audit a hand with no trust in the node that exported it.
+
+---
+
+### 3. Per-hand threshold DKG handshake
+
+At the start of each hand, before any cards are dealt, active seats run a
+**distributed key generation** ceremony. The output is a joint public key
+`PK` (the shared deck encryption key) and a per-seat secret share `si`.
+The threshold is `t = ceil(2n/3)` for `n` active seats: any `t` seats can
+reconstruct a missing seat's contribution; no `t-1` seats can learn
+anything about another seat's share. The underlying construction (Pedersen
+DKG over the curve used for the commutative shuffle cipher) is defined in
+Phase 2; this section specifies only the handshake message sequence.
+
+All DKG messages are signed envelopes recorded in the action log.
+
+**Handshake sequence:**
+
+```
+PHASE 1 — COMMIT  (timeout: 10 s from hand_start)
+  Each seat i broadcasts dkg_commit:
+    payload.commit = Ci     commitment to seat i's random polynomial
+  Completion: all n expected seats have sent dkg_commit.
+
+PHASE 2 — REVEAL  (timeout: 10 s from last required dkg_commit)
+  Each seat i broadcasts dkg_reveal:
+    payload.reveal = Ri     opening of Ci
+    payload.shares = { j: Sij  for each other seat j }
+                            Sij is the share for seat j, encrypted
+                            under seat j's long-term public key
+  Completion: all n expected seats have sent dkg_reveal.
+
+PHASE 3 — VERIFY  (timeout: 10 s from last required dkg_reveal)
+  Each seat j decrypts its n-1 incoming shares, checks each against the
+  matching public commitment Ci, and broadcasts dkg_verify:
+    payload.ok = true
+    — or —
+    payload.ok = false, payload.reason = "bad_share:<seat_i>"
+  Completion: all n expected seats have sent dkg_verify with ok = true.
+
+PHASE 4 — KEY ASSEMBLY  (no message required)
+  Each seat independently assembles PK from the public commitments already
+  in the log. The result is identical on every peer. hand_start plus all
+  DKG envelopes are the sole inputs; no further agreement message is needed.
+```
+
+**Dropout handling during DKG.** A seat that fails to produce a required
+DKG message before its step timeout is handled as follows.
+
+- **Missing `dkg_commit` (Phase 1 timeout):** the remaining active seats
+  co-sign a `timeout_attest` naming the absent seat. That seat transitions
+  to KICKED (§4). The DKG restarts from Phase 1 with `n' = n − 1`. If
+  `n' < 2`, the hand is void and all stacks are restored — an automatic
+  protocol refund, not a player-triggered abort.
+- **Missing `dkg_reveal` (Phase 2 timeout):** same co-sign and KICKED
+  procedure. The absent seat's commit is discarded. DKG restarts with
+  `n' = n − 1`.
+- **Missing `dkg_verify` (Phase 3 timeout):** the remaining seats check
+  whether the absent seat's shares (already broadcast in Phase 2) were
+  consistent with its commit. If consistent, the seat transitions to
+  TIMED_OUT rather than KICKED — a transient failure at the final step is
+  most likely a network hiccup, not a cheat — and its public contribution
+  is extracted from its commit to assemble PK without that seat's further
+  participation. If the Phase 2 shares were inconsistent with the commit,
+  the seat is KICKED and the DKG restarts.
+- **Re-run limit.** DKG may restart at most `n − 2` times per hand (which
+  preserves the minimum two-seat game). A seat that triggers two restarts
+  within a single hand is KICKED and barred from future hands in the session
+  under that pubkey.
+
+---
+
+### 4. Dropout and timeout state machine
+
+Each seat in an active hand is in exactly one of the following states.
+
+**ACTIVE** — the seat is connected and participating normally.
+
+**TIMED_OUT** — the action clock expired before the seat acted. The seat may
+still be reachable; a 15 s grace period allows it to send a valid action
+before the auto-fold fires. No chips are forfeited yet.
+
+**DISCONNECTED** — no signed message has been received from the seat for
+more than 60 s. Treated identically to TIMED_OUT for action-clock purposes;
+the seat remains eligible to reconnect.
+
+**FOLDED_AUTO** — the seat was moved to fold by an expired timeout or
+reconnection window, attested by `t` co-signers. The seat has no further
+decisions this hand; its in-street commitments stay in the pot, consistent
+with a voluntary fold at the same moment.
+
+**ALL_IN_ABSENT** — the seat committed all its chips (all-in) and then
+disconnected. Because it has no future action decisions, it stays in the
+hand and is eligible to win at showdown. The threshold reconstruction
+mechanism handles its hole-card decryption without its participation.
+
+**KICKED** — the seat was removed from the hand, ordinarily because it
+triggered a DKG failure or exceeded the re-run limit. Chips committed before
+the kick remain in the pot up to any side-pot boundary; the remaining stack
+is held in escrow until hand end, then returned.
+
+**Transitions:**
+
+```
+ACTIVE
+  → TIMED_OUT      action clock expires (clock_base seconds; TABLE_RULE default 25 s)
+  → DISCONNECTED   no message received within 60 s
+  → ALL_IN_ABSENT  seat commits all chips and then disconnects
+
+TIMED_OUT
+  → ACTIVE         seat sends a valid action within the 15 s grace period
+  → FOLDED_AUTO    grace period expires; t co-signers attest the silence;
+                   synthetic fold envelope recorded in the log
+
+DISCONNECTED
+  → ACTIVE         seat sends a signed session-resume within 60 s
+  → FOLDED_AUTO    reconnection window expires; attested and auto-folded
+  → ALL_IN_ABSENT  if the seat was already all-in at disconnect time
+
+FOLDED_AUTO       (terminal for this hand)
+
+ALL_IN_ABSENT
+  → ACTIVE         seat reconnects before showdown (may observe; no decisions remain)
+  → (terminal)     if no reconnect before showdown; threshold reconstruction proceeds
+
+KICKED            (terminal for this hand)
+```
+
+**Timeout thresholds** (all TABLE_RULE; defaults align with the existing
+single-player clock in `settings.py`):
+
+| Threshold | Default | Description |
+|---|---|---|
+| Action clock (`clock_base`) | 25 s | Per-action budget, extendable by time-bank draws |
+| Grace period | 15 s | Extra window after TIMED_OUT before auto-fold fires |
+| Reconnection window | 60 s | Window to resume a session after DISCONNECTED |
+| DKG step timeout | 10 s | Per-phase budget during the DKG handshake (§3) |
+
+**Attesting a timeout.** No single peer can fold another seat unilaterally.
+A timeout fold requires `t` distinct active seats to broadcast
+`timeout_attest` envelopes carrying matching `(seat, seq_expected)` tuples.
+When `t` valid, distinct attestations for the same tuple appear in the log,
+the protocol records a synthetic `"fold"` envelope listing the attesting
+pubkeys as collective signers and advances turn order. This prevents any
+single peer from weaponising the timeout rule to eliminate a threatening stack.
+
+**Chip accounting on dropout.** Chips committed to the pot in the current
+street by a FOLDED_AUTO seat are not refunded — folding forfeits them,
+consistent with a voluntary fold at the same moment. Chips still in the stack
+at auto-fold time are preserved and returned at session end. A KICKED seat's
+pre-kick commitments stay in the pot; its remaining stack is escrowed and
+returned when the hand concludes.
+
+The only legitimate full-refund path remains **unanimous signed abort**
+(`action: "abort"` with every active seat's signature in `attestations`).
+No other protocol path returns committed chips — which is, by design, what
+closes the undo-button exploit described in the threshold-keys section above.
