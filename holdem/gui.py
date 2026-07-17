@@ -454,6 +454,9 @@ class Holdem:
                                justify="left", anchor="nw", height=7)
         self.l_show.pack(fill="x", padx=12, pady=(2, 12))
 
+        if self._mp_mode:
+            self._build_chat(side)
+
     def _build_controls(self, f):
         t = self.theme
         bar = tk.Frame(f, bg=t["panel"], height=88)
@@ -589,6 +592,21 @@ class Holdem:
         evts = self.engine.drain()
         for kind, text in evts:
             self.say(kind, text)
+            # Mirror notable game events into the chat panel (mp mode only)
+            if self._mp_mode and kind in (
+                    "hand", "blind", "fold", "check", "call",
+                    "bet", "raise", "pot", "show"):
+                self._append_chat_event(text)
+                if self._mp_is_host:
+                    # Broadcast dealer events so peers see them in their chat panel
+                    try:
+                        from .p2p import transport as _t
+                        _t.broadcast({
+                            "type":    "chat",
+                            "payload": {"nickname": "[Dealer]", "text": text},
+                        })
+                    except Exception:
+                        pass
         self.hand_logger.feed(evts)
 
     # ---------------------------------------------------------- game set-up
@@ -912,7 +930,10 @@ class Holdem:
         if not hasattr(self, "chat_log"):
             return
         self.chat_log.config(state="normal")
-        self.chat_log.insert("end", f"{nickname}: {text}\n")
+        if nickname == "[Dealer]":
+            self.chat_log.insert("end", f"[Dealer] {text}\n", "dealer_ev")
+        else:
+            self.chat_log.insert("end", f"{nickname}: {text}\n")
         self.chat_log.see("end")
         self.chat_log.config(state="disabled")
 
@@ -925,6 +946,51 @@ class Holdem:
         self.chat_log.see("end")
         self.chat_log.config(state="disabled")
 
+    # ---------------------------------------- Chat pane (mp mode only)
+
+    def _build_chat(self, parent) -> None:
+        """Build the in-game chat panel inside *parent* (mp mode only)."""
+        t = self.theme
+        tk.Label(parent, text="CHAT", bg=t["panel"], fg=t["dim"],
+                 font=("Segoe UI", 8, "bold"), anchor="w").pack(
+            fill="x", padx=12, pady=(4, 0))
+        cf = tk.Frame(parent, bg=t["panel"])
+        cf.pack(fill="both", expand=True, padx=12, pady=(2, 2))
+        sb = tk.Scrollbar(cf, width=8)
+        sb.pack(side="right", fill="y")
+        self.chat_log = tk.Text(
+            cf, bg=t["bg"], fg=t["text"], relief="flat",
+            font=("Consolas", 9), wrap="word", height=8,
+            yscrollcommand=sb.set, state="disabled")
+        self.chat_log.pack(side="left", fill="both", expand=True)
+        sb.config(command=self.chat_log.yview)
+        self.chat_log.tag_config("dealer_ev", foreground=t["dim"])
+
+        entry_row = tk.Frame(parent, bg=t["panel"])
+        entry_row.pack(fill="x", padx=12, pady=(0, 8))
+        self._chat_var = tk.StringVar()
+        chat_entry = tk.Entry(
+            entry_row, textvariable=self._chat_var,
+            bg=t["bg"], fg=t["text"], relief="flat",
+            font=("Consolas", 9), insertbackground=t["text"])
+        chat_entry.pack(side="left", fill="x", expand=True)
+        chat_entry.bind("<Return>", lambda _e: self._on_chat_send())
+        tk.Button(
+            entry_row, text="Send", relief="flat",
+            bg=t["btn"], fg=t["btn_text"],
+            font=("Segoe UI", 8), cursor="hand2",
+            command=self._on_chat_send).pack(side="left", padx=(4, 0))
+
+    def _on_chat_send(self) -> None:
+        """Send the content of the chat entry box."""
+        text = getattr(self, "_chat_var", None)
+        if text is None:
+            return
+        msg = text.get().strip()
+        if not msg:
+            return
+        text.set("")
+        self._mp_send_chat(msg)
 
     # -------------------------------------------------------- XP / level
 
