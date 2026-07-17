@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import threading
+
+log = logging.getLogger(__name__)
 
 from . import settings as cfg
 from .p2p.invite import generate_room_code, parse_room_code
@@ -591,8 +594,8 @@ class OnboardingFlow:
     # ---- create-table dialog
 
     def _create_game_dialog(self) -> None:
-        """Start hosting: bind transport, generate invite code, open lobby."""
-        # Start transport host and generate the invite code
+        """Start hosting: bind transport, run STUN, generate invite code, open lobby."""
+        # Start transport host (fires STUN in background)
         try:
             listen_addr = _transport.start_host()
         except Exception as exc:
@@ -601,8 +604,21 @@ class OnboardingFlow:
                                  parent=self.root)
             return
 
-        code = generate_room_code()
-        parsed = parse_room_code(code)
+        # Configure relay fallback (may not be reachable yet — that's OK)
+        _transport.set_relay_address("192.168.1.10", 7878)
+        relay_addr = ("192.168.1.10", 7878)
+
+        # STUN result may not be available yet — get_public_address() returns
+        # None until the background query completes (~1–3 s).
+        pub_addr = _transport.get_public_address()
+
+        # Generate invite code; use a stable rendezvous_key so we can update
+        # the code when STUN resolves without breaking LAN multicast.
+        _code_ref = [generate_room_code(
+            public_address=pub_addr,
+            relay_address=relay_addr,
+        )]
+        parsed = parse_room_code(_code_ref[0])
         rendezvous_key = parsed["rendezvous_key"]
 
         # Build a session and register it globally
@@ -641,7 +657,7 @@ class OnboardingFlow:
         win.transient(self.root)
         win.grab_set()
         self.root.update_idletasks()
-        dw, dh = 480, 380
+        dw, dh = 480, 400
         rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
         ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
         win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
@@ -657,19 +673,64 @@ class OnboardingFlow:
         tk.Label(code_frame, text="Room Code:",
                  bg=_PANEL, fg=_DIM,
                  font=("Segoe UI", 9)).pack(side="left")
-        tk.Label(code_frame, text=code,
-                 bg=_PANEL, fg=_GOLD,
-                 font=("Consolas", 11, "bold")).pack(side="left", padx=8)
+        code_lbl = tk.Label(code_frame, text=_code_ref[0],
+                            bg=_PANEL, fg=_GOLD,
+                            font=("Consolas", 10, "bold"))
+        code_lbl.pack(side="left", padx=8)
 
         def _copy():
             self.root.clipboard_clear()
-            self.root.clipboard_append(code)
+            self.root.clipboard_append(_code_ref[0])
         _btn(code_frame, "Copy", _copy).pack(side="left")
 
-        # Listen address (for manual internet connections)
+        # LAN address (for manual connections)
         tk.Label(win, text=f"LAN address: {listen_addr}",
                  bg=_PANEL, fg=_DIM,
-                 font=("Segoe UI", 8)).pack(pady=(2, 8))
+                 font=("Segoe UI", 8)).pack(pady=(2, 2))
+
+        # Connection info: STUN + relay status
+        _stun_text = (
+            "STUN: discovering…"
+            if pub_addr is None
+            else f"STUN: {pub_addr[0]}:{pub_addr[1]}"
+        )
+        conn_info_lbl = tk.Label(
+            win,
+            text=f"{_stun_text}  |  Relay: ready",
+            bg=_PANEL, fg=_DIM,
+            font=("Segoe UI", 8),
+        )
+        conn_info_lbl.pack(pady=(0, 6))
+
+        # Poll for STUN resolution — update code and label when it arrives
+        _stun_polls = [0]
+
+        def _poll_stun():
+            if not win.winfo_exists():
+                return
+            addr = _transport.get_public_address()
+            _stun_polls[0] += 1
+            if addr is not None:
+                # Regenerate code with the same rendezvous_key so LAN
+                # multicast stays consistent, but now includes public IP.
+                _code_ref[0] = generate_room_code(
+                    public_address=addr,
+                    relay_address=relay_addr,
+                    rendezvous_key=rendezvous_key,
+                )
+                code_lbl.config(text=_code_ref[0])
+                conn_info_lbl.config(
+                    text=f"STUN: {addr[0]}:{addr[1]}  |  Relay: ready"
+                )
+            elif _stun_polls[0] < 10:
+                win.after(500, _poll_stun)
+            else:
+                conn_info_lbl.config(
+                    text="STUN unavailable, direct only  |  Relay: ready"
+                )
+
+        if pub_addr is None:
+            win.after(500, _poll_stun)
 
         # Player list
         tk.Label(win, text="PLAYERS IN LOBBY",
@@ -842,24 +903,83 @@ class OnboardingFlow:
             win.update_idletasks()
 
             def _do_connect():
+                public_ip   = parsed.get("public_ip")
+                public_port = parsed.get("public_port")
+                relay_host  = parsed.get("relay_host")
+                relay_port  = parsed.get("relay_port")
+
+                conn_method = ["Direct connection"]  # updated if relay used
+
                 try:
                     if addr_override:
-                        host_addr = addr_override
+                        # Manual override: direct connect (existing behaviour)
+                        conn_id = _transport.connect(addr_override)
+
+                    elif public_ip and public_port:
+                        # Try direct TCP to the STUN-discovered address (3 s)
+                        try:
+                            conn_id = _transport.connect(
+                                f"{public_ip}:{public_port}"
+                            )
+                        except ConnectionError as direct_exc:
+                            log.info(
+                                "Direct connect failed (%s); trying relay",
+                                direct_exc,
+                            )
+                            win.after(0, lambda: status_lbl.config(
+                                text="Direct failed — trying relay…",
+                                fg=_DIM,
+                            ))
+                            if relay_host and relay_port:
+                                try:
+                                    from holdem.p2p.invite import strip_code
+                                    conn_id = _transport.connect_via_relay(
+                                        relay_host,
+                                        relay_port,
+                                        strip_code(code),
+                                    )
+                                    conn_method[0] = "Relay (via errantsaints.space)"
+                                except ConnectionError as relay_exc:
+                                    # Last resort: try LAN multicast
+                                    host_addr = _transport.find_peer(
+                                        rendezvous_key, timeout=5
+                                    )
+                                    if not host_addr:
+                                        win.after(0, lambda e=relay_exc: _on_error(
+                                            "Connection failed",
+                                            f"Direct and relay both failed:\n{e}",
+                                        ))
+                                        return
+                                    conn_id = _transport.connect(host_addr)
+                            else:
+                                # No relay in code — try LAN multicast as fallback
+                                host_addr = _transport.find_peer(
+                                    rendezvous_key, timeout=5
+                                )
+                                if not host_addr:
+                                    win.after(0, lambda e=direct_exc: _on_error(
+                                        "Connection failed",
+                                        f"Direct connect failed and no relay available:\n{e}",
+                                    ))
+                                    return
+                                conn_id = _transport.connect(host_addr)
+
                     else:
-                        # LAN multicast discovery
+                        # No STUN address in code → fall back to LAN multicast
                         host_addr = _transport.find_peer(rendezvous_key, timeout=15)
+                        if not host_addr:
+                            win.after(0, lambda: _on_error(
+                                "Host not found",
+                                "Could not locate the host on the local network.\n\n"
+                                "If the host is on a different network, ask them for "
+                                "their public IP:port and enter it in the address "
+                                "override field.",
+                            ))
+                            return
+                        conn_id = _transport.connect(host_addr)
 
-                    if not host_addr:
-                        win.after(0, lambda: _on_error(
-                            "Host not found",
-                            "Could not locate the host on the local network.\n\n"
-                            "If the host is on a different network, ask them for "
-                            "their public IP:port and enter it in the address override field.",
-                        ))
-                        return
-
-                    conn_id = _transport.connect(host_addr)
-                    _conn_id_ref[0] = conn_id
+                    _conn_id_ref[0]        = conn_id
+                    _conn_method_ref[0]    = conn_method[0]
 
                     # M-7: verify the host's pubkey prefix matches the room code
                     # (done via the first signed player_ack which carries pubkey)
@@ -893,8 +1013,8 @@ class OnboardingFlow:
                     sess.on_player_list_changed = _on_players
                     sess.on_game_start          = _on_game_start
 
-                    win.after(0, lambda: status_lbl.config(
-                        text="Connected — waiting for host to start…",
+                    win.after(0, lambda m=conn_method[0]: status_lbl.config(
+                        text=f"Connected ({m}) — waiting for host to start…",
                         fg=_ACCENT,
                     ))
                     win.after(0, _show_ready_btn)
@@ -905,6 +1025,7 @@ class OnboardingFlow:
             _ready_btn_ref       = [None]
             _conn_id_ref         = [None]
             _peer_id_prefix_ref  = [None]
+            _conn_method_ref     = ["Direct connection"]
 
             def _on_error(title, msg):
                 connect_btn.config(state="normal")

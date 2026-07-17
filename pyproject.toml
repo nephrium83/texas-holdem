@@ -9,8 +9,8 @@ description = "Texas Hold'em (No-Limit, Pot-Limit, Fixed-Limit) with a Tkinter t
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Adam LeRoux" }]
 dependencies = ["Pillow>=10.0"]
+authors = [{ name = "Adam LeRoux" }]
 keywords = ["poker", "texas-holdem", "tkinter", "game"]
 classifiers = [
     "Programming Language :: Python :: 3",

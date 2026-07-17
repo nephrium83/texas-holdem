@@ -1,5 +1,5 @@
 """
-P2P transport -- asyncio TCP + LAN multicast rendezvous.
+P2P transport -- asyncio TCP + LAN multicast rendezvous + STUN/relay.
 
 py-libp2p failed to install (fastecdsa build error), so this module
 implements a compatible asyncio TCP fallback.  The interface is identical
@@ -10,9 +10,24 @@ Public API
 ----------
 start_host(port=0) -> str
     Bind a TCP server on an ephemeral port.  Returns "host:port".
+    Also fires off STUN discovery in the background — call
+    get_public_address() after a few seconds to retrieve the result.
 
 connect(address: str) -> str
-    Connect to "host:port".  Returns a conn_id string.
+    Connect to "host:port" with a 3-second timeout.  If *address* starts
+    with ``relay://host:port/room_code``, routes through the relay instead.
+    Returns a conn_id string.
+
+connect_via_relay(relay_host, relay_port, room_code) -> str
+    Open a relayed connection through the room-based proxy server.
+    Returns a conn_id string (transparent after the join handshake).
+
+get_public_address() -> tuple[str, int] | None
+    Return the STUN-discovered (public_ip, public_port), or None if STUN
+    has not completed or failed.
+
+set_relay_address(host, port)
+    Record the fallback relay server address for this session.
 
 send(conn_id: str, msg: dict)
     Send a JSON message to one peer (length-prefixed framing).
@@ -44,10 +59,11 @@ find_peer(rendezvous_key: str, timeout: float = 5.0) -> str | None
 
 Internet play
 -------------
-For connections across the internet (not LAN), the host shares their
-public IP + listen port manually.  The join dialog accepts a
-"host:port override" field for this purpose.  See MULTIPLAYER.md
-Phase 3 section 4 for the full connection establishment sequence.
+Sprint 3A adds STUN hole-punching and relay fallback.  The host calls
+start_host() which automatically queries stun.l.google.com in the
+background.  The STUN result is embedded in the invite code so joiners
+can attempt a direct TCP connection; if that fails within 3 seconds they
+transparently fall back to the relay at 192.168.1.10:7878.
 """
 from __future__ import annotations
 
@@ -83,6 +99,12 @@ _disc_callbacks:  list[Callable] = []
 # listen address returned by start_host()
 _listen_address: str = ""
 
+# STUN-discovered public address, set asynchronously after start_host()
+_public_address: Optional[tuple[str, int]] = None
+
+# Relay server address (set by set_relay_address before generating invite code)
+_relay_address: Optional[tuple[str, int]] = None
+
 # multicast constants
 _MC_GROUP = "239.255.77.77"
 _MC_PORT  = 7777
@@ -111,6 +133,25 @@ def on_connect(callback: Callable) -> None:
 def on_disconnect(callback: Callable) -> None:
     """Register callback(conn_id)."""
     _disc_callbacks.append(callback)
+
+
+def get_public_address() -> Optional[tuple[str, int]]:
+    """Return the STUN-discovered ``(public_ip, public_port)``, or ``None``.
+
+    This is populated asynchronously after ``start_host()`` is called.
+    Returns ``None`` if STUN has not yet completed or if it failed.
+    """
+    return _public_address
+
+
+def set_relay_address(host: str, port: int) -> None:
+    """Record the fallback relay server for this session.
+
+    Called by the host after ``start_host()``; the address is embedded in
+    the invite code so joiners can use it when direct TCP fails.
+    """
+    global _relay_address
+    _relay_address = (host, port)
 
 
 def reset_callbacks() -> None:
@@ -203,15 +244,44 @@ async def _handle_connection(reader: asyncio.StreamReader,
 # ---------------------------------------------------------------------------
 
 def start_host(port: int = 0) -> str:
-    """Bind a TCP listener.  Returns the listen address as 'host:port'."""
-    global _listen_address
+    """Bind a TCP listener.  Returns the listen address as 'host:port'.
+
+    Also schedules a STUN binding request in the background so that
+    ``get_public_address()`` eventually returns the NAT-facing address.
+    The STUN query does not block this call.
+    """
+    global _listen_address, _public_address
     _ensure_loop()
+
+    # Reset any leftover STUN result from a previous session
+    _public_address = None
 
     fut: asyncio.Future = asyncio.run_coroutine_threadsafe(
         _start_server(port), _loop
     )
     _listen_address = fut.result(timeout=10)
+
+    # Fire STUN in background — does not block the Tk main thread
+    asyncio.run_coroutine_threadsafe(_resolve_stun(), _loop)
+
     return _listen_address
+
+
+async def _resolve_stun() -> None:
+    """Query STUN and store the result in ``_public_address``."""
+    global _public_address
+    try:
+        local_port_str = _listen_address.rsplit(":", 1)[-1]
+        local_port = int(local_port_str)
+    except (ValueError, IndexError):
+        local_port = 0
+    try:
+        from holdem.p2p import stun as _stun
+        _public_address = await _stun.get_public_address(local_port)
+        log.info("STUN resolved: %s:%d", *_public_address)
+    except Exception as exc:
+        log.warning("STUN failed: %s", exc)
+        _public_address = None
 
 
 def _get_lan_ip() -> str:
@@ -253,21 +323,106 @@ async def _start_server(port: int) -> str:
 
 
 def connect(address: str) -> str:
-    """Connect to a peer at 'host:port'.  Returns the conn_id."""
+    """Connect to a peer.  Returns the conn_id.
+
+    *address* forms:
+    - ``"host:port"``     — direct TCP, 3-second asyncio timeout.
+    - ``"relay://host:port/room_code"`` — connect through relay server.
+
+    Raises ``ConnectionError`` on failure so callers can implement their
+    own fallback (e.g. ``connect_via_relay``).
+    """
     _ensure_loop()
+    if address.startswith("relay://"):
+        # relay://host:port/room_code
+        rest = address[len("relay://"):]
+        host_port, _, room_code = rest.partition("/")
+        relay_host, relay_port_s = host_port.rsplit(":", 1)
+        return connect_via_relay(relay_host, int(relay_port_s), room_code)
+
     host, port_s = address.rsplit(":", 1)
     fut = asyncio.run_coroutine_threadsafe(
-        _connect_to(host, int(port_s)), _loop
+        _connect_direct(host, int(port_s)), _loop
+    )
+    return fut.result(timeout=10)
+
+
+async def _connect_direct(host: str, port: int,
+                           timeout: float = 3.0) -> str:
+    """Open a direct TCP connection with *timeout* seconds."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+    except (asyncio.TimeoutError, OSError) as exc:
+        raise ConnectionError(
+            f"Direct TCP connect to {host}:{port} failed: {exc}"
+        ) from exc
+    cid = _new_conn_id()
+    asyncio.create_task(  # L-5
+        _handle_connection(reader, writer, cid, f"{host}:{port}")
+    )
+    return cid
+
+
+# Keep legacy name for any internal callers
+_connect_to = _connect_direct
+
+
+def connect_via_relay(relay_host: str, relay_port: int,
+                      room_code: str) -> str:
+    """Connect through the room-based relay server.
+
+    Sends ``{"type": "relay_join", "room": room_code, "peer_id": ...}``
+    and then treats the TCP stream as a normal peer connection (same
+    length-prefixed JSON framing).
+
+    Raises ``ConnectionError`` when the relay is unreachable.
+    """
+    _ensure_loop()
+    fut = asyncio.run_coroutine_threadsafe(
+        _connect_via_relay(relay_host, relay_port, room_code), _loop
     )
     return fut.result(timeout=15)
 
 
-async def _connect_to(host: str, port: int) -> str:
-    reader, writer = await asyncio.open_connection(host, port)
+async def _connect_via_relay(relay_host: str, relay_port: int,
+                              room_code: str) -> str:
+    """Async implementation of ``connect_via_relay``."""
+    from holdem.p2p import identity as _identity
+
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(relay_host, relay_port),
+            timeout=5.0,
+        )
+    except (asyncio.TimeoutError, OSError) as exc:
+        raise ConnectionError(
+            f"Relay {relay_host}:{relay_port} unreachable: {exc}"
+        ) from exc
+
+    # Send the relay join handshake
+    join_msg = {
+        "type":    "relay_join",
+        "room":    room_code,
+        "peer_id": _identity.peer_id(),
+    }
+    try:
+        writer.write(_frame(join_msg))
+        await writer.drain()
+    except OSError as exc:
+        writer.close()
+        raise ConnectionError(f"Relay handshake failed: {exc}") from exc
+
     cid = _new_conn_id()
-    asyncio.create_task(  # L-5: create_task replaces deprecated ensure_future
-        _handle_connection(reader, writer, cid, f"{host}:{port}")
+    asyncio.create_task(
+        _handle_connection(
+            reader, writer, cid, f"relay:{relay_host}:{relay_port}"
+        )
     )
+    log.info("transport: relay connection established (%s) room=%s",
+             cid, room_code)
     return cid
 
 
