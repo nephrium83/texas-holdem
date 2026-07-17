@@ -49,6 +49,20 @@ class Deck:
         self.cards = list(FULL_DECK)
         self.rng.shuffle(self.cards)
 
+    @classmethod
+    def from_indices(cls, indices: list) -> "Deck":
+        """Create a pre-ordered Deck from a list of 52 card indices.
+
+        ``indices[0]`` is dealt first (maps to ``FULL_DECK[indices[0]]``).
+        Used by the verifiable-shuffle protocol to inject the deterministic
+        deck order agreed upon by all players.
+        """
+        obj = cls.__new__(cls)
+        obj.rng = None
+        # deal() pops from the end, so reverse to serve index 0 first
+        obj.cards = [FULL_DECK[i] for i in reversed(indices)]
+        return obj
+
     def deal(self, n: int = 1):
         out = self.cards[-n:]
         del self.cards[-n:]
@@ -474,7 +488,19 @@ class Engine:
             if sbp.stack > 0 and sbp.sitting_out and not self.deal_sitting_out:
                 sbp.owes_sb = True                     # dead small blind
 
-    def start_hand(self, straddle_fn=None):
+    def start_hand(self, straddle_fn=None, deck=None):
+        """Begin a new hand.
+
+        Parameters
+        ----------
+        straddle_fn:
+            Optional callable(utg_seat) -> bool; controls UTG straddle.
+        deck:
+            Optional pre-built :class:`Deck` instance (e.g. from
+            ``Deck.from_indices(shuffled_indices)`` in the verifiable-shuffle
+            protocol).  When *None* a freshly shuffled deck is generated from
+            ``self.rng``.
+        """
         self._advance_positions()
 
         for p in self.players:
@@ -492,7 +518,7 @@ class Engine:
         if len(live) < 2:
             return False
 
-        self.deck = Deck(self.rng)
+        self.deck = deck if deck is not None else Deck(self.rng)
         self.board = []
         self.board2 = None
         self.street = "preflop"

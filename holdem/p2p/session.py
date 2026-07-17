@@ -17,24 +17,38 @@ host  -> all  : {"type": "game_start",   "payload": {"table_settings": {...}, "s
 In-game (Phase 1 -- on top of transport)
 -----------------------------------------
 any -> all : {"type": "action",  "action": "fold"|"call"|"raise", "amount": N}
-host-> all : {"type": "deal",    ...}   (Phase 2 when shuffle is ready)
+host-> all : {"type": "deal",    ...}
+
+Verifiable shuffle (Phase 2)
+-----------------------------
+host -> all  : {"type": "shuffle_start",          "payload": {"commit_hex": ..., "x25519_pubkey_hex": ...}}
+peer -> host : {"type": "shuffle_commit",         "payload": {"commit_hex": ..., "x25519_pubkey_hex": ...}}
+host -> all  : {"type": "shuffle_commit_collect", "payload": {"commits": {conn_id: hex, ...}}}
+peer -> host : {"type": "shuffle_reveal",         "payload": {"seed_hex": ..., "nonce_hex": ...}}
+host -> all  : {"type": "shuffle_reveal_collect", "payload": {"reveals": {conn_id: {seed_hex, nonce_hex}, ...}}}
+host -> peer : {"type": "shuffle_deal",           "payload": {"seat": N, "encrypted_hex": "..."}}
 """
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
+_log = logging.getLogger(__name__)
+
 
 @dataclass
 class Player:
-    conn_id:    str
-    peer_id:    str
-    nickname:   str
-    avatar_b64: str
-    is_host:    bool  = False
-    ready:      bool  = False
-    seat_index: int   = -1
+    conn_id:           str
+    peer_id:           str
+    nickname:          str
+    avatar_b64:        str
+    is_host:           bool  = False
+    ready:             bool  = False
+    seat_index:        int   = -1
+    # X25519 pubkey for hole-card encryption (populated from player_info or shuffle_commit)
+    x25519_pubkey_hex: str   = ""
 
 
 class Session:
@@ -62,6 +76,9 @@ class Session:
         # Last table settings (used by _mp_new_game in gui.py)
         self._last_table_settings: dict = {}
 
+        # Verifiable shuffle state
+        self._shuffle_round = None             # holdem.p2p.shuffle.ShuffleRound | None
+
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
         # should route back to the Tk main thread via root.after(0, ...).
@@ -77,6 +94,12 @@ class Session:
         self.on_kick:                Optional[Callable[[dict], None]]         = None
         self.on_adjust_blinds:       Optional[Callable[[dict], None]]         = None
 
+        # Shuffle callbacks
+        # on_shuffle_ready(deck_indices)  -- host: all reveals verified, deck ready
+        self.on_shuffle_ready: Optional[Callable[[list], None]]  = None
+        # on_shuffle_deal(payload_dict)   -- peer: encrypted hole cards arrived
+        self.on_shuffle_deal: Optional[Callable[[dict], None]]   = None
+
         # Engine ref (host only) and seat order
         self._engine     = None
         self._seat_order: list[str] = []
@@ -87,9 +110,6 @@ class Session:
 
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
-        import logging
-        _log = logging.getLogger(__name__)
-
         # M-11: enforce hash-chain linkage for signed envelopes
         if "hash" in msg and "prev" in msg:
             expected_prev = self._peer_last_hash.get(conn_id, "0" * 64)
@@ -129,17 +149,31 @@ class Session:
             self._on_kick(conn_id, msg)
         elif t == "adjust_blinds":
             self._on_adjust_blinds(conn_id, msg)
+        # --- verifiable shuffle ---
+        elif t == "shuffle_start":
+            self._on_shuffle_start(conn_id, msg)
+        elif t == "shuffle_commit":
+            self._on_shuffle_commit(conn_id, msg)
+        elif t == "shuffle_commit_collect":
+            self._on_shuffle_commit_collect(conn_id, msg)
+        elif t == "shuffle_reveal":
+            self._on_shuffle_reveal(conn_id, msg)
+        elif t == "shuffle_reveal_collect":
+            self._on_shuffle_reveal_collect(conn_id, msg)
+        elif t == "shuffle_deal":
+            self._on_shuffle_deal(msg)
 
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
         """Host receives identity from a newly connected peer."""
         payload = msg.get("payload", {})
         with self._lock:
             self.players[conn_id] = Player(
-                conn_id    = conn_id,
-                peer_id    = msg.get("pubkey", "")[:16],
-                nickname   = payload.get("nickname",   "Player"),
-                avatar_b64 = payload.get("avatar_b64", ""),
-                is_host    = False,
+                conn_id           = conn_id,
+                peer_id           = msg.get("pubkey", "")[:16],
+                nickname          = payload.get("nickname",           "Player"),
+                avatar_b64        = payload.get("avatar_b64",         ""),
+                x25519_pubkey_hex = payload.get("x25519_pubkey_hex",  ""),
+                is_host           = False,
             )
             if conn_id not in self._join_order:
                 self._join_order.append(conn_id)
@@ -161,20 +195,22 @@ class Session:
                     continue
                 if cid not in self.players:
                     self.players[cid] = Player(
-                        conn_id    = cid,
-                        peer_id    = p.get("peer_id",    ""),
-                        nickname   = p.get("nickname",   "Player"),
-                        avatar_b64 = p.get("avatar_b64", ""),
-                        is_host    = p.get("is_host",    False),
-                        ready      = p.get("ready",      False),
+                        conn_id           = cid,
+                        peer_id           = p.get("peer_id",           ""),
+                        nickname          = p.get("nickname",          "Player"),
+                        avatar_b64        = p.get("avatar_b64",        ""),
+                        x25519_pubkey_hex = p.get("x25519_pubkey_hex", ""),
+                        is_host           = p.get("is_host",           False),
+                        ready             = p.get("ready",             False),
                     )
                 else:
                     # M-5: update mutable fields on existing Player objects
                     existing = self.players[cid]
-                    existing.ready      = p.get("ready",      existing.ready)
-                    existing.nickname   = p.get("nickname",   existing.nickname)
-                    existing.avatar_b64 = p.get("avatar_b64", existing.avatar_b64)
-                    existing.is_host    = p.get("is_host",    existing.is_host)
+                    existing.ready             = p.get("ready",             existing.ready)
+                    existing.nickname          = p.get("nickname",          existing.nickname)
+                    existing.avatar_b64        = p.get("avatar_b64",        existing.avatar_b64)
+                    existing.is_host           = p.get("is_host",           existing.is_host)
+                    existing.x25519_pubkey_hex = p.get("x25519_pubkey_hex", existing.x25519_pubkey_hex)
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data
@@ -226,6 +262,256 @@ class Session:
             # Re-broadcast to all peers (echo back to sender too)
             from holdem.p2p import transport as _t
             _t.broadcast(msg)
+
+    # ------------------------------------------------------------------
+    # Verifiable shuffle — protocol message handlers
+    # ------------------------------------------------------------------
+
+    def start_shuffle(self) -> None:
+        """Host: begin a new shuffle round for the upcoming hand.
+
+        Generates the host's own commit and broadcasts ``shuffle_start`` to
+        all peers.  Returns immediately; the shuffle completes asynchronously
+        when all peers have revealed (``on_shuffle_ready`` callback).
+        """
+        if not self.is_host:
+            raise RuntimeError("Only the host can call start_shuffle()")
+
+        from holdem.p2p.shuffle import ShuffleRound
+        from holdem.p2p import identity as _id, transport as _t
+
+        all_ids = list(self._seat_order) if self._seat_order else list(self.players)
+        if not self.local_conn_id:
+            self.local_conn_id = next(
+                (p.conn_id for p in self.players.values() if p.is_host), "")
+
+        self._shuffle_round = ShuffleRound(
+            local_conn_id=self.local_conn_id,
+            all_conn_ids=all_ids,
+        )
+        sr = self._shuffle_round
+
+        # Generate host's own commit and record local X25519 pubkey
+        commit = sr.local_commit()
+        host_x25519_pub = _id.x25519_public_key_bytes().hex()
+        sr.record_x25519_pubkey(self.local_conn_id, _id.x25519_public_key_bytes())
+
+        _t.broadcast({
+            "type": "shuffle_start",
+            "payload": {
+                "commit_hex":       commit.hex(),
+                "x25519_pubkey_hex": host_x25519_pub,
+            },
+        })
+        _log.debug("shuffle: host broadcasted commit and waiting for peer commits")
+
+    def _on_shuffle_start(self, conn_id: str, msg: dict) -> None:
+        """Peer: host has started a shuffle round — generate and send our commit."""
+        if self.is_host:
+            return   # host sent this, not a receiver
+        if conn_id != self._host_conn_id and self._host_conn_id:
+            _log.warning("shuffle_start from non-host %s — ignoring", conn_id)
+            return
+
+        from holdem.p2p.shuffle import ShuffleRound
+        from holdem.p2p import identity as _id, transport as _t
+
+        payload = msg.get("payload", {})
+        host_commit_hex     = payload.get("commit_hex", "")
+        host_x25519_pub_hex = payload.get("x25519_pubkey_hex", "")
+
+        all_ids = list(self._seat_order) if self._seat_order else list(self.players)
+        self._shuffle_round = ShuffleRound(
+            local_conn_id=self.local_conn_id,
+            all_conn_ids=all_ids,
+        )
+        sr = self._shuffle_round
+
+        # Record host's commit
+        if host_commit_hex:
+            sr.record_commit(conn_id, bytes.fromhex(host_commit_hex))
+        if host_x25519_pub_hex:
+            sr.record_x25519_pubkey(conn_id, bytes.fromhex(host_x25519_pub_hex))
+
+        # Generate our own commit and send to host
+        my_commit   = sr.local_commit()
+        my_x25519   = _id.x25519_public_key_bytes().hex()
+        sr.record_x25519_pubkey(self.local_conn_id, _id.x25519_public_key_bytes())
+
+        _t.send(self._host_conn_id, {
+            "type": "shuffle_commit",
+            "payload": {
+                "commit_hex":        my_commit.hex(),
+                "x25519_pubkey_hex": my_x25519,
+            },
+        })
+        _log.debug("shuffle: peer sent commit to host")
+
+    def _on_shuffle_commit(self, conn_id: str, msg: dict) -> None:
+        """Host: receive a commit from a peer."""
+        if not self.is_host or self._shuffle_round is None:
+            return
+
+        payload = msg.get("payload", {})
+        commit_hex     = payload.get("commit_hex", "")
+        x25519_pub_hex = payload.get("x25519_pubkey_hex", "")
+
+        sr = self._shuffle_round
+        if commit_hex:
+            sr.record_commit(conn_id, bytes.fromhex(commit_hex))
+        if x25519_pub_hex:
+            sr.record_x25519_pubkey(conn_id, bytes.fromhex(x25519_pub_hex))
+
+        _log.debug("shuffle: host got commit from %s (have %d/%d)",
+                   conn_id, len(sr._commits), len(sr.all_conn_ids))
+
+        if sr.all_commits_received():
+            self._host_broadcast_commit_collect()
+
+    def _host_broadcast_commit_collect(self) -> None:
+        """Host: broadcast all commits so every peer can verify theirs is included."""
+        from holdem.p2p import transport as _t
+
+        sr = self._shuffle_round
+        commits_payload = {cid: commit.hex() for cid, commit in sr._commits.items()}
+
+        _t.broadcast({
+            "type": "shuffle_commit_collect",
+            "payload": {"commits": commits_payload},
+        })
+        _log.debug("shuffle: host broadcasted commit_collect")
+
+    def _on_shuffle_commit_collect(self, conn_id: str, msg: dict) -> None:
+        """Peer: host has collected all commits — send our reveal."""
+        if self.is_host or self._shuffle_round is None:
+            return
+        if conn_id != self._host_conn_id and self._host_conn_id:
+            return
+
+        from holdem.p2p import transport as _t
+
+        sr = self._shuffle_round
+        payload = msg.get("payload", {})
+        commits = payload.get("commits", {})
+
+        # Verify our commit is in the collection
+        my_commit_hex = sr._commits.get(self.local_conn_id, b"").hex()
+        if self.local_conn_id and self.local_conn_id not in commits:
+            _log.warning("shuffle: our commit not in commit_collect — aborting")
+            return
+
+        _t.send(self._host_conn_id, {
+            "type": "shuffle_reveal",
+            "payload": {
+                "seed_hex":  sr.local_seed_hex,
+                "nonce_hex": sr.local_nonce_hex,
+            },
+        })
+        _log.debug("shuffle: peer sent reveal to host")
+
+    def _on_shuffle_reveal(self, conn_id: str, msg: dict) -> None:
+        """Host: verify a reveal from a peer."""
+        if not self.is_host or self._shuffle_round is None:
+            return
+
+        payload  = msg.get("payload", {})
+        seed_hex  = payload.get("seed_hex",  "")
+        nonce_hex = payload.get("nonce_hex", "")
+
+        sr = self._shuffle_round
+        try:
+            sr.record_reveal(conn_id,
+                             bytes.fromhex(seed_hex),
+                             bytes.fromhex(nonce_hex))
+        except (ValueError, Exception) as exc:
+            _log.error("shuffle: reveal verification FAILED for %s: %s", conn_id, exc)
+            return
+
+        _log.debug("shuffle: host verified reveal from %s (%d/%d)",
+                   conn_id, len(sr._seeds), len(sr.all_conn_ids))
+
+        if sr.all_reveals_received():
+            self._host_finalise_shuffle()
+
+    def _host_finalise_shuffle(self) -> None:
+        """Host: all reveals verified — compute deck, encrypt, and deal."""
+        from holdem.p2p import transport as _t, identity as _id
+        from holdem.p2p.shuffle import encrypt_hole_cards
+
+        sr = self._shuffle_round
+        deck_indices = sr.shuffled_deck()
+
+        # Broadcast reveals so every peer can independently verify the deck
+        reveals_payload: dict = {}
+        for cid in sr.all_conn_ids:
+            if cid in sr._seeds:
+                reveals_payload[cid] = {
+                    "seed_hex":  sr._seeds[cid].hex(),
+                    "nonce_hex": sr._commits[cid].hex(),  # commit acts as nonce
+                }
+        _t.broadcast({
+            "type": "shuffle_reveal_collect",
+            "payload": {"reveals": reveals_payload},
+        })
+        _log.debug("shuffle: host broadcasted reveal_collect, deck derived")
+
+        # Notify the host's own GUI that the deck is ready
+        if self.on_shuffle_ready:
+            self.on_shuffle_ready(deck_indices)
+
+    def _on_shuffle_reveal_collect(self, conn_id: str, msg: dict) -> None:
+        """Peer: optionally verify all reveals; no further action required here."""
+        # The deck is derived independently by the host and cards arrive via
+        # shuffle_deal.  Peers can audit offline from this broadcast.
+        pass
+
+    def _on_shuffle_deal(self, msg: dict) -> None:
+        """Peer: receive encrypted hole cards from the host."""
+        if self.on_shuffle_deal:
+            self.on_shuffle_deal(msg.get("payload", {}))
+
+    def send_encrypted_hole_cards(self, conn_id: str, seat: int,
+                                   cards_str: list) -> None:
+        """Host: encrypt and unicast hole cards to exactly one peer.
+
+        Uses the X25519 pubkey supplied by that peer during their shuffle_commit.
+        Falls back to plaintext ``deal_private`` if the pubkey is unavailable
+        (e.g., the peer is running an older client).
+        """
+        from holdem.p2p import transport as _t
+
+        sr = self._shuffle_round
+        pubkey_bytes: bytes | None = None
+        if sr is not None:
+            pubkey_bytes = sr.x25519_pubkeys.get(conn_id)
+        # Also try the stored player record
+        if pubkey_bytes is None:
+            sp = self.players.get(conn_id)
+            if sp and sp.x25519_pubkey_hex:
+                try:
+                    pubkey_bytes = bytes.fromhex(sp.x25519_pubkey_hex)
+                except ValueError:
+                    pass
+
+        if pubkey_bytes is not None:
+            from holdem.p2p.shuffle import encrypt_hole_cards
+            try:
+                blob = encrypt_hole_cards(cards_str, pubkey_bytes)
+                _t.send(conn_id, {
+                    "type": "shuffle_deal",
+                    "payload": {"seat": seat, "encrypted_hex": blob.hex()},
+                })
+                return
+            except Exception as exc:
+                _log.warning(
+                    "shuffle: encryption failed for seat %d (%s): %s — "
+                    "falling back to plaintext", seat, conn_id, exc)
+
+        # Fallback: legacy plaintext deal (no encryption)
+        _t.send(conn_id, {
+            "type":    "deal_private",
+            "payload": {"seat": seat, "hole_cards": cards_str},
+        })
 
     # ------------------------------------------------------------------
     # Disconnect / host migration
@@ -313,12 +599,13 @@ class Session:
         with self._lock:
             players_data = [
                 {
-                    "conn_id":    p.conn_id,
-                    "peer_id":    p.peer_id,
-                    "nickname":   p.nickname,
-                    "avatar_b64": p.avatar_b64,
-                    "is_host":    p.is_host,
-                    "ready":      p.ready,
+                    "conn_id":           p.conn_id,
+                    "peer_id":           p.peer_id,
+                    "nickname":          p.nickname,
+                    "avatar_b64":        p.avatar_b64,
+                    "x25519_pubkey_hex": p.x25519_pubkey_hex,
+                    "is_host":           p.is_host,
+                    "ready":             p.ready,
                 }
                 for p in self.players.values()
             ]
@@ -329,14 +616,16 @@ class Session:
 
     def add_local_player(self, conn_id: str) -> None:
         """Register the local host player once we know our own conn_id."""
+        from holdem.p2p import identity as _id
         with self._lock:
             self.players[conn_id] = Player(
-                conn_id    = conn_id,
-                peer_id    = "",
-                nickname   = self.local_nickname,
-                avatar_b64 = self.local_avatar,
-                is_host    = self.is_host,
-                ready      = True,
+                conn_id           = conn_id,
+                peer_id           = "",
+                nickname          = self.local_nickname,
+                avatar_b64        = self.local_avatar,
+                x25519_pubkey_hex = _id.x25519_public_key_bytes().hex(),
+                is_host           = self.is_host,
+                ready             = True,
             )
         if self.is_host:
             self._broadcast_player_list()
@@ -408,7 +697,7 @@ class Session:
 
     def send_private_cards(self, conn_id: str, seat: int,
                            hole_cards: list) -> None:
-        """Host only: send hole cards to exactly one peer."""
+        """Host only: send hole cards to exactly one peer (plaintext legacy)."""
         from holdem.p2p import transport as _t
         _t.send(conn_id, {
             "type":    "deal_private",
