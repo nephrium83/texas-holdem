@@ -613,10 +613,17 @@ class OnboardingFlow:
         )
         _p2p_pkg._session = sess
 
-        # Wire transport callbacks
+        # H-12: register the host under a stable local ID derived from the
+        # Ed25519 public key — NOT inside an on_connect callback (which fires
+        # for the first *remote* peer, not for the host itself).
+        host_local_id = _identity.peer_id()
+        sess.local_conn_id = host_local_id
+        sess.add_local_player(host_local_id)
+
+        # Wire transport callbacks — stale-callback fix: clear before registering
+        # so repeated dialog opens don't accumulate duplicate handlers.
+        _transport.reset_callbacks()
         _transport.on_message(sess.handle_message)
-        _transport.on_connect(lambda cid, addr: sess.add_local_player(cid)
-                              if not sess.players else None)
         _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
 
         # Announce on LAN multicast in background
@@ -726,9 +733,17 @@ class OnboardingFlow:
                     "All players must be ready before the host can start.",
                     parent=win)
                 return
+            # H-10: include betting structure and rule flags so peers can create
+            # the correct Engine on their side.
+            stored_rules = cfg.load()["last_table"]
             table_settings = {
-                "sb": 10, "bb": 20, "stack": 1000,
-                "clock_base": 25,
+                "sb":        stored_rules.get("sb",         10),
+                "bb":        stored_rules.get("bb",         20),
+                "stack":     stored_rules.get("stack",    1000),
+                "structure": stored_rules.get("structure", "No-Limit"),
+                "rit":       stored_rules.get("rit",       "Ask"),
+                "straddles": stored_rules.get("straddles",  False),
+                "clock_base": stored_rules.get("clock_base", 25),
             }
             try:
                 sess.start_game(table_settings)
@@ -846,13 +861,18 @@ class OnboardingFlow:
                     conn_id = _transport.connect(host_addr)
                     _conn_id_ref[0] = conn_id
 
-                    # Build our session
+                    # M-7: verify the host's pubkey prefix matches the room code
+                    # (done via the first signed player_ack which carries pubkey)
+                    _peer_id_prefix_ref[0] = parsed.get("peer_id_prefix", "")
+
+                    # Build our session; clear stale callbacks from any previous dialog
                     sess = _session_mod.Session(
                         is_host    = False,
                         nickname   = self.nickname,
                         avatar_b64 = getattr(self, "avatar_b64", ""),
                     )
                     _p2p_pkg._session = sess
+                    _transport.reset_callbacks()
                     _transport.on_message(sess.handle_message)
                     _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
 
@@ -882,8 +902,9 @@ class OnboardingFlow:
                 except Exception as exc:
                     win.after(0, lambda e=exc: _on_error("Connection failed", str(e)))
 
-            _ready_btn_ref = [None]
-            _conn_id_ref   = [None]
+            _ready_btn_ref       = [None]
+            _conn_id_ref         = [None]
+            _peer_id_prefix_ref  = [None]
 
             def _on_error(title, msg):
                 connect_btn.config(state="normal")
@@ -925,6 +946,21 @@ class OnboardingFlow:
                               if local_cid in seat_order else 1)
                 ts = payload.get("table_settings",
                                  {"sb": 10, "bb": 20, "stack": 1000})
+
+                # M-7: verify host pubkey matches the peer_id_prefix from the room code.
+                # The host's conn_id in the seat_order is its local ID (peer_id hex).
+                expected_prefix = _peer_id_prefix_ref[0] or ""
+                if expected_prefix:
+                    host_cid = next(
+                        (p.conn_id for p in sess.players.values() if p.is_host), "")
+                    if host_cid and not host_cid.startswith(expected_prefix):
+                        win.after(0, lambda: _on_error(
+                            "Host verification failed",
+                            "The host's identity does not match the room code.\n"
+                            "Possible man-in-the-middle — connection aborted.",
+                        ))
+                        return
+
                 win.destroy()
                 self._launch_mp_game(sess, is_host=False,
                                      local_seat=local_seat,

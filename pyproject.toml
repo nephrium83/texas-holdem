@@ -26,7 +26,7 @@ Repository = "https://github.com/nephrium83/texas-holdem"
 holdem = "holdem.gui:main"
 
 [tool.setuptools]
-packages = ["holdem"]
+packages = ["holdem", "holdem.p2p"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
