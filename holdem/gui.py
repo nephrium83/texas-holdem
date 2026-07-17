@@ -912,11 +912,16 @@ class Holdem:
     def _mp_setup_callbacks(self) -> None:
         """Wire session callbacks based on host/peer role."""
         sess = self._mp_session
-        if not self._mp_is_host:
+        if self._mp_is_host:
+            sess.on_shuffle_ready = lambda deck: self.root.after(
+                0, lambda d=deck: self._mp_on_shuffle_ready(d))
+        else:
             sess.on_game_state   = lambda s: self.root.after(
                 0, lambda st=s: self._mp_apply_state(st))
             sess.on_deal_private = lambda d: self.root.after(
                 0, lambda pd=d: self._mp_on_deal_private(pd))
+            sess.on_shuffle_deal = lambda d: self.root.after(
+                0, lambda pd=d: self._mp_on_shuffle_deal(pd))
         sess.on_chat = lambda nick, txt: self.root.after(
             0, lambda n=nick, t=txt: self._append_chat(n, t))
         sess.on_host_changed = lambda am_host: self.root.after(
@@ -1006,7 +1011,7 @@ class Holdem:
             self.b_next.config(state="disabled")
 
     def _mp_after_deal(self) -> None:
-        """Host: after dealing, send private cards and broadcast state."""
+        """Host: after dealing, send hole cards (encrypted) and broadcast state."""
         e    = self.engine
         sess = self._mp_session
         seat_order = sess._seat_order
@@ -1014,7 +1019,8 @@ class Holdem:
             sp = sess.players.get(cid)
             if sp and not sp.is_host and i < len(e.players):
                 cards_str = [_card_to_str(c) for c in e.players[i].hole]
-                sess.send_private_cards(cid, i, cards_str)
+                # Prefer encrypted send; falls back to plaintext if no pubkey
+                sess.send_encrypted_hole_cards(cid, i, cards_str)
         sess.broadcast_game_state()
 
     def _mp_apply_state(self, state: dict) -> None:
@@ -1399,9 +1405,24 @@ class Holdem:
             return self.rng.random() < {"Maniac": 0.4, "Loose": 0.15}.get(
                 p.style, 0.0)
 
+        if self._mp_mode and self._mp_is_host:
+            # Verifiable shuffle: kick off the commit-reveal protocol.
+            # _mp_on_shuffle_ready() will call _mp_do_start_hand() once all
+            # peers have revealed their seeds.
+            self._pending_straddle_fn = straddle_fn
+            self._mp_session.start_shuffle()
+            return
+
+        # Solo / local AI game: deal directly with the RNG-shuffled deck.
         if not e.start_hand(straddle_fn=straddle_fn):
             self.finish_game(live)
             return
+        self._post_start_hand()
+
+    def _post_start_hand(self):
+        """Run the common post-start_hand bookkeeping (solo and MP-host paths)."""
+        e     = self.engine
+        local = self.hero_seat
         self.hand_logger.on_hand_start(e.players, e)
         self.session_stats.record_hand_start(e.players)
         self._vpip_counted = set()
@@ -1422,6 +1443,44 @@ class Holdem:
         self.loop()
         if self._mp_mode and self._mp_is_host:
             self._mp_after_deal()
+
+    # ---------------------------------------- Verifiable-shuffle callbacks
+
+    def _mp_on_shuffle_ready(self, deck_indices: list) -> None:
+        """Host: all peers revealed — build the verified deck and start the hand."""
+        from .engine import Deck as _Deck
+        e = self.engine
+        if e is None or self.game_over or not self.hand_over:
+            return
+        deck = _Deck.from_indices(deck_indices)
+        straddle_fn = getattr(self, "_pending_straddle_fn", None)
+        if not e.start_hand(straddle_fn=straddle_fn, deck=deck):
+            live = [p for p in e.players if p.stack > 0]
+            self.finish_game(live)
+            return
+        self._post_start_hand()
+
+    def _mp_on_shuffle_deal(self, data: dict) -> None:
+        """Peer: decrypt encrypted hole cards received from the host."""
+        if data.get("seat") != self._mp_local_seat:
+            return
+        encrypted_hex = data.get("encrypted_hex", "")
+        if not encrypted_hex:
+            return
+        try:
+            from holdem.p2p import identity as _id
+            from holdem.p2p.shuffle import decrypt_hole_cards
+            blob = bytes.fromhex(encrypted_hex)
+            cards_str = decrypt_hole_cards(blob, _id.x25519_private_key())
+            self._mp_hole_cards = [_str_to_card(s) for s in cards_str]
+            e = self.engine
+            if e and self._mp_local_seat < len(e.players):
+                e.players[self._mp_local_seat].hole = list(self._mp_hole_cards)
+            self.redraw()
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "shuffle_deal decrypt failed: %s — trying plaintext fallback", exc)
 
     def finish_game(self, live):
         self.stop_clock()
