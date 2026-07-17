@@ -6,5 +6,8 @@ dist/
 .pytest_cache/
 .venv/
 venv/
+# PyInstaller
+*.spec.bak
+
 # local launcher with a machine-specific interpreter path
 Play Poker.bat
