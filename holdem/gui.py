@@ -84,7 +84,7 @@ BLIND_LEVELS = [(10, 20), (15, 30), (25, 50), (50, 100), (75, 150),
 
 SPEEDS = {"Slow": 950, "Normal": 550, "Fast": 260, "Instant": 60}
 
-HERO = 0
+HERO = 0   # default seat for solo play; see Holdem.hero_seat property for MP
 
 
 def rrect(cv, x1, y1, x2, y2, r, **kw):
@@ -239,6 +239,14 @@ class Holdem:
             self._mp_new_game()
         else:
             self._show(self.setup)
+
+    # -------------------------------------------------------------- properties
+
+    @property
+    def hero_seat(self) -> int:
+        """M-4: Local player's seat index.  In MP mode this is _mp_local_seat;
+        in solo mode it is always HERO (0)."""
+        return self._mp_local_seat if self._mp_mode else HERO
 
     # ------------------------------------------------------------- screens
 
@@ -690,7 +698,7 @@ class Holdem:
             tk.Button(self._emote_frame, text=_em,
                       font=("Segoe UI", 16), bg=t["panel"],
                       relief="flat", cursor="hand2", bd=0,
-                      command=lambda em=_em: self._show_emote(HERO, em)
+                      command=lambda em=_em: self._show_emote(self.hero_seat, em)
                       ).pack(side="left", padx=1)
         self._emote_frame.pack_forget()
 
@@ -908,9 +916,14 @@ class Holdem:
         sess = self._mp_session
         ts   = getattr(sess, '_last_table_settings',
                        {"sb": 10, "bb": 20, "stack": 1000})
-        sb    = ts.get("sb",    10)
-        bb    = ts.get("bb",    20)
-        stack = ts.get("stack", 1000)
+        sb        = ts.get("sb",        10)
+        bb        = ts.get("bb",        20)
+        stack     = ts.get("stack",   1000)
+        structure = ts.get("structure", "No-Limit")
+
+        # H-10/M-13: store run-it-twice and straddle rules so loop/deal use them
+        self._mp_rit       = ts.get("rit",       "Ask")
+        self._mp_straddles = ts.get("straddles",  False)
 
         seat_order = sess._seat_order or list(sess.players.keys())
         n = max(2, len(seat_order))
@@ -929,7 +942,8 @@ class Holdem:
                        human=is_local)
             players.append(p)
 
-        self.engine = Engine(players, sb=sb, bb=bb)
+        # H-10: pass betting structure to Engine (was always defaulting to No-Limit)
+        self.engine = Engine(players, sb=sb, bb=bb, structure=structure)
 
         # Common state reset
         self.buyin  = stack
@@ -1198,6 +1212,14 @@ class Holdem:
         if am_new_host:
             self._mp_is_host = True
             self._show_banner("Host left — you are now hosting", duration_ms=4000)
+            # H-11: wire the session engine and action callback so broadcast works
+            if self._mp_session is not None and self.engine is not None:
+                self._mp_session._engine = self.engine
+                # Re-apply the last known game state so the engine is up to date
+                if self._mp_remote_state:
+                    self._mp_apply_state(self._mp_remote_state)
+                self._mp_session.on_action = lambda seat, act, amt: self.root.after(
+                    0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
             self._mp_broadcast_state()
             # Show the host controls bar if not already visible
             if not getattr(self, "_host_bar_built", False):
@@ -1309,13 +1331,14 @@ class Holdem:
                 if not p.human and 0 <= p.stack < self.buyin:
                     e.add_chips(p.idx, self.buyin - p.stack)
 
-        hero = e.players[HERO]
+        local = self.hero_seat
+        hero = e.players[local]
         if cash and hero.stack == 0 and not hero.sitting_out:
             if messagebox.askyesno(
                     "Rebuy", f"You're felted. Rebuy for {self.buyin:,}?"):
-                e.add_chips(HERO, self.buyin)
+                e.add_chips(local, self.buyin)
             else:
-                e.sit_out(HERO)
+                e.sit_out(local)
                 self.b_sit.config(text="I'm back")
 
         live = [p for p in e.players if p.stack > 0]
@@ -1367,7 +1390,7 @@ class Holdem:
         _audio.play("deal")
         cfg.set('hands_played_total', cfg.get('hands_played_total') + 1)
         self.update_xp(hands=1)
-        if e.bb_i == HERO and e.players[HERO].in_seat:
+        if e.bb_i == local and e.players[local].in_seat:
             self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
         self.flush_log()
         self.l_blinds.config(
@@ -1385,7 +1408,7 @@ class Holdem:
         self.hand_over = True
         self.lock()
         self.b_next.config(state="disabled")
-        if live and live[0].idx == HERO:
+        if live and live[0].idx == self.hero_seat:
             self.l_status.config(text="You took the whole table. Nice.")
             self.say("pot", "*** You win — everyone else is broke. ***")
         else:
@@ -1425,15 +1448,16 @@ class Holdem:
         i = e.actor
         self.redraw()
 
-        hero = e.players[HERO]
-        if i == HERO and hero.sitting_out:      # sitting out: check or fold
+        local = self.hero_seat
+        hero = e.players[local]
+        if i == local and hero.sitting_out:     # sitting out: check or fold
             self.lock()
-            act = "call" if e.legal(HERO)["can_check"] else "fold"
+            act = "call" if e.legal(local)["can_check"] else "fold"
             self.root.after(max(60, self.delay // 3),
                             lambda a=act: self._forced(a))
             return
 
-        if i == HERO and not self.v_observe.get():
+        if i == local and not self.v_observe.get():
             self.start_equity()
             if self._maybe_fire_pre_action():
                 return    # pre-action fired; loop() will be called again
@@ -1449,9 +1473,10 @@ class Holdem:
         if self._defer(lambda a=action: self._forced(a)):
             return
         e = self.engine
-        if e is None or e.actor != HERO:
+        local = self.hero_seat
+        if e is None or e.actor != local:
             return
-        e.act(HERO, action, 0)
+        e.act(local, action, 0)
         self.flush_log()
         self.redraw()
         self.root.after(max(60, self.delay // 3), self.loop)
@@ -1469,9 +1494,9 @@ class Holdem:
         runs = 1
         board_left = len(e.board) < 5
         if board_left:
-            hero_in = (any(p.idx == HERO for p in e.contested())
+            hero_in = (any(p.idx == self.hero_seat for p in e.contested())
                        and not self.v_observe.get()
-                       and not e.players[HERO].sitting_out)
+                       and not e.players[self.hero_seat].sitting_out)
             if hero_in and self._maybe_offer_cashout(e):
                 return   # hand settled via EV cashout
             mode = self.v_rit.get()
@@ -1503,7 +1528,8 @@ class Holdem:
         self.flush_log()
         self.redraw()
         # ~20% chance of a contextual emote from this AI seat
-        if random.random() < 0.20:
+        # M-12: use the seeded rng to keep replay deterministic
+        if self.rng.random() < 0.20:
             _p = e.players[i]
             _emote = None
             if _p.style == "Maniac":
@@ -1544,9 +1570,10 @@ class Holdem:
         """If a pre-action checkbox is armed and still valid, fire it.
         Returns True if an action was dispatched (caller should return)."""
         e = self.engine
-        if e is None or e.actor != HERO or self.v_observe.get():
+        local = self.hero_seat
+        if e is None or e.actor != local or self.v_observe.get():
             return False
-        lg = e.legal(HERO)
+        lg = e.legal(local)
 
         if self.v_pre_cf.get():
             # Check / Fold: check when free, otherwise fold
@@ -1570,14 +1597,15 @@ class Holdem:
     def _fire_pre_action(self, action: str) -> None:
         """Execute a pre-selected action for the hero."""
         e = self.engine
-        if e is None or e.actor != HERO:
+        local = self.hero_seat
+        if e is None or e.actor != local:
             return
         self.stop_clock()
         self.lock()
-        lg = e.legal(HERO)
+        lg = e.legal(local)
         if e.street == "preflop":
-            self._record_vpip_pfr(HERO, action, lg)
-        e.act(HERO, action, 0)
+            self._record_vpip_pfr(local, action, lg)
+        e.act(local, action, 0)
         if action == "fold":
             _audio.play("fold")
         elif action == "call":
@@ -1609,7 +1637,7 @@ class Holdem:
 
     def unlock(self):
         e = self.engine
-        lg = e.legal(HERO)
+        lg = e.legal(self.hero_seat)
         t = self.theme
 
         # Hero's turn: switch back to size-preset buttons
@@ -1691,7 +1719,7 @@ class Holdem:
 
     def _sync_raise_label(self):
         e = self.engine
-        local = self._mp_local_seat if self._mp_mode else HERO
+        local = self.hero_seat
         if e is None or e.actor != local:
             return
         lg = e.legal(local)
@@ -1705,7 +1733,7 @@ class Holdem:
 
     def preset(self, frac):
         e = self.engine
-        local = self._mp_local_seat if self._mp_mode else HERO
+        local = self.hero_seat
         if e is None or e.actor != local:
             return
         lg = e.legal(local)
@@ -1719,7 +1747,7 @@ class Holdem:
 
     def hero(self, action):
         e = self.engine
-        local = self._mp_local_seat if self._mp_mode else HERO
+        local = self.hero_seat
         if e is None or e.actor != local or self.v_observe.get():
             return
         self.stop_clock()
@@ -1756,7 +1784,7 @@ class Holdem:
             if str(self.b_next["state"]) == "normal":
                 self.deal()
             return
-        if self.engine is None or self.engine.actor != HERO:
+        if self.engine is None or self.engine.actor != self.hero_seat:
             return
         if k == "f" and str(self.b_fold["state"]) == "normal":
             self.hero("fold")
@@ -1772,6 +1800,7 @@ class Holdem:
                        self.showdown(runs=r, tabled=tb)):
             return
         e = self.engine
+        local = self.hero_seat
         self.lock()
         self.stop_clock()
         res = e.settle(runs=runs, force_tabled=tabled)
@@ -1808,7 +1837,7 @@ class Holdem:
         nruns = len(res["runs"])
         for p in sorted(alive, key=lambda q: -q.won):
             tag = "WIN " if p.idx in res["winners"] else "    "
-            nm = "You" if p.idx == HERO else p.name
+            nm = "You" if p.idx == local else p.name
             if p.idx in res.get("mucked", ()):
                 lines.append(f"    {nm:<4} mucks")
             elif nruns >= 2:
@@ -1824,20 +1853,20 @@ class Holdem:
                 lines.append(f"{tag}{nm:<4} wins uncontested  +{p.won}")
         self.l_show.config(text="\n".join(lines) if lines else "-")
 
-        if HERO in res["winners"]:
-            self.l_status.config(text=f"You win {e.players[HERO].won}.")
+        if local in res["winners"]:
+            self.l_status.config(text=f"You win {e.players[local].won}.")
             _audio.play("win")
             # update persistent bankroll with winnings
-            won = e.players[HERO].won
+            won = e.players[local].won
             if won > 0:
                 cfg.set('bankroll', cfg.get('bankroll') + won)
             self.update_xp(pots_won=1)
-        elif not e.players[HERO].in_seat:
-            if e.players[HERO].sitting_out or e.players[HERO].wait_for_bb:
+        elif not e.players[local].in_seat:
+            if e.players[local].sitting_out or e.players[local].wait_for_bb:
                 self.l_status.config(text="Sitting out.")
             else:
                 self.l_status.config(text="You're out — the table plays on.")
-        elif e.players[HERO].folded:
+        elif e.players[local].folded:
             self.l_status.config(text="You folded. Next hand?")
         else:
             self.l_status.config(text="You lose the pot.")
@@ -1849,7 +1878,7 @@ class Holdem:
                 and self.v_mode.get() == "Cash"):
             self.b_rabbit.config(state="normal")
         if self.v_mode.get() == "Cash":
-            hero = e.players[HERO]
+            hero = e.players[local]
             cap_bb = self.table_rules.get("buyin_max_bb", 100)
             if hero.stack + hero.total < cap_bb * e.bb:
                 self.b_add.config(state="normal")
@@ -1863,7 +1892,7 @@ class Holdem:
                             lambda: self.finish_game(alive_next))
             return
 
-        hero = e.players[HERO]
+        hero = e.players[local]
         hero_idle = (hero.stack <= 0 and self.v_mode.get() != "Cash") \
             or hero.sitting_out or hero.wait_for_bb
         self.b_next.config(state="normal")
@@ -1880,7 +1909,7 @@ class Holdem:
         self.stop_clock()
         e = self.engine
         if (not self.v_clock.get() or self.v_observe.get() or e is None
-                or e.players[HERO].sitting_out):
+                or e.players[self.hero_seat].sitting_out):
             return
         self.clock_phase = "base"
         self.clock_until = time.time() + CLOCK_BASE
@@ -1901,7 +1930,7 @@ class Holdem:
 
     def _clock_tick(self):
         e = self.engine
-        if e is None or e.actor != HERO or self.clock_phase == "off":
+        if e is None or e.actor != self.hero_seat or self.clock_phase == "off":
             return
         now = time.time()
         left = self.clock_until - now
@@ -1915,7 +1944,7 @@ class Holdem:
                     self.bank = 0.0
                 self.clock_phase = "off"
                 self.l_clock.config(text="0:00")
-                lg = e.legal(HERO)
+                lg = e.legal(self.hero_seat)
                 if lg["can_check"]:
                     self.say("check", "Clock ran out — checked.")
                     self._forced("call")
@@ -1974,7 +2003,7 @@ class Holdem:
 
         # Rank (1 = chip leader) among all players
         ranked = sorted(e.players, key=lambda p: p.stack, reverse=True)
-        rank = next((i + 1 for i, p in enumerate(ranked) if p.idx == HERO),
+        rank = next((i + 1 for i, p in enumerate(ranked) if p.idx == self.hero_seat),
                     "-")
         total = len(e.players)
 
@@ -2021,9 +2050,10 @@ class Holdem:
         e = self.engine
         if e is None or self.game_over:
             return
-        hero = e.players[HERO]
+        local = self.hero_seat
+        hero = e.players[local]
         if not hero.sitting_out:
-            e.sit_out(HERO)
+            e.sit_out(local)
             self.b_sit.config(text="I'm back")
             self.say("fold", "You sit out.")
         else:
@@ -2031,9 +2061,9 @@ class Holdem:
                 post = messagebox.askyesno(
                     "Return", "Post the missed blinds now?\n"
                               "(No = wait for the big blind)")
-                e.sit_in(HERO, post_now=post)
+                e.sit_in(local, post_now=post)
             else:
-                e.sit_in(HERO)
+                e.sit_in(local)
             self.b_sit.config(text="Sit out")
             self.say("hand", "You're back.")
 
@@ -2041,7 +2071,8 @@ class Holdem:
         e = self.engine
         if e is None or not self.hand_over or self.v_mode.get() != "Cash":
             return
-        hero = e.players[HERO]
+        local = self.hero_seat
+        hero = e.players[local]
         cap = self.table_rules.get("buyin_max_bb", 100) * e.bb - hero.stack
         if cap <= 0:
             messagebox.showinfo("Add chips", "You're at the table max.")
@@ -2050,7 +2081,7 @@ class Holdem:
             "Add chips", f"Add how much? (max {cap:,})",
             minvalue=1, maxvalue=cap,
             initialvalue=min(cap, self.buyin))
-        if amt and e.add_chips(HERO, amt):
+        if amt and e.add_chips(local, amt):
             self.say("pot", f"You add {amt:,}.")
             self.redraw()
 
@@ -2078,7 +2109,8 @@ class Holdem:
         False otherwise.  Must be called from the main (Tkinter) thread."""
         if self._cashout_offered:
             return False
-        hero = e.players[HERO]
+        local = self.hero_seat
+        hero = e.players[local]
         if not hero.all_in or hero.folded or not hero.in_seat:
             return False
         if self.v_observe.get() or hero.sitting_out:
@@ -2086,7 +2118,7 @@ class Holdem:
         pot = e.pot
         if pot < 10 * e.bb:
             return False
-        opp = [p for p in e.contested() if p.idx != HERO]
+        opp = [p for p in e.contested() if p.idx != local]
         n_opp = len(opp)
         if n_opp == 0:
             return False
@@ -2133,10 +2165,12 @@ class Holdem:
 
         self.hand_over = True
         self.result = {
-            "winners": {HERO}, "pots": [], "runs": [],
-            "shown": {HERO}, "mucked": set(),
-            "order": [HERO], "refund": None, "tabled": False,
+            "winners": {local}, "pots": [{"amount": pot, "eligible": [local], "runs": []}],
+            "runs": [], "shown": {local}, "mucked": set(),
+            "order": [local], "refund": None, "tabled": False,
         }
+        # H-8: record the cashout in hand history (was previously bypassed)
+        self.hand_logger.on_settle(self.result, e)
         self.l_status.config(text=f"Cashed out for {net:,}  "
                                    f"({hero_eq:.0%} equity).")
         self.l_hint.config(text="")
@@ -2144,6 +2178,9 @@ class Holdem:
         self.say("pot",
                  f"EV cashout: You take {net:,} "
                  f"({hero_eq:.0%} × {pot:,} − 1% fee)")
+        # update persistent bankroll
+        if net > 0:
+            cfg.set('bankroll', cfg.get('bankroll') + net)
         self.redraw()
 
         alive_next = [p for p in e.players if p.stack > 0]
@@ -2480,9 +2517,9 @@ class Holdem:
                         and e is not None and len(e.players) >= 3)
         self.b_straddle.config(
             state="normal" if can_straddle else "disabled")
-        if (e is not None and e.actor == HERO and not self.hand_over
+        if (e is not None and e.actor == self.hero_seat and not self.hand_over
                 and not self.v_observe.get()
-                and not e.players[HERO].sitting_out):
+                and not e.players[self.hero_seat].sitting_out):
             self.start_clock()
 
     def _sync_resume(self):
@@ -2513,13 +2550,13 @@ class Holdem:
         e = self.engine
         self.eq_gen += 1
         gen = self.eq_gen
-        hero = e.players[HERO]
+        hero = e.players[self.hero_seat]
         if (not self.v_odds.get() or not self.aids_ok()
                 or not hero.hole or hero.folded):
             self.eq_text = "-"
             self.eq_bars = (0, 0, 1)
             return
-        opp = len([p for p in e.contested() if p.idx != HERO])
+        opp = len([p for p in e.contested() if p.idx != self.hero_seat])
         if opp == 0:
             self.eq_text = "You're the only one left."
             self.eq_bars = (1, 0, 0)
@@ -2691,7 +2728,7 @@ class Holdem:
                 cv.create_text(sx, sy, text="D", fill="#1a1a1a",
                                font=("Segoe UI", 9, "bold"))
 
-        hero = e.players[HERO]
+        hero = e.players[self.hero_seat]
         self.l_stack.config(text=f"{hero.stack:,}"
                             + ("  ALL-IN" if hero.all_in else ""))
         self.draw_equity()
@@ -2703,7 +2740,7 @@ class Holdem:
         e = self.engine
         cv = self.cv
         t = self.theme
-        hero = p.idx == HERO
+        hero = p.idx == self.hero_seat
         w, h = (150, 104) if hero else (132, 92)
 
         if not p.in_seat:
@@ -2853,7 +2890,7 @@ class Holdem:
 
     def hint(self, lg):
         e = self.engine
-        p = e.players[HERO]
+        p = e.players[self.hero_seat]
         pot = lg["pot"]
         call = lg["to_call"]
 
