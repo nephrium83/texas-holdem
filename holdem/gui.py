@@ -403,6 +403,190 @@ class Holdem:
         # fire daily bonus toast after UI is ready
         self.root.after(800, self._maybe_show_daily_bonus)
 
+    def _build_host_controls(self, f) -> None:
+        """Build the host admin bar above the action buttons (mp host only)."""
+        t = self.theme
+        hbar = tk.Frame(f, bg=t["panel"], pady=3)
+        hbar.pack(fill="x", side="bottom")
+        self._host_bar = hbar
+
+        tk.Label(hbar, text="HOST:", bg=t["panel"], fg=t["gold"],
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=(8, 6))
+
+        def hbtn(txt, cmd, **kw):
+            b = tk.Button(hbar, text=txt, command=cmd, relief="flat",
+                          bg=t["btn"], fg=t["btn_text"],
+                          font=("Segoe UI", 8), cursor="hand2", padx=6, **kw)
+            b.pack(side="left", padx=2)
+            return b
+
+        self._btn_host_pause  = hbtn("⏸ Pause",        self._mp_host_pause)
+        self._btn_host_resume = hbtn("▶ Resume",        self._mp_host_resume)
+        self._btn_host_resume.config(state="disabled")
+        hbtn("Kick player",    self._mp_host_kick_dialog)
+        hbtn("Adjust blinds",  self._mp_host_adjust_blinds_dialog)
+
+    # ---------------------------------------- Host admin actions
+
+    def _mp_host_pause(self) -> None:
+        """Host pauses the game and notifies all peers."""
+        from .p2p import transport as _t
+        _t.broadcast({"type": "pause", "payload": {"reason": "host paused"}})
+        self._mp_game_paused = True
+        self.paused = True
+        self._btn_host_pause.config(state="disabled")
+        self._btn_host_resume.config(state="normal")
+        self.lock()
+        self._mp_show_pause_overlay()
+
+    def _mp_host_resume(self) -> None:
+        """Host resumes the game and notifies all peers."""
+        from .p2p import transport as _t
+        _t.broadcast({"type": "resume", "payload": {}})
+        self._mp_game_paused = False
+        self.paused = False
+        self._btn_host_pause.config(state="normal")
+        self._btn_host_resume.config(state="disabled")
+        self._mp_hide_pause_overlay()
+        # Unlock controls if it's the host's turn
+        e = self.engine
+        if e is not None and e.actor == self._mp_local_seat:
+            self._mp_unlock()
+
+    def _mp_host_kick_dialog(self) -> None:
+        """Host opens a dialog to select and kick a connected player."""
+        sess = self._mp_session
+        if sess is None:
+            return
+        t = self.theme
+
+        win = tk.Toplevel(self.root)
+        win.title("Kick Player")
+        win.configure(bg=t["panel"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        self.root.update_idletasks()
+        dw, dh = 320, 260
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text="Kick Player", bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 12, "bold")).pack(pady=(12, 8))
+
+        with sess._lock:
+            others = [(p.conn_id, p.nickname)
+                      for p in sess.players.values() if not p.is_host]
+
+        lb = tk.Listbox(win, bg=t["bg"], fg=t["text"], relief="flat",
+                        selectmode="single", height=6,
+                        font=("Segoe UI", 10), highlightthickness=0)
+        lb.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+
+        conn_map: dict[str, str] = {}
+        for cid, nick in others:
+            lb.insert("end", nick)
+            conn_map[nick] = cid
+
+        def _do_kick():
+            sel = lb.curselection()
+            if not sel:
+                messagebox.showwarning("No selection",
+                                       "Please select a player to kick.",
+                                       parent=win)
+                return
+            nick = lb.get(sel[0])
+            cid  = conn_map.get(nick, "")
+            if not cid:
+                return
+            from .p2p import transport as _t
+            _t.broadcast({"type": "kick",
+                           "payload": {"conn_id": cid, "nickname": nick}})
+            _t.disconnect(cid)
+            win.destroy()
+
+        bbar = tk.Frame(win, bg=t["panel"])
+        bbar.pack(fill="x", padx=16, pady=(0, 12))
+        tk.Button(bbar, text="Cancel", command=win.destroy, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 9), cursor="hand2").pack(side="left")
+        tk.Button(bbar, text="Kick", command=_do_kick, relief="flat",
+                  bg="#5c2333", fg="#ffe8ee",
+                  font=("Segoe UI", 9, "bold"), cursor="hand2",
+                  padx=10).pack(side="right")
+
+    def _mp_host_adjust_blinds_dialog(self) -> None:
+        """Host opens a dialog to change SB/BB for the next hand."""
+        t = self.theme
+        e = self.engine
+        cur_sb = e.sb if e else 10
+        cur_bb = e.bb if e else 20
+
+        win = tk.Toplevel(self.root)
+        win.title("Adjust Blinds")
+        win.configure(bg=t["panel"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        self.root.update_idletasks()
+        dw, dh = 290, 210
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text="Adjust Blinds (next hand)",
+                 bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 11, "bold")).pack(pady=(12, 10))
+
+        body = tk.Frame(win, bg=t["panel"])
+        body.pack(fill="x", padx=20)
+
+        v_sb = tk.IntVar(value=cur_sb)
+        v_bb = tk.IntVar(value=cur_bb)
+
+        def _row(label, var):
+            fr = tk.Frame(body, bg=t["panel"])
+            fr.pack(fill="x", pady=4)
+            tk.Label(fr, text=label, bg=t["panel"], fg=t["text"],
+                     font=("Segoe UI", 9), width=14, anchor="e").pack(
+                side="left")
+            tk.Spinbox(fr, textvariable=var, from_=1, to=10000, width=8,
+                       bg=t["bg"], fg=t["text"], insertbackground=t["text"],
+                       relief="flat", justify="center").pack(
+                side="left", padx=(6, 0))
+
+        _row("Small blind:", v_sb)
+        _row("Big blind:",   v_bb)
+
+        def _confirm():
+            sb = v_sb.get()
+            bb = v_bb.get()
+            if bb <= sb:
+                messagebox.showwarning(
+                    "Invalid blinds",
+                    "Big blind must be greater than small blind.",
+                    parent=win)
+                return
+            from .p2p import transport as _t
+            _t.broadcast({"type": "adjust_blinds",
+                           "payload": {"sb": sb, "bb": bb}})
+            if self.engine:
+                self.engine.sb = sb
+                self.engine.bb = bb
+            self.l_blinds.config(text=f"Blinds {sb}/{bb}")
+            win.destroy()
+
+        bbar = tk.Frame(win, bg=t["panel"])
+        bbar.pack(fill="x", padx=20, pady=(8, 12))
+        tk.Button(bbar, text="Cancel", command=win.destroy, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 9), cursor="hand2").pack(side="left")
+        tk.Button(bbar, text="Confirm", command=_confirm, relief="flat",
+                  bg=t["accent"], fg="#04040c",
+                  font=("Segoe UI", 9, "bold"), cursor="hand2",
+                  padx=10).pack(side="right")
+
     def _build_side(self, side):
         t = self.theme
 
@@ -462,6 +646,12 @@ class Holdem:
         bar = tk.Frame(f, bg=t["panel"], height=88)
         bar.pack(fill="x", side="bottom")
         bar.pack_propagate(False)
+
+        # Host admin bar sits above the action bar (mp host only)
+        self._host_bar_built = False
+        if self._mp_mode and self._mp_is_host:
+            self._build_host_controls(f)
+            self._host_bar_built = True
 
         left = tk.Frame(bar, bg=t["panel"])
         left.pack(side="left", padx=16, pady=10)

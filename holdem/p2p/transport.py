@@ -245,6 +245,15 @@ def broadcast(msg: dict) -> None:
         asyncio.run_coroutine_threadsafe(_send_to(cid, msg), _loop)
 
 
+def disconnect(conn_id: str) -> None:
+    """Close the connection for a specific peer (e.g. kick from host)."""
+    _ensure_loop()
+    with _writers_lock:
+        writer = _writers.get(conn_id)
+    if writer is not None:
+        _loop.call_soon_threadsafe(writer.close)
+
+
 def stop() -> None:
     """Stop the transport and close all connections."""
     global _announce_task
