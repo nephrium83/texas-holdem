@@ -9,7 +9,29 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
 from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
-                    AI_STYLES, SUIT_GLYPHS, RANK_STR)
+                    AI_STYLES, SUIT_GLYPHS, RANK_STR, Card as _Card,
+                    FULL_DECK as _FULL_DECK)
+
+# ---------------------------------------------------------------------------
+# Multiplayer card helpers
+# ---------------------------------------------------------------------------
+_SUIT_CHARS = "cdhs"                        # index = Card.s
+_RANK_VALS  = {v: k for k, v in RANK_STR.items()}
+_STUB_CARD  = _Card(2, 0)                   # placeholder for opponent backs
+
+
+def _card_to_str(card: _Card) -> str:
+    return RANK_STR[card.v] + _SUIT_CHARS[card.s]
+
+
+def _str_to_card(s: str) -> _Card:
+    if len(s) == 3:          # "10c"
+        r, su = s[:2], s[2]
+    else:
+        r, su = s[0], s[1]
+    return _Card(_RANK_VALS[r], _SUIT_CHARS.index(su))
+
+
 from . import settings as cfg
 from .onboarding import OnboardingFlow
 from .hand_history import HandLogger, open_history_viewer
@@ -75,10 +97,19 @@ def rrect(cv, x1, y1, x2, y2, r, **kw):
 
 
 class Holdem:
-    def __init__(self, root):
+    def __init__(self, root, mp_session=None, is_host=True, local_seat=0):
         self.root = root
         root.title("Texas Hold'em")
         root.minsize(1180, 760)
+
+        # Multiplayer state
+        self._mp_session    = mp_session
+        self._mp_mode       = mp_session is not None
+        self._mp_is_host    = is_host
+        self._mp_local_seat = local_seat
+        self._mp_remote_state: dict | None = None
+        self._mp_hole_cards: list = []
+        self._hand_num = 0
 
         self.rng = random.Random()
         self.brain = Brain(self.rng)
@@ -202,7 +233,12 @@ class Holdem:
         self.table = tk.Frame(self.wrap)
         self._build_setup()
         self._build_table()
-        self._show(self.setup)
+
+        if self._mp_mode:
+            self._mp_setup_callbacks()
+            self._mp_new_game()
+        else:
+            self._show(self.setup)
 
     # ------------------------------------------------------------- screens
 
@@ -638,6 +674,257 @@ class Holdem:
         for w in (self.table, self.cv):
             w.configure(bg=t["bg"])
 
+    # ======================================================== Multiplayer
+
+    def _mp_setup_callbacks(self) -> None:
+        """Wire session callbacks based on host/peer role."""
+        sess = self._mp_session
+        if not self._mp_is_host:
+            sess.on_game_state   = lambda s: self.root.after(
+                0, lambda st=s: self._mp_apply_state(st))
+            sess.on_deal_private = lambda d: self.root.after(
+                0, lambda pd=d: self._mp_on_deal_private(pd))
+        sess.on_chat = lambda nick, txt: self.root.after(
+            0, lambda n=nick, t=txt: self._append_chat(n, t))
+
+    def _mp_new_game(self) -> None:
+        """Create the Engine for a multiplayer session (host or peer)."""
+        sess = self._mp_session
+        ts   = getattr(sess, '_last_table_settings',
+                       {"sb": 10, "bb": 20, "stack": 1000})
+        sb    = ts.get("sb",    10)
+        bb    = ts.get("bb",    20)
+        stack = ts.get("stack", 1000)
+
+        seat_order = sess._seat_order or list(sess.players.keys())
+        n = max(2, len(seat_order))
+
+        players: list[Player] = []
+        for i in range(n):
+            cid       = seat_order[i] if i < len(seat_order) else ""
+            sp        = sess.players.get(cid)
+            name      = sp.nickname if sp else f"P{i+1}"
+            is_local  = (i == self._mp_local_seat)
+            if is_local:
+                name = getattr(self, "nickname", None) or name
+            p = Player(i, name, stack,
+                       style="Hero" if is_local else "Solid",
+                       level=3        if is_local else 2,
+                       human=is_local)
+            players.append(p)
+
+        self.engine = Engine(players, sb=sb, bb=bb)
+
+        # Common state reset
+        self.buyin  = stack
+        self.bank   = float(BANK_START)
+        self.level_started    = time.time()
+        self.straddle_armed   = False
+        self.rabbit_cards     = None
+        self.paused           = False
+        self.game_over        = False
+        self.hand_over        = True
+        self.result           = None
+        self.reveal           = set()
+        self.highlight        = set()
+        self.session_stats    = SessionStats()
+        self._vpip_counted    = set()
+        self._pfr_counted     = set()
+        self._allin_announced = set()
+        self._last_hero_eq    = 0.0
+        self.stop_clock()
+        self.log.config(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.config(state="disabled")
+        self._retheme()
+        self._show(self.table)
+
+        if self._mp_is_host:
+            sess._engine  = self.engine
+            sess._seat_order = seat_order
+            sess.on_action = lambda seat, act, amt: self.root.after(
+                0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
+            self.say("hand", "=== Multiplayer Game (Host) ===")
+            self.b_next.config(state="disabled")
+            self.root.after(120, self.deal)
+        else:
+            self.say("hand", "=== Multiplayer Game ===")
+            self.l_status.config(text="Waiting for host to deal…")
+            self.lock()
+            self.b_next.config(state="disabled")
+
+    def _mp_after_deal(self) -> None:
+        """Host: after dealing, send private cards and broadcast state."""
+        e    = self.engine
+        sess = self._mp_session
+        seat_order = sess._seat_order
+        for i, cid in enumerate(seat_order):
+            sp = sess.players.get(cid)
+            if sp and not sp.is_host and i < len(e.players):
+                cards_str = [_card_to_str(c) for c in e.players[i].hole]
+                sess.send_private_cards(cid, i, cards_str)
+        sess.broadcast_game_state()
+
+    def _mp_apply_state(self, state: dict) -> None:
+        """Peer: update stub engine from a received game_state and redraw."""
+        self._mp_remote_state = state
+        e = self.engine
+        if e is None:
+            return
+
+        e.board  = [_str_to_card(s) for s in state.get("community", [])]
+        e.street = state.get("street", "idle")
+
+        stacks = state.get("stacks",  [])
+        bets   = state.get("bets",    [])
+        folded = state.get("folded",  [])
+        allin  = state.get("allin",   [])
+
+        for i, p in enumerate(e.players):
+            p.stack   = stacks[i] if i < len(stacks) else p.stack
+            p.bet     = bets[i]   if i < len(bets)   else 0
+            p.folded  = folded[i] if i < len(folded)  else False
+            p.all_in  = allin[i]  if i < len(allin)   else False
+            p.in_seat = (p.stack > 0 or p.bet > 0) or not p.folded
+            p.total_live = p.bet  # for pot display
+            # hole cards
+            if i == self._mp_local_seat:
+                p.hole = list(self._mp_hole_cards)
+            elif not p.folded:
+                p.hole = [_STUB_CARD, _STUB_CARD]
+            else:
+                p.hole = []
+
+        action_on     = state.get("action_on", -1)
+        e.actor       = action_on if 0 <= action_on < len(e.players) else None
+        e.current_bet = state.get("call_amount", 0)
+        e.min_raise   = state.get("min_raise",   e.bb)
+        self.hand_over = e.street in ("idle", "showdown")
+
+        last = state.get("last_action")
+        if last:
+            si  = last.get("seat",   -1)
+            act = last.get("action", "")
+            amt = last.get("amount", 0)
+            if 0 <= si < len(e.players):
+                pl = e.players[si]
+                if act == "fold":
+                    pl.last_action = "FOLD"
+                elif act in ("call", "check"):
+                    pl.last_action = f"CALL {amt}" if amt else "CHECK"
+                elif act == "raise":
+                    pl.last_action = f"RAISE {pl.bet}"
+
+        self.redraw()
+
+        if action_on == self._mp_local_seat:
+            self._mp_unlock()
+        else:
+            self.lock()
+
+    def _mp_on_deal_private(self, data: dict) -> None:
+        """Peer: store received hole cards and update display."""
+        if data.get("seat") != self._mp_local_seat:
+            return
+        self._mp_hole_cards = [_str_to_card(s)
+                               for s in data.get("hole_cards", [])]
+        e = self.engine
+        if e and self._mp_local_seat < len(e.players):
+            e.players[self._mp_local_seat].hole = list(self._mp_hole_cards)
+        self.redraw()
+
+    def _mp_unlock(self) -> None:
+        """Peer: enable action buttons when it's the local seat's turn."""
+        e     = self.engine
+        local = self._mp_local_seat
+        if e is None or local >= len(e.players):
+            return
+        lg = e.legal(local)
+        self._show_pre_actions(False)
+        for b in (self.b_fold, self.b_call):
+            b.config(state="normal")
+        self.b_call.config(
+            text="Check" if lg["can_check"] else f"Call {lg['to_call']}")
+        self.b_fold.config(text="Fold")
+        if lg["can_raise"]:
+            self.b_raise.config(state="normal")
+            for b in self.size_btns:
+                b.config(state="normal")
+            self.slider.config(state="normal",
+                               from_=lg["min_to"], to=lg["max_to"],
+                               resolution=max(1, e.bb // 4))
+            pot_bet = int(e.current_bet + lg["pot"] * 0.6)
+            self.v_bet.set(max(lg["min_to"], min(pot_bet, lg["max_to"])))
+        else:
+            self.b_raise.config(state="disabled")
+            for b in self.size_btns:
+                b.config(state="disabled")
+            self.slider.config(state="disabled")
+        self._sync_raise_label()
+        self.l_status.config(
+            text=f"{e.street.capitalize()} — your move."
+                 + (f"  {lg['to_call']} to call." if lg["to_call"] else ""))
+
+    def _mp_peer_acted(self, seat: int, action: str, amount: int) -> None:
+        """Host: apply a validated action from a peer and continue the loop."""
+        e = self.engine
+        if e is None or e.actor != seat:
+            return
+        lg = e.legal(seat)
+        if action == "fold":
+            _audio.play("fold")
+        elif action == "call":
+            _audio.play("check" if lg["can_check"] else "call")
+        elif action == "raise":
+            _audio.play("raise_sound")
+        e.act(seat, action, amount)
+        self.flush_log()
+        self._mp_session.broadcast_game_state()
+        self.redraw()
+        self.root.after(max(80, self.delay // 3), self.loop)
+
+    def _mp_send_action(self, action: str, amount: int = 0) -> None:
+        """Peer: pack and broadcast an action message to the host."""
+        import json as _json
+        from .p2p import wire as _wire
+        from .p2p import transport as _t
+        msg = _json.loads(_wire.pack("action", {
+            "seat":   self._mp_local_seat,
+            "action": action,
+            "amount": amount,
+        }))
+        _t.broadcast(msg)
+
+    def _mp_send_chat(self, text: str) -> None:
+        """Send a chat message; host shows it locally, peers wait for echo."""
+        import json as _json
+        from .p2p import wire as _wire
+        from .p2p import transport as _t
+        nickname = getattr(self, "nickname", "Player")
+        msg = _json.loads(_wire.pack("chat",
+                                     {"text": text, "nickname": nickname}))
+        _t.broadcast(msg)
+        if self._mp_is_host:
+            self._append_chat(nickname, text)
+
+    def _append_chat(self, nickname: str, text: str) -> None:
+        """Append a line to the chat log (mp mode only)."""
+        if not hasattr(self, "chat_log"):
+            return
+        self.chat_log.config(state="normal")
+        self.chat_log.insert("end", f"{nickname}: {text}\n")
+        self.chat_log.see("end")
+        self.chat_log.config(state="disabled")
+
+    def _append_chat_event(self, text: str) -> None:
+        """Append a dealer event line to the chat log."""
+        if not hasattr(self, "chat_log") or not self._mp_mode:
+            return
+        self.chat_log.config(state="normal")
+        self.chat_log.insert("end", f"[Dealer] {text}\n", "dealer_ev")
+        self.chat_log.see("end")
+        self.chat_log.config(state="disabled")
+
 
     # -------------------------------------------------------- XP / level
 
@@ -649,6 +936,8 @@ class Holdem:
         cfg.set("player_level", level)
 
     def deal(self):
+        if self._mp_mode and not self._mp_is_host:
+            return   # peer: host deals for us
         if self._defer(self.deal):
             return
         e = self.engine
@@ -728,6 +1017,8 @@ class Holdem:
         self.b_next.config(state="disabled")
         self.b_add.config(state="disabled")
         self.loop()
+        if self._mp_mode and self._mp_is_host:
+            self._mp_after_deal()
 
     def finish_game(self, live):
         self.stop_clock()
@@ -749,6 +1040,8 @@ class Holdem:
     # ------------------------------------------------------------- the loop
 
     def loop(self):
+        if self._mp_mode and not self._mp_is_host:
+            return   # peers are driven by game_state messages, not the local loop
         if self._defer(self.loop):
             return
         e = self.engine
@@ -1039,9 +1332,10 @@ class Holdem:
 
     def _sync_raise_label(self):
         e = self.engine
-        if e is None or e.actor != HERO:
+        local = self._mp_local_seat if self._mp_mode else HERO
+        if e is None or e.actor != local:
             return
-        lg = e.legal(HERO)
+        lg = e.legal(local)
         amt = self.v_bet.get()
         if amt >= lg["max_to"] and lg["max_to"] > 0:
             self.b_raise.config(text=f"All-in {amt}")
@@ -1052,9 +1346,10 @@ class Holdem:
 
     def preset(self, frac):
         e = self.engine
-        if e is None or e.actor != HERO:
+        local = self._mp_local_seat if self._mp_mode else HERO
+        if e is None or e.actor != local:
             return
-        lg = e.legal(HERO)
+        lg = e.legal(local)
         if frac is None:
             amt = lg["max_to"]
         else:
@@ -1065,23 +1360,28 @@ class Holdem:
 
     def hero(self, action):
         e = self.engine
-        if e is None or e.actor != HERO or self.v_observe.get():
+        local = self._mp_local_seat if self._mp_mode else HERO
+        if e is None or e.actor != local or self.v_observe.get():
             return
         self.stop_clock()
         amt = self.v_bet.get() if action == "raise" else 0
-        lg = e.legal(HERO)
+        lg = e.legal(local)
         self.lock()
+        if self._mp_mode and not self._mp_is_host:
+            # Peer: send action to host; wait for game_state echo
+            self._mp_send_action(action, amt)
+            return
         if e.street == "preflop":
-            self._record_vpip_pfr(HERO, action, lg)
-        e.act(HERO, action, amt)
+            self._record_vpip_pfr(local, action, lg)
+        e.act(local, action, amt)
         # sound effects
         if action == "fold":
             _audio.play("fold")
         elif action == "call":
             _audio.play("check" if lg["can_check"] else "call")
         elif action == "raise":
-            if e.players[HERO].all_in and HERO not in self._allin_announced:
-                self._allin_announced.add(HERO)
+            if e.players[local].all_in and local not in self._allin_announced:
+                self._allin_announced.add(local)
                 _audio.play("allin")
             else:
                 _audio.play("raise_sound")
@@ -1195,6 +1495,8 @@ class Holdem:
             if hero.stack + hero.total < cap_bb * e.bb:
                 self.b_add.config(state="normal")
         self.redraw()
+        if self._mp_mode and self._mp_is_host:
+            self._mp_session.broadcast_game_state()
 
         alive_next = [p for p in e.players if p.stack > 0]
         if len(alive_next) < 2:
@@ -1206,7 +1508,9 @@ class Holdem:
         hero_idle = (hero.stack <= 0 and self.v_mode.get() != "Cash") \
             or hero.sitting_out or hero.wait_for_bb
         self.b_next.config(state="normal")
-        if self.v_auto.get() or self.v_observe.get() or hero_idle \
+        if self._mp_mode and not self._mp_is_host:
+            self.b_next.config(state="disabled")   # peer cannot initiate next deal
+        elif self.v_auto.get() or self.v_observe.get() or hero_idle \
                 or (hero.stack <= 0 and self.v_mode.get() == "Cash"):
             self.root.after(max(900, self.delay * 3), self.deal)
 

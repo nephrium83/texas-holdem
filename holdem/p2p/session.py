@@ -34,6 +34,7 @@ class Player:
     avatar_b64: str
     is_host:    bool  = False
     ready:      bool  = False
+    seat_index: int   = -1
 
 
 class Session:
