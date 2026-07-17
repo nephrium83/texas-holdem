@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import pathlib
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -24,19 +25,31 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-_IDENTITY_PATH = pathlib.Path.home() / ".texas_holdem_identity.json"
+
+def _identity_path() -> pathlib.Path:
+    """L-4: Store identity alongside other app config via settings.config_dir()."""
+    from holdem.settings import config_dir
+    d = config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    return d / "identity.json"
 
 
 def _load_or_create() -> Ed25519PrivateKey:
-    if _IDENTITY_PATH.exists():
-        data = json.loads(_IDENTITY_PATH.read_text())
+    path = _identity_path()
+    if path.exists():
+        data = json.loads(path.read_text())
         raw = base64.b64decode(data["private_key_b64"])
         return Ed25519PrivateKey.from_private_bytes(raw)
     key = Ed25519PrivateKey.generate()
     raw = key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-    _IDENTITY_PATH.write_text(
+    path.write_text(
         json.dumps({"private_key_b64": base64.b64encode(raw).decode()})
     )
+    # M-10: restrict identity file to owner read/write only
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass   # Windows: best-effort
     return key
 
 

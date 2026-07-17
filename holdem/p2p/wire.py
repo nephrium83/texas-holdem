@@ -51,8 +51,9 @@ def unpack(raw: bytes) -> dict:
     """Parse and verify a signed envelope.
 
     Returns the verified message dict (with "sig" and "hash" restored).
-    Raises ValueError if the signature is invalid or required fields are
-    missing.
+    Raises ValueError if the signature is invalid, required fields are
+    missing, the timestamp is outside the ±30-second window (H-6), or the
+    declared hash does not match the recomputed one (H-7).
     """
     msg = json.loads(raw)
     for field in ("v", "type", "payload", "pubkey", "ts", "prev", "sig", "hash"):
@@ -68,6 +69,21 @@ def unpack(raw: bytes) -> dict:
     if not identity.verify(pubkey, canonical, sig):
         raise ValueError("Invalid signature in envelope from pubkey %s" % msg["pubkey"][:16])
 
-    msg["sig"]  = sig.hex()
+    # H-6: replay protection — reject envelopes outside a ±30-second window
+    skew_ms = abs(time.time() * 1000 - msg["ts"])
+    if skew_ms > 30_000:
+        raise ValueError(
+            "Envelope timestamp out of window (skew %.0f ms)" % skew_ms
+        )
+
+    # H-7: verify the declared hash matches the recomputed one
+    msg["sig"] = sig.hex()
+    full = json.dumps(msg, sort_keys=True, separators=(",", ":")).encode()
+    expected_hash = hashlib.sha256(full).hexdigest()
+    if h != expected_hash:
+        raise ValueError(
+            "Hash mismatch: declared %s, computed %s" % (h[:16], expected_hash[:16])
+        )
+
     msg["hash"] = h
     return msg

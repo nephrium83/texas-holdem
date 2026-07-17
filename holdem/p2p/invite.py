@@ -34,6 +34,11 @@ def parse_room_code(code):
     raw = base64.b32decode(stripped + "=" * pad)
     if len(raw) < 18:
         raise ValueError("Invalid room code (too short: %d bytes)" % len(raw))
+    # L-1: reject codes whose version byte doesn't match ours
+    if raw[0:1] != VERSION:
+        raise ValueError(
+            "Unsupported room code version %d (expected %d)" % (raw[0], VERSION[0])
+        )
     return {
         "version": raw[0],
         "peer_id_prefix": raw[1:9].hex(),

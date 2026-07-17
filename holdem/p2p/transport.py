@@ -69,6 +69,7 @@ log = logging.getLogger(__name__)
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
+_loop_lock = threading.Lock()          # H-2: guards _loop initialisation
 
 # conn_id -> asyncio StreamWriter
 _writers: dict[str, asyncio.StreamWriter] = {}
@@ -90,6 +91,9 @@ _MC_TTL   = 1   # LAN-only; one hop
 # announce loop task handle (so we can cancel it)
 _announce_task: Optional[asyncio.Task] = None
 
+# C-3: Maximum allowed message size (1 MB) to prevent OOM DoS
+MAX_MSG = 1 << 20  # 1 048 576 bytes
+
 # ---------------------------------------------------------------------------
 # Public registration API (call before starting)
 # ---------------------------------------------------------------------------
@@ -109,6 +113,18 @@ def on_disconnect(callback: Callable) -> None:
     _disc_callbacks.append(callback)
 
 
+def reset_callbacks() -> None:
+    """Clear all registered callbacks.
+
+    Call before re-registering callbacks for a new session to prevent
+    accumulation when the lobby dialog is opened more than once (fix for
+    stale-callback finding in the audit).
+    """
+    _msg_callbacks.clear()
+    _conn_callbacks.clear()
+    _disc_callbacks.clear()
+
+
 # ---------------------------------------------------------------------------
 # Wire framing: 4-byte big-endian length + JSON bytes
 # ---------------------------------------------------------------------------
@@ -121,8 +137,20 @@ def _frame(msg: dict) -> bytes:
 async def _read_msg(reader: asyncio.StreamReader) -> dict:
     header = await reader.readexactly(4)
     length = struct.unpack(">I", header)[0]
+    # C-3: reject oversized frames before allocating memory
+    if length > MAX_MSG:
+        raise ValueError(f"oversized frame: {length} bytes (max {MAX_MSG})")
     body = await reader.readexactly(length)
-    return json.loads(body)
+    # M-1: propagate JSON errors as ValueError so _handle_connection can close cleanly
+    try:
+        msg = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"malformed JSON frame: {exc}") from exc
+    # C-1: if the envelope carries a signature, verify it via wire.unpack
+    if "sig" in msg:
+        from holdem.p2p import wire as _wire
+        msg = _wire.unpack(body)   # raises ValueError on bad/expired signature
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +183,9 @@ async def _handle_connection(reader: asyncio.StreamReader,
                     log.exception("on_message callback error")
     except (asyncio.IncompleteReadError, ConnectionResetError, EOFError):
         pass
+    except ValueError as exc:
+        # C-1/C-3/M-1: bad signature, oversized frame, or malformed JSON → drop peer
+        log.warning("transport: dropping conn %s: %s", conn_id, exc)
     finally:
         writer.close()
         with _writers_lock:
@@ -183,19 +214,42 @@ def start_host(port: int = 0) -> str:
     return _listen_address
 
 
+def _get_lan_ip() -> str:
+    """Return the host's non-loopback IPv4 LAN address (H-1).
+
+    Tries getaddrinfo first for a real interface address; falls back to
+    gethostbyname; falls back to 127.0.0.1 so the app never crashes.
+    """
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                return ip
+    except OSError:
+        pass
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except OSError:
+        return "127.0.0.1"
+
+
 async def _start_server(port: int) -> str:
     async def _accept(reader, writer):
         addr = writer.get_extra_info("peername", ("unknown", 0))
         cid = _new_conn_id()
-        asyncio.ensure_future(
+        # L-5: use create_task instead of deprecated ensure_future
+        asyncio.create_task(
             _handle_connection(reader, writer, cid, f"{addr[0]}:{addr[1]}")
         )
 
     server = await asyncio.start_server(_accept, "0.0.0.0", port)
     actual_port = server.sockets[0].getsockname()[1]
     # Keep the server running in the background
-    asyncio.ensure_future(server.serve_forever())
-    return f"0.0.0.0:{actual_port}"
+    asyncio.create_task(server.serve_forever())
+    # H-1: announce the real LAN IP, not the unroutable 0.0.0.0
+    lan_ip = _get_lan_ip()
+    return f"{lan_ip}:{actual_port}"
 
 
 def connect(address: str) -> str:
@@ -211,7 +265,7 @@ def connect(address: str) -> str:
 async def _connect_to(host: str, port: int) -> str:
     reader, writer = await asyncio.open_connection(host, port)
     cid = _new_conn_id()
-    asyncio.ensure_future(
+    asyncio.create_task(  # L-5: create_task replaces deprecated ensure_future
         _handle_connection(reader, writer, cid, f"{host}:{port}")
     )
     return cid
@@ -220,7 +274,12 @@ async def _connect_to(host: str, port: int) -> str:
 def send(conn_id: str, msg: dict) -> None:
     """Send *msg* to the peer identified by *conn_id*."""
     _ensure_loop()
-    asyncio.run_coroutine_threadsafe(_send_to(conn_id, msg), _loop)
+    # M-3: store future and attach an exception callback so failures are logged
+    fut = asyncio.run_coroutine_threadsafe(_send_to(conn_id, msg), _loop)
+    fut.add_done_callback(
+        lambda f: log.warning("transport.send(%s) error: %s", conn_id, f.exception())
+        if not f.cancelled() and f.exception() else None
+    )
 
 
 async def _send_to(conn_id: str, msg: dict) -> None:
@@ -296,9 +355,13 @@ def announce(rendezvous_key: str, address: str) -> None:
         finally:
             sock.close()
 
-    _announce_task = asyncio.run_coroutine_threadsafe(
-        _loop_announce(), _loop
-    )
+    # H-3: schedule the coroutine from *inside* the asyncio thread so we get a
+    # real asyncio.Task (not a concurrent.futures.Future), making cancel() reliable.
+    async def _schedule():
+        return asyncio.create_task(_loop_announce())
+
+    fut = asyncio.run_coroutine_threadsafe(_schedule(), _loop)
+    _announce_task = fut.result(timeout=5)  # now a real asyncio.Task
 
 
 def find_peer(rendezvous_key: str, timeout: float = 5.0) -> Optional[str]:
@@ -339,15 +402,20 @@ def find_peer(rendezvous_key: str, timeout: float = 5.0) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _ensure_loop() -> None:
-    """Start the background asyncio event loop thread if not already running."""
+    """Start the background asyncio event loop thread if not already running.
+
+    H-2: the entire body is held under _loop_lock so that two threads cannot
+    both pass the "is None" check and each create a new event loop.
+    """
     global _loop, _thread
-    if _loop is not None and not _loop.is_closed():
-        return
-    _loop = asyncio.new_event_loop()
+    with _loop_lock:
+        if _loop is not None and not _loop.is_closed():
+            return
+        _loop = asyncio.new_event_loop()
 
-    def _run():
-        asyncio.set_event_loop(_loop)
-        _loop.run_forever()
+        def _run():
+            asyncio.set_event_loop(_loop)
+            _loop.run_forever()
 
-    _thread = threading.Thread(target=_run, daemon=True, name="p2p-transport")
-    _thread.start()
+        _thread = threading.Thread(target=_run, daemon=True, name="p2p-transport")
+        _thread.start()

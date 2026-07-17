@@ -48,12 +48,19 @@ class Session:
         self.local_nickname  = nickname
         self.local_avatar    = avatar_b64
         self._lock           = threading.Lock()
-        self._hash_chain     = "0" * 64
+
+        # M-11: per-peer hash-chain tracking (conn_id -> last seen hash)
+        self._peer_last_hash: dict[str, str] = {}
 
         # Join order & host tracking
         self._join_order: list[str] = []       # conn_ids in join order (host-side IDs)
         self.local_conn_id: str = ""           # this peer's own conn_id as seen by host
         self._host_conn_id: str = ""           # conn_id used to reach the host (peers only)
+
+        # H-11: last received game_state payload (used for host migration)
+        self._last_game_state: dict = {}
+        # Last table settings (used by _mp_new_game in gui.py)
+        self._last_table_settings: dict = {}
 
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
@@ -80,6 +87,21 @@ class Session:
 
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
+        import logging
+        _log = logging.getLogger(__name__)
+
+        # M-11: enforce hash-chain linkage for signed envelopes
+        if "hash" in msg and "prev" in msg:
+            expected_prev = self._peer_last_hash.get(conn_id, "0" * 64)
+            if msg["prev"] != expected_prev:
+                _log.warning(
+                    "session: hash-chain broken for %s "
+                    "(expected prev=%s, got %s) — dropping",
+                    conn_id, expected_prev[:16], msg["prev"][:16]
+                )
+                return
+            self._peer_last_hash[conn_id] = msg["hash"]
+
         t = msg.get("type")
         if t == "player_info":
             self._on_player_info(conn_id, msg)
@@ -100,13 +122,13 @@ class Session:
         elif t == "chat":
             self._on_chat(conn_id, msg)
         elif t == "pause":
-            self._on_pause(msg)
+            self._on_pause(conn_id, msg)
         elif t == "resume":
-            self._on_resume(msg)
+            self._on_resume(conn_id, msg)
         elif t == "kick":
             self._on_kick(conn_id, msg)
         elif t == "adjust_blinds":
-            self._on_adjust_blinds(msg)
+            self._on_adjust_blinds(conn_id, msg)
 
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
         """Host receives identity from a newly connected peer."""
@@ -135,7 +157,9 @@ class Session:
         with self._lock:
             for p in players_data:
                 cid = p.get("conn_id", "")
-                if cid and cid not in self.players:
+                if not cid:
+                    continue
+                if cid not in self.players:
                     self.players[cid] = Player(
                         conn_id    = cid,
                         peer_id    = p.get("peer_id",    ""),
@@ -144,6 +168,13 @@ class Session:
                         is_host    = p.get("is_host",    False),
                         ready      = p.get("ready",      False),
                     )
+                else:
+                    # M-5: update mutable fields on existing Player objects
+                    existing = self.players[cid]
+                    existing.ready      = p.get("ready",      existing.ready)
+                    existing.nickname   = p.get("nickname",   existing.nickname)
+                    existing.avatar_b64 = p.get("avatar_b64", existing.avatar_b64)
+                    existing.is_host    = p.get("is_host",    existing.is_host)
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data
@@ -163,6 +194,10 @@ class Session:
         self.state = "PLAYING"
         payload = msg.get("payload", {})
         self._seat_order = payload.get("seat_order", [])
+        # Store table settings so _mp_new_game in gui.py can read them
+        ts = payload.get("table_settings", {})
+        if ts:
+            self._last_table_settings = ts
         if self.on_game_start:
             self.on_game_start(payload)
 
@@ -171,8 +206,11 @@ class Session:
         self.set_ready(conn_id, payload.get("ready", False))
 
     def _on_game_state(self, msg: dict) -> None:
+        payload = msg.get("payload", {})
+        # H-11: keep the most recent game state for use by host-migration engine rebuild
+        self._last_game_state = payload
         if self.on_game_state:
-            self.on_game_state(msg.get("payload", {}))
+            self.on_game_state(payload)
 
     def _on_deal_private(self, msg: dict) -> None:
         if self.on_deal_private:
@@ -215,8 +253,11 @@ class Session:
         if not self._join_order:
             return
         new_host_conn = self._join_order[0]
+        # M-6: do NOT fall through to am_new_host when local_conn_id is "" —
+        # a peer that never received player_ack cannot reliably self-identify
+        # and promoting every such peer causes split-brain.
         am_new_host = (new_host_conn == self.local_conn_id
-                       or self.local_conn_id == "")
+                       and self.local_conn_id != "")
         if am_new_host:
             self.is_host = True
             self._host_conn_id = self.local_conn_id
@@ -233,19 +274,31 @@ class Session:
     # Admin message handlers (pause / resume / kick / adjust_blinds)
     # ------------------------------------------------------------------
 
-    def _on_pause(self, msg: dict) -> None:
+    def _on_pause(self, conn_id: str, msg: dict) -> None:
+        # C-2: only accept admin messages from the host's connection
+        if conn_id != self._host_conn_id:
+            return
         if not self.is_host and self.on_pause:
             self.on_pause()
 
-    def _on_resume(self, msg: dict) -> None:
+    def _on_resume(self, conn_id: str, msg: dict) -> None:
+        # C-2: only accept admin messages from the host's connection
+        if conn_id != self._host_conn_id:
+            return
         if not self.is_host and self.on_resume:
             self.on_resume()
 
     def _on_kick(self, conn_id: str, msg: dict) -> None:
+        # C-2: only accept admin messages from the host's connection
+        if conn_id != self._host_conn_id:
+            return
         if not self.is_host and self.on_kick:
             self.on_kick(msg.get("payload", {}))
 
-    def _on_adjust_blinds(self, msg: dict) -> None:
+    def _on_adjust_blinds(self, conn_id: str, msg: dict) -> None:
+        # C-2: only accept admin messages from the host's connection
+        if conn_id != self._host_conn_id:
+            return
         if not self.is_host and self.on_adjust_blinds:
             self.on_adjust_blinds(msg.get("payload", {}))
 
@@ -311,6 +364,7 @@ class Session:
         with self._lock:
             seat_order = [p.conn_id for p in self.players.values()]
         self._seat_order = seat_order
+        self._last_table_settings = table_settings
         payload = {"table_settings": table_settings, "seat_order": seat_order}
         _t.broadcast({"type": "game_start", "payload": payload})
         self.state = "PLAYING"
@@ -361,6 +415,8 @@ class Session:
             "payload": {"seat": seat, "hole_cards": hole_cards},
         })
 
+    _VALID_ACTIONS = frozenset(("fold", "call", "raise", "check"))
+
     def handle_game_action(self, conn_id: str, msg: dict) -> None:
         """Host only: validate and route an action from a peer."""
         if not self.is_host or self._engine is None:
@@ -369,10 +425,15 @@ class Session:
         seat   = payload.get("seat",   -1)
         action = payload.get("action", "fold")
         amount = payload.get("amount", 0)
-        # Verify the acting peer owns that seat
-        if 0 <= seat < len(self._seat_order):
-            if self._seat_order[seat] != conn_id:
-                return
+
+        # M-9: reject unrecognised action strings before they reach the engine
+        if action not in self._VALID_ACTIONS:
+            return
+
+        # H-5: inverted guard — reject out-of-range seats AND wrong owner
+        if not (0 <= seat < len(self._seat_order)) or self._seat_order[seat] != conn_id:
+            return
+
         if self._engine.actor != seat:
             return
         if self.on_action:
