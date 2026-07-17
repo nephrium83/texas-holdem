@@ -704,6 +704,14 @@ class Holdem:
                 0, lambda pd=d: self._mp_on_deal_private(pd))
         sess.on_chat = lambda nick, txt: self.root.after(
             0, lambda n=nick, t=txt: self._append_chat(n, t))
+        sess.on_host_changed = lambda am_host: self.root.after(
+            0, lambda h=am_host: self._mp_on_host_changed(h))
+        sess.on_pause = lambda: self.root.after(0, self._mp_on_pause)
+        sess.on_resume = lambda: self.root.after(0, self._mp_on_resume)
+        sess.on_kick = lambda p: self.root.after(
+            0, lambda payload=p: self._mp_on_kick(payload))
+        sess.on_adjust_blinds = lambda p: self.root.after(
+            0, lambda payload=p: self._mp_on_adjust_blinds(payload))
 
     def _mp_new_game(self) -> None:
         """Create the Engine for a multiplayer session (host or peer)."""
@@ -740,6 +748,7 @@ class Holdem:
         self.straddle_armed   = False
         self.rabbit_cards     = None
         self.paused           = False
+        self._mp_game_paused  = False
         self.game_over        = False
         self.hand_over        = True
         self.result           = None
@@ -991,6 +1000,100 @@ class Holdem:
             return
         text.set("")
         self._mp_send_chat(msg)
+
+    # ---------------------------------------- Host-change / banner
+
+    def _mp_on_host_changed(self, am_new_host: bool) -> None:
+        """Called when the active host drops and a new host is elected."""
+        if am_new_host:
+            self._mp_is_host = True
+            self._show_banner("Host left — you are now hosting", duration_ms=4000)
+            self._mp_broadcast_state()
+            # Show the host controls bar if not already visible
+            if not getattr(self, "_host_bar_built", False):
+                self._build_host_controls(self.table)
+                self._host_bar_built = True
+        else:
+            self._show_banner("Host reconnecting…", duration_ms=2000)
+
+    def _mp_broadcast_state(self) -> None:
+        """Re-broadcast current game state to all peers (called after becoming host)."""
+        if self._mp_session and self._mp_is_host:
+            self._mp_session.broadcast_game_state()
+
+    def _show_banner(self, text: str, duration_ms: int = 3000) -> None:
+        """Draw a transient text banner in the canvas centre."""
+        cv = self.cv
+        W = max(cv.winfo_width(), 400)
+        H = max(cv.winfo_height(), 300)
+        t = self.theme
+        bg_id = cv.create_rectangle(
+            W // 2 - 270, H // 2 - 30, W // 2 + 270, H // 2 + 30,
+            fill=t["panel"], outline=t["accent"], width=2, tags="banner")
+        txt_id = cv.create_text(
+            W // 2, H // 2, text=text,
+            fill=t["accent"], font=("Segoe UI", 13, "bold"), tags="banner")
+
+        def _remove():
+            try:
+                cv.delete(bg_id)
+                cv.delete(txt_id)
+            except Exception:
+                pass
+        self.root.after(duration_ms, _remove)
+
+    # ---------------------------------------- Pause overlay helpers
+
+    def _mp_show_pause_overlay(self) -> None:
+        """Draw a semi-transparent pause overlay on the canvas."""
+        cv = self.cv
+        W = max(cv.winfo_width(), 400)
+        H = max(cv.winfo_height(), 300)
+        t = self.theme
+        cv.create_rectangle(0, 0, W, H, fill=t["bg"], stipple="gray50",
+                             tags="pause_overlay")
+        cv.create_text(W // 2, H // 2, text="Game paused by host",
+                       fill=t["gold"], font=("Segoe UI", 22, "bold"),
+                       tags="pause_overlay")
+
+    def _mp_hide_pause_overlay(self) -> None:
+        try:
+            self.cv.delete("pause_overlay")
+        except Exception:
+            pass
+
+    # ---------------------------------------- Peer admin-message handlers
+
+    def _mp_on_pause(self) -> None:
+        """Peer: host has paused the game."""
+        self._mp_game_paused = True
+        self.paused = True
+        self.lock()
+        self._mp_show_pause_overlay()
+
+    def _mp_on_resume(self) -> None:
+        """Peer: host has resumed the game."""
+        self._mp_game_paused = False
+        self.paused = False
+        self._mp_hide_pause_overlay()
+        if self._mp_remote_state:
+            self._mp_apply_state(self._mp_remote_state)
+
+    def _mp_on_kick(self, payload: dict) -> None:
+        """Peer: check if we're the kicked player; if so, close the window."""
+        my_cid = getattr(self._mp_session, "local_conn_id", "")
+        if payload.get("conn_id") and payload["conn_id"] == my_cid:
+            messagebox.showinfo("Removed", "You were removed by the host.")
+            self.root.destroy()
+
+    def _mp_on_adjust_blinds(self, payload: dict) -> None:
+        """Peer: host has changed the blinds for the next hand."""
+        sb = payload.get("sb", 10)
+        bb = payload.get("bb", 20)
+        if self.engine:
+            self.engine.sb = sb
+            self.engine.bb = bb
+        self.l_blinds.config(text=f"Blinds {sb}/{bb}")
 
     # -------------------------------------------------------- XP / level
 
@@ -2403,6 +2506,8 @@ class Holdem:
                             + ("  ALL-IN" if hero.all_in else ""))
         self.draw_equity()
         self._draw_tournament_overlay()
+        if getattr(self, "_mp_game_paused", False):
+            self._mp_show_pause_overlay()
 
     def seat(self, p, x, y, cx, cy):
         e = self.engine

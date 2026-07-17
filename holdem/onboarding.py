@@ -617,6 +617,7 @@ class OnboardingFlow:
         _transport.on_message(sess.handle_message)
         _transport.on_connect(lambda cid, addr: sess.add_local_player(cid)
                               if not sess.players else None)
+        _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
 
         # Announce on LAN multicast in background
         threading.Thread(
@@ -853,6 +854,7 @@ class OnboardingFlow:
                     )
                     _p2p_pkg._session = sess
                     _transport.on_message(sess.handle_message)
+                    _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
 
                     # Send our identity to the host
                     import json as _json

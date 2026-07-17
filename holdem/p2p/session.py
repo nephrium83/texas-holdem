@@ -50,6 +50,11 @@ class Session:
         self._lock           = threading.Lock()
         self._hash_chain     = "0" * 64
 
+        # Join order & host tracking
+        self._join_order: list[str] = []       # conn_ids in join order (host-side IDs)
+        self.local_conn_id: str = ""           # this peer's own conn_id as seen by host
+        self._host_conn_id: str = ""           # conn_id used to reach the host (peers only)
+
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
         # should route back to the Tk main thread via root.after(0, ...).
@@ -59,6 +64,11 @@ class Session:
         self.on_deal_private:        Optional[Callable[[dict], None]]         = None
         self.on_chat:                Optional[Callable[[str, str], None]]     = None
         self.on_action:              Optional[Callable[[int, str, int], None]]= None
+        self.on_host_changed:        Optional[Callable[[bool], None]]         = None
+        self.on_pause:               Optional[Callable[[], None]]             = None
+        self.on_resume:              Optional[Callable[[], None]]             = None
+        self.on_kick:                Optional[Callable[[dict], None]]         = None
+        self.on_adjust_blinds:       Optional[Callable[[dict], None]]         = None
 
         # Engine ref (host only) and seat order
         self._engine     = None
@@ -75,6 +85,8 @@ class Session:
             self._on_player_info(conn_id, msg)
         elif t == "player_list":
             self._on_player_list(conn_id, msg)
+        elif t == "player_ack":
+            self._on_player_ack(conn_id, msg)
         elif t == "game_start":
             self._on_game_start(msg)
         elif t == "ready":
@@ -87,6 +99,14 @@ class Session:
             self._on_deal_private(msg)
         elif t == "chat":
             self._on_chat(conn_id, msg)
+        elif t == "pause":
+            self._on_pause(msg)
+        elif t == "resume":
+            self._on_resume(msg)
+        elif t == "kick":
+            self._on_kick(conn_id, msg)
+        elif t == "adjust_blinds":
+            self._on_adjust_blinds(msg)
 
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
         """Host receives identity from a newly connected peer."""
@@ -99,7 +119,13 @@ class Session:
                 avatar_b64 = payload.get("avatar_b64", ""),
                 is_host    = False,
             )
+            if conn_id not in self._join_order:
+                self._join_order.append(conn_id)
         if self.is_host:
+            # Tell the peer their host-side conn_id so they can self-identify
+            from holdem.p2p import transport as _t
+            _t.send(conn_id, {"type": "player_ack",
+                               "payload": {"your_conn_id": conn_id}})
             self._broadcast_player_list()
 
     def _on_player_list(self, conn_id: str, msg: dict) -> None:
@@ -118,9 +144,20 @@ class Session:
                         is_host    = p.get("is_host",    False),
                         ready      = p.get("ready",      False),
                     )
+            # Mirror join order from the host's authoritative list (non-hosts only)
+            self._join_order = [
+                p.get("conn_id", "") for p in players_data
+                if p.get("conn_id", "") and not p.get("is_host", False)
+            ]
             snapshot = list(self.players.values())
         if self.on_player_list_changed:
             self.on_player_list_changed(snapshot)
+
+    def _on_player_ack(self, conn_id: str, msg: dict) -> None:
+        """Peer receives its own host-side conn_id from the host."""
+        payload = msg.get("payload", {})
+        self.local_conn_id = payload.get("your_conn_id", "")
+        self._host_conn_id = conn_id   # conn_id of the connection to the host
 
     def _on_game_start(self, msg: dict) -> None:
         self.state = "PLAYING"
@@ -151,6 +188,66 @@ class Session:
             # Re-broadcast to all peers (echo back to sender too)
             from holdem.p2p import transport as _t
             _t.broadcast(msg)
+
+    # ------------------------------------------------------------------
+    # Disconnect / host migration
+    # ------------------------------------------------------------------
+
+    def handle_disconnect(self, conn_id: str) -> None:
+        """Called by the transport on_disconnect handler for any dropped peer."""
+        with self._lock:
+            self.players.pop(conn_id, None)
+            if conn_id in self._join_order:
+                self._join_order.remove(conn_id)
+
+        if conn_id == self._host_conn_id:
+            # The host dropped — elect a new one
+            self._elect_new_host()
+        else:
+            # A non-host peer dropped
+            if self.is_host:
+                self._broadcast_player_list()
+            if self.on_player_list_changed:
+                self.on_player_list_changed(list(self.players.values()))
+
+    def _elect_new_host(self) -> None:
+        """Lowest-join-order peer becomes the new host."""
+        if not self._join_order:
+            return
+        new_host_conn = self._join_order[0]
+        am_new_host = (new_host_conn == self.local_conn_id
+                       or self.local_conn_id == "")
+        if am_new_host:
+            self.is_host = True
+            self._host_conn_id = self.local_conn_id
+            self._broadcast_player_list()
+            if self.state == "PLAYING" and self.on_host_changed:
+                self.on_host_changed(True)
+            elif self.on_host_changed:
+                self.on_host_changed(True)
+        else:
+            if self.on_host_changed:
+                self.on_host_changed(False)
+
+    # ------------------------------------------------------------------
+    # Admin message handlers (pause / resume / kick / adjust_blinds)
+    # ------------------------------------------------------------------
+
+    def _on_pause(self, msg: dict) -> None:
+        if not self.is_host and self.on_pause:
+            self.on_pause()
+
+    def _on_resume(self, msg: dict) -> None:
+        if not self.is_host and self.on_resume:
+            self.on_resume()
+
+    def _on_kick(self, conn_id: str, msg: dict) -> None:
+        if not self.is_host and self.on_kick:
+            self.on_kick(msg.get("payload", {}))
+
+    def _on_adjust_blinds(self, msg: dict) -> None:
+        if not self.is_host and self.on_adjust_blinds:
+            self.on_adjust_blinds(msg.get("payload", {}))
 
     # ------------------------------------------------------------------
     # Host actions
