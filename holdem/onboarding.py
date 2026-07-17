@@ -605,8 +605,8 @@ class OnboardingFlow:
             return
 
         # Configure relay fallback (may not be reachable yet — that's OK)
-        _transport.set_relay_address("192.168.1.10", 7878)
-        relay_addr = ("192.168.1.10", 7878)
+        _transport.set_relay_address("192.168.1.10", 7890)
+        relay_addr = ("192.168.1.10", 7890)
 
         # STUN result may not be available yet — get_public_address() returns
         # None until the background query completes (~1–3 s).
@@ -992,6 +992,7 @@ class OnboardingFlow:
                         avatar_b64 = getattr(self, "avatar_b64", ""),
                     )
                     _p2p_pkg._session = sess
+                    _sess_ref[0] = sess          # C-2: expose to _handle_start
                     _transport.reset_callbacks()
                     _transport.on_message(sess.handle_message)
                     _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
@@ -1026,6 +1027,7 @@ class OnboardingFlow:
             _conn_id_ref         = [None]
             _peer_id_prefix_ref  = [None]
             _conn_method_ref     = ["Direct connection"]
+            _sess_ref            = [None]   # C-2: share Session across nested fns
 
             def _on_error(title, msg):
                 connect_btn.config(state="normal")
@@ -1068,13 +1070,21 @@ class OnboardingFlow:
                 ts = payload.get("table_settings",
                                  {"sb": 10, "bb": 20, "stack": 1000})
 
+                sess = _sess_ref[0]
+                if sess is None:
+                    win.after(0, lambda: _on_error(
+                        "Connection error",
+                        "Session was lost before the game started.",
+                    ))
+                    return
+
                 # M-7: verify host pubkey matches the peer_id_prefix from the room code.
                 # The host's conn_id in the seat_order is its local ID (peer_id hex).
                 expected_prefix = _peer_id_prefix_ref[0] or ""
                 if expected_prefix:
                     host_cid = next(
                         (p.conn_id for p in sess.players.values() if p.is_host), "")
-                    if host_cid and not host_cid.startswith(expected_prefix):
+                    if not host_cid or not host_cid.startswith(expected_prefix):
                         win.after(0, lambda: _on_error(
                             "Host verification failed",
                             "The host's identity does not match the room code.\n"
