@@ -89,7 +89,16 @@ SPEC = {
     "sounds_enabled": dict(scope=CLIENT, kind="bool", default=True,
                            label="Sound effects"),
     "sound_volume":   dict(scope=CLIENT, kind="int",  default=70,
-                           label="Sound volume (0–100)", lo=0, hi=100),
+                           label="Sound volume (0-100)", lo=0, hi=100),
+
+    # ---- ui polish (CLIENT) -----------------------------------------
+    "four_color_deck": dict(scope=CLIENT, kind="bool", default=False,
+                            label="Four-color deck"),
+    "felt_color":      dict(scope=CLIENT, kind="str",  default="#35654d",
+                            maxlen=16, label="Table felt color"),
+    "bet_buttons":     dict(scope=CLIENT, kind="str",  default="0.5,1,2,3",
+                            maxlen=64,
+                            label="Bet-size shortcuts (fractions, comma-sep)"),
 
     # ---- bankroll / XP / progression (CLIENT) ----------------------
     "bankroll":              dict(scope=CLIENT, kind="int", default=10000,

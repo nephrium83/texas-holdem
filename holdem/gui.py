@@ -6,7 +6,7 @@ import threading
 import datetime
 import time
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk, colorchooser
 
 from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR, Card as _Card,
@@ -33,6 +33,7 @@ def _str_to_card(s: str) -> _Card:
 
 
 from . import settings as cfg
+from . import notes as _notes
 from .onboarding import OnboardingFlow
 from .hand_history import HandLogger, open_history_viewer
 from .session_stats import SessionStats
@@ -110,6 +111,8 @@ class Holdem:
         self._mp_remote_state: dict | None = None
         self._mp_hole_cards: list = []
         self._hand_num = 0
+        # seat_idx -> peer connection-id; empty in solo mode
+        self._mp_seat_to_peer: dict[int, str] = {}
 
         self.rng = random.Random()
         self.brain = Brain(self.rng)
@@ -144,6 +147,9 @@ class Holdem:
         self.v_fullscreen = tk.BooleanVar(value=True)  # CLIENT: start zoomed
         self.v_sounds_enabled = tk.BooleanVar(value=True)
         self.v_sound_volume = tk.IntVar(value=70)
+        self.v_four_color_deck = tk.BooleanVar(value=False)
+        self.v_felt_color = tk.StringVar(value="#35654d")
+        self.v_bet_buttons = tk.StringVar(value="0.5,1,2,3")
 
         # option key -> tk var, scopes per holdem.settings.SPEC
         self._varmap = {
@@ -156,6 +162,9 @@ class Holdem:
             "fullscreen": self.v_fullscreen,
             "sounds_enabled": self.v_sounds_enabled,
             "sound_volume": self.v_sound_volume,
+            "four_color_deck": self.v_four_color_deck,
+            "felt_color": self.v_felt_color,
+            "bet_buttons": self.v_bet_buttons,
             "mode": self.v_mode, "structure": self.v_struct,
             "sb": self.v_sb, "bb": self.v_bb, "stack": self.v_stack,
             "players": self.v_players, "bb_ante": self.v_ante,
@@ -381,6 +390,14 @@ class Holdem:
         tk.Button(top, text="Settings", command=self.open_settings,
                   bg=t["btn"], fg=t["btn_text"], relief="flat",
                   font=("Segoe UI", 9), cursor="hand2").pack(side="right")
+        tk.Button(top, text="Preferences", command=self.open_preferences,
+                  bg=t["btn"], fg=t["btn_text"], relief="flat",
+                  font=("Segoe UI", 9), cursor="hand2").pack(
+            side="right", padx=(0, 6))
+        tk.Button(top, text="Player Notes", command=self.open_notes_viewer,
+                  bg=t["btn"], fg=t["btn_text"], relief="flat",
+                  font=("Segoe UI", 9), cursor="hand2").pack(
+            side="right", padx=(0, 6))
         tk.Button(top, text="Last hand", command=self.open_history,
                   bg=t["btn"], fg=t["btn_text"], relief="flat",
                   font=("Segoe UI", 9), cursor="hand2").pack(
@@ -646,6 +663,13 @@ class Holdem:
                                justify="left", anchor="nw", height=7)
         self.l_show.pack(fill="x", padx=12, pady=(2, 12))
 
+        # Player Notes button (always accessible)
+        tk.Button(side, text="Player Notes",
+                  command=self.open_notes_viewer, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 8), cursor="hand2").pack(
+            fill="x", padx=12, pady=(4, 4))
+
         if self._mp_mode:
             self._build_chat(side)
 
@@ -708,14 +732,7 @@ class Holdem:
         self.sizes = tk.Frame(right, bg=t["panel"])
         self.sizes.grid(row=0, column=0, columnspan=6, sticky="e", pady=(0, 4))
         self.size_btns = []
-        for label, frac in (("½ pot", 0.5), ("¾ pot", 0.75),
-                            ("Pot", 1.0), ("All-in", None)):
-            b = tk.Button(self.sizes, text=label, width=6, relief="flat",
-                          bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
-                          cursor="hand2",
-                          command=lambda fr=frac: self.preset(fr))
-            b.pack(side="left", padx=2)
-            self.size_btns.append(b)
+        self._rebuild_bet_buttons()
 
         # Pre-action checkboxes (shown when it is NOT the human player's turn)
         self.v_pre_cf = tk.BooleanVar(value=False)   # Check / Fold
@@ -928,6 +945,7 @@ class Holdem:
         seat_order = sess._seat_order or list(sess.players.keys())
         n = max(2, len(seat_order))
 
+        self._mp_seat_to_peer = {}
         players: list[Player] = []
         for i in range(n):
             cid       = seat_order[i] if i < len(seat_order) else ""
@@ -936,6 +954,9 @@ class Holdem:
             is_local  = (i == self._mp_local_seat)
             if is_local:
                 name = getattr(self, "nickname", None) or name
+            self._mp_seat_to_peer[i] = cid
+            if cid and not is_local:
+                _notes.update_nickname(cid, name)
             p = Player(i, name, stack,
                        style="Hero" if is_local else "Solid",
                        level=3        if is_local else 2,
@@ -2622,7 +2643,7 @@ class Holdem:
                   width=1, dash=(3, 4))
             return
         face = "#dcdce4" if dim else t["card"]
-        col = t["red"] if card.red else t["black"]
+        col = self._suit_color(card.s)
         if dim:
             col = t["dim"]
         rrect(cv, x, y, x + w, y + h, 6, fill=face,
@@ -2664,8 +2685,9 @@ class Holdem:
         # felt
         cv.create_oval(cx - rx - 16, cy - ry - 16, cx + rx + 16, cy + ry + 16,
                        fill=t["rail"], outline="")
+        _felt_col = self.v_felt_color.get() or t["felt"]
         cv.create_oval(cx - rx, cy - ry, cx + rx, cy + ry,
-                       fill=t["felt"], outline=t["felt_edge"], width=2)
+                       fill=_felt_col, outline=t["felt_edge"], width=2)
 
         # board (one row, or two smaller rows when the pot ran twice)
         if e.board2:
@@ -2805,6 +2827,22 @@ class Holdem:
             cv.create_text(av_cx, av_cy, text=init,
                            fill=t["text"], font=("Segoe UI", 9, "bold"))
 
+        # Color ring label (MP mode, opponent seats only)
+        if self._mp_mode and not hero:
+            _pid = self._mp_seat_to_peer.get(p.idx, "")
+            if _pid:
+                _nc = _notes.get(_pid).get("color", "none")
+                _ring_hex = {
+                    "red": "#e53935", "orange": "#fb8c00",
+                    "yellow": "#fdd835", "green": "#43a047",
+                    "blue": "#1e88e5", "purple": "#8e24aa",
+                }.get(_nc)
+                if _ring_hex:
+                    _rr = av_size / 2 + 4
+                    cv.create_oval(av_cx - _rr, av_cy - _rr,
+                                   av_cx + _rr, av_cy + _rr,
+                                   fill="", outline=_ring_hex, width=3)
+
         # ---- name + stack (shifted right to clear the avatar) -------------
         txt_off = av_pad + av_size + 4   # = 37 px from left edge of seat
         name = "You" if hero else p.name
@@ -2880,6 +2918,438 @@ class Holdem:
         if self.result and p.won > 0:
             cv.create_text(x, y - h / 2 - 12, text=f"+{p.won:,}",
                            fill=t["win"], font=("Segoe UI", 11, "bold"))
+
+        # Right-click hit region (MP mode, opponent seats only)
+        if self._mp_mode and not hero and p.in_seat:
+            _htag = f"seat_{p.idx}_hit"
+            cv.create_rectangle(
+                x - w / 2, y - h / 2, x + w / 2, y + h / 2,
+                fill="", outline="", tags=(_htag,))
+            cv.tag_bind(_htag, "<Button-3>",
+                        lambda _ev, si=p.idx: self._seat_right_click(_ev, si))
+
+    # ------------------------------------------------------ suit / deck helper
+
+    def _suit_color(self, suit_idx: int) -> str:
+        """Return the hex color for a card suit.
+
+        suit_idx: 0=clubs, 1=diamonds, 2=hearts, 3=spades
+        In four-color mode clubs are green and diamonds are blue.
+        """
+        if self.v_four_color_deck.get():
+            return ["#2e7d32", "#1565c0", "#d32f2f", "#1a1a1a"][suit_idx]
+        t = self.theme
+        return t["red"] if suit_idx in (1, 2) else t["black"]
+
+    # -------------------------------------------------- bet button helpers
+
+    def _rebuild_bet_buttons(self):
+        """Destroy existing bet-size buttons and rebuild from settings."""
+        for b in self.size_btns:
+            try:
+                b.destroy()
+            except Exception:
+                pass
+        self.size_btns = []
+        t = self.theme
+        raw = self.v_bet_buttons.get() if hasattr(self, "v_bet_buttons") else "0.5,1,2,3"
+        fracs: list[float] = []
+        for tok in raw.split(","):
+            tok = tok.strip()
+            try:
+                fracs.append(float(tok))
+            except ValueError:
+                pass
+        if not fracs:
+            fracs = [0.5, 1.0, 2.0, 3.0]
+
+        def _frac_label(f: float) -> str:
+            if f == 0.5:
+                return "1/2 pot"
+            if f == 0.75:
+                return "3/4 pot"
+            if f == 1.0:
+                return "Pot"
+            n = int(f) if f == int(f) else f
+            return f"{n}x pot"
+
+        for frac in fracs:
+            lbl = _frac_label(frac)
+            b = tk.Button(self.sizes, text=lbl, width=6, relief="flat",
+                          bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
+                          cursor="hand2",
+                          command=lambda fr=frac: self.preset(fr))
+            b.pack(side="left", padx=2)
+            self.size_btns.append(b)
+        # All-in is always the last button
+        b_ai = tk.Button(self.sizes, text="All-in", width=6, relief="flat",
+                         bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
+                         cursor="hand2", command=lambda: self.preset(None))
+        b_ai.pack(side="left", padx=2)
+        self.size_btns.append(b_ai)
+
+    # ------------------------------------------------- preferences dialog
+
+    def open_preferences(self):
+        """Open the Preferences dialog for UI polish options."""
+        t = self.theme
+        win = tk.Toplevel(self.root)
+        win.title("Preferences")
+        win.configure(bg=t["panel"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        self.root.update_idletasks()
+        dw, dh = 440, 340
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text="PREFERENCES", bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 13, "bold")).pack(pady=(12, 6))
+
+        body = tk.Frame(win, bg=t["panel"])
+        body.pack(fill="both", expand=True, padx=20)
+
+        def _section(txt):
+            tk.Label(body, text=txt, bg=t["panel"], fg=t["gold"],
+                     font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(10, 2))
+
+        # Table section
+        _section("TABLE")
+        felt_row = tk.Frame(body, bg=t["panel"])
+        felt_row.pack(anchor="w", pady=2)
+        tk.Label(felt_row, text="Felt color:", bg=t["panel"], fg=t["text"],
+                 font=("Segoe UI", 9), width=16, anchor="e").pack(side="left")
+        _felt_preview = tk.Label(felt_row, width=4,
+                                 bg=self.v_felt_color.get(), relief="solid")
+        _felt_preview.pack(side="left", padx=(4, 0))
+
+        def _pick_felt():
+            cur = self.v_felt_color.get()
+            result = colorchooser.askcolor(color=cur,
+                                           title="Table Felt Color",
+                                           parent=win)
+            if result and result[1]:
+                hex_col = result[1]
+                self.v_felt_color.set(hex_col)
+                cfg.set("felt_color", hex_col)
+                _felt_preview.config(bg=hex_col)
+                self.redraw()
+
+        tk.Button(felt_row, text="Pick...", relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 8), cursor="hand2",
+                  command=_pick_felt).pack(side="left", padx=(6, 0))
+
+        tk.Checkbutton(
+            body, text="Four-color deck  (clubs=green, diamonds=blue)",
+            variable=self.v_four_color_deck, bg=t["panel"],
+            fg=t["text"], selectcolor=t["bg"],
+            activebackground=t["panel"], activeforeground=t["text"],
+            font=("Segoe UI", 9),
+            command=lambda: (cfg.set("four_color_deck",
+                                     self.v_four_color_deck.get()),
+                             self.redraw())
+        ).pack(anchor="w", pady=2)
+
+        # Betting section
+        _section("BETTING")
+        bet_row = tk.Frame(body, bg=t["panel"])
+        bet_row.pack(anchor="w", pady=2)
+        tk.Label(bet_row, text="Bet shortcuts:", bg=t["panel"], fg=t["text"],
+                 font=("Segoe UI", 9), width=16, anchor="e").pack(side="left")
+        v_bb_entry = tk.StringVar(value=self.v_bet_buttons.get())
+        bet_entry = tk.Entry(bet_row, textvariable=v_bb_entry, width=22,
+                             bg=t["bg"], fg=t["text"], relief="flat",
+                             insertbackground=t["text"],
+                             font=("Consolas", 9))
+        bet_entry.pack(side="left", padx=(4, 0))
+        tk.Label(body, text="Comma-separated fractions, e.g. 0.5,1,2,3",
+                 bg=t["panel"], fg=t["dim"],
+                 font=("Segoe UI", 8)).pack(anchor="w", padx=(138, 0))
+
+        # Sound section
+        _section("SOUND")
+
+        def _on_sounds_toggle():
+            _audio.set_enabled(self.v_sounds_enabled.get())
+
+        tk.Checkbutton(
+            body, text="Sound effects enabled",
+            variable=self.v_sounds_enabled, bg=t["panel"],
+            fg=t["text"], selectcolor=t["bg"],
+            activebackground=t["panel"], activeforeground=t["text"],
+            font=("Segoe UI", 9), command=_on_sounds_toggle
+        ).pack(anchor="w", pady=2)
+        vol_row2 = tk.Frame(body, bg=t["panel"])
+        vol_row2.pack(anchor="w", pady=2)
+        tk.Label(vol_row2, text="Volume:", bg=t["panel"], fg=t["text"],
+                 font=("Segoe UI", 9), width=16, anchor="e").pack(side="left")
+
+        def _on_vol(_v=None):
+            _audio.set_volume(self.v_sound_volume.get() / 100)
+
+        tk.Scale(vol_row2, variable=self.v_sound_volume,
+                 from_=0, to=100, orient="horizontal", length=180,
+                 showvalue=True, bg=t["panel"], fg=t["text"],
+                 troughcolor=t["bg"], highlightthickness=0,
+                 activebackground=t["accent"], relief="flat",
+                 command=_on_vol).pack(side="left", padx=(4, 0))
+
+        def _save_prefs():
+            raw = v_bb_entry.get().strip()
+            valid = []
+            for tok in raw.split(","):
+                try:
+                    valid.append(str(float(tok.strip())))
+                except ValueError:
+                    pass
+            if valid:
+                clean = ",".join(valid)
+                self.v_bet_buttons.set(clean)
+                cfg.set("bet_buttons", clean)
+                self._rebuild_bet_buttons()
+            cfg.set("four_color_deck", self.v_four_color_deck.get())
+            cfg.set("sounds_enabled", self.v_sounds_enabled.get())
+            cfg.set("sound_volume", self.v_sound_volume.get())
+            win.destroy()
+
+        bbar = tk.Frame(win, bg=t["panel"])
+        bbar.pack(fill="x", padx=20, pady=(8, 12))
+        tk.Button(bbar, text="Cancel", command=win.destroy, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 9), cursor="hand2").pack(side="left")
+        tk.Button(bbar, text="Save", command=_save_prefs, relief="flat",
+                  bg=t["accent"], fg="#04040c",
+                  font=("Segoe UI", 9, "bold"), cursor="hand2",
+                  padx=12).pack(side="right")
+
+    # -------------------------------------------------- notes viewer dialog
+
+    def open_notes_viewer(self):
+        """Open a viewer listing all saved opponent notes."""
+        t = self.theme
+        win = tk.Toplevel(self.root)
+        win.title("Player Notes")
+        win.configure(bg=t["panel"])
+        win.resizable(True, True)
+        win.transient(self.root)
+        self.root.update_idletasks()
+        dw, dh = 520, 360
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text="PLAYER NOTES", bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 13, "bold")).pack(pady=(12, 4))
+
+        entries = _notes.all()
+        if not entries:
+            tk.Label(win, text="No notes saved yet.",
+                     bg=t["panel"], fg=t["dim"],
+                     font=("Segoe UI", 10)).pack(pady=40)
+            tk.Button(win, text="Close", command=win.destroy, relief="flat",
+                      bg=t["btn"], fg=t["btn_text"],
+                      font=("Segoe UI", 9), cursor="hand2").pack(pady=8)
+            return
+
+        _COLOR_HEX = {
+            "red": "#e53935", "orange": "#fb8c00", "yellow": "#fdd835",
+            "green": "#43a047", "blue": "#1e88e5", "purple": "#8e24aa",
+            "none": t["panel"],
+        }
+
+        lf = tk.Frame(win, bg=t["panel"])
+        lf.pack(fill="both", expand=True, padx=12, pady=(4, 4))
+        sb = tk.Scrollbar(lf, width=8)
+        sb.pack(side="right", fill="y")
+        lb_cv = tk.Canvas(lf, bg=t["panel"], highlightthickness=0,
+                          yscrollcommand=sb.set)
+        lb_cv.pack(side="left", fill="both", expand=True)
+        sb.config(command=lb_cv.yview)
+        rows_frame = tk.Frame(lb_cv, bg=t["panel"])
+        lb_cv.create_window(0, 0, anchor="nw", window=rows_frame)
+
+        def _on_configure(_e):
+            lb_cv.config(scrollregion=lb_cv.bbox("all"))
+
+        rows_frame.bind("<Configure>", _on_configure)
+
+        def _edit_entry(pid, nick):
+            win.destroy()
+            self._note_edit_dialog(pid, nick)
+
+        for entry in entries:
+            pid = entry["peer_id"]
+            nick = entry.get("nickname") or pid[:8]
+            color = entry.get("color", "none")
+            note = entry.get("note", "")
+            preview = (note[:40] + "...") if len(note) > 40 else note
+
+            row = tk.Frame(rows_frame, bg=t["bg"], pady=4, padx=6,
+                           cursor="hand2")
+            row.pack(fill="x", pady=1, padx=2)
+
+            # Color dot
+            dot_col = _COLOR_HEX.get(color, t["panel"])
+            tk.Label(row, width=2, bg=dot_col, relief="flat").pack(
+                side="left", padx=(0, 6))
+            # Initial
+            init_ch = nick[:1].upper() if nick else "?"
+            tk.Label(row, text=init_ch, bg=t["seat"], fg=t["text"],
+                     font=("Segoe UI", 9, "bold"), width=2).pack(side="left")
+            # Nickname
+            tk.Label(row, text=nick, bg=t["bg"], fg=t["text"],
+                     font=("Segoe UI", 9, "bold"), width=14,
+                     anchor="w").pack(side="left", padx=(4, 0))
+            # Note preview
+            tk.Label(row, text=preview, bg=t["bg"], fg=t["dim"],
+                     font=("Segoe UI", 9), anchor="w").pack(
+                side="left", padx=(4, 0), fill="x", expand=True)
+            # Bind click to edit
+            for child in (row,) + tuple(row.winfo_children()):
+                child.bind("<Button-1>",
+                           lambda _e, p=pid, n=nick: _edit_entry(p, n))
+
+        bbar2 = tk.Frame(win, bg=t["panel"])
+        bbar2.pack(fill="x", padx=12, pady=(4, 10))
+        tk.Button(bbar2, text="Close", command=win.destroy, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 9), cursor="hand2").pack(side="right")
+
+    # ---------------------------------------- seat right-click context menu
+
+    def _seat_right_click(self, event, seat_idx: int):
+        """Show context menu on right-click of an opponent seat (MP only)."""
+        if not self._mp_mode:
+            return
+        peer_id = self._mp_seat_to_peer.get(seat_idx, "")
+        if not peer_id:
+            return
+        e = self.engine
+        nick = (e.players[seat_idx].name
+                if e and seat_idx < len(e.players) else f"P{seat_idx + 1}")
+        t = self.theme
+
+        menu = tk.Menu(self.root, tearoff=0, bg=t["panel"], fg=t["text"],
+                       activebackground=t["seat"], activeforeground=t["accent"],
+                       relief="flat", font=("Segoe UI", 9))
+        menu.add_command(
+            label="Add/Edit Note...",
+            command=lambda: self._note_edit_dialog(peer_id, nick))
+
+        color_menu = tk.Menu(menu, tearoff=0, bg=t["panel"], fg=t["text"],
+                             activebackground=t["seat"],
+                             activeforeground=t["accent"],
+                             relief="flat", font=("Segoe UI", 9))
+        _COLORS = [
+            ("red",    "Red"),
+            ("orange", "Orange"),
+            ("yellow", "Yellow"),
+            ("green",  "Green"),
+            ("blue",   "Blue"),
+            ("purple", "Purple"),
+        ]
+        for ckey, clabel in _COLORS:
+            color_menu.add_command(
+                label=clabel,
+                command=lambda ck=ckey: (
+                    _notes.set_color(peer_id, ck, nick), self.redraw()))
+        color_menu.add_separator()
+        color_menu.add_command(
+            label="None (clear)",
+            command=lambda: (_notes.set_color(peer_id, "none", nick),
+                             self.redraw()))
+        menu.add_cascade(label="Set Color Label", menu=color_menu)
+        menu.add_command(
+            label="View Stats",
+            command=lambda: self._stats_popup(seat_idx))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _note_edit_dialog(self, peer_id: str, nickname: str):
+        """Open a dialog to add or edit a note for the given peer."""
+        t = self.theme
+        existing = _notes.get(peer_id)
+        win = tk.Toplevel(self.root)
+        win.title(f"Note - {nickname}")
+        win.configure(bg=t["panel"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.grab_set()
+        self.root.update_idletasks()
+        dw, dh = 380, 240
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text=nickname, bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 12, "bold")).pack(pady=(12, 4))
+        tk.Label(win, text="Note:", bg=t["panel"], fg=t["text"],
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=16)
+        txt = tk.Text(win, height=4, bg=t["bg"], fg=t["text"],
+                      font=("Consolas", 9), relief="flat",
+                      insertbackground=t["text"], wrap="word")
+        txt.pack(fill="x", padx=16, pady=(2, 4))
+        txt.insert("1.0", existing.get("note", ""))
+
+        def _save():
+            note_text = txt.get("1.0", "end-1c").strip()
+            _notes.set_note(peer_id, note_text, nickname)
+            self.redraw()
+            win.destroy()
+
+        bbar = tk.Frame(win, bg=t["panel"])
+        bbar.pack(fill="x", padx=16, pady=(4, 12))
+        tk.Button(bbar, text="Cancel", command=win.destroy, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 9), cursor="hand2").pack(side="left")
+        tk.Button(bbar, text="Save", command=_save, relief="flat",
+                  bg=t["accent"], fg="#04040c",
+                  font=("Segoe UI", 9, "bold"), cursor="hand2",
+                  padx=10).pack(side="right")
+
+    def _stats_popup(self, seat_idx: int):
+        """Show a small popup with session stats for the given seat."""
+        t = self.theme
+        e = self.engine
+        if e is None or seat_idx >= len(e.players):
+            return
+        p = e.players[seat_idx]
+        vpip = f"{self.session_stats.vpip_pct(seat_idx):.0f}%"
+        pfr = f"{self.session_stats.pfr_pct(seat_idx):.0f}%"
+        hands = str(self.session_stats.hands_dealt(seat_idx))
+
+        win = tk.Toplevel(self.root)
+        win.title(f"Stats - {p.name}")
+        win.configure(bg=t["panel"])
+        win.resizable(False, False)
+        win.transient(self.root)
+        self.root.update_idletasks()
+        dw, dh = 260, 180
+        rx = self.root.winfo_rootx() + self.root.winfo_width()  // 2 - dw // 2
+        ry = self.root.winfo_rooty() + self.root.winfo_height() // 2 - dh // 2
+        win.geometry(f"{dw}x{dh}+{max(0, rx)}+{max(0, ry)}")
+
+        tk.Label(win, text=p.name, bg=t["panel"], fg=t["accent"],
+                 font=("Segoe UI", 12, "bold")).pack(pady=(12, 8))
+        for label, val in (("Hands dealt:", hands),
+                           ("VPIP:", vpip),
+                           ("PFR:", pfr)):
+            row = tk.Frame(win, bg=t["panel"])
+            row.pack(fill="x", padx=20, pady=2)
+            tk.Label(row, text=label, bg=t["panel"], fg=t["text"],
+                     font=("Segoe UI", 9), width=14, anchor="e").pack(
+                side="left")
+            tk.Label(row, text=val, bg=t["panel"], fg=t["gold"],
+                     font=("Segoe UI", 9, "bold"), anchor="w").pack(
+                side="left", padx=(4, 0))
+        tk.Button(win, text="Close", command=win.destroy, relief="flat",
+                  bg=t["btn"], fg=t["btn_text"],
+                  font=("Segoe UI", 9), cursor="hand2").pack(pady=(14, 10))
 
     # ------------------------------------------------------- hand history
 
