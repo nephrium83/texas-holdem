@@ -197,6 +197,9 @@ def _valid(key, value):
 
 # ---------------------------------------------------------------- config
 
+_cache: dict | None = None   # M-14: in-memory cache; invalidated on save()
+
+
 def config_dir() -> Path:
     env = os.environ.get("HOLDEM_CONFIG_DIR")
     if env:
@@ -217,7 +220,11 @@ def load() -> dict:
 
     Unknown keys are dropped, invalid values fall back to defaults, and a
     missing or corrupt file yields pure defaults. Never raises.
+    Result is cached in memory until save() invalidates it (M-14).
     """
+    global _cache
+    if _cache is not None:
+        return _cache
     client = defaults(CLIENT)
     table = defaults(TABLE_RULE)
     try:
@@ -232,7 +239,8 @@ def load() -> dict:
             ok = _valid(k, v)
             if ok is not None and k in store:
                 store[k] = ok
-    return {"client": client, "last_table": table}
+    _cache = {"client": client, "last_table": table}
+    return _cache
 
 
 def get(key: str):
@@ -249,12 +257,17 @@ def set(key: str, value) -> bool:
     if spec is None or spec["scope"] != CLIENT:
         raise KeyError(key)
     stored = load()
+    # Mutate a copy so the cache stays valid if save() fails
+    import copy
+    stored = copy.deepcopy(stored)
     stored["client"][key] = value
     return save(stored["client"], stored["last_table"])
 
 
 def save(client: dict, last_table: dict) -> bool:
-    """Atomically persist both buckets. Best-effort: never raises."""
+    """Atomically persist both buckets. Best-effort: never raises.
+    Invalidates the in-memory cache on success (M-14)."""
+    global _cache
     out = {
         "client": {k: v for k, v in client.items()
                    if _valid(k, v) is not None and SPEC[k]["scope"] == CLIENT},
@@ -269,6 +282,7 @@ def save(client: dict, last_table: dict) -> bool:
         tmp.write_text(json.dumps(out, indent=2, sort_keys=True),
                        encoding="utf-8")
         os.replace(tmp, config_path())
+        _cache = None   # invalidate cache after successful write
         return True
     except Exception:
         return False

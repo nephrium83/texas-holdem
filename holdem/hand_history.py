@@ -16,8 +16,11 @@ Usage (wired in gui.py):
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
+
+log = logging.getLogger(__name__)
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -225,8 +228,8 @@ class HandLogger:
                     "pot_final": rec.pot_final,
                 }
                 fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("hand_history persist failed: %s", exc)
 
 
 # ----------------------------------------------------------------- viewer
