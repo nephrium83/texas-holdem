@@ -307,13 +307,62 @@ def scalar_from_bytes(data: bytes) -> Scalar:
 # DLEQ and shuffle proofs hash it into their Fiat-Shamir challenges.
 G: Point = mul_base(Scalar((1).to_bytes(SCALAR_BYTES, "little")))
 
+# The identity element: the canonical all-zero encoding. add() and sub()
+# handle it correctly, but libsodium's scalarmult REJECTS a zero scalar or
+# the identity point (a Diffie-Hellman contributory-behaviour check). The
+# Pedersen commitments and the Bayer-Groth shuffle arguments legitimately
+# need those cases (e.g. committing to a zero value), so the *_safe helpers
+# below route around the check.
+IDENTITY: Point = Point(b"\x00" * POINT_BYTES)
+
+_ZERO_SCALAR = Scalar(b"\x00" * SCALAR_BYTES)
+
+
+def is_zero_scalar(s: Scalar) -> bool:
+    return bytes(s) == bytes(_ZERO_SCALAR)
+
+
+def mul_safe(k: Scalar, p: Point) -> Point:
+    """k*p, returning the identity when k == 0 or p is the identity.
+
+    Use this instead of ``mul`` anywhere a zero scalar or identity point is
+    a legitimate input (commitments, multi-exponentiation arguments).
+    """
+    if bytes(k) == bytes(_ZERO_SCALAR) or bytes(p) == bytes(IDENTITY):
+        return IDENTITY
+    return mul(k, p)
+
+
+def mul_base_safe(k: Scalar) -> Point:
+    """k*G, returning the identity when k == 0."""
+    if bytes(k) == bytes(_ZERO_SCALAR):
+        return IDENTITY
+    return mul_base(k)
+
+
+def multiscalar_mul(scalars, points) -> Point:
+    """Sum_i scalars[i] * points[i], zero-safe. Identity if empty.
+
+    The workhorse of the commitment scheme and shuffle arguments:
+    comck(a; r) = r*H + sum a_i*G_i is one such multiscalar multiplication.
+    """
+    scalars = list(scalars)
+    points = list(points)
+    if len(scalars) != len(points):
+        raise ValueError("multiscalar_mul: scalars and points differ in length")
+    acc = IDENTITY
+    for k, p in zip(scalars, points):
+        acc = add(acc, mul_safe(k, p))
+    return acc
+
 
 __all__ = [
-    "Point", "Scalar", "G",
+    "Point", "Scalar", "G", "IDENTITY",
     "POINT_BYTES", "SCALAR_BYTES", "HASH_BYTES",
     "libsodium_version",
-    "random_scalar", "scalar_reduce",
+    "random_scalar", "scalar_reduce", "is_zero_scalar",
     "scalar_add", "scalar_sub", "scalar_mul", "scalar_negate", "scalar_invert",
-    "mul", "mul_base", "add", "sub", "hash_to_group",
+    "mul", "mul_base", "mul_safe", "mul_base_safe", "multiscalar_mul",
+    "add", "sub", "hash_to_group",
     "point_from_bytes", "scalar_from_bytes",
 ]
