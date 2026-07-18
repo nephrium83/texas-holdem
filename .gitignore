@@ -11,3 +11,9 @@ venv/
 
 # local launcher with a machine-specific interpreter path
 Play Poker.bat
+
+# native crypto libraries (build artifacts — see native/README.md to rebuild)
+native/*.dll
+native/*.so
+native/*.dylib
+native/*.lib
