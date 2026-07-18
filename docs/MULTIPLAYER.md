@@ -239,19 +239,38 @@ adversarial-dropper bot — yanking simulated players at every protocol
 step and asserting the hand always terminates with conserved chips —
 doubles as the integration fuzzer.
 
-**Phase 4 — multiplayer client and packaging.** The Tkinter app is the
-multiplayer client — not an offline fallback. Phase 4 wires libp2p
+**Phase 4 — multiplayer client and packaging.** Phase 4 wires libp2p
 (py-libp2p, falling back to the Go sidecar per the Phase 3 decision
-rule) into the existing GUI, makes the lobby do real DHT-based table
-discovery and joining, and runs actual multiplayer game sessions over
-the Phase 1 signed wire format with Phase 2 mental poker shuffles. No
-browser client; that path was considered and reversed — the desktop
-app is the product. The deliverable is a PyInstaller-packaged binary:
-one download, no Python required. See the Phase 4 spec section below.
+rule) into the client, makes the lobby do real DHT-based table discovery
+and joining, and runs actual multiplayer game sessions over the Phase 1
+signed wire format with Phase 2 mental poker shuffles.
 
-The current single-player engine and GUI are not throwaway: the engine
-is the authoritative rules core the protocol wraps, and its determinism
-is the property the whole design leans on.
+**Client direction (decided).** The shipped client is a **native Godot
+2.5D app** — a retro pixel-art table with a fixed camera and occasional
+detailed (dimensional) animations on key moments (showdown flip, pot
+award, deal). The **Python engine runs as an authoritative sidecar**:
+Godot handles rendering and input only and never runs game logic, so
+the security-critical core (evaluator, betting state machine, signed
+envelopes, verifiable shuffle) stays a single source of truth. The
+Tkinter GUI is **not** the shipped client — it is retained as a
+development and headless-test harness for the engine. **This is a
+native desktop app; a web/browser client is explicitly out of scope,
+permanently.** The client ↔ engine message contract (what the client
+sends as actions and receives as state snapshots + the animation-
+triggering event stream) is a slice of the Phase 1 spec and is shared
+across any client, so it is pinned before the Godot client is built.
+
+The deliverable is a packaged native binary — Godot export for the
+front end plus the bundled Python sidecar — one download, no separate
+Python install required.
+
+The current single-player engine is not throwaway: it is the
+authoritative rules core the protocol wraps, and its determinism is the
+property the whole design leans on. The Godot spike (a fixed-perspective
+pixel table dealt from the sidecar, with one card flipping through 3D
+space on showdown) validates both the aesthetic and the sidecar
+architecture, and can proceed in parallel once the client ↔ engine
+contract is pinned.
 
 
 ---
@@ -1396,10 +1415,21 @@ the multicast rendezvous becomes the LAN fast-path only.
 
 ## Phase 4 — Multiplayer client and packaging
 
-Phase 4 is the integration and distribution phase. The Tkinter GUI, the
-Phase 1 signed action log, and the Phase 3 transport are wired together
-into a single runnable application that a user can download and play
-without installing Python or configuring anything.
+Phase 4 is the integration and distribution phase. The Phase 1 signed
+action log and the Phase 3 transport are wired together into a single
+runnable application that a user can download and play without installing
+Python or configuring anything.
+
+> **Client scope note (supersedes the code below).** The shipped front
+> end is a **native Godot 2.5D client**, not Tkinter (see "Client
+> direction (decided)" in the roadmap above). The Python side described
+> in this section — libp2p node startup, DHT table discovery, wiring the
+> signed action log and mental-poker shuffle — is the **authoritative
+> sidecar** the Godot client drives, and remains correct as written. The
+> `tk.Tk()` snippets below are reference/harness form: read them as "the
+> sidecar exposes this; the Godot client calls it over the client↔engine
+> boundary." The Tkinter GUI stays as the engine's dev/test harness. A
+> web/browser client is permanently out of scope.
 
 ---
 

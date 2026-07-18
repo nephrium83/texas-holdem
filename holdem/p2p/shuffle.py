@@ -27,8 +27,17 @@ Security properties
 * Liveness:        one dishonest peer that refuses to reveal causes the hand to abort.
 * Verifiability:   given the reveal_collect broadcast anyone can independently
                    reproduce the master seed and the deck order.
-* Card privacy:    hole cards are encrypted with ephemeral X25519 + AES-256-GCM;
-                   only the intended recipient can decrypt them.
+* Card privacy:    hole cards are encrypted with ephemeral X25519 + AES-256-GCM,
+                   so no *peer* can read another peer's cards in transit.
+
+  LIMITATION (H-2): this is a trusted-dealer model. The host derives the
+  full deck order in the clear (Phase 3) in order to deal, so the *host*
+  knows every player's hole cards. The per-recipient encryption hides
+  cards from other peers, NOT from the host. This is an interim design;
+  true mental poker (no single party ever knows the deck) requires the
+  threshold / commutative-encryption shuffle described in
+  docs/MULTIPLAYER.md Phase 2. Do not treat host-held card secrecy as a
+  guarantee until that lands.
 """
 from __future__ import annotations
 
