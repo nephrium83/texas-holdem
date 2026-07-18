@@ -163,10 +163,25 @@ def make_initial_deck(pk: Point) -> List[Ciphertext]:
     return [encrypt(pk, p) for p in _CARD_POINTS]
 
 
+def joint_public_key(public_shares: Sequence[Point]) -> Point:
+    """Combine per-seat public shares X_i = x_i*G into PK = sum(X_i).
+
+    The Phase 1 DKG produces each seat's public share X_i; the joint
+    encryption key is their group sum, so that decryption requires every
+    corresponding secret share x_i to contribute a partial decryption.
+    """
+    if not public_shares:
+        raise ValueError("joint_public_key requires at least one share")
+    pk = public_shares[0]
+    for x in public_shares[1:]:
+        pk = R.add(pk, x)
+    return pk
+
+
 __all__ = [
     "SUITS", "RANKS", "CARDS",
     "card_label_bytes", "card_point", "point_to_card", "deck_points",
     "Ciphertext",
     "encrypt", "reencrypt", "partial_decrypt", "combine",
-    "make_initial_deck",
+    "make_initial_deck", "joint_public_key",
 ]
