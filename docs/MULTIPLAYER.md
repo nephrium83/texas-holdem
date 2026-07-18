@@ -627,6 +627,146 @@ closes the undo-button exploit described in the threshold-keys section above.
 
 ---
 
+### 5. Client ↔ engine contract
+
+This is the **local** boundary between a rendering client (the shipped
+Godot front end, or the Tkinter harness) and the authoritative Python
+engine running as an in-process object or a sidecar subprocess. It is
+distinct from the peer wire format in §1: §1 is how *peers* talk to each
+other over libp2p; §5 is how *one machine's* client talks to *its own*
+engine. It is defined in Phase 1 because it is shared by every client and
+because writing it down pins the engine boundary the whole architecture
+leans on.
+
+**Direction of the design.** The engine is authoritative and stateful.
+The client is a pure function of the messages it receives: it holds no
+game rules, computes no legality, and knows nothing it was not explicitly
+sent. Three message kinds cross the boundary:
+
+1. **Commands** — client → engine. A closed set of intents.
+2. **Snapshots** — engine → client. The full renderable state for *one*
+   seat, pushed after every state change.
+3. **Events** — engine → client. A stream of discrete moments, used to
+   trigger animations. Purely presentational; a client that ignores them
+   still renders correctly from snapshots alone.
+
+The transport for this boundary is deliberately unspecified here: for the
+Tkinter harness it is direct method calls; for the Godot client it is
+newline-delimited JSON over a local socket or stdio to the sidecar. The
+message *shapes* below are identical in both cases.
+
+**The hidden-information rule is a contract invariant, not a UI choice.**
+A snapshot addressed to seat *N* MUST NOT contain any other seat's hole
+cards. The engine already enforces this split today: table state is
+broadcast to everyone (`game_state`), while hole cards are unicast only
+to their owner (`deal_private`). §5 formalizes that separation as a
+security property of the boundary — a client cannot leak what it was
+never given.
+
+**Command messages (client → engine).** The closed set the client may
+send. Each is validated by the engine exactly as a peer action is (§1),
+so an out-of-turn or illegal command is rejected, not trusted.
+
+| command        | payload fields              | meaning                          |
+|----------------|-----------------------------|----------------------------------|
+| `fold`         | —                           | fold the current hand            |
+| `check_call`   | —                           | check if free, else call to_call |
+| `raise_to`     | `amount` (int)              | raise the total bet to `amount`  |
+| `sit_out`      | —                           | sit out from the next hand       |
+| `sit_in`       | `post_now` (bool)           | return; post blind now or wait   |
+| `add_chips`    | `amount` (int)              | top up between hands             |
+| `rabbit`       | —                           | request the fold-out runout      |
+| `next_hand`    | —                           | acknowledge/deal the next hand   |
+
+`raise_to` uses an absolute target (matching the engine's `act(i,
+"raise", amount)` semantics and the bet slider), never a delta. The
+engine clamps it to the legal band; the client never computes legality.
+
+**Snapshot messages (engine → client).** Pushed after every state change,
+addressed to one seat. Supersedes the current `game_state` broadcast by
+folding in the per-seat and positional data the Tkinter GUI computes
+locally today (so a socket client needs nothing but the snapshot to
+render a full table):
+
+```json
+{
+  "type": "snapshot",
+  "seat": 3,
+  "hand_num": 42,
+  "street": "flop",
+  "board": ["Ks", "7d", "2c"],
+  "pot": 240,
+  "side_pots": [{"amount": 120, "eligible": [0, 3]}],
+  "button": 0, "sb_seat": 1, "bb_seat": 2,
+  "action_on": 3,
+  "seats": [
+    {
+      "seat": 0, "name": "P1", "stack": 980, "bet": 40,
+      "folded": false, "all_in": false, "in_seat": true,
+      "sitting_out": false, "last_action": "CALL 40",
+      "pos": "BTN", "is_you": false
+    }
+  ],
+  "you": {
+    "hole": ["Ah", "Kh"],
+    "legal": {
+      "can_check": false, "to_call": 40, "can_raise": true,
+      "min_to": 80, "max_to": 980
+    }
+  }
+}
+```
+
+- `seats[*].last_action` and `pos` (SB/BB/BTN badge) are engine-derived,
+  not client-inferred — that is the delta from today's `game_state`.
+- `you.hole` is present **only** in the snapshot addressed to that seat
+  (the §5 hidden-information invariant). Every other seat's `hole` is
+  absent, never null-with-a-placeholder.
+- `you.legal` mirrors the engine's `legal()` dict (`to_call`,
+  `can_check`, `can_raise`, `min_to`, `max_to`); it is populated only
+  when `action_on == seat`, and drives which buttons the client enables.
+
+**Event messages (engine → client).** The animation stream. Each is a
+discrete moment the client MAY render with a flourish; ignoring them still
+leaves snapshots authoritative — a client that only consumes snapshots is
+correct, just less animated.
+
+The engine already emits a presentational event log today via
+`emit(kind, text)` / `drain()`, with these kinds: `blind`, `bet`,
+`raise`, `check`, `fold`, `street`, `show`, `pot`, `hand`. That log is
+the seed of this stream. The contract's **target** event set below
+normalizes those into structured payloads (text → fields) and adds the
+few a rich client needs that the log does not yet distinguish
+(`deal_hole`, `run_twice`). Growing `emit()` to carry structured payloads
+for each of these is a Phase-1 task; until then the client can drive
+basic animation from the existing `(kind, text)` log.
+
+| target event  | payload                        | from emit kind / trigger       |
+|---------------|--------------------------------|--------------------------------|
+| `deal_hole`   | `seat`                         | (new) hole cards dealt         |
+| `deal_board`  | `street`, `cards`              | `street`                       |
+| `post_blind`  | `seat`, `kind`, `amount`       | `blind`                        |
+| `bet`         | `seat`, `verb`, `amount`       | `bet` / `raise` / `check`      |
+| `fold`        | `seat`                         | `fold`                         |
+| `showdown`    | `reveals` (seat→cards), `best` | `show`                         |
+| `award`       | `pot_index`, `winners`, `amt`  | `pot`                          |
+| `run_twice`   | `board1`, `board2`             | (new) all-in board run twice   |
+
+The Godot client's "surprisingly detailed" moments are a chosen subset of
+these — `showdown` (the dimensional card flip), `award` (chip cascade),
+`deal_board` — while the rest update instantly. The client decides which
+events earn the deluxe treatment; the engine just reports that they
+happened.
+
+**Validation approach.** §5 is proven by driving the existing Tkinter GUI
+and the P2P `Session` through this contract and asserting neither consumer
+needs a field the snapshot/event set omits, plus a no-leak test: no
+snapshot addressed to seat *N* ever contains another seat's `hole`. This
+is the same house style as the engine suite — the contract is not "done"
+until a test pins it.
+
+---
+
 ## Phase 2 — Joint shuffle prototype
 
 The four components below are the Phase 2 deliverable. All code runs in-process:
