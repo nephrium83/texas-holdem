@@ -303,8 +303,13 @@ def scalar_from_bytes(data: bytes) -> Scalar:
     return Scalar(data)
 
 
+# The Ristretto255 base point G (= 1*G). Exposed as a constant because the
+# DLEQ and shuffle proofs hash it into their Fiat-Shamir challenges.
+G: Point = mul_base(Scalar((1).to_bytes(SCALAR_BYTES, "little")))
+
+
 __all__ = [
-    "Point", "Scalar",
+    "Point", "Scalar", "G",
     "POINT_BYTES", "SCALAR_BYTES", "HASH_BYTES",
     "libsodium_version",
     "random_scalar", "scalar_reduce",
