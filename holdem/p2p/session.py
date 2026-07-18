@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 _log = logging.getLogger(__name__)
@@ -99,6 +99,8 @@ class Session:
         self.on_shuffle_ready: Optional[Callable[[list], None]]  = None
         # on_shuffle_deal(payload_dict)   -- peer: encrypted hole cards arrived
         self.on_shuffle_deal: Optional[Callable[[dict], None]]   = None
+        # on_shuffle_cheat(conn_id)       -- peer: a reveal failed verification
+        self.on_shuffle_cheat: Optional[Callable[[str], None]]   = None
 
         # Engine ref (host only) and seat order
         self._engine     = None
@@ -110,14 +112,22 @@ class Session:
 
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
-        # M-11: enforce hash-chain linkage for signed envelopes
+        # M-11 / H-3: per-message integrity is enforced at the transport
+        # layer (C-1: every envelope is signature-verified in wire.unpack).
+        # The hash *chain* linking successive messages is not yet threaded —
+        # senders still emit prev="0"*64 (see wire.pack). We record each
+        # message hash so the chain can be verified once per-peer sequencing
+        # is implemented (docs/MULTIPLAYER.md Phase 1), but we do NOT drop on
+        # a prev mismatch here: doing so would reject every message after the
+        # first, since prev is not populated. Detect a *real* chain (prev set
+        # to something other than genesis) and enforce it only then.
         if "hash" in msg and "prev" in msg:
-            expected_prev = self._peer_last_hash.get(conn_id, "0" * 64)
-            if msg["prev"] != expected_prev:
+            last = self._peer_last_hash.get(conn_id)
+            if msg["prev"] != "0" * 64 and last is not None and msg["prev"] != last:
                 _log.warning(
                     "session: hash-chain broken for %s "
                     "(expected prev=%s, got %s) — dropping",
-                    conn_id, expected_prev[:16], msg["prev"][:16]
+                    conn_id, last[:16], msg["prev"][:16]
                 )
                 return
             self._peer_last_hash[conn_id] = msg["hash"]
@@ -395,7 +405,6 @@ class Session:
         commits = payload.get("commits", {})
 
         # Verify our commit is in the collection
-        my_commit_hex = sr._commits.get(self.local_conn_id, b"").hex()
         if self.local_conn_id and self.local_conn_id not in commits:
             _log.warning("shuffle: our commit not in commit_collect — aborting")
             return
@@ -435,23 +444,18 @@ class Session:
 
     def _host_finalise_shuffle(self) -> None:
         """Host: all reveals verified — compute deck, encrypt, and deal."""
-        from holdem.p2p import transport as _t, identity as _id
-        from holdem.p2p.shuffle import encrypt_hole_cards
+        from holdem.p2p import transport as _t
 
         sr = self._shuffle_round
         deck_indices = sr.shuffled_deck()
 
-        # Broadcast reveals so every peer can independently verify the deck
-        reveals_payload: dict = {}
-        for cid in sr.all_conn_ids:
-            if cid in sr._seeds:
-                reveals_payload[cid] = {
-                    "seed_hex":  sr._seeds[cid].hex(),
-                    "nonce_hex": sr._commits[cid].hex(),  # commit acts as nonce
-                }
+        # Broadcast reveals so every peer can independently verify the deck.
+        # H-1: reveals_snapshot() emits the real per-seat nonce (not the
+        # commit), so any peer recomputing SHA256(seed||nonce) matches the
+        # commitment and can reproduce the deck.
         _t.broadcast({
             "type": "shuffle_reveal_collect",
-            "payload": {"reveals": reveals_payload},
+            "payload": {"reveals": sr.reveals_snapshot()},
         })
         _log.debug("shuffle: host broadcasted reveal_collect, deck derived")
 
@@ -460,10 +464,47 @@ class Session:
             self.on_shuffle_ready(deck_indices)
 
     def _on_shuffle_reveal_collect(self, conn_id: str, msg: dict) -> None:
-        """Peer: optionally verify all reveals; no further action required here."""
-        # The deck is derived independently by the host and cards arrive via
-        # shuffle_deal.  Peers can audit offline from this broadcast.
-        pass
+        """Peer: verify every revealed seed against its commitment (H-1).
+
+        Each peer already holds the commits from the commit_collect phase.
+        Recompute SHA256(seed||nonce) for every seat and confirm it matches
+        the committed value; if any seat fails, the host cheated or a message
+        was tampered with, and the hand must not proceed.
+        """
+        from holdem.p2p.shuffle import verify_commit, derive_master_seed, \
+            deterministic_shuffle
+
+        sr = self._shuffle_round
+        if sr is None:
+            return
+        reveals = msg.get("payload", {}).get("reveals", {})
+        seeds: dict = {}
+        for cid, r in reveals.items():
+            try:
+                seed  = bytes.fromhex(r["seed_hex"])
+                nonce = bytes.fromhex(r["nonce_hex"])
+            except (KeyError, ValueError):
+                _log.error("shuffle: malformed reveal for %s — aborting hand", cid)
+                if self.on_shuffle_cheat:
+                    self.on_shuffle_cheat(cid)
+                return
+            commit = sr._commits.get(cid)
+            if commit is None or not verify_commit(seed, nonce, commit):
+                _log.error(
+                    "shuffle: reveal for %s does not match its commit — "
+                    "possible host cheating; aborting hand", cid)
+                if self.on_shuffle_cheat:
+                    self.on_shuffle_cheat(cid)
+                return
+            seeds[cid] = seed
+
+        # Independently reproduce the deck and expose it to the peer's GUI.
+        try:
+            deck = deterministic_shuffle(derive_master_seed(seeds))
+        except ValueError:
+            return
+        if self.on_shuffle_ready:
+            self.on_shuffle_ready(deck)
 
     def _on_shuffle_deal(self, msg: dict) -> None:
         """Peer: receive encrypted hole cards from the host."""

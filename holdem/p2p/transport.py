@@ -175,6 +175,27 @@ def _frame(msg: dict) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
+# Control frames exchanged with the *relay server* (not peers) are the only
+# messages that legitimately travel unsigned: they are addressed to the relay
+# itself, never dispatched to the game session, and carry no game authority.
+_RELAY_CONTROL_TYPES = frozenset({"relay_join"})
+
+
+def _sign_frame(msg: dict) -> bytes:
+    """Wrap a peer-bound dict in a signed envelope, then frame it.
+
+    C-1: every peer-to-peer message is signed centrally here, so no call
+    site can accidentally send an unsigned game or control message. Frames
+    that already carry a signature (pre-packed by a caller) pass through
+    unchanged; relay-control frames are framed without signing.
+    """
+    if "sig" in msg or msg.get("type") in _RELAY_CONTROL_TYPES:
+        return _frame(msg)
+    from holdem.p2p import wire as _wire
+    signed = json.loads(_wire.pack(msg.get("type", ""), msg.get("payload", {})))
+    return _frame(signed)
+
+
 async def _read_msg(reader: asyncio.StreamReader) -> dict:
     header = await reader.readexactly(4)
     length = struct.unpack(">I", header)[0]
@@ -187,11 +208,12 @@ async def _read_msg(reader: asyncio.StreamReader) -> dict:
         msg = json.loads(body)
     except json.JSONDecodeError as exc:
         raise ValueError(f"malformed JSON frame: {exc}") from exc
-    # C-1: if the envelope carries a signature, verify it via wire.unpack
-    if "sig" in msg:
-        from holdem.p2p import wire as _wire
-        msg = _wire.unpack(body)   # raises ValueError on bad/expired signature
-    return msg
+    # C-1: every peer message MUST be a valid signed envelope. Relay-control
+    # frames are the sole exception (addressed to the relay, not a session).
+    if msg.get("type") in _RELAY_CONTROL_TYPES:
+        return msg
+    from holdem.p2p import wire as _wire
+    return _wire.unpack(body)   # raises ValueError on missing/bad/expired sig
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +466,7 @@ async def _send_to(conn_id: str, msg: dict) -> None:
         log.warning("transport.send: no writer for conn_id %s", conn_id)
         return
     try:
-        writer.write(_frame(msg))
+        writer.write(_sign_frame(msg))   # C-1: sign every peer-bound message
         await writer.drain()
     except Exception:
         log.exception("transport.send error")

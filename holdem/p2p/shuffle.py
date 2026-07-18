@@ -37,7 +37,7 @@ import hmac as _hmac
 import os
 import struct
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +245,7 @@ class ShuffleRound:
     _nonce:   bytes = field(default_factory=make_nonce, init=False, repr=False)
     _commits: Dict[str, bytes] = field(default_factory=dict, init=False)
     _seeds:   Dict[str, bytes] = field(default_factory=dict, init=False)
+    _nonces:  Dict[str, bytes] = field(default_factory=dict, init=False)
 
     # X25519 pubkeys collected from peers (conn_id → 32-byte pubkey)
     x25519_pubkeys: Dict[str, bytes] = field(default_factory=dict, init=False)
@@ -254,6 +255,7 @@ class ShuffleRound:
         commit = compute_commit(self._seed, self._nonce)
         self._commits[self.local_conn_id] = commit
         self._seeds[self.local_conn_id] = self._seed
+        self._nonces[self.local_conn_id] = self._nonce   # H-1: retain nonce
         return commit
 
     @property
@@ -292,6 +294,7 @@ class ShuffleRound:
                 "SHA256(seed||nonce) ≠ committed value — possible cheating"
             )
         self._seeds[conn_id] = seed
+        self._nonces[conn_id] = nonce   # H-1: retain nonce for verifiable broadcast
 
     def all_reveals_received(self) -> bool:
         """True when every seat's seed has been verified and stored."""
@@ -312,8 +315,9 @@ class ShuffleRound:
         return {
             cid: {
                 "seed_hex":  self._seeds[cid].hex(),
-                "nonce_hex": self._commits[cid].hex(),   # nonce not stored after verify
+                "nonce_hex": self._nonces[cid].hex(),   # H-1: real nonce, so
+                                                        # SHA256(seed||nonce)==commit
             }
             for cid in self.all_conn_ids
-            if cid in self._seeds
+            if cid in self._seeds and cid in self._nonces
         }
