@@ -261,3 +261,150 @@ deletion + docs.
   over in-process dicts).
 - Reconstruction of a dropped seat's share (deferred per open question 1).
 - Any change to the crypto primitives — they are frozen and tested.
+
+
+---
+
+## Decisions settled (2026-07-19)
+
+All ten scoping questions answered. These are build-ready rulings; where
+an answer described a real-money or centralized-account feature, it is
+recorded as out-of-scope with the reason, since this is a **play-money,
+serverless, peer-to-peer** app.
+
+### Architecture
+
+- **Fully hostless (Q7).** No host/coordinator player. All seats are
+  equal peers. Every phase (DKG, shuffle chain, deal, audit) is driven
+  by canonical rules every peer computes identically from shared public
+  state — seat order, whose turn to shuffle, which position deals to
+  whom — with no seat holding a privileged coordinating role. This is a
+  structural change from today's host-coordinated `session.py`; the
+  `MentalDeal` coordinator is written peer-symmetric from the start.
+  *Consequence:* protocol steps that the old code funnelled through the
+  host (collect commits, finalise) become "every peer broadcasts, every
+  peer tallies against the same rule." Turn-taking (shuffle order) is
+  enforced by the canonical seat order, not by a coordinator granting
+  turns.
+
+- **Transport stays decoupled (Q8).** L5 is built and tested entirely
+  headless over in-process/loopback message passing (dicts in, dicts
+  out), exactly like the crypto modules' test harnesses. Real networking
+  (join-code → connection) is a separate layer that plugs in later;
+  nothing in L5 assumes sockets. Multi-instance realism (copies on
+  Unraid + laptop simulating internet peers) is a later integration-test
+  step, not part of L5.
+
+- **Headless, no UI (Q10).** L5 ships as tested logic with no screen.
+  The Tkinter window is not kept in sync during L5; the visible client
+  (Tkinter harness and/or Godot) is wired up entirely afterward against
+  the finished coordinator.
+
+### Cheating response (Q6) — non-financial only
+
+Real-money mechanisms from the Q6 answer (slashing, escrow, buy-in
+freeze/seize, victim compensation, wallet/smart-contract blacklisting)
+are **out of scope**: there is no money, custody, wallet, or escrow in
+this app, and adding them would make it a regulated money-transmitting
+service — a different project. Global identity bans (email / MAC /
+hardware UUID / IP blacklist) are **out of scope** too: there is no
+central account authority to maintain such a list, and harvesting
+hardware identifiers is a privacy line we won't cross.
+
+What L5 **does** build, on a cheat caught by proof/audit failure:
+- **Void the hand** — no result stands; chips as they were at hand start.
+- **Public attribution broadcast** — a system event every peer displays:
+  "Player X removed — verification failure." Proves the security is
+  working (builds trust for honest players).
+- **Eviction** — the cheating seat is dropped from the table; its seat
+  is marked empty; the button advances and play continues with the rest.
+- **Local refuse-list** — each peer records the offending **public key**
+  and declines to seat it again. This is the decentralized, privacy-
+  respecting analogue of a ban: local, per-peer, keyed on the crypto
+  identity that actually misbehaved, with no central authority and no
+  hardware fingerprinting.
+
+### Mid-hand dropout (Q1) — void for v1
+
+Any seat disconnecting mid-hand **voids the hand** (chips returned,
+redeal with remaining seats). Because full decryption already requires
+every seat (n-of-n), a mid-hand dropout stalls the hand regardless, and
+voiding matches the audit's void-on-failure posture — no new trust
+assumption.
+
+**Deferred to v2 (recorded, not built):** Verifiable Secret Sharing /
+threshold key reconstruction so remaining seats can pool shares to
+reconstruct a dropped seat's key and finish the hand (fold/all-in the
+absentee per room rules). This is genuine mental-poker cryptography and
+arguably larger than all of L5; it directly conflicts with the
+detection-first / get-it-playable priority, so it is a post-v1 upgrade.
+
+### Crash survival (Q9) — deterministic keys + persisted public state
+
+A hand **survives the app closing/reopening** within a grace window.
+Design:
+- **Deterministic hand keys.** A seat's secret key share for a hand is
+  derived, not stored volatile: `x_share = HKDF(local_master_secret,
+  session_id ‖ hand_id ‖ seat)`. On reopen the app recomputes the exact
+  same share instead of losing it. The **master secret is a local
+  device secret** generated once and saved to the app data dir — *not* a
+  crypto wallet, seed phrase, or HD-wallet key (that framing came from a
+  money-app source and does not apply here).
+- **Persisted public state.** Public game state (pot, bets, board,
+  publicly-decrypted cards, current `hand_id`, accepted deck rounds) is
+  written to a local store (SQLite) as it changes.
+- **Re-sync on reopen.** Fetch current state from peers → recompute hand
+  keys deterministically → replay betting history to catch up → resume.
+- **Grace window.** A closed/crashed app is treated as a normal
+  disconnect: the hand stays alive for **15–20 s** while the seat's
+  action clock ticks; reopen-and-handshake within the window resumes,
+  otherwise the dropout rule (void, per Q1) fires.
+
+This also affects the DKG: because key shares are deterministic from the
+master secret + hand id, `keygen_pop` proves possession of a
+deterministically-derived share, and a rejoining seat regenerates the
+identical share — key derivation must be settled in the coordinator's
+Phase A design (step 2).
+
+### Table size & latency (Q4/Q5) — measured, not estimated
+
+Cap tables at **9 seats**. Budget: **≤ 60–90 s per hand**. Measured on
+the dev machine (single-threaded libsodium), per shuffle proof at k=128:
+**~1.1 s to prove, ~1.1 s to verify, 637 KB (≈1.3 MB hex on the wire).**
+
+- **Prevention ON at 9 seats:** the shuffle chain is serial (seat *s*
+  can't shuffle until *s-1*'s deck is verified), so ~9×(prove+verify) ≈
+  **~20 s of compute** plus ~10 MB of proof traffic — lands inside 90 s
+  but is heavy, and dominated entirely by the shuffle proofs. DKG +
+  audit are negligible (~0.2 s combined for 9 seats).
+- **Detection ONLY at 9 seats:** no shuffle proofs sent; cost is just
+  the post-hand audit, measured at **~0.18 s total for 9 seats** — well
+  under a second, feels instant.
+
+**Ruling (with Q3): detection-only is the v1 default.** It is ~100×
+cheaper at the table and trivially inside budget at a full 9-max. The
+prevention layer (`shuffle_proof`, already built and tested) is retained
+as an **opt-in table setting**, with a UI warning that enabling it at
+large tables adds ~20 s/hand. Likely future policy: prevention for
+small/higher-stakes tables, detection for casual 9-max.
+
+### Confirmed without change
+
+- **Q2** — folded/burn cards going public at hand-end audit: accepted.
+- **Q3** — detection-first: adopted as the default mode (see Q4/Q5). This
+  overrides the prevention-heavy parts of the Q1 and Q6 answers.
+
+### Net effect on the build order
+
+The four-step build order above is unchanged, but two items move earlier
+because the settled decisions make them foundational rather than
+optional:
+1. **Deterministic key derivation** (`HKDF(master_secret, session ‖ hand
+   ‖ seat)`) is part of the coordinator's Phase A from the start, not a
+   later crash-recovery bolt-on — it changes how shares and their PoPs
+   are generated.
+2. **Peer-symmetric (hostless) state machine** is the coordinator's
+   basic shape from line one, not a refactor of a host-centric design.
+
+Deferred cleanly to post-v1: VSS dropout continuance, the prevention
+layer as default, and any persistence beyond what crash-survival needs.
