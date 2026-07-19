@@ -780,6 +780,49 @@ drives them through a full hand (DKG → shuffle → deal → showdown), and ass
 properties defined in §4. Nothing here invalidates Phase 1; the `deal_step` action
 introduced in §1.1 of Phase 1 is fully specified in §2.1 below.
 
+> **Design revision (2026-07-19, after external cryptographic review) —
+> shuffle-proof construction changed.** The Bayer–Groth argument
+> originally specified in §2.2 is **parked**: its sublinear proof size
+> buys nothing at N=52, and its five nested sub-arguments are exactly
+> where implementation soundness bugs hide (see the 2019 Scytl/Swiss
+> Post breaks). The adopted design, in deployment order:
+>
+> 1. **Verifiable round 0** — the shuffle chain starts from the
+>    *trivial* deck (`elgamal.make_trivial_deck`, E(M;0) = (identity,
+>    M)), checkable by inspection (`verify_trivial_deck`), so the chain
+>    provably begins with the 52 canonical cards. *Implemented.*
+> 2. **Post-hand full-deck audit** (`holdem/p2p/deck_audit.py`) — at
+>    hand end every seat publishes DLEQ-proven decryption shares for all
+>    52 positions; everyone checks the plaintext multiset equals the
+>    canonical deck. Covert security: substitution, duplication, and
+>    drops are *always detected*, the hand is void, a lying decryptor
+>    is identified by seat, and a corrupt deck is attributed to the
+>    exact shuffler round via the chain walk (`first_corrupt_round`).
+>    Consequence, accepted: mucked and burned cards become public at
+>    hand end. *Implemented.*
+> 3. **Shadow-deck cut-and-choose shuffle proof, k=128** (Sako–Kilian
+>    style) — adds *prevention* on top of detection. k shadow shuffles
+>    per real shuffle; Fiat–Shamir challenge bits over the complete
+>    transcript; each bit opens either the shadow's own (σⱼ, rⱼ) or the
+>    bridge φⱼ = σⱼ⁻¹∘π with re-encryption deltas. Soundness is a
+>    one-paragraph composition argument (2⁻ᵏ per hash query); k is a
+>    **full** security parameter under Fiat–Shamir grinding, not a
+>    statistical one — do not reduce it to 40. No commitment key
+>    exists, so the Scytl trapdoor bug class is structurally
+>    impossible. ~650 KB per proof — in budget per the broadband-only
+>    scope decision. *Planned next.*
+> 4. **Schnorr proof-of-possession per key share at the DKG** — closes
+>    the rogue-key attack (the last announcer choosing
+>    Xₙ = X* − ΣXᵢ to own the joint key alone). *Planned.*
+>
+> If a compact algebraic proof is ever wanted later, the pick is
+> **Terelius–Wikström** (with Verificatum as an audited reference), not
+> Bayer–Groth or Neff. The Pedersen commitment (`pedersen.py`, NUMS
+> generators) and the single-value product argument (`bg_svp.py`) built
+> for the BG path are TW prerequisites and remain as tested code. The
+> §2.2 Bayer–Groth text below is retained as reference for that
+> contingency and is not the implementation target.
+
 ---
 
 ### 1. Cipher suite and deck encoding
