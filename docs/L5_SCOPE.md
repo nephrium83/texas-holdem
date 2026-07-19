@@ -408,3 +408,70 @@ optional:
 
 Deferred cleanly to post-v1: VSS dropout continuance, the prevention
 layer as default, and any persistence beyond what crash-survival needs.
+
+
+---
+
+## Deferred to v2 (the backlog)
+
+Single collected list of everything consciously pushed past v1, so none
+of it is lost in the inline prose above. Each item is *recorded, not
+built*; v1 ships without it.
+
+### Cryptographic / protocol
+
+1. **VSS dropout continuance.** Verifiable Secret Sharing / threshold key
+   reconstruction so remaining seats can pool shares to reconstruct a
+   dropped seat's key and finish the hand (fold/all-in the absentee per
+   room rules) instead of voiding. Genuine mental-poker crypto, arguably
+   larger than all of L5. *v1 instead:* void the hand on any mid-hand
+   dropout (Q1).
+
+2. **Prevention layer as default.** The shadow-deck shuffle proof
+   (`shuffle_proof`, already built and tested) runs as an **opt-in table
+   setting** in v1, not always-on, because at a 9-max table it costs
+   ~20 s and ~10 MB per hand. *v2 direction:* smarter policy — e.g.
+   prevention auto-enabled for small or higher-stakes tables, detection
+   for casual 9-max — plus proof-size/perf work (parallelism, smaller k
+   where justified, streaming) to make always-on cheaper.
+
+### Networking / transport
+
+3. **Real network transport.** Join-code → connection (libp2p per
+   Phase 3, DHT/relay/NAT traversal). L5 is transport-decoupled and
+   tested headless; the real transport plugs in afterward.
+
+4. **Multi-instance integration realism.** Running copies on Unraid +
+   laptop to simulate internet peers end-to-end. A later integration-test
+   milestone, after the headless coordinator and the transport both
+   exist.
+
+5. **Proof fragmentation on the wire.** ~1.3 MB (hex) proofs should be
+   chunked/streamed rather than sent as one frame; depends on the real
+   transport's max-frame behaviour, so it lands with #3.
+
+### Client / UI
+
+6. **Visible client wired to the new deal.** The Tkinter harness and/or
+   Godot client are connected to the finished coordinator *after* L5.
+   L5 itself is headless (Q10). The client↔engine contract (§5) is
+   already pinned, so this is wiring, not design.
+
+### Persistence (beyond crash-survival)
+
+7. **Richer persistence.** v1 persists only what crash-survival needs
+   (public game state + `hand_id` in SQLite, deterministic key
+   re-derivation). Hand-history archives, cross-session stats tied to the
+   P2P deal, replay storage, etc. are later.
+
+### Enforcement (explicitly NOT v2 either — permanently out for this app)
+
+Recorded here so they are never mistaken for backlog: real-money
+mechanisms (slashing, escrow, buy-in seize, victim compensation, wallet /
+smart-contract blacklisting) and global identity bans (email / MAC /
+hardware UUID / IP). These are out because the app is play-money and
+serverless — adding money custody would make it a regulated money
+transmitter, and there is no central authority to hold a global banlist.
+They are **not** deferred features; they are out of scope by design.
+Local, per-peer pubkey refuse-lists are the decentralized substitute and
+ARE in v1.
