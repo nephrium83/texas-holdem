@@ -412,6 +412,105 @@ layer as default, and any persistence beyond what crash-survival needs.
 
 ---
 
+## Phase C — engine seam confirmed (2026-07-19)
+
+Read the actual engine code (`Deck`, `Deck.from_indices`, `start_hand`,
+the hole-deal loop, `next_street`) and verified the integration seam
+empirically. The Phase-C design tension is resolved, and one real gotcha
+surfaced that the earlier note missed.
+
+### How the engine deals (ground truth)
+
+- **Hole cards** (`start_hand`, ~line 575): builds a seat `order` starting
+  one seat left of the button, then deals **two rounds of one card each**,
+  seat by seat, `self.deck.deal(1)` per card. That is the real alternating
+  deal — NOT "seat 0 gets both its cards, then seat 1." The deal-position
+  sequence for h holes over s seats is: round-1 to each seat in order,
+  then round-2 to each seat in order.
+- **Board** (`next_street`): flop `deal(3)`, turn `deal(1)`, river
+  `deal(1)`. **No burn cards** — the engine does not burn before streets.
+  (Real casinos burn; this engine does not, so `deal_map` must match the
+  engine, not casino convention. Burn cards, if ever added, are an engine
+  change first.)
+- `Deck.deal(n)` pops from the **end** of `self.cards`, and
+  `Deck.from_indices(indices)` stores `reversed(indices)` so that
+  `indices[0]` is served first. So an injected order is consumed
+  front-to-back as `indices[0], indices[1], ...`.
+
+The canonical deal-position order is therefore fully determined by
+`(button, seats_in, holes=2)` and is identical for every peer — exactly
+what `deal_map.py` must produce, and it must mirror THIS loop (left of
+button, round-robin, two passes, then flop/turn/river with no burns).
+
+### The gotcha: two different card orderings
+
+The engine's `FULL_DECK` and mental-poker's `elgamal.CARDS` are **not the
+same order**, so `Deck.from_indices` cannot be fed mental-poker indices
+directly:
+
+- `FULL_DECK` = `Card(v, s) for v in 2..14 for s in 0..3` — **rank-major**
+  (2c,2d,2h,2s, 3c,...). Index = `(v-2)*4 + s`.
+- `elgamal.CARDS` = `r+s for s in "cdhs" for r in "23456789TJQKA"` —
+  **suit-major** (2c,3c,...,Ac, 2d,...). Index = `suit*13 + rank`.
+
+They agree at index 0 (2c) and 51 (As) by coincidence but diverge
+everywhere between. A translation function is required and was verified
+to be an exact bijection where every card matches by (rank, suit):
+
+```
+elgamal_index -> fulldeck_index:
+    rank, suit = card[0], card[1]
+    v = "23456789TJQKA".index(rank) + 2
+    s = "cdhs".index(suit)
+    return (v - 2) * 4 + s        # == FULL_DECK position
+```
+
+This translation is a small pure helper that belongs in `deal_map.py`
+(or a shared card-index module), with a round-trip test pinning it. It is
+the exact seam where a silent off-by-ordering bug would deal wrong cards,
+so it is tested against `FULL_DECK`/`elgamal.CARDS` directly.
+
+### Resolved integration model for Phase C
+
+The coordinator does NOT inject a full 52-card `Deck` (mental poker never
+knows the full order until showdown — the original tension). Instead:
+
+1. **`deal_map(button, seats_in)`** yields the canonical mapping of deck
+   position -> destination (which seat's hole, or which board slot),
+   mirroring the engine's deal loop above. Pure, no crypto, deterministic.
+2. **Hole cards:** for each hole position, the entitled seat gathers the
+   other seats' DLEQ-proven partial decrypts, combines, recovers its card
+   (as an `elgamal` card label), and **sets it on the engine directly**
+   via the player's `hole` list — translating the label to a `Card`.
+3. **Board cards:** at each street the board positions are decrypted by
+   everyone (public threshold decrypt), and the coordinator appends the
+   resulting `Card`s to `self.board` / feeds them so `next_street`'s
+   state advances consistently.
+4. The engine runs **betting, pots, showdown, run-it-twice** unchanged;
+   it simply receives already-decrypted cards instead of dealing them
+   from `self.deck`.
+
+So the engine is used for everything EXCEPT card generation, via its
+existing card-holding fields (`player.hole`, `self.board`) — confirmed
+present and populated exactly this way by `start_hand`/`next_street`.
+`Deck.from_indices` stays available but is **not** the Phase-C path
+(it would require revealing the whole order); it remains useful only if a
+future variant wants a fully-public deck.
+
+**Action for step 2:** `deal_map.py` includes (a) the position->destination
+map mirroring the engine loop, and (b) the elgamal<->FULL_DECK index
+translation, each with tests against the engine's real ordering. The
+coordinator's Phase C sets cards on `player.hole` / `self.board` rather
+than injecting a `Deck`. `next_street` interaction (advancing street state
+while supplying board cards) is the one spot to integration-test carefully,
+since the engine normally couples "advance street" with "deal board" in the
+same call — the coordinator must supply the board cards in a way consistent
+with that coupling (likely: pre-load the engine's deck with just the board
+cards it will deal for that street, or set `self.board` and advance state
+directly — decide against the running engine in step 2).
+
+---
+
 ## Deferred to v2 (the backlog)
 
 Single collected list of everything consciously pushed past v1, so none
