@@ -173,6 +173,62 @@ def test_initial_deck_encrypts_all_52():
     assert recovered == EG.CARDS
 
 
+# ------------------------------------------------------ trivial round-0 deck
+
+def test_trivial_deck_is_inspectable():
+    """Round 0 must be verifiable by inspection: (identity, card_point_i)."""
+    deck = EG.make_trivial_deck()
+    assert len(deck) == 52
+    for ct, card in zip(deck, EG.CARDS):
+        assert bytes(ct.c0) == bytes(R.IDENTITY)
+        assert bytes(ct.c1) == bytes(EG.card_point(card))
+    assert EG.verify_trivial_deck(deck) is True
+
+
+def test_verify_trivial_deck_catches_substituted_card():
+    """The 52-aces attack: a swapped plaintext point must be caught."""
+    deck = EG.make_trivial_deck()
+    deck[5] = EG.Ciphertext(R.IDENTITY, EG.card_point("As"))
+    assert EG.verify_trivial_deck(deck) is False
+
+
+def test_verify_trivial_deck_catches_real_encryption():
+    """A smuggled non-trivial ciphertext (secret randomness) must be caught."""
+    xs = [R.random_scalar()]
+    pk = _joint_key(xs)
+    deck = EG.make_trivial_deck()
+    deck[0] = EG.encrypt(pk, EG.card_point("2c"))     # right card, hidden r
+    assert EG.verify_trivial_deck(deck) is False
+
+
+def test_verify_trivial_deck_catches_wrong_length():
+    deck = EG.make_trivial_deck()
+    assert EG.verify_trivial_deck(deck[:51]) is False
+
+
+def test_trivial_ciphertext_decrypts():
+    """mul_safe fix: partial_decrypt on C0 = identity yields identity, and
+    combine recovers the plaintext."""
+    xs = [R.random_scalar() for _ in range(3)]
+    deck = EG.make_trivial_deck()
+    ct = deck[7]
+    shares = [EG.partial_decrypt(ct, x) for x in xs]
+    assert all(bytes(s) == bytes(R.IDENTITY) for s in shares)
+    assert EG.point_to_card(EG.combine(ct, shares)) == EG.CARDS[7]
+
+
+def test_reencrypted_trivial_deck_decrypts():
+    """One re-encryption turns trivial ciphertexts into real ones that
+    still cooperatively decrypt to the same cards."""
+    xs = [R.random_scalar() for _ in range(2)]
+    pk = _joint_key(xs)
+    deck = [EG.reencrypt(pk, ct) for ct in EG.make_trivial_deck()]
+    for ct, card in zip(deck, EG.CARDS):
+        assert bytes(ct.c0) != bytes(R.IDENTITY)      # real now
+        shares = [EG.partial_decrypt(ct, x) for x in xs]
+        assert EG.point_to_card(EG.combine(ct, shares)) == card
+
+
 if __name__ == "__main__":
     fns = [(k, v) for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

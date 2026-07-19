@@ -158,10 +158,14 @@ but us" outward:
   symmetric NAT without port-forwarding or a TURN server fleet. A user
   downloads the app and starts playing — no IP address to enter, no
   server to run.
-- **Reticulum** — identities are keys, links are end-to-end encrypted,
-  transports span TCP down to LoRa radio. The right choice for
-  mesh-radio and offline LAN use cases; slots behind the same Phase 1
-  stream interface once the libp2p path is working. (See Phase 3 spec.)
+
+> **Scope decision (2026-07-18): broadband only.** This is a broadband
+> app. Mesh-radio / LoRa-class transports (Reticulum) are out of scope:
+> the anti-cheat protocol assumes broadband-class bandwidth (per-hand
+> proof traffic in the megabytes is acceptable), and no design decision
+> should be constrained by narrowband links. An earlier draft slotted
+> Reticulum behind the Phase 1 stream interface for mesh/offline
+> scenarios; that option is retired.
 
 ---
 
@@ -1309,12 +1313,10 @@ achieves the same NAT traversal with no dedicated server fleet: relays are contr
 by peers in the swarm, and the relay sees only encrypted signed bytes it cannot
 interpret.
 
-Reticulum is the right transport for mesh-radio and offline LAN scenarios — its
-transports span TCP down to LoRa radio and it requires no internet connectivity. It
-is not the primary target because it requires the Reticulum daemon (`rnsd`) to be
-running and configured, which violates the zero-setup goal for general online play.
-It slots behind the same Phase 1 stream interface once the libp2p path is working,
-with no changes to the game protocol. (See note at end of this section.)
+Reticulum (mesh-radio / offline LAN transport) was also evaluated and is **retired
+per the broadband-only scope decision** recorded in the Transport section above.
+The anti-cheat protocol's bandwidth budget is set for broadband; narrowband links
+are not a design constraint.
 
 ---
 
@@ -1509,19 +1511,6 @@ passes those tests, it ships. If it fails on circuit relay or DHT stability, swi
 to the Go sidecar. The Phase 1 interface boundary — signed byte strings in, signed
 byte strings out — means the switch touches only the transport module, not the game
 protocol or test harness.
-
----
-
-> **Note — Reticulum.** For offline and mesh-radio scenarios — a group playing over
-> LoRa radio without internet, or a local tournament on an isolated LAN — Reticulum
-> is the natural fit. Identities are keys, links are end-to-end encrypted by
-> construction, and a table is simply a Reticulum destination hash used as the join
-> code. It does not require the DHT or relay machinery above; it is a self-contained
-> transport. The integration point is the same `/poker/game/1.0.0` stream interface:
-> the Reticulum transport module wraps an RNS link the same way the libp2p module
-> wraps a libp2p stream, and the Phase 1 codec above sees no difference. Reticulum
-> requires `rnsd` to be running and configured by the user, which is why it is not
-> the primary target for general online play.
 
 ---
 

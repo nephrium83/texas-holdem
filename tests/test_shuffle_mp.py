@@ -151,6 +151,24 @@ def test_composition_of_permutations_tracks_position():
         assert final[i] == original[net[i]]
 
 
+def test_pipeline_from_trivial_deck():
+    """THE protocol round 0, corrected: start from the inspection-verifiable
+    trivial deck (not secret-randomness encryptions), every seat shuffles,
+    and the result still cooperatively decrypts to all 52 cards."""
+    n = 3
+    xs, pk = _seats(n)
+
+    deck = eg.make_trivial_deck()
+    assert eg.verify_trivial_deck(deck)      # every peer's round-0 check
+
+    for _ in range(n):
+        deck, _wit = sh.shuffle_deck(pk, deck)
+
+    final = _decrypt_deck(deck, xs)
+    assert Counter(final) == Counter(eg.CARDS)
+    assert len(set(final)) == 52
+
+
 if __name__ == "__main__":
     fns = [(k, v) for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

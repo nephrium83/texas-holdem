@@ -134,8 +134,12 @@ def reencrypt(pk: Point, ct: Ciphertext, r: Scalar | None = None) -> Ciphertext:
 
 
 def partial_decrypt(ct: Ciphertext, x_share: Scalar) -> Point:
-    """Seat i's partial decryption share D_i = x_i * C0."""
-    return R.mul(x_share, ct.c0)
+    """Seat i's partial decryption share D_i = x_i * C0.
+
+    Zero-safe: for a trivial ciphertext (C0 = identity) the share is the
+    identity, so trivial ciphertexts decrypt correctly via ``combine``.
+    """
+    return R.mul_safe(x_share, ct.c0)
 
 
 def combine(ct: Ciphertext, shares: Sequence[Point]) -> Point:
@@ -156,11 +160,44 @@ def combine(ct: Ciphertext, shares: Sequence[Point]) -> Point:
 def make_initial_deck(pk: Point) -> List[Ciphertext]:
     """Encrypt each of the 52 canonical card points under ``pk``.
 
-    This is what seat 0 broadcasts as shuffle round 0: every card freshly
-    encrypted with independent randomness, in canonical order (before any
-    permutation is applied).
+    TESTS AND UTILITIES ONLY -- NOT the protocol's round-0 deck. This
+    uses fresh SECRET randomness, so no other peer can verify what was
+    encrypted: a malicious seat 0 could encrypt 52 aces and every
+    downstream shuffle (and shuffle proof) would faithfully certify a
+    permutation of a corrupt deck. The protocol's shuffle chain MUST
+    start from ``make_trivial_deck`` (verifiable by inspection); the
+    first shuffler's re-encryption is what introduces secrecy.
     """
     return [encrypt(pk, p) for p in _CARD_POINTS]
+
+
+def make_trivial_deck() -> List[Ciphertext]:
+    """The canonical round-0 deck: trivial encryptions, one per card.
+
+    A trivial encryption uses randomness zero: E(M; 0) = (0*G, M + 0*PK)
+    = (identity, M). It is independent of the public key, deterministic,
+    and every peer can verify it by inspection (``verify_trivial_deck``),
+    so the shuffle chain provably starts from exactly the 52 canonical
+    cards. The first re-encrypting shuffler turns these into real
+    ciphertexts; until then the "plaintexts" are public by construction,
+    which is fine -- the deck order is also public until shuffled.
+    """
+    return [Ciphertext(R.IDENTITY, p) for p in _CARD_POINTS]
+
+
+def verify_trivial_deck(deck: Sequence[Ciphertext]) -> bool:
+    """Check that ``deck`` is exactly the canonical trivial deck.
+
+    Every peer runs this on the round-0 deck before accepting any
+    shuffle built on it. True iff there are 52 entries, each with
+    C0 = identity and C1 = the canonical card point for that position.
+    """
+    if len(deck) != len(_CARD_POINTS):
+        return False
+    for ct, m in zip(deck, _CARD_POINTS):
+        if bytes(ct.c0) != bytes(R.IDENTITY) or bytes(ct.c1) != bytes(m):
+            return False
+    return True
 
 
 def joint_public_key(public_shares: Sequence[Point]) -> Point:
@@ -183,5 +220,6 @@ __all__ = [
     "card_label_bytes", "card_point", "point_to_card", "deck_points",
     "Ciphertext",
     "encrypt", "reencrypt", "partial_decrypt", "combine",
-    "make_initial_deck", "joint_public_key",
+    "make_initial_deck", "make_trivial_deck", "verify_trivial_deck",
+    "joint_public_key",
 ]
