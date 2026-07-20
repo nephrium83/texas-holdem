@@ -532,6 +532,122 @@ def test_deal_share_undealt_position_aborts():
     assert d.bad_seat == 1
 
 
+# ------------------------------------------------------ Phase D: post-hand audit
+
+from holdem.p2p import deck_audit
+
+
+def _open_audit_all(deals, seats):
+    msgs = []
+    for s in seats:
+        msgs.extend(deals[s].open_audit())
+    _deliver(deals, seats, msgs)
+
+
+@pytest.mark.parametrize("n", [2, 3, 6, 9])
+def test_audit_passes_on_honest_hand(n):
+    """A full honest hand audits clean and every seat reaches DONE."""
+    seats = list(range(n))
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    for street in ("flop", "turn", "river"):
+        _reveal_all(deals, seats, street)
+    _open_audit_all(deals, seats)
+    for s in seats:
+        assert deals[s].is_done()
+        assert deals[s].phase == Phase.DONE
+        assert deals[s].audit_report is not None
+        assert deals[s].audit_report.ok is True
+        assert deals[s].abort_reason is None
+
+
+def test_audit_reveals_full_deck():
+    from collections import Counter
+    seats = [0, 1, 2, 3]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    _open_audit_all(deals, seats)
+    rep = deals[0].audit_report
+    assert rep.ok
+    assert Counter(rep.cards) == Counter(eg.CARDS)     # all 52 exposed
+
+
+def test_round_decks_history_retained():
+    """One deck retained per shuffle round (the chain-attribution source)."""
+    seats = [0, 1, 2, 3]
+    deals = run_broadcast(seats, _secrets(seats))
+    for s in seats:
+        assert len(deals[s].round_decks) == len(seats)
+
+
+def test_audit_open_is_idempotent():
+    seats = [0, 1, 2]
+    deals = run_broadcast(seats, _secrets(seats))
+    _open_audit_all(deals, seats)
+    for s in seats:
+        assert deals[s].is_done()
+        assert deals[s].open_audit() == []             # already opened
+
+
+def test_lying_decryptor_in_audit_aborts():
+    """A seat that opens the audit with a bad share is caught and blamed,
+    and the hand is voided for everyone."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    queue = []
+    for s in seats:
+        queue.extend(deals[s].open_audit())
+    while queue:
+        msg = queue.pop(0)
+        if msg.get("type") == "audit_open" and msg["seat"] == 2:
+            msg = dict(msg)
+            shares = [list(p) for p in msg["shares"]]
+            shares[0][0] = bytes(R.mul_base(R.random_scalar())).hex()  # bad D
+            msg["shares"] = shares
+        for s in seats:
+            queue.extend(deals[s].handle(dict(msg)))
+    for s in (0, 1):
+        assert deals[s].phase == Phase.ABORTED
+        assert deals[s].bad_seat == 2
+        assert deals[s].audit_report is not None and not deals[s].audit_report.ok
+
+
+def test_malformed_audit_open_aborts():
+    seats = [0, 1, 2]
+    d = run_broadcast(seats, _secrets(seats))[0]
+    d.handle({"type": "audit_open", "seat": 1, "shares": [["zz", "zz"]]})
+    assert d.phase == Phase.ABORTED
+
+
+def test_unknown_seat_audit_open_aborts():
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    d = run_broadcast(seats, ms)[0]
+    x = derive_share(ms[0], "s", 1, 0)
+    shares = deck_audit.make_shares(d.deck, x)
+    d.handle({"type": "audit_open", "seat": 7,
+              "shares": [[bytes(ps.share).hex(), ps.proof.hex()] for ps in shares]})
+    assert d.phase == Phase.ABORTED
+    assert d.bad_seat == 7
+
+
+def test_full_lifecycle_reaches_done():
+    """KEYGEN -> SHUFFLE -> DEAL -> AUDIT -> DONE, end to end, with hole
+    cards, full board, and a clean audit."""
+    seats = [0, 1, 2, 3, 4, 5]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    for street in ("flop", "turn", "river"):
+        _reveal_all(deals, seats, street)
+    _open_audit_all(deals, seats)
+    for s in seats:
+        assert deals[s].is_done()
+        assert deals[s].hole_complete()
+        assert deals[s].board_complete()
+        assert deals[s].audit_report.ok
+
+
 if __name__ == "__main__":
     passed = total = 0
     for name, fn in sorted(globals().items()):

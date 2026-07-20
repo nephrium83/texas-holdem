@@ -60,6 +60,7 @@ from holdem.p2p import elgamal as eg
 from holdem.p2p import shuffle_mp
 from holdem.p2p import dleq
 from holdem.p2p import deal_map as dmap
+from holdem.p2p import deck_audit
 from holdem.p2p.ristretto import Point, Scalar
 from holdem.p2p.elgamal import Ciphertext
 
@@ -135,6 +136,11 @@ class MentalDeal:
     _hole: List[Optional[str]] = field(default_factory=lambda: [None, None])
     _board: List[Optional[str]] = field(default_factory=lambda: [None] * 5)
     _revealed_streets: set = field(default_factory=set)
+    # Phase D (audit) state
+    _round_decks: List[List[Ciphertext]] = field(default_factory=list)  # per-round history
+    _audit_shares: Dict[int, list] = field(default_factory=dict)   # seat -> PositionShares
+    _audit_report: Optional["deck_audit.AuditReport"] = None
+    _audit_opened: bool = False
     abort_reason: Optional[str] = None
     bad_seat: Optional[int] = None
     _announced: bool = False
@@ -184,6 +190,19 @@ class MentalDeal:
     def board_complete(self) -> bool:
         return all(c is not None for c in self._board)
 
+    @property
+    def audit_report(self):
+        """The AuditReport once the post-hand audit has run, else None."""
+        return self._audit_report
+
+    @property
+    def round_decks(self) -> List[List[Ciphertext]]:
+        """Each accepted shuffle round's deck, in order (chain-audit source)."""
+        return list(self._round_decks)
+
+    def is_done(self) -> bool:
+        return self.phase == Phase.DONE
+
     # ---------------------------------------------------------------- dispatch
 
     def start(self) -> List[dict]:
@@ -219,6 +238,8 @@ class MentalDeal:
             return self._on_deck_round(msg)
         if mtype == "deal_share":
             return self._on_deal_share(msg)
+        if mtype == "audit_open":
+            return self._on_audit_open(msg)
         return []
 
     # ---------------------------------------------------------------- Phase A
@@ -329,6 +350,7 @@ class MentalDeal:
         # accept
         self._deck = deck
         self._shuffle_round = round_no
+        self._round_decks.append(deck)          # retain history for chain attribution
 
         if round_no == len(self.seats_in):
             # shuffle chain complete; begin the deal (hole cards)
@@ -459,6 +481,74 @@ class MentalDeal:
                 self._hole[ordinal] = eg.point_to_card(
                     eg.combine(self._deck[pos], shares))
         # else: another seat's hole -> never combined (privacy)
+
+    # ---------------------------------------------------------------- Phase D
+
+    def open_audit(self) -> List[dict]:
+        """Open the post-hand audit: broadcast DLEQ-proven decryption shares
+        for ALL 52 deck positions.
+
+        Called by the wiring layer at hand end (showdown). Every seat's full
+        opening lets everyone verify the final deck was an honest permutation
+        of the 52 canonical cards; a corrupt deck fails the multiset check
+        with certainty, and a lying decryptor is pinned by seat. Accepted
+        consequence: mucked and burned cards become public here. Idempotent.
+        """
+        if self.phase not in (Phase.DEAL, Phase.AUDIT) or self._audit_opened:
+            return []
+        self.phase = Phase.AUDIT
+        self._audit_opened = True
+        shares = deck_audit.make_shares(self._deck, self._x_share)
+        self._audit_shares[self.seat] = shares
+        msg = {
+            "type": "audit_open",
+            "seat": self.seat,
+            "shares": [[bytes(ps.share).hex(), ps.proof.hex()] for ps in shares],
+        }
+        self._maybe_run_audit()
+        return [msg]
+
+    def _on_audit_open(self, msg: dict) -> List[dict]:
+        if self.phase not in (Phase.DEAL, Phase.AUDIT):
+            return []
+        try:
+            seat = int(msg["seat"])
+            raw = msg["shares"]
+            shares = [
+                deck_audit.PositionShare(
+                    share=R.point_from_bytes(bytes.fromhex(pair[0])),
+                    proof=bytes.fromhex(pair[1]),
+                )
+                for pair in raw
+            ]
+        except (KeyError, ValueError, TypeError, IndexError):
+            return self._abort("malformed audit_open", None)
+
+        if seat not in self.seats_in:
+            return self._abort(f"audit_open from unknown seat {seat}", seat)
+
+        self._audit_shares[seat] = shares
+        self._maybe_run_audit()
+        return []
+
+    def _maybe_run_audit(self) -> None:
+        """Once every seat has opened, run the full-deck audit and settle."""
+        if any(s not in self._audit_shares for s in self.seats_in):
+            return
+        if self._audit_report is not None:
+            return                              # already settled
+        pubkeys = [self._pubkeys[s] for s in self.seats_in]
+        shares_by_seat = [self._audit_shares[s] for s in self.seats_in]
+        report = deck_audit.audit_deck(self._deck, pubkeys, shares_by_seat)
+        self._audit_report = report
+        if report.ok:
+            self.phase = Phase.DONE
+        else:
+            # void + attribute. A lying decryptor is named in bad_seats; a
+            # corrupt deck with no bad decryptor is a shuffler cheat (the
+            # exact round is recoverable from round_decks via a chain audit).
+            blame = report.bad_seats[0] if report.bad_seats else None
+            self._abort("; ".join(report.problems) or "audit failed", blame)
 
 
 __all__ = ["MentalDeal", "Phase", "derive_share"]
