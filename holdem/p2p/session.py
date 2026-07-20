@@ -54,8 +54,16 @@ class Player:
 class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
 
-    def __init__(self, is_host: bool, nickname: str, avatar_b64: str):
+    def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
+                 transport=None):
         self.is_host    = is_host
+        # transport module (or a mock) providing broadcast()/send().
+        # Defaults to the real global transport; tests inject an
+        # in-memory one so N sessions can run in one process.
+        if transport is None:
+            from holdem.p2p import transport as _t_module
+            transport = _t_module
+        self._transport = transport
         self.state      = "LOBBY"
         # conn_id -> Player (includes local player once we have a conn_id)
         self.players:   dict[str, Player] = {}
@@ -189,8 +197,7 @@ class Session:
                 self._join_order.append(conn_id)
         if self.is_host:
             # Tell the peer their host-side conn_id so they can self-identify
-            from holdem.p2p import transport as _t
-            _t.send(conn_id, {"type": "player_ack",
+            self._transport.send(conn_id, {"type": "player_ack",
                                "payload": {"your_conn_id": conn_id}})
             self._broadcast_player_list()
 
@@ -270,8 +277,7 @@ class Session:
             self.on_chat(nickname, text)
         if self.is_host:
             # Re-broadcast to all peers (echo back to sender too)
-            from holdem.p2p import transport as _t
-            _t.broadcast(msg)
+            self._transport.broadcast(msg)
 
     # ------------------------------------------------------------------
     # Verifiable shuffle — protocol message handlers
@@ -288,7 +294,7 @@ class Session:
             raise RuntimeError("Only the host can call start_shuffle()")
 
         from holdem.p2p.shuffle import ShuffleRound
-        from holdem.p2p import identity as _id, transport as _t
+        from holdem.p2p import identity as _id
 
         all_ids = list(self._seat_order) if self._seat_order else list(self.players)
         if not self.local_conn_id:
@@ -306,7 +312,7 @@ class Session:
         host_x25519_pub = _id.x25519_public_key_bytes().hex()
         sr.record_x25519_pubkey(self.local_conn_id, _id.x25519_public_key_bytes())
 
-        _t.broadcast({
+        self._transport.broadcast({
             "type": "shuffle_start",
             "payload": {
                 "commit_hex":       commit.hex(),
@@ -324,7 +330,7 @@ class Session:
             return
 
         from holdem.p2p.shuffle import ShuffleRound
-        from holdem.p2p import identity as _id, transport as _t
+        from holdem.p2p import identity as _id
 
         payload = msg.get("payload", {})
         host_commit_hex     = payload.get("commit_hex", "")
@@ -348,7 +354,7 @@ class Session:
         my_x25519   = _id.x25519_public_key_bytes().hex()
         sr.record_x25519_pubkey(self.local_conn_id, _id.x25519_public_key_bytes())
 
-        _t.send(self._host_conn_id, {
+        self._transport.send(self._host_conn_id, {
             "type": "shuffle_commit",
             "payload": {
                 "commit_hex":        my_commit.hex(),
@@ -380,12 +386,11 @@ class Session:
 
     def _host_broadcast_commit_collect(self) -> None:
         """Host: broadcast all commits so every peer can verify theirs is included."""
-        from holdem.p2p import transport as _t
 
         sr = self._shuffle_round
         commits_payload = {cid: commit.hex() for cid, commit in sr._commits.items()}
 
-        _t.broadcast({
+        self._transport.broadcast({
             "type": "shuffle_commit_collect",
             "payload": {"commits": commits_payload},
         })
@@ -398,7 +403,6 @@ class Session:
         if conn_id != self._host_conn_id and self._host_conn_id:
             return
 
-        from holdem.p2p import transport as _t
 
         sr = self._shuffle_round
         payload = msg.get("payload", {})
@@ -409,7 +413,7 @@ class Session:
             _log.warning("shuffle: our commit not in commit_collect — aborting")
             return
 
-        _t.send(self._host_conn_id, {
+        self._transport.send(self._host_conn_id, {
             "type": "shuffle_reveal",
             "payload": {
                 "seed_hex":  sr.local_seed_hex,
@@ -444,7 +448,6 @@ class Session:
 
     def _host_finalise_shuffle(self) -> None:
         """Host: all reveals verified — compute deck, encrypt, and deal."""
-        from holdem.p2p import transport as _t
 
         sr = self._shuffle_round
         deck_indices = sr.shuffled_deck()
@@ -453,7 +456,7 @@ class Session:
         # H-1: reveals_snapshot() emits the real per-seat nonce (not the
         # commit), so any peer recomputing SHA256(seed||nonce) matches the
         # commitment and can reproduce the deck.
-        _t.broadcast({
+        self._transport.broadcast({
             "type": "shuffle_reveal_collect",
             "payload": {"reveals": sr.reveals_snapshot()},
         })
@@ -519,7 +522,6 @@ class Session:
         Falls back to plaintext ``deal_private`` if the pubkey is unavailable
         (e.g., the peer is running an older client).
         """
-        from holdem.p2p import transport as _t
 
         sr = self._shuffle_round
         pubkey_bytes: bytes | None = None
@@ -538,7 +540,7 @@ class Session:
             from holdem.p2p.shuffle import encrypt_hole_cards
             try:
                 blob = encrypt_hole_cards(cards_str, pubkey_bytes)
-                _t.send(conn_id, {
+                self._transport.send(conn_id, {
                     "type": "shuffle_deal",
                     "payload": {"seat": seat, "encrypted_hex": blob.hex()},
                 })
@@ -549,7 +551,7 @@ class Session:
                     "falling back to plaintext", seat, conn_id, exc)
 
         # Fallback: legacy plaintext deal (no encryption)
-        _t.send(conn_id, {
+        self._transport.send(conn_id, {
             "type":    "deal_private",
             "payload": {"seat": seat, "hole_cards": cards_str},
         })
@@ -636,7 +638,6 @@ class Session:
     def _broadcast_player_list(self) -> None:
         """Send the current player roster to all connected peers (host only)."""
         # Late import to avoid circular dependency with transport module.
-        from holdem.p2p import transport as _t
         with self._lock:
             players_data = [
                 {
@@ -651,7 +652,7 @@ class Session:
                 for p in self.players.values()
             ]
             snapshot = list(self.players.values())
-        _t.broadcast({"type": "player_list", "payload": {"players": players_data}})
+        self._transport.broadcast({"type": "player_list", "payload": {"players": players_data}})
         if self.on_player_list_changed:
             self.on_player_list_changed(snapshot)
 
@@ -690,13 +691,12 @@ class Session:
         """Host starts the game: broadcast game_start and transition to PLAYING."""
         if not self.is_host:
             raise RuntimeError("Only the host can start the game")
-        from holdem.p2p import transport as _t
         with self._lock:
             seat_order = [p.conn_id for p in self.players.values()]
         self._seat_order = seat_order
         self._last_table_settings = table_settings
         payload = {"table_settings": table_settings, "seat_order": seat_order}
-        _t.broadcast({"type": "game_start", "payload": payload})
+        self._transport.broadcast({"type": "game_start", "payload": payload})
         self.state = "PLAYING"
         if self.on_game_start:
             self.on_game_start(payload)
@@ -733,14 +733,12 @@ class Session:
             "call_amount": e.current_bet,
             "hand_num":    e.hand_no,
         }
-        from holdem.p2p import transport as _t
-        _t.broadcast({"type": "game_state", "payload": state})
+        self._transport.broadcast({"type": "game_state", "payload": state})
 
     def send_private_cards(self, conn_id: str, seat: int,
                            hole_cards: list) -> None:
         """Host only: send hole cards to exactly one peer (plaintext legacy)."""
-        from holdem.p2p import transport as _t
-        _t.send(conn_id, {
+        self._transport.send(conn_id, {
             "type":    "deal_private",
             "payload": {"seat": seat, "hole_cards": hole_cards},
         })
