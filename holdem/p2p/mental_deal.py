@@ -58,6 +58,8 @@ from holdem.p2p import ristretto as R
 from holdem.p2p import keygen_pop
 from holdem.p2p import elgamal as eg
 from holdem.p2p import shuffle_mp
+from holdem.p2p import dleq
+from holdem.p2p import deal_map as dmap
 from holdem.p2p.ristretto import Point, Scalar
 from holdem.p2p.elgamal import Ciphertext
 
@@ -98,6 +100,10 @@ def _pop_ctx(session_id: str, hand_no: int, seat: int) -> bytes:
     return f"poker.dkg.v1|{session_id}|{hand_no}|{seat}".encode()
 
 
+# board slots revealed per street (indices into board_positions() output)
+_STREET_SLOTS = {"flop": (0, 1, 2), "turn": (3,), "river": (4,)}
+
+
 @dataclass
 class MentalDeal:
     """One seat's view of a mental-poker hand. Peer-symmetric state machine.
@@ -121,6 +127,14 @@ class MentalDeal:
     _joint_pk: Optional[Point] = None
     _deck: Optional[List[Ciphertext]] = None              # current accepted deck
     _shuffle_round: int = 0                               # rounds accepted so far
+    # Phase C (deal) state
+    _deal_map: Optional[List[dmap.Destination]] = None
+    _hole_pos: Dict[int, List[int]] = field(default_factory=dict)   # seat -> [pos,pos]
+    _board_pos: List[int] = field(default_factory=list)   # deck pos by board slot 0..4
+    _shares: Dict[int, Dict[int, Point]] = field(default_factory=dict)  # pos->seat->D
+    _hole: List[Optional[str]] = field(default_factory=lambda: [None, None])
+    _board: List[Optional[str]] = field(default_factory=lambda: [None] * 5)
+    _revealed_streets: set = field(default_factory=set)
     abort_reason: Optional[str] = None
     bad_seat: Optional[int] = None
     _announced: bool = False
@@ -153,6 +167,22 @@ class MentalDeal:
     def is_shuffle_complete(self) -> bool:
         return (self._shuffle_round == len(self.seats_in)
                 and self.phase in (Phase.DEAL, Phase.AUDIT, Phase.DONE))
+
+    @property
+    def hole_cards(self) -> List[Optional[str]]:
+        """This seat's two hole cards (labels), filled as shares arrive."""
+        return list(self._hole)
+
+    @property
+    def board(self) -> List[Optional[str]]:
+        """The board (5 slots), filled street by street as revealed."""
+        return list(self._board)
+
+    def hole_complete(self) -> bool:
+        return all(c is not None for c in self._hole)
+
+    def board_complete(self) -> bool:
+        return all(c is not None for c in self._board)
 
     # ---------------------------------------------------------------- dispatch
 
@@ -187,6 +217,8 @@ class MentalDeal:
             return self._on_key_announce(msg)
         if mtype == "deck_round":
             return self._on_deck_round(msg)
+        if mtype == "deal_share":
+            return self._on_deal_share(msg)
         return []
 
     # ---------------------------------------------------------------- Phase A
@@ -299,10 +331,134 @@ class MentalDeal:
         self._shuffle_round = round_no
 
         if round_no == len(self.seats_in):
-            # shuffle chain complete; Phase C (deal) begins here once built
-            self.phase = Phase.DEAL
-            return []
+            # shuffle chain complete; begin the deal (hole cards)
+            return self._enter_deal()
         return self._maybe_emit_shuffle()
+
+    # ---------------------------------------------------------------- Phase C
+
+    def _valid_positions(self) -> set:
+        """Deck positions that are actually dealt (all holes + the board)."""
+        positions = set(self._board_pos)
+        for plist in self._hole_pos.values():
+            positions.update(plist)
+        return positions
+
+    def _make_share_msg(self, pos: int) -> dict:
+        """Compute this seat's DLEQ-proven decryption share for ``pos``,
+        record it locally, and return the broadcast message."""
+        ct = self._deck[pos]
+        D = eg.partial_decrypt(ct, self._x_share)
+        proof = dleq.prove(self._x_share, ct.c0)
+        self._shares.setdefault(pos, {})[self.seat] = D
+        return {
+            "type": "deal_share",
+            "position": pos,
+            "seat_from": self.seat,
+            "D_hex": bytes(D).hex(),
+            "dleq_hex": proof.hex(),
+        }
+
+    def _enter_deal(self) -> List[dict]:
+        """Begin the deal: broadcast hole-card decryption shares.
+
+        Privacy is cryptographic, not delivery-based: for a hole card owned
+        by seat t, every OTHER seat broadcasts its share, and t's withheld
+        share masks the plaintext from everyone else -- so only t can
+        combine and recover the card. This seat therefore broadcasts a share
+        for every hole position it does NOT own, and merely records (never
+        sends) its own share for its own hole positions. Board cards stay
+        undealt until reveal_street() (else the board would leak before
+        betting).
+        """
+        self.phase = Phase.DEAL
+        self._deal_map = dmap.deal_map(self.button, self.seats_in)
+        self._hole_pos = dmap.hole_positions(self.button, self.seats_in)
+        self._board_pos = dmap.board_positions(self.button, self.seats_in)
+
+        # record (do not send) my share for my own hole positions
+        for pos in self._hole_pos.get(self.seat, []):
+            D = eg.partial_decrypt(self._deck[pos], self._x_share)
+            self._shares.setdefault(pos, {})[self.seat] = D
+
+        # broadcast my share for every other seat's hole positions
+        msgs: List[dict] = []
+        for owner, positions in self._hole_pos.items():
+            if owner == self.seat:
+                continue
+            for pos in positions:
+                msgs.append(self._make_share_msg(pos))
+        return msgs
+
+    def reveal_street(self, street: str) -> List[dict]:
+        """Broadcast this seat's board shares for a street's slots.
+
+        Called by the wiring layer once the preceding betting round closes,
+        so the board is revealed progressively rather than all at once.
+        ``street`` is "flop" (slots 0-2), "turn" (slot 3), or "river"
+        (slot 4). Idempotent per street.
+        """
+        if self.phase not in (Phase.DEAL, Phase.AUDIT):
+            return []
+        if street in self._revealed_streets:
+            return []
+        slots = _STREET_SLOTS.get(street)
+        if slots is None:
+            raise ValueError(f"unknown street {street!r}")
+        self._revealed_streets.add(street)
+        msgs = [self._make_share_msg(self._board_pos[slot]) for slot in slots]
+        for slot in slots:                       # handles a 1-seat edge case
+            self._try_complete(self._board_pos[slot])
+        return msgs
+
+    def _on_deal_share(self, msg: dict) -> List[dict]:
+        if self.phase not in (Phase.DEAL, Phase.AUDIT):
+            return []
+        try:
+            pos = int(msg["position"])
+            seat_from = int(msg["seat_from"])
+            D = R.point_from_bytes(bytes.fromhex(msg["D_hex"]))
+            proof = bytes.fromhex(msg["dleq_hex"])
+        except (KeyError, ValueError, TypeError):
+            return self._abort("malformed deal_share", None)
+
+        if seat_from not in self.seats_in:
+            return self._abort(f"deal_share from unknown seat {seat_from}", seat_from)
+        if pos not in self._valid_positions():
+            return self._abort(f"deal_share for undealt position {pos}", seat_from)
+
+        # DLEQ: proves D = x_{seat_from} * C0, tied to that seat's pubkey
+        if not dleq.verify(self._pubkeys[seat_from], D, self._deck[pos].c0, proof):
+            return self._abort(
+                f"seat {seat_from} sent a bad decryption proof at position {pos}",
+                seat_from)
+
+        self._shares.setdefault(pos, {})[seat_from] = D
+        self._try_complete(pos)
+        return []
+
+    def _try_complete(self, pos: int) -> None:
+        """Combine a position's shares into a card -- but only for positions
+        this seat is entitled to see (the board, or its OWN holes). Another
+        seat's hole is never combined even if all shares happened to arrive.
+        """
+        n = len(self.seats_in)
+        have = self._shares.get(pos, {})
+        if len(have) < n:
+            return
+        shares = [have[s] for s in self.seats_in]
+
+        if pos in self._board_pos:
+            slot = self._board_pos.index(pos)
+            if self._board[slot] is None:
+                self._board[slot] = eg.point_to_card(
+                    eg.combine(self._deck[pos], shares))
+        elif pos in self._hole_pos.get(self.seat, []):
+            ordinal = self._hole_pos[self.seat].index(pos)
+            if self._hole[ordinal] is None:
+                self._hole[ordinal] = eg.point_to_card(
+                    eg.combine(self._deck[pos], shares))
+        # else: another seat's hole -> never combined (privacy)
 
 
 __all__ = ["MentalDeal", "Phase", "derive_share"]

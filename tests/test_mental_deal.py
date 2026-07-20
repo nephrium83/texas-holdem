@@ -362,6 +362,176 @@ def test_stale_round_ignored_not_aborted():
     assert observer._shuffle_round == 1
 
 
+# ------------------------------------------------------ Phase C: the deal
+
+from holdem.p2p import deal_map as dmap
+from holdem.p2p import dleq
+
+
+def _omniscient(deck, seats, ms, session="s", hand=1):
+    """Decode every deck position to a card label using all seats' shares."""
+    xs = {s: derive_share(ms[s], session, hand, s) for s in seats}
+    out = []
+    for ct in deck:
+        shares = [eg.partial_decrypt(ct, xs[s]) for s in seats]
+        out.append(eg.point_to_card(eg.combine(ct, shares)))
+    return out
+
+
+def _deliver(deals, seats, msgs):
+    queue = list(msgs)
+    while queue:
+        msg = queue.pop(0)
+        for s in seats:
+            queue.extend(deals[s].handle(dict(msg)))
+
+
+def _reveal_all(deals, seats, street):
+    msgs = []
+    for s in seats:
+        msgs.extend(deals[s].reveal_street(street))
+    _deliver(deals, seats, msgs)
+
+
+@pytest.mark.parametrize("n", [2, 3, 6, 9])
+def test_hole_cards_dealt_correctly(n):
+    """Each seat recovers exactly the two cards deal_map assigns it,
+    matching an omniscient decode of the final deck."""
+    seats = list(range(n))
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)            # A+B+hole deal
+    by_pos = _omniscient(deals[0].deck, seats, ms)
+    hp = dmap.hole_positions(0, seats)          # coordinator uses button=0
+    for s in seats:
+        assert deals[s].hole_complete()
+        assert deals[s].hole_cards == [by_pos[hp[s][0]], by_pos[hp[s][1]]]
+
+
+def test_hole_cards_are_real_distinct_cards():
+    seats = [0, 1, 2, 3, 4, 5]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    all_hole = []
+    for s in seats:
+        all_hole.extend(deals[s].hole_cards)
+    assert all(c in eg.CARDS for c in all_hole)
+    assert len(set(all_hole)) == len(all_hole)   # no card dealt twice
+
+
+def test_hole_shares_insufficient_for_others():
+    """The privacy property: for another seat's hole position, a seat holds
+    only n-1 shares (the owner's is withheld), so it can never combine."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    hp = dmap.hole_positions(0, seats)
+    n = len(seats)
+    for s in seats:
+        for owner in seats:
+            if owner == s:
+                continue
+            for p in hp[owner]:
+                have = deals[s]._shares.get(p, {})
+                assert len(have) == n - 1        # missing exactly the owner
+                assert owner not in have
+
+
+def test_board_not_revealed_until_street():
+    seats = [0, 1, 2]
+    deals = run_broadcast(seats, _secrets(seats))
+    for s in seats:
+        assert all(c is None for c in deals[s].board)
+        assert not deals[s].board_complete()
+
+
+def test_board_reveal_by_street():
+    seats = [0, 1, 2, 3]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    by_pos = _omniscient(deals[0].deck, seats, ms)
+    bp = dmap.board_positions(0, seats)
+    for street, slots in [("flop", (0, 1, 2)), ("turn", (3,)), ("river", (4,))]:
+        _reveal_all(deals, seats, street)
+        for slot in slots:
+            for s in seats:
+                assert deals[s].board[slot] == by_pos[bp[slot]]
+    for s in seats:
+        assert deals[s].board_complete()
+        # board cards are real and distinct from each other
+        assert all(c in eg.CARDS for c in deals[s].board)
+        assert len(set(deals[s].board)) == 5
+
+
+def test_reveal_street_is_idempotent():
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    _reveal_all(deals, seats, "flop")
+    board_after = deals[0].board
+    # a second flop reveal emits nothing and changes nothing
+    for s in seats:
+        assert deals[s].reveal_street("flop") == []
+    assert deals[0].board == board_after
+
+
+def test_full_hand_hole_plus_board_consistent():
+    """Hole cards + full board are 4*n... no: 2*n hole + 5 board, all distinct
+    real cards drawn from the one shuffled deck."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    for street in ("flop", "turn", "river"):
+        _reveal_all(deals, seats, street)
+    dealt = list(deals[0].board)
+    for s in seats:
+        dealt.extend(deals[s].hole_cards)
+    assert all(c in eg.CARDS for c in dealt)
+    assert len(set(dealt)) == len(dealt)         # 5 + 2*3 = 11 distinct cards
+
+
+def test_lying_decryptor_in_deal_aborts():
+    """A seat broadcasting a share with a bad DLEQ is caught and blamed."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    deals = {s: MentalDeal("s", 1, s, list(seats), 0, ms[s]) for s in seats}
+    queue = []
+    for s in seats:
+        queue.extend(deals[s].start())
+    while queue:
+        msg = queue.pop(0)
+        if msg.get("type") == "deal_share" and msg["seat_from"] == 2:
+            msg = dict(msg)
+            msg["D_hex"] = bytes(R.mul_base(R.random_scalar())).hex()  # wrong D
+        for s in seats:
+            queue.extend(deals[s].handle(dict(msg)))
+    for s in (0, 1):
+        assert deals[s].phase == Phase.ABORTED
+        assert deals[s].bad_seat == 2
+
+
+def test_malformed_deal_share_aborts():
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    d = run_broadcast(seats, ms)[0]
+    d.handle({"type": "deal_share", "position": 0, "seat_from": 1,
+              "D_hex": "zz", "dleq_hex": "zz"})
+    assert d.phase == Phase.ABORTED
+
+
+def test_deal_share_undealt_position_aborts():
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    d = run_broadcast(seats, ms)[0]
+    # a 3-handed hand deals positions 0..10; position 51 is undealt
+    x1 = derive_share(ms[1], "s", 1, 1)
+    D = eg.partial_decrypt(d.deck[51], x1)
+    proof = dleq.prove(x1, d.deck[51].c0)
+    d.handle({"type": "deal_share", "position": 51, "seat_from": 1,
+              "D_hex": bytes(D).hex(), "dleq_hex": proof.hex()})
+    assert d.phase == Phase.ABORTED
+    assert d.bad_seat == 1
+
+
 if __name__ == "__main__":
     passed = total = 0
     for name, fn in sorted(globals().items()):
