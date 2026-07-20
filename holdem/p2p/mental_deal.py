@@ -1,4 +1,4 @@
-"""MentalDeal coordinator — Phase A: distributed key ceremony (L5 step 2).
+"""MentalDeal coordinator — Phases A+B (L5 step 2).
 
 The heart of L5: a peer-symmetric state machine that runs a full
 mental-poker hand (DKG -> shuffle chain -> deal -> audit) over the crypto
@@ -8,35 +8,43 @@ the same public state. Transport is decoupled — methods take and return
 message dicts (``{"type": ..., ...}``), so an n-instance in-process
 simulation drives and tests the whole protocol with no sockets.
 
-This module is built phase by phase. THIS commit is **Phase A only**:
-the distributed key ceremony that establishes the joint encryption key
-PK = sum_i X_i with a proof-of-possession per share (keygen_pop), closing
-the rogue-key attack. Phases B (shuffle chain), C (deal), and D (audit)
-land on this foundation next.
+Built phase by phase. Implemented so far:
+  Phase A -- distributed key ceremony (DKG) with per-share PoP.
+  Phase B -- shuffle chain from the trivial deck.
+Phases C (selective threshold deal) and D (post-hand audit) land next.
 
 Design commitments (from the settled L5 decisions)
 --------------------------------------------------
 - **Peer-symmetric.** No seat coordinates. Canonical rules every seat
-  computes identically drive turn-taking and tallying.
+  computes identically drive turn-taking (the shuffle order is the sorted
+  seat list) and tallying.
 - **Transport-agnostic.** ``start()`` returns the outbound messages this
   seat should broadcast; ``handle(msg)`` consumes one inbound broadcast
   and returns any outbound messages it triggers. The caller moves bytes.
-- **Deterministic key shares.** A seat's secret share is DERIVED, not
-  randomly generated: ``x_share = HKDF(master_secret, session|hand|seat)``.
-  So a crashed/reopened app regenerates the identical share instead of
-  losing it (crash-survival decision). The master secret is a local
-  device secret, never transmitted.
-- **Fail-closed with attribution.** A bad PoP aborts the hand and names
-  the offending seat; there is no "skip the bad share and continue."
+  NOTE: the shuffle chain assumes a seat receives an echo of its OWN
+  broadcast (the in-process harness delivers every message to every seat,
+  including the sender). A real transport must either loop back a sender's
+  own messages or the wiring layer must self-deliver.
+- **Deterministic key shares.** x_share = HKDF(master_secret,
+  session|hand|seat) -- a crashed/reopened app regenerates the identical
+  share (crash-survival decision). The master secret never leaves the
+  process.
+- **Detection-only by default.** Per the settled decision, the v1 default
+  attaches NO shuffle proof to a deck round; a cheating shuffle is caught
+  by the Phase D post-hand audit. The opt-in prevention layer (attaching
+  and verifying a shadow-deck shuffle_proof per round) wires in on top of
+  this and is added next.
+- **Fail-closed with attribution.** A protocol violation aborts the hand
+  and names the offending seat; there is no skip-and-continue.
 
-Message types (Phase A)
------------------------
-- ``key_announce {seat, X_hex, pop_hex}`` — broadcast by every seat once,
-  carrying its public key share and the PoP for it.
-
-The ceremony completes for a seat when it has verified a valid
-``key_announce`` from every seat in the hand (including its own echo);
-it then computes PK deterministically and transitions to Phase B.
+Message types
+-------------
+- ``key_announce {seat, X_hex, pop_hex}`` (Phase A) -- each seat's public
+  key share and its proof-of-possession.
+- ``deck_round {round, seat, deck}`` (Phase B) -- the shuffled deck after
+  round ``round`` (1-based), produced by ``seat``; ``deck`` is a list of
+  [c0_hex, c1_hex] ciphertext pairs. Round 0 is the trivial deck, held
+  implicitly and never transmitted.
 """
 from __future__ import annotations
 
@@ -49,13 +57,15 @@ from typing import Dict, List, Optional
 from holdem.p2p import ristretto as R
 from holdem.p2p import keygen_pop
 from holdem.p2p import elgamal as eg
+from holdem.p2p import shuffle_mp
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.elgamal import Ciphertext
 
 
 class Phase(Enum):
     KEYGEN = "keygen"
-    SHUFFLE = "shuffle"        # Phase B (not yet implemented)
-    DEAL = "deal"              # Phase C
+    SHUFFLE = "shuffle"
+    DEAL = "deal"              # Phase C (not yet implemented)
     AUDIT = "audit"            # Phase D
     DONE = "done"
     ABORTED = "aborted"
@@ -72,7 +82,6 @@ def derive_share(master_secret: bytes, session_id: str, hand_no: int,
     local device secret and never leaves the process.
     """
     info = f"poker.share.v1|{session_id}|{hand_no}|{seat}".encode()
-    # HKDF-Expand to 64 bytes, then scalar_reduce (unbiased into the field).
     t = b""
     okm = b""
     counter = 1
@@ -110,6 +119,8 @@ class MentalDeal:
     _x_share: Optional[Scalar] = None                     # my secret (local only)
     _pubkeys: Dict[int, Point] = field(default_factory=dict)   # seat -> X_i
     _joint_pk: Optional[Point] = None
+    _deck: Optional[List[Ciphertext]] = None              # current accepted deck
+    _shuffle_round: int = 0                               # rounds accepted so far
     abort_reason: Optional[str] = None
     bad_seat: Optional[int] = None
     _announced: bool = False
@@ -131,10 +142,19 @@ class MentalDeal:
     def joint_pk(self) -> Optional[Point]:
         return self._joint_pk
 
+    @property
+    def deck(self) -> Optional[List[Ciphertext]]:
+        """The current accepted deck (trivial deck, then each shuffle)."""
+        return self._deck
+
     def is_done_with_keygen(self) -> bool:
         return self._joint_pk is not None
 
-    # ---------------------------------------------------------------- Phase A
+    def is_shuffle_complete(self) -> bool:
+        return (self._shuffle_round == len(self.seats_in)
+                and self.phase in (Phase.DEAL, Phase.AUDIT, Phase.DONE))
+
+    # ---------------------------------------------------------------- dispatch
 
     def start(self) -> List[dict]:
         """Begin the hand: derive this seat's share and announce it.
@@ -150,8 +170,7 @@ class MentalDeal:
         pop = keygen_pop.prove(self._x_share,
                                _pop_ctx(self.session_id, self.hand_no, self.seat))
         self._announced = True
-        # record our own share immediately (we still also process the echo)
-        self._pubkeys[self.seat] = X
+        self._pubkeys[self.seat] = X            # record our own share
         return [{
             "type": "key_announce",
             "seat": self.seat,
@@ -166,8 +185,11 @@ class MentalDeal:
         mtype = msg.get("type")
         if mtype == "key_announce":
             return self._on_key_announce(msg)
-        # messages for later phases are ignored until those phases exist
+        if mtype == "deck_round":
+            return self._on_deck_round(msg)
         return []
+
+    # ---------------------------------------------------------------- Phase A
 
     def _on_key_announce(self, msg: dict) -> List[dict]:
         if self.phase != Phase.KEYGEN:
@@ -182,18 +204,15 @@ class MentalDeal:
         except (ValueError, KeyError):
             return self._abort(f"malformed key_announce from seat {seat}", seat)
 
-        # verify the proof-of-possession, bound to this seat's context
         if not keygen_pop.verify(X, pop, _pop_ctx(self.session_id, self.hand_no, seat)):
             return self._abort(f"seat {seat} failed key-share proof-of-possession",
                                seat)
 
-        # a seat announcing a different share than we already recorded is a fault
         if seat in self._pubkeys and bytes(self._pubkeys[seat]) != bytes(X):
             return self._abort(f"seat {seat} announced conflicting key shares", seat)
 
         self._pubkeys[seat] = X
 
-        # ceremony complete once every seat's verified share is in
         if all(s in self._pubkeys for s in self.seats_in):
             return self._finish_keygen()
         return []
@@ -203,7 +222,87 @@ class MentalDeal:
         ordered = [self._pubkeys[s] for s in self.seats_in]
         self._joint_pk = eg.joint_public_key(ordered)
         self.phase = Phase.SHUFFLE
-        return []          # Phase B kickoff lands when that phase is built
+        # the shuffle chain starts from the inspection-verifiable trivial deck
+        self._deck = eg.make_trivial_deck()
+        self._shuffle_round = 0
+        # if this seat is the first shuffler, kick off round 1
+        return self._maybe_emit_shuffle()
+
+    # ---------------------------------------------------------------- Phase B
+
+    def _expected_shuffler(self, round_no: int) -> Optional[int]:
+        """Which seat shuffles round ``round_no`` (1-based), or None if the
+        chain is complete."""
+        if 1 <= round_no <= len(self.seats_in):
+            return self.seats_in[round_no - 1]
+        return None
+
+    def _maybe_emit_shuffle(self) -> List[dict]:
+        """If it is this seat's turn to shuffle the next round, produce and
+        broadcast the shuffled deck. Changes NO local state -- the deck is
+        applied uniformly by _on_deck_round when the echo arrives, so every
+        seat (including this one) advances identically.
+        """
+        next_round = self._shuffle_round + 1
+        if self._expected_shuffler(next_round) != self.seat:
+            return []
+        deck, _wit = shuffle_mp.shuffle_deck(self._joint_pk, self._deck)
+        return [{
+            "type": "deck_round",
+            "round": next_round,
+            "seat": self.seat,
+            "deck": [ct.to_hex() for ct in deck],
+        }]
+
+    def _on_deck_round(self, msg: dict) -> List[dict]:
+        if self.phase != Phase.SHUFFLE:
+            return []                       # not shuffling (yet / anymore)
+
+        try:
+            round_no = int(msg["round"])
+            seat = int(msg["seat"])
+            raw = msg["deck"]
+        except (KeyError, ValueError, TypeError):
+            return self._abort("malformed deck_round", None)
+
+        # must be exactly the next round in sequence
+        if round_no != self._shuffle_round + 1:
+            return []                       # duplicate/echo/out-of-order: ignore
+
+        # must come from the seat whose turn it is
+        expected = self._expected_shuffler(round_no)
+        if seat != expected:
+            return self._abort(
+                f"seat {seat} shuffled out of turn (round {round_no} "
+                f"belongs to seat {expected})", seat)
+
+        # parse and structurally validate the deck
+        try:
+            deck = [Ciphertext.from_hex(pair) for pair in raw]
+        except (ValueError, TypeError):
+            return self._abort(f"seat {seat} sent an unparseable deck", seat)
+        if len(deck) != 52:
+            return self._abort(
+                f"seat {seat} sent a deck of {len(deck)} cards (expected 52)", seat)
+        # a genuine shuffle re-encrypts, so no ciphertext may be trivial
+        # (C0 == identity would be an unshuffled / smuggled card)
+        if any(bytes(ct.c0) == bytes(R.IDENTITY) for ct in deck):
+            return self._abort(
+                f"seat {seat} sent a deck containing a trivial ciphertext", seat)
+
+        # (prevention mode would verify a shadow-deck shuffle_proof here,
+        #  against self._deck as the previous deck. Detection-only default
+        #  relies on the Phase D audit instead.)
+
+        # accept
+        self._deck = deck
+        self._shuffle_round = round_no
+
+        if round_no == len(self.seats_in):
+            # shuffle chain complete; Phase C (deal) begins here once built
+            self.phase = Phase.DEAL
+            return []
+        return self._maybe_emit_shuffle()
 
 
 __all__ = ["MentalDeal", "Phase", "derive_share"]

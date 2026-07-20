@@ -79,14 +79,16 @@ def test_share_varies_by_context():
 
 @pytest.mark.parametrize("n", [2, 3, 6, 9])
 def test_ceremony_completes_all_seats_agree(n):
+    """run_broadcast now drives A+B to completion: keygen agrees on one
+    joint key, then the shuffle chain runs to the end (Phase.DEAL)."""
     seats = list(range(n))
     deals = run_broadcast(seats, _secrets(seats))
-    # every seat finished keygen and moved to the shuffle phase
     for s in seats:
         assert deals[s].is_done_with_keygen()
-        assert deals[s].phase == Phase.SHUFFLE
         assert deals[s].abort_reason is None
-    # and they all computed the identical joint key
+        assert deals[s].phase == Phase.DEAL          # shuffle chain finished
+        assert deals[s].is_shuffle_complete()
+    # all seats computed the identical joint key
     pks = {bytes(deals[s].joint_pk) for s in seats}
     assert len(pks) == 1
 
@@ -229,6 +231,135 @@ def test_conflicting_shares_from_one_seat_aborts():
 def test_seat_not_in_seats_in_raises():
     with pytest.raises(ValueError):
         MentalDeal("s", 1, 9, [0, 1, 2], 0, b"m")
+
+
+# ------------------------------------------------------ Phase B: shuffle chain
+
+def _one_seat_in_shuffle(seat, seats, ms, session="s", hand=1, button=0):
+    """Drive a single MentalDeal to the SHUFFLE phase (round 0) by feeding
+    it valid key_announces from every other seat."""
+    from holdem.p2p.mental_deal import _pop_ctx
+    d = MentalDeal(session, hand, seat, list(seats), button, ms[seat])
+    d.start()
+    for s in seats:
+        if s == seat:
+            continue
+        xs = derive_share(ms[s], session, hand, s)
+        X = R.mul_base(xs)
+        pop = keygen_pop.prove(xs, _pop_ctx(session, hand, s))
+        d.handle({"type": "key_announce", "seat": s, "X_hex": bytes(X).hex(),
+                  "pop_hex": pop.hex()})
+    return d
+
+
+def _decrypt_final(deal, seats, ms, session="s", hand=1):
+    """Cooperatively decrypt a completed deal's final deck to card labels."""
+    xs = {s: derive_share(ms[s], session, hand, s) for s in seats}
+    cards = []
+    for ct in deal.deck:
+        shares = [eg.partial_decrypt(ct, xs[s]) for s in seats]
+        cards.append(eg.point_to_card(eg.combine(ct, shares)))
+    return cards
+
+
+@pytest.mark.parametrize("n", [2, 3, 6, 9])
+def test_shuffle_chain_final_deck_decrypts_to_52(n):
+    """The real end-to-end: A+B produce a deck that cooperatively decrypts
+    to exactly the 52 canonical cards."""
+    from collections import Counter
+    seats = list(range(n))
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    cards = _decrypt_final(deals[0], seats, ms)
+    assert Counter(cards) == Counter(eg.CARDS)
+    assert len(set(cards)) == 52
+
+
+def test_all_seats_hold_same_final_deck():
+    seats = [0, 1, 2, 3]
+    ms = _secrets(seats)
+    deals = run_broadcast(seats, ms)
+    ref = [ct.to_hex() for ct in deals[0].deck]
+    for s in seats:
+        assert [ct.to_hex() for ct in deals[s].deck] == ref
+
+
+def test_every_seat_shuffled_once():
+    """After the chain, exactly len(seats) rounds were applied."""
+    seats = [0, 1, 2, 3, 4]
+    deals = run_broadcast(seats, _secrets(seats))
+    for s in seats:
+        assert deals[s]._shuffle_round == len(seats)
+
+
+def test_out_of_turn_shuffle_aborts():
+    """A valid deck from the wrong shuffler for the round -> abort +
+    attribution."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    observer = _one_seat_in_shuffle(2, seats, ms)     # round-1 shuffler is seat 0
+    from holdem.p2p import shuffle_mp
+    deck, _ = shuffle_mp.shuffle_deck(observer.joint_pk, eg.make_trivial_deck())
+    # seat 1 (not the round-1 shuffler) broadcasts round 1
+    observer.handle({"type": "deck_round", "round": 1, "seat": 1,
+                     "deck": [ct.to_hex() for ct in deck]})
+    assert observer.phase == Phase.ABORTED
+    assert observer.bad_seat == 1
+
+
+def test_short_deck_aborts():
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    observer = _one_seat_in_shuffle(2, seats, ms)
+    from holdem.p2p import shuffle_mp
+    deck, _ = shuffle_mp.shuffle_deck(observer.joint_pk, eg.make_trivial_deck())
+    observer.handle({"type": "deck_round", "round": 1, "seat": 0,
+                     "deck": [ct.to_hex() for ct in deck[:51]]})
+    assert observer.phase == Phase.ABORTED
+    assert observer.bad_seat == 0
+
+
+def test_trivial_ciphertext_in_shuffle_aborts():
+    """A deck carrying a trivial (identity-C0) ciphertext post-shuffle is
+    rejected -- a genuine shuffle re-encrypts every card."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    observer = _one_seat_in_shuffle(2, seats, ms)
+    from holdem.p2p import shuffle_mp
+    deck, _ = shuffle_mp.shuffle_deck(observer.joint_pk, eg.make_trivial_deck())
+    deck = list(deck)
+    deck[10] = eg.make_trivial_deck()[10]             # smuggle a trivial ct
+    observer.handle({"type": "deck_round", "round": 1, "seat": 0,
+                     "deck": [ct.to_hex() for ct in deck]})
+    assert observer.phase == Phase.ABORTED
+    assert observer.bad_seat == 0
+
+
+def test_malformed_deck_aborts():
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    observer = _one_seat_in_shuffle(2, seats, ms)
+    observer.handle({"type": "deck_round", "round": 1, "seat": 0,
+                     "deck": [["not-hex", "also-not"]] * 52})
+    assert observer.phase == Phase.ABORTED
+
+
+def test_stale_round_ignored_not_aborted():
+    """A duplicate/old round (round <= accepted) is ignored, not an abort."""
+    seats = [0, 1, 2]
+    ms = _secrets(seats)
+    observer = _one_seat_in_shuffle(2, seats, ms)
+    from holdem.p2p import shuffle_mp
+    # accept a valid round 1 first
+    deck1, _ = shuffle_mp.shuffle_deck(observer.joint_pk, eg.make_trivial_deck())
+    observer.handle({"type": "deck_round", "round": 1, "seat": 0,
+                     "deck": [ct.to_hex() for ct in deck1]})
+    assert observer._shuffle_round == 1 and observer.phase == Phase.SHUFFLE
+    # re-send round 1 -> ignored, still round 1, not aborted
+    observer.handle({"type": "deck_round", "round": 1, "seat": 0,
+                     "deck": [ct.to_hex() for ct in deck1]})
+    assert observer.phase == Phase.SHUFFLE
+    assert observer._shuffle_round == 1
 
 
 if __name__ == "__main__":
