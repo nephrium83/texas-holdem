@@ -114,6 +114,19 @@ class Session:
         self._engine     = None
         self._seat_order: list[str] = []
 
+        # --- mental-poker deal (L5): per-hand coordinator for the local seat ---
+        # One driver per hand; created in begin_hand(). The deal is hostless
+        # and peer-symmetric, so every peer runs its own driver.
+        self._deal_driver = None
+        self._deal_outbox: list[dict] = []      # driver emissions buffered for routing
+        self._deal_hole: list = [None, None]    # this seat's hole cards (engine Cards)
+        self._deal_board: list = [None] * 5     # the board (engine Cards)
+        # local device secret for deterministic key shares (crash-survival).
+        # NOTE: regenerated per process for now; persisting it across restarts
+        # is the separate persistence milestone.
+        import os as _os
+        self._deal_master_secret = _os.urandom(32)
+
     # ------------------------------------------------------------------
     # Message dispatch (called by transport on_message handler)
     # ------------------------------------------------------------------
@@ -180,6 +193,120 @@ class Session:
             self._on_shuffle_reveal_collect(conn_id, msg)
         elif t == "shuffle_deal":
             self._on_shuffle_deal(msg)
+        # --- mental-poker deal (L5, hostless) ---
+        elif t in ("key_announce", "deck_round", "deal_share", "audit_open"):
+            self._on_deal_message(conn_id, msg)
+
+    # ------------------------------------------------------------------
+    # Mental-poker deal (L5) — hostless, peer-symmetric. Each peer drives
+    # its own MentalDealDriver for the local seat; messages carry seat
+    # indices and are self-describing, so routing is by seat, not conn_id.
+    # ------------------------------------------------------------------
+
+    def _deal_session_id(self) -> str:
+        """Shared, stable per-game id (every peer holds the same seat order)."""
+        return "poker|" + "|".join(self._seat_order)
+
+    def begin_hand(self, hand_no: int, button: int = 0) -> None:
+        """Start this seat's mental-poker deal for a hand and kick off the DKG.
+
+        Hostless and peer-symmetric: every peer calls this for the same hand,
+        with the same (hand_no, button). All peers must have begun before the
+        exchange settles, or an early key_announce would be dropped by a peer
+        that has no driver yet.
+        """
+        from holdem.p2p.mental_deal_driver import MentalDealDriver
+        order = list(self._seat_order)
+        if self.local_conn_id not in order:
+            raise RuntimeError("cannot begin hand: local seat not in seat order")
+        self._deal_hole = [None, None]
+        self._deal_board = [None] * 5
+        self._deal_outbox = []
+        self._deal_driver = MentalDealDriver(
+            session_id=self._deal_session_id(),
+            hand_no=hand_no,
+            local_seat=order.index(self.local_conn_id),
+            seats_in=list(range(len(order))),
+            button=button,
+            master_secret=self._deal_master_secret,
+            send=self._deal_outbox.append,      # buffer; _flush_deal routes them
+        )
+        self._deal_driver.start()
+        self._flush_deal()
+
+    def reveal_board_street(self, street: str) -> None:
+        """Reveal a board street ("flop"/"turn"/"river"); called once the
+        preceding betting round closes."""
+        if self._deal_driver is None:
+            return
+        self._deal_driver.reveal_street(street)
+        self._flush_deal()
+
+    def open_deal_audit(self) -> None:
+        """Open the post-hand audit (at showdown)."""
+        if self._deal_driver is None:
+            return
+        self._deal_driver.open_audit()
+        self._flush_deal()
+
+    def _on_deal_message(self, conn_id: str, msg: dict) -> None:
+        if self._deal_driver is None:
+            return                              # no active hand yet
+        # Seat-spoofing defence: the seat a message claims must be the
+        # sender's own seat (the transport already authenticates conn_id).
+        order = self._seat_order
+        claimed = msg.get("seat", msg.get("seat_from"))
+        if conn_id != self.local_conn_id:
+            if not (isinstance(claimed, int) and 0 <= claimed < len(order)
+                    and order[claimed] == conn_id):
+                _log.warning("session: deal msg from %s claims seat %s — dropping",
+                             conn_id, claimed)
+                return
+        self._deal_driver.handle(dict(msg))
+        self._flush_deal()
+
+    def _flush_deal(self) -> None:
+        """Route buffered driver emissions. Each is broadcast to the OTHER
+        peers and also self-delivered to our own driver: the coordinator's
+        shuffle chain assumes a peer sees its own broadcast, but the real
+        transport excludes the sender, so we feed it back here. Drains to
+        quiescence, then pulls any newly recovered cards.
+
+        The outbox list is drained IN PLACE (never rebound): the driver's
+        send callback was bound to this exact list object at construction,
+        so replacing it would strand later emissions.
+        """
+        steps = 0
+        while self._deal_outbox:
+            steps += 1
+            if steps > 10000:
+                raise RuntimeError("mental-deal flush did not terminate")
+            m = self._deal_outbox.pop(0)
+            self._transport.broadcast(m)        # to the other peers
+            self._deal_driver.handle(m)         # self-deliver; may append more
+        self._apply_deal_cards()
+
+    def _apply_deal_cards(self) -> None:
+        if self._deal_driver is None:
+            return
+        self._deal_hole = self._deal_driver.hole_cards
+        self._deal_board = self._deal_driver.board
+
+    @property
+    def deal_hole_cards(self) -> list:
+        """This seat's hole cards as engine Cards (None until recovered)."""
+        return list(self._deal_hole)
+
+    @property
+    def deal_board(self) -> list:
+        """The board as engine Cards, filling street by street."""
+        return list(self._deal_board)
+
+    def deal_done(self) -> bool:
+        return self._deal_driver is not None and self._deal_driver.is_done()
+
+    def deal_aborted(self) -> bool:
+        return self._deal_driver is not None and self._deal_driver.aborted()
 
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
         """Host receives identity from a newly connected peer."""
