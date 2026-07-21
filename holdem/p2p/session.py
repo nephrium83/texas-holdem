@@ -127,6 +127,16 @@ class Session:
         import os as _os
         self._deal_master_secret = _os.urandom(32)
 
+        # --- hostless betting (L5): per-peer replica engine + orchestration ---
+        self._replica = None                    # ReplicaTable for the current hand
+        self._own_hole_set = False              # local holes fed to replica yet?
+        self._pumping = False                   # re-entrancy guard for _pump_hand
+        self.hand_voided = False
+        self.void_reason: str | None = None
+        self.hand_result: dict | None = None    # normalized settle() result
+        # on_hand_settled(result_dict) -- hand settled on this replica
+        self.on_hand_settled: Optional[Callable[[dict], None]] = None
+
     # ------------------------------------------------------------------
     # Message dispatch (called by transport on_message handler)
     # ------------------------------------------------------------------
@@ -196,6 +206,9 @@ class Session:
         # --- mental-poker deal (L5, hostless) ---
         elif t in ("key_announce", "deck_round", "deal_share", "audit_open"):
             self._on_deal_message(conn_id, msg)
+        # --- hostless betting (L5): replica action ---
+        elif t == "bet_action":
+            self._on_bet_action(conn_id, msg)
 
     # ------------------------------------------------------------------
     # Mental-poker deal (L5) — hostless, peer-symmetric. Each peer drives
@@ -285,6 +298,7 @@ class Session:
             self._transport.broadcast(m)        # to the other peers
             self._deal_driver.handle(m)         # self-deliver; may append more
         self._apply_deal_cards()
+        self._pump_hand()                       # recovered cards may advance the hand
 
     def _apply_deal_cards(self) -> None:
         if self._deal_driver is None:
@@ -307,6 +321,163 @@ class Session:
 
     def deal_aborted(self) -> bool:
         return self._deal_driver is not None and self._deal_driver.aborted()
+
+    # ------------------------------------------------------------------
+    # Hostless hand orchestration (L5): replica betting + mental deal.
+    # Every peer runs the same state machine; nothing here is host-only.
+    # ------------------------------------------------------------------
+
+    @property
+    def local_seat(self) -> int:
+        return self._seat_order.index(self.local_conn_id)
+
+    def start_p2p_hand(self, *, hand_no: int, names: list, stacks: list,
+                       sb: int, bb: int, structure: str = "No-Limit",
+                       button: int = 0) -> None:
+        """Run one fully-hostless hand: replica engine for betting, mental
+        deal for the cards. Every peer calls this with the same shared
+        config. Orchestration order matters: the replica's start_hand MOVES
+        the button (blinds / dead-button rule), and that post-move button
+        is what drives the mental deal's deal_map -- so the replica starts
+        first and the deal is begun with replica.button."""
+        from holdem.p2p.replica_table import ReplicaTable
+        self.hand_voided = False
+        self.void_reason = None
+        self.hand_result = None
+        self._own_hole_set = False
+        self._replica = ReplicaTable(
+            session_id=self._deal_session_id(), hand_no=hand_no,
+            names=list(names), stacks=list(stacks), sb=sb, bb=bb,
+            structure=structure)
+        self._replica.start_hand(button)
+        self.begin_hand(hand_no, button=self._replica.button)
+        self._pump_hand()
+
+    def send_bet_action(self, action: str, amount: int = 0) -> str:
+        """Act for the LOCAL seat: apply to our own replica first, then
+        broadcast the action with our post-apply state digest so every
+        peer can verify we all agree (desync detection)."""
+        if self._replica is None or self.hand_voided:
+            return "rejected"
+        seat = self.local_seat
+        seq = self._replica.next_seq
+        verdict = self._replica.apply_action(seq, seat, action, amount)
+        if verdict != "applied":
+            return verdict
+        self._transport.broadcast({
+            "type": "bet_action", "seq": seq, "seat": seat,
+            "action": action, "amount": int(amount),
+            "digest": self._replica.state_digest(),
+        })
+        self._pump_hand()
+        return verdict
+
+    def _on_bet_action(self, conn_id: str, msg: dict) -> None:
+        if self._replica is None or self.hand_voided:
+            return
+        try:
+            seq = int(msg["seq"])
+            seat = int(msg["seat"])
+            action = str(msg["action"])
+            amount = int(msg.get("amount", 0))
+        except (KeyError, ValueError, TypeError):
+            return
+        # seat-spoofing defence, same rule as the deal messages
+        order = self._seat_order
+        if conn_id != self.local_conn_id:
+            if not (0 <= seat < len(order) and order[seat] == conn_id):
+                _log.warning("session: bet_action from %s claims seat %s "
+                             "— dropping", conn_id, seat)
+                return
+        verdict = self._replica.apply_action(seq, seat, action, amount)
+        if verdict == "applied":
+            # Desync detection: the sender attached its post-apply digest.
+            # Compare only when we applied exactly that action (a buffered
+            # later action draining in the same call would legitimately
+            # move our digest past the sender's snapshot).
+            theirs = msg.get("digest")
+            if (theirs is not None
+                    and self._replica.next_seq == seq + 1
+                    and theirs != self._replica.state_digest()):
+                self._void_hand(f"replica desync detected at action {seq}")
+                return
+        self._pump_hand()
+
+    def _void_hand(self, reason: str) -> None:
+        """Void the hand (desync, deal abort, audit failure). Chips revert
+        to their pre-hand state because settle() never ran; a settled hand
+        is final and cannot be voided."""
+        if self.hand_voided:
+            return
+        self.hand_voided = True
+        self.void_reason = reason
+        _log.warning("session: HAND VOIDED — %s", reason)
+
+    def _pump_hand(self) -> None:
+        """Advance the hand's orchestration to quiescence: feed recovered
+        cards to the replica, reveal and advance streets, open the audit,
+        settle. Called after every deal message, bet action, and lifecycle
+        call. Re-entrant invocations (reveal/audit go through _flush_deal,
+        which calls back here) are absorbed by the guard; the outermost
+        pump loops until no step makes progress."""
+        if self._pumping or self._replica is None:
+            return
+        self._pumping = True
+        try:
+            for _ in range(32):
+                if self.hand_voided:
+                    return
+                if self.deal_aborted():
+                    d = self._deal_driver
+                    self._void_hand(f"deal aborted: {d.abort_reason} "
+                                    f"(seat {d.bad_seat})")
+                    return
+                if not self._step_hand():
+                    return
+        finally:
+            self._pumping = False
+
+    def _step_hand(self) -> bool:
+        """One orchestration step. Returns True iff progress was made."""
+        from holdem.p2p.replica_table import (
+            PHASE_STREET_OVER, PHASE_SHOWDOWN, PHASE_HAND_OVER)
+        r = self._replica
+        # 1. local hole cards -> replica, as soon as the deal recovers them
+        if not self._own_hole_set:
+            hole = self.deal_hole_cards
+            if all(c is not None for c in hole):
+                r.set_own_hole(self.local_seat, hole)
+                self._own_hole_set = True
+                return True
+        # 2. a betting round closed: reveal the next street, then advance
+        #    the replica with the REAL recovered board cards
+        if r.phase == PHASE_STREET_OVER:
+            street = {"preflop": "flop", "flop": "turn",
+                      "turn": "river"}[r.engine.street]
+            slots = {"flop": (0, 1, 2), "turn": (3,), "river": (4,)}[street]
+            board = self.deal_board
+            if not all(board[s] is not None for s in slots):
+                self.reveal_board_street(street)      # idempotent; flushes
+                board = self.deal_board               # may be complete now
+            if all(board[s] is not None for s in slots):
+                r.advance_street([board[s] for s in slots])
+                return True
+            return False               # waiting on other peers' shares
+        # 3. hand over (folds) or showdown: audit, then settle
+        if r.phase in (PHASE_SHOWDOWN, PHASE_HAND_OVER) and self.hand_result is None:
+            if not self.deal_done():
+                self.open_deal_audit()                # idempotent; flushes
+                if not self.deal_done():
+                    return False       # waiting on other peers' openings
+            holes = self._deal_driver.all_hole_cards()
+            if r.phase == PHASE_SHOWDOWN and holes:
+                r.set_all_holes(holes)
+            self.hand_result = r.finish(
+                force_tabled=(r.phase == PHASE_SHOWDOWN))
+            if self.on_hand_settled:
+                self.on_hand_settled(self.hand_result)
+            return False               # settled: terminal state
+        return False
 
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
         """Host receives identity from a newly connected peer."""

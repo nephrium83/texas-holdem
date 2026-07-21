@@ -27,9 +27,10 @@ session's concern and is the larger, still-open part of step 3.
 """
 from __future__ import annotations
 
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from holdem.engine import Card
+from holdem.p2p import deal_map as dmap
 from holdem.p2p.mental_deal import MentalDeal, Phase
 
 
@@ -133,6 +134,18 @@ class MentalDealDriver:
     @property
     def audit_report(self):
         return self.deal.audit_report
+
+    def all_hole_cards(self) -> Optional[Dict[int, List[Card]]]:
+        """Every seat's TRUE hole cards, {seat: [c1, c2]}, available only
+        after a clean audit (which opens all 52 positions). None until
+        then. This is what showdown scoring uses -- during betting a peer
+        knows only its own holes."""
+        rep = self.deal.audit_report
+        if rep is None or not rep.ok:
+            return None
+        hp = dmap.hole_positions(self.deal.button, self.deal.seats_in)
+        return {seat: [label_to_card(rep.cards[p]) for p in positions]
+                for seat, positions in hp.items()}
 
 
 __all__ = ["MentalDealDriver", "label_to_card"]
