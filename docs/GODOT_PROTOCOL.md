@@ -8,9 +8,10 @@ it builds on); both are covered by `tests/test_client_view.py`. If this
 document and that code ever disagree, the code is authoritative and this
 document is the bug.
 
-Status: draft v1. The message schemas below are stable (they mirror tested
-code). The transport framing (§2) and connection lifecycle (§7) are the
-parts still open to change; they are marked where so.
+Status: v1. The message schemas mirror tested code. The transport framing
+(§2) and connection lifecycle (§7) are implemented by the sidecar's client
+server (`holdem/client_server.py`, `tests/test_client_server.py`) and are
+now locked.
 
 ---
 
@@ -42,7 +43,7 @@ client cannot leak what it was never given.
 
 ---
 
-## 2. Transport and framing  *(open — leaning as below)*
+## 2. Transport and framing  *(locked — implemented)*
 
 The sidecar listens on a **localhost TCP socket** (default `127.0.0.1`, a
 port the client is told at launch). Messages are **UTF-8 JSON objects, one
@@ -51,10 +52,10 @@ no additional framing. Both directions use the same framing.
 
 Godot side: `StreamPeerTCP`, read to the next `\n`, `JSON.parse_string`.
 
-WebSocket (`WebSocketPeer`, one JSON text frame per message) is an equally
-acceptable alternative if preferred; the message bodies in §4–§6 are
-unchanged. This choice is not yet locked — raise it before building the
-client's networking layer.
+WebSocket was considered and passed over: the sidecar serves plain TCP +
+newline-JSON (`holdem/client_server.py`). The message bodies in §4–§6
+would carry over unchanged if a WebSocket listener were ever added
+alongside; nothing in the schemas assumes the transport.
 
 Every message is a JSON object with a `"type"` field. Unknown message types
 must be ignored by both sides (forward compatibility).
@@ -264,9 +265,9 @@ the winner is not shown, exactly as at a real table.
 
 ---
 
-## 7. Connection lifecycle  *(open)*
+## 7. Connection lifecycle  *(implemented)*
 
-Current shape (subject to change as the sidecar's client server is built):
+As implemented by `holdem/client_server.py`:
 
 1. Sidecar starts, begins its P2P work, and listens on the local port.
 2. Client connects. Sidecar sends `{"type":"hello","protocol":1}` then an
@@ -308,6 +309,11 @@ These will be added as message types without breaking §4–§6.
   view) and `card_str` (§3 encoding).
 - `tests/test_client_view.py` — exercises the no-leak invariant, the phase
   transitions, showdown reveals, and command verdicts over real hands.
+- `holdem/client_server.py` — the localhost server itself: §2 framing,
+  §7 hello, §4 command handling, §5 unprompted pushes (coalesced, via
+  `Session.on_state_changed`).
+- `tests/test_client_server.py` — the whole protocol over a real socket
+  against live hostless hands on the in-memory bus.
 
 Build the Godot client against these. When in doubt, run a sidecar and read
 the actual JSON.
