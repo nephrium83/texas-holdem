@@ -1,0 +1,142 @@
+"""Client-facing view of a hostless session — the boundary the rendering
+client (Godot front end, or any UI) consumes.
+
+Architecture: the client runs NO game logic. It receives *snapshots* and
+sends *commands*. The Python sidecar owns the Session (crypto + P2P +
+replica betting); this module turns the sidecar's state into a per-player
+snapshot the client renders, and turns client commands into session calls.
+A thin socket layer (added separately) just moves these dicts as JSON.
+
+This builds on contract.build_snapshot (the engine->client half from
+MULTIPLAYER.md section 5), reusing its public per-seat view and adding the
+hostless lifecycle envelope: deal progress, void, settlement, and showdown
+reveals.
+
+Hidden-information invariant (inherited and preserved): during play a
+snapshot carries hole cards for the LOCAL seat only. Other seats' cards
+appear solely in a contested-showdown 'settled' snapshot, where the
+post-hand audit has already made them public. A client physically cannot
+leak what it was never sent. Every snapshot is plain JSON-serialisable.
+"""
+from __future__ import annotations
+
+from typing import Optional
+
+from holdem import contract
+
+
+def _holes_recovered(session) -> bool:
+    hole = session.deal_hole_cards
+    return len(hole) == 2 and all(c is not None for c in hole)
+
+
+def _phase(session, dealt: bool) -> str:
+    if session.hand_voided:
+        return "void"
+    if session.hand_result is not None:
+        return "settled"
+    if not dealt:
+        return "dealing"
+    return "betting"
+
+
+def snapshot(session) -> dict:
+    """Everything the local player's client needs to render right now.
+
+    Returns a lobby snapshot when no hand is in progress, otherwise a full
+    in-hand snapshot for the local seat.
+    """
+    replica = getattr(session, "_replica", None)
+    if replica is None:
+        return _lobby_snapshot(session)
+
+    seat = session.local_seat
+    engine = replica.engine
+    snap = contract.build_snapshot(engine, seat)
+    snap["hand_num"] = session._hand_no
+
+    dealt = _holes_recovered(session)
+    phase = _phase(session, dealt)
+    snap["phase"] = phase
+
+    # Local hole cards come from the deal, never the dummy deck the replica
+    # was seeded with; omit them until they are actually recovered.
+    if dealt:
+        snap["you"]["hole"] = [contract.card_str(c)
+                               for c in session.deal_hole_cards]
+    else:
+        snap["you"].pop("hole", None)
+
+    # Offer legal actions only when it is genuinely this seat's turn to bet.
+    if phase != "betting" or engine.actor != seat:
+        snap["you"].pop("legal", None)
+
+    # Void / settlement envelope.
+    snap["voided"] = session.hand_voided
+    snap["void_reason"] = session.void_reason if session.hand_voided else None
+    snap["result"] = session.hand_result
+
+    # Showdown reveals: at a contested showdown (result carries scored runs)
+    # the audit has made every hole public, so the client can table them.
+    # A hand that ended by folds has no runs and reveals nothing.
+    result = session.hand_result
+    if (phase == "settled" and result and result.get("runs")
+            and session._deal_driver is not None):
+        revealed = session._deal_driver.all_hole_cards()
+        if revealed:
+            by_seat = {s: [contract.card_str(c) for c in cards]
+                       for s, cards in revealed.items()}
+            for sv in snap["seats"]:
+                if sv["seat"] in by_seat and not sv["is_you"]:
+                    sv["hole"] = by_seat[sv["seat"]]
+    return snap
+
+
+def _lobby_snapshot(session) -> dict:
+    """Table membership before a hand is running."""
+    order = list(getattr(session, "_seat_order", []) or [])
+    players = getattr(session, "players", {}) or {}
+    seats = []
+    for i, cid in enumerate(order):
+        p = players.get(cid)
+        seats.append({
+            "seat": i,
+            "conn_id": cid,
+            "name": (p.nickname if p else ""),
+            "is_you": (cid == session.local_conn_id),
+        })
+    my_seat = order.index(session.local_conn_id) \
+        if session.local_conn_id in order else -1
+    return {
+        "type": "snapshot",
+        "phase": "lobby",
+        "hand_num": getattr(session, "_hand_no", 0),
+        "seats": seats,
+        "you": {"seat": my_seat},
+    }
+
+
+def apply_command(session, command: str,
+                  payload: Optional[dict] = None) -> dict:
+    """Apply a client command to the hostless session.
+
+    Betting commands are broadcast to every replica via the session; the
+    result echoes the engine's verdict so the client can surface 'not your
+    turn' / 'illegal' without guessing. Legality is the replica's job, as
+    for any peer action -- never trusted from the client.
+    """
+    payload = payload or {}
+    if command == "fold":
+        verdict = session.send_bet_action("fold")
+    elif command == "check_call":
+        # The engine treats a zero-to-call "call" as a check.
+        verdict = session.send_bet_action("call")
+    elif command == "raise_to":
+        verdict = session.send_bet_action("raise", int(payload["amount"]))
+    else:
+        raise ValueError(f"unknown command: {command!r}")
+    return {"type": "command_result", "command": command,
+            "ok": verdict == "applied", "verdict": verdict}
+
+
+__all__ = ["snapshot", "apply_command"]
