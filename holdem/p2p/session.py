@@ -19,14 +19,9 @@ In-game (Phase 1 -- on top of transport)
 any -> all : {"type": "action",  "action": "fold"|"call"|"raise", "amount": N}
 host-> all : {"type": "deal",    ...}
 
-Verifiable shuffle (Phase 2)
------------------------------
-host -> all  : {"type": "shuffle_start",          "payload": {"commit_hex": ..., "x25519_pubkey_hex": ...}}
-peer -> host : {"type": "shuffle_commit",         "payload": {"commit_hex": ..., "x25519_pubkey_hex": ...}}
-host -> all  : {"type": "shuffle_commit_collect", "payload": {"commits": {conn_id: hex, ...}}}
-peer -> host : {"type": "shuffle_reveal",         "payload": {"seed_hex": ..., "nonce_hex": ...}}
-host -> all  : {"type": "shuffle_reveal_collect", "payload": {"reveals": {conn_id: {seed_hex, nonce_hex}, ...}}}
-host -> peer : {"type": "shuffle_deal",           "payload": {"seat": N, "encrypted_hex": "..."}}
+The old host-coordinated commit-reveal shuffle (Phase 2's 6 shuffle_*
+message types) is RETIRED — dealing is the trustless mental-poker deal
+(key_announce / deck_round / deal_share / audit_open, see mental_deal.py).
 """
 from __future__ import annotations
 
@@ -47,7 +42,7 @@ class Player:
     is_host:           bool  = False
     ready:             bool  = False
     seat_index:        int   = -1
-    # X25519 pubkey for hole-card encryption (populated from player_info or shuffle_commit)
+    # X25519 pubkey for hole-card encryption (populated from player_info)
     x25519_pubkey_hex: str   = ""
 
 
@@ -84,9 +79,6 @@ class Session:
         # Last table settings (used by _mp_new_game in gui.py)
         self._last_table_settings: dict = {}
 
-        # Verifiable shuffle state
-        self._shuffle_round = None             # holdem.p2p.shuffle.ShuffleRound | None
-
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
         # should route back to the Tk main thread via root.after(0, ...).
@@ -101,14 +93,6 @@ class Session:
         self.on_resume:              Optional[Callable[[], None]]             = None
         self.on_kick:                Optional[Callable[[dict], None]]         = None
         self.on_adjust_blinds:       Optional[Callable[[dict], None]]         = None
-
-        # Shuffle callbacks
-        # on_shuffle_ready(deck_indices)  -- host: all reveals verified, deck ready
-        self.on_shuffle_ready: Optional[Callable[[list], None]]  = None
-        # on_shuffle_deal(payload_dict)   -- peer: encrypted hole cards arrived
-        self.on_shuffle_deal: Optional[Callable[[dict], None]]   = None
-        # on_shuffle_cheat(conn_id)       -- peer: a reveal failed verification
-        self.on_shuffle_cheat: Optional[Callable[[str], None]]   = None
 
         # Engine ref (host only) and seat order
         self._engine     = None
@@ -200,19 +184,6 @@ class Session:
             self._on_kick(conn_id, msg)
         elif t == "adjust_blinds":
             self._on_adjust_blinds(conn_id, msg)
-        # --- verifiable shuffle ---
-        elif t == "shuffle_start":
-            self._on_shuffle_start(conn_id, msg)
-        elif t == "shuffle_commit":
-            self._on_shuffle_commit(conn_id, msg)
-        elif t == "shuffle_commit_collect":
-            self._on_shuffle_commit_collect(conn_id, msg)
-        elif t == "shuffle_reveal":
-            self._on_shuffle_reveal(conn_id, msg)
-        elif t == "shuffle_reveal_collect":
-            self._on_shuffle_reveal_collect(conn_id, msg)
-        elif t == "shuffle_deal":
-            self._on_shuffle_deal(msg)
         # --- mental-poker deal (L5, hostless) ---
         elif t in ("key_announce", "deck_round", "deal_share", "audit_open"):
             self._on_deal_message(conn_id, msg)
@@ -623,283 +594,6 @@ class Session:
         if self.is_host:
             # Re-broadcast to all peers (echo back to sender too)
             self._transport.broadcast(msg)
-
-    # ------------------------------------------------------------------
-    # Verifiable shuffle — protocol message handlers
-    # ------------------------------------------------------------------
-
-    def start_shuffle(self) -> None:
-        """Host: begin a new shuffle round for the upcoming hand.
-
-        Generates the host's own commit and broadcasts ``shuffle_start`` to
-        all peers.  Returns immediately; the shuffle completes asynchronously
-        when all peers have revealed (``on_shuffle_ready`` callback).
-        """
-        if not self.is_host:
-            raise RuntimeError("Only the host can call start_shuffle()")
-
-        from holdem.p2p.shuffle import ShuffleRound
-        from holdem.p2p import identity as _id
-
-        all_ids = list(self._seat_order) if self._seat_order else list(self.players)
-        if not self.local_conn_id:
-            self.local_conn_id = next(
-                (p.conn_id for p in self.players.values() if p.is_host), "")
-
-        self._shuffle_round = ShuffleRound(
-            local_conn_id=self.local_conn_id,
-            all_conn_ids=all_ids,
-        )
-        sr = self._shuffle_round
-
-        # Generate host's own commit and record local X25519 pubkey
-        commit = sr.local_commit()
-        host_x25519_pub = _id.x25519_public_key_bytes().hex()
-        sr.record_x25519_pubkey(self.local_conn_id, _id.x25519_public_key_bytes())
-
-        self._transport.broadcast({
-            "type": "shuffle_start",
-            "payload": {
-                "commit_hex":       commit.hex(),
-                "x25519_pubkey_hex": host_x25519_pub,
-            },
-        })
-        _log.debug("shuffle: host broadcasted commit and waiting for peer commits")
-
-    def _on_shuffle_start(self, conn_id: str, msg: dict) -> None:
-        """Peer: host has started a shuffle round — generate and send our commit."""
-        if self.is_host:
-            return   # host sent this, not a receiver
-        if conn_id != self._host_conn_id and self._host_conn_id:
-            _log.warning("shuffle_start from non-host %s — ignoring", conn_id)
-            return
-
-        from holdem.p2p.shuffle import ShuffleRound
-        from holdem.p2p import identity as _id
-
-        payload = msg.get("payload", {})
-        host_commit_hex     = payload.get("commit_hex", "")
-        host_x25519_pub_hex = payload.get("x25519_pubkey_hex", "")
-
-        all_ids = list(self._seat_order) if self._seat_order else list(self.players)
-        self._shuffle_round = ShuffleRound(
-            local_conn_id=self.local_conn_id,
-            all_conn_ids=all_ids,
-        )
-        sr = self._shuffle_round
-
-        # Record host's commit
-        if host_commit_hex:
-            sr.record_commit(conn_id, bytes.fromhex(host_commit_hex))
-        if host_x25519_pub_hex:
-            sr.record_x25519_pubkey(conn_id, bytes.fromhex(host_x25519_pub_hex))
-
-        # Generate our own commit and send to host
-        my_commit   = sr.local_commit()
-        my_x25519   = _id.x25519_public_key_bytes().hex()
-        sr.record_x25519_pubkey(self.local_conn_id, _id.x25519_public_key_bytes())
-
-        self._transport.send(self._host_conn_id, {
-            "type": "shuffle_commit",
-            "payload": {
-                "commit_hex":        my_commit.hex(),
-                "x25519_pubkey_hex": my_x25519,
-            },
-        })
-        _log.debug("shuffle: peer sent commit to host")
-
-    def _on_shuffle_commit(self, conn_id: str, msg: dict) -> None:
-        """Host: receive a commit from a peer."""
-        if not self.is_host or self._shuffle_round is None:
-            return
-
-        payload = msg.get("payload", {})
-        commit_hex     = payload.get("commit_hex", "")
-        x25519_pub_hex = payload.get("x25519_pubkey_hex", "")
-
-        sr = self._shuffle_round
-        if commit_hex:
-            sr.record_commit(conn_id, bytes.fromhex(commit_hex))
-        if x25519_pub_hex:
-            sr.record_x25519_pubkey(conn_id, bytes.fromhex(x25519_pub_hex))
-
-        _log.debug("shuffle: host got commit from %s (have %d/%d)",
-                   conn_id, len(sr._commits), len(sr.all_conn_ids))
-
-        if sr.all_commits_received():
-            self._host_broadcast_commit_collect()
-
-    def _host_broadcast_commit_collect(self) -> None:
-        """Host: broadcast all commits so every peer can verify theirs is included."""
-
-        sr = self._shuffle_round
-        commits_payload = {cid: commit.hex() for cid, commit in sr._commits.items()}
-
-        self._transport.broadcast({
-            "type": "shuffle_commit_collect",
-            "payload": {"commits": commits_payload},
-        })
-        _log.debug("shuffle: host broadcasted commit_collect")
-
-    def _on_shuffle_commit_collect(self, conn_id: str, msg: dict) -> None:
-        """Peer: host has collected all commits — send our reveal."""
-        if self.is_host or self._shuffle_round is None:
-            return
-        if conn_id != self._host_conn_id and self._host_conn_id:
-            return
-
-
-        sr = self._shuffle_round
-        payload = msg.get("payload", {})
-        commits = payload.get("commits", {})
-
-        # Verify our commit is in the collection
-        if self.local_conn_id and self.local_conn_id not in commits:
-            _log.warning("shuffle: our commit not in commit_collect — aborting")
-            return
-
-        self._transport.send(self._host_conn_id, {
-            "type": "shuffle_reveal",
-            "payload": {
-                "seed_hex":  sr.local_seed_hex,
-                "nonce_hex": sr.local_nonce_hex,
-            },
-        })
-        _log.debug("shuffle: peer sent reveal to host")
-
-    def _on_shuffle_reveal(self, conn_id: str, msg: dict) -> None:
-        """Host: verify a reveal from a peer."""
-        if not self.is_host or self._shuffle_round is None:
-            return
-
-        payload  = msg.get("payload", {})
-        seed_hex  = payload.get("seed_hex",  "")
-        nonce_hex = payload.get("nonce_hex", "")
-
-        sr = self._shuffle_round
-        try:
-            sr.record_reveal(conn_id,
-                             bytes.fromhex(seed_hex),
-                             bytes.fromhex(nonce_hex))
-        except (ValueError, Exception) as exc:
-            _log.error("shuffle: reveal verification FAILED for %s: %s", conn_id, exc)
-            return
-
-        _log.debug("shuffle: host verified reveal from %s (%d/%d)",
-                   conn_id, len(sr._seeds), len(sr.all_conn_ids))
-
-        if sr.all_reveals_received():
-            self._host_finalise_shuffle()
-
-    def _host_finalise_shuffle(self) -> None:
-        """Host: all reveals verified — compute deck, encrypt, and deal."""
-
-        sr = self._shuffle_round
-        deck_indices = sr.shuffled_deck()
-
-        # Broadcast reveals so every peer can independently verify the deck.
-        # H-1: reveals_snapshot() emits the real per-seat nonce (not the
-        # commit), so any peer recomputing SHA256(seed||nonce) matches the
-        # commitment and can reproduce the deck.
-        self._transport.broadcast({
-            "type": "shuffle_reveal_collect",
-            "payload": {"reveals": sr.reveals_snapshot()},
-        })
-        _log.debug("shuffle: host broadcasted reveal_collect, deck derived")
-
-        # Notify the host's own GUI that the deck is ready
-        if self.on_shuffle_ready:
-            self.on_shuffle_ready(deck_indices)
-
-    def _on_shuffle_reveal_collect(self, conn_id: str, msg: dict) -> None:
-        """Peer: verify every revealed seed against its commitment (H-1).
-
-        Each peer already holds the commits from the commit_collect phase.
-        Recompute SHA256(seed||nonce) for every seat and confirm it matches
-        the committed value; if any seat fails, the host cheated or a message
-        was tampered with, and the hand must not proceed.
-        """
-        from holdem.p2p.shuffle import verify_commit, derive_master_seed, \
-            deterministic_shuffle
-
-        sr = self._shuffle_round
-        if sr is None:
-            return
-        reveals = msg.get("payload", {}).get("reveals", {})
-        seeds: dict = {}
-        for cid, r in reveals.items():
-            try:
-                seed  = bytes.fromhex(r["seed_hex"])
-                nonce = bytes.fromhex(r["nonce_hex"])
-            except (KeyError, ValueError):
-                _log.error("shuffle: malformed reveal for %s — aborting hand", cid)
-                if self.on_shuffle_cheat:
-                    self.on_shuffle_cheat(cid)
-                return
-            commit = sr._commits.get(cid)
-            if commit is None or not verify_commit(seed, nonce, commit):
-                _log.error(
-                    "shuffle: reveal for %s does not match its commit — "
-                    "possible host cheating; aborting hand", cid)
-                if self.on_shuffle_cheat:
-                    self.on_shuffle_cheat(cid)
-                return
-            seeds[cid] = seed
-
-        # Independently reproduce the deck and expose it to the peer's GUI.
-        try:
-            deck = deterministic_shuffle(derive_master_seed(seeds))
-        except ValueError:
-            return
-        if self.on_shuffle_ready:
-            self.on_shuffle_ready(deck)
-
-    def _on_shuffle_deal(self, msg: dict) -> None:
-        """Peer: receive encrypted hole cards from the host."""
-        if self.on_shuffle_deal:
-            self.on_shuffle_deal(msg.get("payload", {}))
-
-    def send_encrypted_hole_cards(self, conn_id: str, seat: int,
-                                   cards_str: list) -> None:
-        """Host: encrypt and unicast hole cards to exactly one peer.
-
-        Uses the X25519 pubkey supplied by that peer during their shuffle_commit.
-        Falls back to plaintext ``deal_private`` if the pubkey is unavailable
-        (e.g., the peer is running an older client).
-        """
-
-        sr = self._shuffle_round
-        pubkey_bytes: bytes | None = None
-        if sr is not None:
-            pubkey_bytes = sr.x25519_pubkeys.get(conn_id)
-        # Also try the stored player record
-        if pubkey_bytes is None:
-            sp = self.players.get(conn_id)
-            if sp and sp.x25519_pubkey_hex:
-                try:
-                    pubkey_bytes = bytes.fromhex(sp.x25519_pubkey_hex)
-                except ValueError:
-                    pass
-
-        if pubkey_bytes is not None:
-            from holdem.p2p.shuffle import encrypt_hole_cards
-            try:
-                blob = encrypt_hole_cards(cards_str, pubkey_bytes)
-                self._transport.send(conn_id, {
-                    "type": "shuffle_deal",
-                    "payload": {"seat": seat, "encrypted_hex": blob.hex()},
-                })
-                return
-            except Exception as exc:
-                _log.warning(
-                    "shuffle: encryption failed for seat %d (%s): %s — "
-                    "falling back to plaintext", seat, conn_id, exc)
-
-        # Fallback: legacy plaintext deal (no encryption)
-        self._transport.send(conn_id, {
-            "type":    "deal_private",
-            "payload": {"seat": seat, "hole_cards": cards_str},
-        })
 
     # ------------------------------------------------------------------
     # Disconnect / host migration

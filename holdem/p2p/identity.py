@@ -5,9 +5,9 @@ The same keypair serves two roles:
     and the signing key for all game messages (Phase 1).
   - Transport identity: the peer ID at the network layer (Phase 3).
 
-A companion X25519 keypair is also stored in the same file and is used
-exclusively for hole-card encryption in the verifiable shuffle protocol
-(see holdem/p2p/shuffle.py).
+A companion X25519 keypair is also stored in the same file. It served
+hole-card encryption in the retired commit-reveal shuffle and is kept
+for future transport-layer encryption; nothing consumes it today.
 
 Generating the keypairs on first launch is the full "setup" the user
 performs.  The keypairs are stable across sessions so that a reconnecting

@@ -3,8 +3,9 @@
 Covers the fixes from the 2026-07-17 audit:
 - C-1: transport requires a valid signed envelope on every peer message
 - C-1: seat/pubkey binding is enforced in handle_game_action
-- H-1: shuffle reveals broadcast the real nonce and peers verify them
 - hash-chain: enforcing signatures must not drop consecutive messages
+(H-1's commit-reveal shuffle tests were removed with the legacy shuffle
+itself; the trustless deal is covered by the mental-deal/session suites.)
 """
 import asyncio
 import json
@@ -18,7 +19,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p import transport as t, wire
 from holdem.p2p.session import Session
-from holdem.p2p.shuffle import ShuffleRound, verify_commit
 
 
 def _framed(d: dict) -> bytes:
@@ -121,55 +121,6 @@ def test_consecutive_signed_messages_deliver():
     s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "one"})))
     s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "two"})))
     assert got == ["one", "two"]
-
-
-# --------------------------------------------------------------------- H-1
-
-def _paired_rounds():
-    ids = ["host", "peerB"]
-    host = ShuffleRound(local_conn_id="host",  all_conn_ids=ids)
-    peer = ShuffleRound(local_conn_id="peerB", all_conn_ids=ids)
-    host.local_commit(); peer.local_commit()
-    host.record_commit("peerB", peer._commits["peerB"])
-    peer.record_commit("host", host._commits["host"])
-    host.record_reveal("peerB", peer._seeds["peerB"], peer._nonces["peerB"])
-    peer.record_reveal("host",  host._seeds["host"],  host._nonces["host"])
-    return host, peer
-
-
-def test_reveal_snapshot_uses_real_nonce():
-    host, _ = _paired_rounds()
-    snap = host.reveals_snapshot()
-    for cid, r in snap.items():
-        seed  = bytes.fromhex(r["seed_hex"])
-        nonce = bytes.fromhex(r["nonce_hex"])
-        assert verify_commit(seed, nonce, host._commits[cid])
-
-
-def test_peers_derive_identical_deck():
-    host, peer = _paired_rounds()
-    assert host.shuffled_deck() == peer.shuffled_deck()
-
-
-def test_peer_flags_tampered_reveal():
-    host, peer = _paired_rounds()
-    snap = host.reveals_snapshot()
-    sess = Session(is_host=False, nickname="P", avatar_b64="")
-    sess._shuffle_round = peer
-    ready, cheat = [], []
-    sess.on_shuffle_ready = lambda deck: ready.append(deck)
-    sess.on_shuffle_cheat = lambda cid: cheat.append(cid)
-
-    sess._on_shuffle_reveal_collect("host", {"payload": {"reveals": snap}})
-    assert ready and not cheat
-
-    bad = {k: dict(v) for k, v in snap.items()}
-    seed = bytearray(bytes.fromhex(bad["host"]["seed_hex"]))
-    seed[0] ^= 0xFF
-    bad["host"]["seed_hex"] = bytes(seed).hex()
-    ready.clear(); cheat.clear()
-    sess._on_shuffle_reveal_collect("host", {"payload": {"reveals": bad}})
-    assert cheat and not ready
 
 
 if __name__ == "__main__":
