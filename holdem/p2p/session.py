@@ -136,6 +136,16 @@ class Session:
         self.hand_result: dict | None = None    # normalized settle() result
         # on_hand_settled(result_dict) -- hand settled on this replica
         self.on_hand_settled: Optional[Callable[[dict], None]] = None
+        # Hand sequencing over a real async network: there is no host to say
+        # "start hand N now", so peers begin hands at slightly different times.
+        # Messages carry a hand number; ones for a future hand are buffered and
+        # replayed when that hand begins (else an early key_announce is dropped
+        # and the deal deadlocks); ones for a past hand are ignored.
+        self._hand_no = 0                       # current hand (0 = none begun)
+        self._msg_buffer: list = []             # [(conn_id, msg)] for future hands
+        # on_state_changed() -- fired after any hand progress, so an async UI
+        # can re-render from the local replica on its own thread.
+        self.on_state_changed: Optional[Callable[[], None]] = None
 
     # ------------------------------------------------------------------
     # Message dispatch (called by transport on_message handler)
@@ -235,6 +245,7 @@ class Session:
         self._deal_hole = [None, None]
         self._deal_board = [None] * 5
         self._deal_outbox = []
+        self._hand_no = hand_no
         self._deal_driver = MentalDealDriver(
             session_id=self._deal_session_id(),
             hand_no=hand_no,
@@ -246,6 +257,34 @@ class Session:
         )
         self._deal_driver.start()
         self._flush_deal()
+        self._replay_buffer()
+
+    def _replay_buffer(self) -> None:
+        """Feed buffered messages now that a hand has begun: those for the
+        current hand are processed, later ones kept, earlier ones dropped."""
+        if not self._msg_buffer:
+            return
+        pending, self._msg_buffer = self._msg_buffer, []
+        for cid, m in pending:
+            h = m.get("hand", self._hand_no)
+            if h == self._hand_no:
+                self.handle_message(cid, m)
+            elif h > self._hand_no:
+                self._msg_buffer.append((cid, m))
+            # h < current: stale, dropped
+
+    def _hand_msg_ok(self, conn_id: str, msg: dict) -> bool:
+        """Hand-scope filter for deal/bet messages: buffer future-hand ones,
+        drop stale ones, admit current-hand ones."""
+        h = msg.get("hand", self._hand_no)
+        if h > self._hand_no:
+            self._msg_buffer.append((conn_id, dict(msg)))
+            return False
+        return h == self._hand_no
+
+    def _notify_state_changed(self) -> None:
+        if self.on_state_changed is not None:
+            self.on_state_changed()
 
     def reveal_board_street(self, street: str) -> None:
         """Reveal a board street ("flop"/"turn"/"river"); called once the
@@ -263,6 +302,8 @@ class Session:
         self._flush_deal()
 
     def _on_deal_message(self, conn_id: str, msg: dict) -> None:
+        if not self._hand_msg_ok(conn_id, msg):
+            return
         if self._deal_driver is None:
             return                              # no active hand yet
         # Seat-spoofing defence: the seat a message claims must be the
@@ -295,10 +336,12 @@ class Session:
             if steps > 10000:
                 raise RuntimeError("mental-deal flush did not terminate")
             m = self._deal_outbox.pop(0)
+            m["hand"] = self._hand_no           # tag for hand-scoped routing
             self._transport.broadcast(m)        # to the other peers
             self._deal_driver.handle(m)         # self-deliver; may append more
         self._apply_deal_cards()
         self._pump_hand()                       # recovered cards may advance the hand
+        self._notify_state_changed()
 
     def _apply_deal_cards(self) -> None:
         if self._deal_driver is None:
@@ -365,14 +408,17 @@ class Session:
         if verdict != "applied":
             return verdict
         self._transport.broadcast({
-            "type": "bet_action", "seq": seq, "seat": seat,
+            "type": "bet_action", "hand": self._hand_no, "seq": seq, "seat": seat,
             "action": action, "amount": int(amount),
             "digest": self._replica.state_digest(),
         })
         self._pump_hand()
+        self._notify_state_changed()
         return verdict
 
     def _on_bet_action(self, conn_id: str, msg: dict) -> None:
+        if not self._hand_msg_ok(conn_id, msg):
+            return
         if self._replica is None or self.hand_voided:
             return
         try:
@@ -402,6 +448,7 @@ class Session:
                 self._void_hand(f"replica desync detected at action {seq}")
                 return
         self._pump_hand()
+        self._notify_state_changed()
 
     def _void_hand(self, reason: str) -> None:
         """Void the hand (desync, deal abort, audit failure). Chips revert
