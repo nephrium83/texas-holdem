@@ -13,20 +13,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-
-# Engine suit index -> ASCII letter. Index order (see engine.SUIT_GLYPHS):
-# 0=club, 1=diamond, 2=heart, 3=spade. The wire contract uses ASCII so
-# JSON stays clean and the client maps letters to sprites directly.
-_SUIT_LETTER = ("c", "d", "h", "s")
-
-
-def card_str(card) -> str:
-    """Engine Card -> two-char ASCII string like 'Ah' or 'Ks'.
-
-    ``card.rank`` and ``card.suit`` are properties; suit is a glyph, so we
-    map the suit *index* (``card.s``) to an ASCII letter instead.
-    """
-    return f"{card.rank}{_SUIT_LETTER[card.s]}"
+from .player_info import card_str, event_views, made_hand_view, turn_view
 
 
 def _pos_badge(engine, seat: int) -> Optional[str]:
@@ -73,6 +60,9 @@ def build_snapshot(engine, seat: int) -> dict:
     you: dict = {}
     if me.hole:
         you["hole"] = [card_str(c) for c in me.hole]
+        made_hand = made_hand_view(me.hole, engine.board)
+        if made_hand is not None:
+            you["made_hand"] = made_hand
     action_on = engine.actor if engine.actor is not None else -1
     if action_on == seat:
         you["legal"] = engine.legal(seat)
@@ -90,6 +80,8 @@ def build_snapshot(engine, seat: int) -> dict:
         "action_on": action_on,
         "seats": seats,
         "you": you,
+        "turn": turn_view(engine, seat),
+        "events": event_views(getattr(engine, "public_events", [])),
     }
 
 

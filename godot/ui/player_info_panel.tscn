@@ -1,0 +1,181 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://ui/player_info_panel.gd" id="1_script"]
+
+[sub_resource type="StyleBoxFlat" id="StylePanel"]
+bg_color = Color(0.027, 0.071, 0.059, 0.98)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.76, 0.52, 0.3, 0.75)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+
+[sub_resource type="StyleBoxFlat" id="StyleCard"]
+bg_color = Color(0.055, 0.145, 0.116, 0.9)
+border_width_left = 3
+border_color = Color(0.88, 0.65, 0.39, 0.9)
+corner_radius_top_left = 6
+corner_radius_top_right = 6
+corner_radius_bottom_right = 6
+corner_radius_bottom_left = 6
+content_margin_left = 12.0
+content_margin_top = 10.0
+content_margin_right = 12.0
+content_margin_bottom = 10.0
+
+[node name="PlayerInfoPanel" type="PanelContainer"]
+custom_minimum_size = Vector2(340, 640)
+theme_override_styles/panel = SubResource("StylePanel")
+script = ExtResource("1_script")
+
+[node name="Margin" type="MarginContainer" parent="."]
+theme_override_constants/margin_left = 18
+theme_override_constants/margin_top = 18
+theme_override_constants/margin_right = 18
+theme_override_constants/margin_bottom = 18
+
+[node name="Content" type="VBoxContainer" parent="Margin"]
+theme_override_constants/separation = 10
+
+[node name="StateBadge" type="Label" parent="Margin/Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.94, 0.72, 0.44, 1)
+theme_override_font_sizes/font_size = 12
+text = "LOBBY"
+
+[node name="StatusLabel" type="Label" parent="Margin/Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+theme_override_font_sizes/font_size = 24
+text = "Waiting for players"
+autowrap_mode = 2
+
+[node name="StreetLabel" type="Label" parent="Margin/Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
+theme_override_font_sizes/font_size = 13
+text = "Idle | pot 0"
+
+[node name="DecisionCard" type="PanelContainer" parent="Margin/Content"]
+unique_name_in_owner = true
+theme_override_styles/panel = SubResource("StyleCard")
+
+[node name="DecisionGrid" type="GridContainer" parent="Margin/Content/DecisionCard"]
+columns = 2
+theme_override_constants/h_separation = 14
+theme_override_constants/v_separation = 6
+
+[node name="PotKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "POT NOW"
+
+[node name="PotValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+text = "0"
+horizontal_alignment = 2
+
+[node name="CallKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "ACTION"
+
+[node name="CallValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.94, 0.72, 0.44, 1)
+text = "Check"
+horizontal_alignment = 2
+
+[node name="PotAfterKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "POT AFTER CALL"
+
+[node name="PotAfterValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+text = "0"
+horizontal_alignment = 2
+
+[node name="OddsKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "POT ODDS"
+
+[node name="OddsValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+text = "0.0%"
+horizontal_alignment = 2
+
+[node name="StackKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "STACK AFTER CALL"
+
+[node name="StackValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+text = "0"
+horizontal_alignment = 2
+
+[node name="EffectiveKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "EFFECTIVE STACK"
+
+[node name="EffectiveValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+text = "0"
+horizontal_alignment = 2
+
+[node name="RaiseKey" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+text = "LEGAL RAISE-TO"
+
+[node name="RaiseValue" type="Label" parent="Margin/Content/DecisionCard/DecisionGrid"]
+unique_name_in_owner = true
+text = "Not available"
+horizontal_alignment = 2
+
+[node name="HandHeading" type="Label" parent="Margin/Content"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+theme_override_font_sizes/font_size = 11
+text = "YOUR HAND"
+
+[node name="HandLabel" type="Label" parent="Margin/Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+theme_override_font_sizes/font_size = 15
+text = "Made hand appears on the flop"
+autowrap_mode = 2
+
+[node name="VerificationLabel" type="Label" parent="Margin/Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.44, 0.82, 0.65, 1)
+theme_override_font_sizes/font_size = 12
+text = "Verification starts with the deal"
+autowrap_mode = 2
+
+[node name="ResultCard" type="PanelContainer" parent="Margin/Content"]
+unique_name_in_owner = true
+visible = false
+theme_override_styles/panel = SubResource("StyleCard")
+
+[node name="ResultText" type="Label" parent="Margin/Content/ResultCard"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+text = "Hand complete"
+autowrap_mode = 2
+
+[node name="FeedHeading" type="Label" parent="Margin/Content"]
+theme_override_colors/font_color = Color(0.56, 0.68, 0.62, 1)
+theme_override_font_sizes/font_size = 11
+text = "CURRENT HAND"
+
+[node name="EventLog" type="RichTextLabel" parent="Margin/Content"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 170)
+size_flags_vertical = 3
+theme_override_colors/default_color = Color(0.74, 0.79, 0.75, 1)
+theme_override_font_sizes/normal_font_size = 13
+bbcode_enabled = false
+scroll_active = true
+scroll_following = false
+text = "No hand events yet."

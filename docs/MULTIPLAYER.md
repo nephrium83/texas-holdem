@@ -730,37 +730,31 @@ render a full table):
   `can_check`, `can_raise`, `min_to`, `max_to`); it is populated only
   when `action_on == seat`, and drives which buttons the client enables.
 
-**Event messages (engine → client).** The animation stream. Each is a
-discrete moment the client MAY render with a flourish; ignoring them still
-leaves snapshots authoritative — a client that only consumes snapshots is
-correct, just less animated.
+**Structured event ledger (engine → client).** The animation and
+current-hand log stream is implemented as an append-only `events` array in
+every snapshot. Each entry has a hand-scoped `seq`, structured fields, and
+ready-to-display fallback text. Reconnects receive the complete current hand;
+connected clients animate only sequence numbers they have not seen. Ignoring
+events still leaves the snapshot authoritative and correct.
 
-The engine already emits a presentational event log today via
-`emit(kind, text)` / `drain()`, with these kinds: `blind`, `bet`,
-`raise`, `check`, `fold`, `street`, `show`, `pot`, `hand`. That log is
-the seed of this stream. The contract's **target** event set below
-normalizes those into structured payloads (text → fields) and adds the
-few a rich client needs that the log does not yet distinguish
-(`deal_hole`, `run_twice`). Growing `emit()` to carry structured payloads
-for each of these is a Phase-1 task; until then the client can drive
-basic animation from the existing `(kind, text)` log.
+`Engine.emit()` now records the legacy `(kind, text)` log and a structured
+record together, so Tkinter hand history and Godot cannot disagree about what
+happened.
 
-| target event  | payload                        | from emit kind / trigger       |
-|---------------|--------------------------------|--------------------------------|
-| `deal_hole`   | `seat`                         | (new) hole cards dealt         |
-| `deal_board`  | `street`, `cards`              | `street`                       |
-| `post_blind`  | `seat`, `kind`, `amount`       | `blind`                        |
-| `bet`         | `seat`, `verb`, `amount`       | `bet` / `raise` / `check`      |
-| `fold`        | `seat`                         | `fold`                         |
-| `showdown`    | `reveals` (seat→cards), `best` | `show`                         |
-| `award`       | `pot_index`, `winners`, `amt`  | `pot`                          |
-| `run_twice`   | `board1`, `board2`             | (new) all-in board run twice   |
+| event          | principal payload                                      |
+|----------------|--------------------------------------------------------|
+| `hand_started` | hand, blinds, ante                                     |
+| `post_blind`   | seat, blind kind, amount, all-in, pot after             |
+| `action`       | seat, fold/check/call/bet/raise, delta, target, pot after|
+| `deal_board`   | street, board, optional run index                       |
+| `showdown`     | seat, shown/mucked, exact hand and best five             |
+| `refund`       | seat, amount, pot after                                 |
+| `award`        | pot/run index, winners, exact per-seat payouts, hand     |
 
 The Godot client's "surprisingly detailed" moments are a chosen subset of
 these — `showdown` (the dimensional card flip), `award` (chip cascade),
 `deal_board` — while the rest update instantly. The client decides which
-events earn the deluxe treatment; the engine just reports that they
-happened.
+events earn the deluxe treatment; the engine just reports that they happened.
 
 **Validation approach.** §5 is proven by driving the existing Tkinter GUI
 and the P2P `Session` through this contract and asserting neither consumer

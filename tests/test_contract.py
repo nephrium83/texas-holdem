@@ -27,7 +27,8 @@ def test_snapshot_has_all_contract_fields():
     e = _table()
     snap = contract.build_snapshot(e, 0)
     for key in ("type", "seat", "hand_num", "street", "board", "pot",
-                "button", "sb_seat", "bb_seat", "action_on", "seats", "you"):
+                "button", "sb_seat", "bb_seat", "action_on", "seats", "you",
+                "turn", "events"):
         assert key in snap, f"snapshot missing '{key}'"
     assert snap["type"] == "snapshot"
     assert snap["seat"] == 0
@@ -87,6 +88,17 @@ def test_legal_matches_engine():
     actor = e.actor
     snap = contract.build_snapshot(e, actor)
     assert snap["you"]["legal"] == e.legal(actor)
+    assert snap["turn"]["state"] == "your_turn"
+    assert snap["turn"]["decision"]["to_call"] == e.legal(actor)["to_call"]
+
+
+def test_current_hand_events_are_sequenced():
+    e = _table()
+    snap = contract.build_snapshot(e, e.actor)
+    assert snap["events"][0]["event"] == "hand_started"
+    assert [event["seq"] for event in snap["events"]] == list(
+        range(1, len(snap["events"]) + 1)
+    )
 
 
 def test_position_badges_assigned():

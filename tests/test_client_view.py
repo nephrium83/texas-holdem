@@ -82,6 +82,9 @@ def test_snapshot_is_json_and_well_formed():
         assert snap["phase"] == "betting"
         assert len(snap["seats"]) == 3
         assert snap["hand_num"] == 1
+        assert snap["verification"]["state"] == "audit_pending"
+        assert snap["events"][0]["event"] == "hand_started"
+        assert snap["settlement"] is None
 
 
 def test_local_hole_present_others_absent_during_play():
@@ -114,8 +117,12 @@ def test_legal_only_for_the_actor():
         if i == actor:
             assert "legal" in snap["you"]
             assert set(snap["you"]["legal"]) >= {"to_call", "can_check", "min_to"}
+            assert snap["turn"]["state"] == "your_turn"
+            assert snap["turn"]["decision"]["to_call"] == \
+                snap["you"]["legal"]["to_call"]
         else:
             assert "legal" not in snap["you"]
+            assert "decision" not in snap["turn"]
 
 
 # --------------------------------------------------------------- commands
@@ -130,6 +137,9 @@ def test_command_drives_the_hand():
     for cid in order:
         assert sessions[cid]._replica.actor != actor or \
             sessions[cid]._replica.actor is None
+        action = client_view.snapshot(sessions[cid])["events"][-1]
+        assert action["event"] == "action"
+        assert action["seat"] == actor
 
 
 def test_command_from_wrong_seat_is_reported_not_applied():
@@ -160,6 +170,10 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
     snap = json_safe(client_view.snapshot(sessions[order[0]]))
     assert snap["phase"] == "settled"
     assert snap["result"] is not None
+    assert snap["verification"]["state"] == "verified"
+    assert snap["turn"]["state"] == "hand_complete"
+    assert snap["settlement"]["pots"]
+    assert snap["settlement"]["showdown"]
     # collect every seat's tabled hole cards (mine from you.hole, others from
     # their seat view): 3 seats x 2 = 6 distinct cards
     holes = list(snap["you"]["hole"])
@@ -294,6 +308,8 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     assert snap["session_over"] is True
     assert snap["session_winner"] == 2
     assert snap["final_stacks"] == [0, 0, 1500]
+    assert snap["turn"]["state"] == "match_complete"
+    assert snap["turn"]["headline"] == "P2 won the match"
 
 
 if __name__ == "__main__":
