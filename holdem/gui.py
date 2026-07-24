@@ -8,7 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk, colorchooser
 
-from .engine import (Engine, Player, Brain, equity, evaluate, hand_name,
+from .engine import (Engine, Player, Brain, equity,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR, Card as _Card,
                     FULL_DECK as _FULL_DECK)
 
@@ -34,6 +34,7 @@ def _str_to_card(s: str) -> _Card:
 
 from . import settings as cfg
 from . import notes as _notes
+from . import player_info
 from .onboarding import OnboardingFlow
 from .hand_history import HandLogger, open_history_viewer
 from .session_stats import SessionStats
@@ -227,7 +228,11 @@ class Holdem:
         self.highlight = set()      # (v,s) of the winning five
         self.eq_gen = 0
         self.eq_text = "-"
-        self.eq_bars = (0.0, 0.0, 1.0)
+        self.eq_bars = (0.0, 0.0, 0.0)
+        self.eq_value = None
+        self.eq_pending = False
+        self._eq_signature = None
+        self._hand_start_stacks = None
         self.hand_over = True
         self.game_over = False
         self.level_idx = 0
@@ -625,7 +630,7 @@ class Holdem:
                                justify="left", anchor="w")
         self.l_hint.pack(fill="x", padx=12, pady=(0, 8))
 
-        tk.Label(side, text="EQUITY", bg=t["panel"], fg=t["dim"],
+        tk.Label(side, text="HAND / EQUITY", bg=t["panel"], fg=t["dim"],
                  font=("Segoe UI", 8, "bold"), anchor="w").pack(
             fill="x", padx=12)
         self.eq_cv = tk.Canvas(side, height=16, bg=t["panel"],
@@ -658,10 +663,17 @@ class Holdem:
         tk.Label(side, text="SHOWDOWN", bg=t["panel"], fg=t["dim"],
                  font=("Segoe UI", 8, "bold"), anchor="w").pack(
             fill="x", padx=12)
-        self.l_show = tk.Label(side, text="-", bg=t["bg"], fg=t["text"],
-                               font=("Consolas", 9), wraplength=258,
-                               justify="left", anchor="nw", height=7)
-        self.l_show.pack(fill="x", padx=12, pady=(2, 12))
+        show_frame = tk.Frame(side, bg=t["panel"])
+        show_frame.pack(fill="x", padx=12, pady=(2, 12))
+        show_scroll = tk.Scrollbar(show_frame, width=8)
+        show_scroll.pack(side="right", fill="y")
+        self.l_show = tk.Text(
+            show_frame, bg=t["bg"], fg=t["text"], relief="flat",
+            font=("Consolas", 9), wrap="word", height=8,
+            yscrollcommand=show_scroll.set, state="disabled",
+        )
+        self.l_show.pack(side="left", fill="both", expand=True)
+        show_scroll.config(command=self.l_show.yview)
 
         # Player Notes button (always accessible)
         tk.Button(side, text="Player Notes",
@@ -798,10 +810,25 @@ class Holdem:
         return SPEEDS[self.v_speed.get()]
 
     def say(self, kind, text):
+        _, bottom = self.log.yview()
+        follow_latest = bottom >= 0.98
         self.log.config(state="normal")
         self.log.insert("end", text + "\n", kind)
-        self.log.see("end")
+        if follow_latest:
+            self.log.see("end")
         self.log.config(state="disabled")
+
+    def clear_table_log(self):
+        """Show only the current hand; full prior hands remain in History."""
+        self.log.config(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.config(state="disabled")
+
+    def set_showdown_text(self, text):
+        self.l_show.config(state="normal")
+        self.l_show.delete("1.0", "end")
+        self.l_show.insert("1.0", text)
+        self.l_show.config(state="disabled")
 
     def flush_log(self):
         evts = self.engine.drain()
@@ -823,6 +850,36 @@ class Holdem:
                     except Exception:
                         pass
         self.hand_logger.feed(evts)
+
+    def _refresh_player_panel(self):
+        """Render status and coaching from authoritative current state."""
+        e = self.engine
+        if e is None:
+            return
+        local = self.hero_seat
+        phase = "settled" if self.result is not None else (
+            "betting" if not self.hand_over else "lobby"
+        )
+        live = [p.idx for p in e.players if p.stack > 0]
+        winner = live[0] if self.game_over and len(live) == 1 else None
+        turn = player_info.turn_view(
+            e,
+            local,
+            phase=phase,
+            result=self.result,
+            session_over=self.game_over,
+            session_winner=winner,
+        )
+        self.l_status.config(text=turn["headline"])
+
+        if (
+            turn["state"] == "your_turn"
+            and self.v_hint.get()
+            and self.aids_ok()
+        ):
+            self.l_hint.config(text=self.hint(e.legal(local)))
+        else:
+            self.l_hint.config(text="")
 
     # ---------------------------------------------------------- game set-up
 
@@ -1118,9 +1175,7 @@ class Holdem:
                 b.config(state="disabled")
             self.slider.config(state="disabled")
         self._sync_raise_label()
-        self.l_status.config(
-            text=f"{e.street.capitalize()} — your move."
-                 + (f"  {lg['to_call']} to call." if lg["to_call"] else ""))
+        self._refresh_player_panel()
 
     def _mp_peer_acted(self, seat: int, action: str, amount: int) -> None:
         """Host: apply a validated action from a peer and continue the loop."""
@@ -1372,6 +1427,9 @@ class Holdem:
             self.finish_game(live)
             return
 
+        self.clear_table_log()
+        self._hand_start_stacks = [p.stack for p in e.players]
+
         if not cash:                              # timed blind levels
             mins = max(1, self.v_lvlmin.get())
             want = min(len(BLIND_LEVELS) - 1,
@@ -1387,8 +1445,11 @@ class Holdem:
         self.rabbit_cards = None
         self.b_rabbit.config(state="disabled")
         self.eq_text = "-"
-        self.eq_bars = (0, 0, 1)
-        self.l_show.config(text="-")
+        self.eq_bars = (0, 0, 0)
+        self.eq_value = None
+        self.eq_pending = False
+        self._eq_signature = None
+        self.set_showdown_text("-")
         self.hand_over = False
         self._cashout_offered = False
 
@@ -1708,13 +1769,7 @@ class Holdem:
             self.slider.config(state="disabled")
 
         self._sync_raise_label()
-        self.l_status.config(
-            text=f"{e.street.capitalize()} — your move."
-                 + (f"  {lg['to_call']} to call." if lg["to_call"] else ""))
-        if self.v_hint.get() and self.aids_ok():
-            self.l_hint.config(text="Hint: " + self.hint(lg))
-        else:
-            self.l_hint.config(text="")
+        self._refresh_player_panel()
         self._emote_frame.pack(side="left", padx=8, pady=6)
 
     def _show_emote(self, seat_idx, emoji):
@@ -1868,25 +1923,44 @@ class Holdem:
                         self.highlight |= {(c.v, c.s)
                                            for c in info["best"][w]}
 
-        lines = []
-        nruns = len(res["runs"])
-        for p in sorted(alive, key=lambda q: -q.won):
-            tag = "WIN " if p.idx in res["winners"] else "    "
-            nm = "You" if p.idx == local else p.name
-            if p.idx in res.get("mucked", ()):
-                lines.append(f"    {nm:<4} mucks")
-            elif nruns >= 2:
-                names = "/".join(hand_name(r["scores"][p.idx])
-                                 for r in res["runs"])
-                lines.append(f"{tag}{nm:<4} {names}"
-                             + (f"  +{p.won}" if p.won else ""))
-            elif nruns == 1:
-                sc = res["runs"][0]["scores"].get(p.idx)
-                lines.append(f"{tag}{nm:<4} {hand_name(sc)}"
-                             + (f"  +{p.won}" if p.won else ""))
-            else:
-                lines.append(f"{tag}{nm:<4} wins uncontested  +{p.won}")
-        self.l_show.config(text="\n".join(lines) if lines else "-")
+        summary = player_info.settlement_view(
+            e, res, local, starting_stacks=self._hand_start_stacks
+        )
+        lines = [summary["headline"]]
+        for shown_player in summary["showdown"]:
+            name = "You" if shown_player["seat"] == local else shown_player["name"]
+            if shown_player["mucked"]:
+                lines.append(f"{name}: mucked")
+                continue
+            hands = " / ".join(
+                hand["description"] for hand in shown_player["hands"]
+            )
+            won = f"  +{shown_player['won']}" if shown_player["won"] else ""
+            lines.append(f"{name}: {hands}{won}")
+        for pot in summary["pots"]:
+            for award in pot["awards"]:
+                paid = ", ".join(
+                    f"{'You' if payout['seat'] == local else payout['name']}"
+                    f" +{payout['amount']}"
+                    for payout in award["payouts"]
+                )
+                hand = (
+                    f" ({award['hand']['description']})"
+                    if award["hand"] is not None else ""
+                )
+                run = f" run {award['run']}" if len(pot["awards"]) > 1 else ""
+                lines.append(f"{pot['label']}{run}: {paid}{hand}")
+        if summary["refund"] is not None:
+            refund = summary["refund"]
+            name = "You" if refund["seat"] == local else refund["name"]
+            lines.append(f"Refund: {name} +{refund['amount']}")
+        if summary["you"]["net"] is not None:
+            net = summary["you"]["net"]
+            lines.append(
+                f"Your net: {net:+} | stack {summary['you']['stack']}"
+            )
+        lines.append("Deal and settlement verified")
+        self.set_showdown_text("\n".join(lines))
 
         if local in res["winners"]:
             self.l_status.config(text=f"You win {e.players[local].won}.")
@@ -2203,6 +2277,13 @@ class Holdem:
             "winners": {local}, "pots": [{"amount": pot, "eligible": [local], "runs": []}],
             "runs": [], "shown": {local}, "mucked": set(),
             "order": [local], "refund": None, "tabled": False,
+            "cashout": {
+                "seat": local,
+                "equity": hero_eq,
+                "gross": gross,
+                "fee": gross - net,
+                "paid": net,
+            },
         }
         # H-8: record the cashout in hand history (was previously bypassed)
         self.hand_logger.on_settle(self.result, e)
@@ -2213,6 +2294,17 @@ class Holdem:
         self.say("pot",
                  f"EV cashout: You take {net:,} "
                  f"({hero_eq:.0%} × {pot:,} − 1% fee)")
+        start = (
+            self._hand_start_stacks[local]
+            if self._hand_start_stacks is not None else hero.stack
+        )
+        self.set_showdown_text(
+            f"You cashed out for {net:,}\n"
+            f"Estimated equity: {hero_eq:.0%}\n"
+            f"Gross value: {gross:,}\n"
+            f"Fee: {gross - net:,}\n"
+            f"Your net: {hero.stack - start:+,} | stack {hero.stack:,}"
+        )
         # update persistent bankroll
         if net > 0:
             cfg.set('bankroll', cfg.get('bankroll') + net)
@@ -2542,8 +2634,12 @@ class Holdem:
         if not self.v_hint.get():
             self.l_hint.config(text="")
         if not self.v_odds.get():
+            self.eq_gen += 1
             self.eq_text = "-"
-            self.eq_bars = (0, 0, 1)
+            self.eq_bars = (0, 0, 0)
+            self.eq_value = None
+            self.eq_pending = False
+            self._eq_signature = None
             self.draw_equity()
         e = self.engine
         cash = self.v_mode.get() == "Cash"
@@ -2583,21 +2679,46 @@ class Holdem:
 
     def start_equity(self):
         e = self.engine
-        self.eq_gen += 1
-        gen = self.eq_gen
         hero = e.players[self.hero_seat]
         if (not self.v_odds.get() or not self.aids_ok()
                 or not hero.hole or hero.folded):
+            self.eq_gen += 1
             self.eq_text = "-"
-            self.eq_bars = (0, 0, 1)
+            self.eq_bars = (0, 0, 0)
+            self.eq_value = None
+            self.eq_pending = False
+            self._eq_signature = None
+            self.draw_equity()
             return
         opp = len([p for p in e.contested() if p.idx != self.hero_seat])
         if opp == 0:
             self.eq_text = "You're the only one left."
             self.eq_bars = (1, 0, 0)
+            self.eq_value = 1.0
+            self.eq_pending = False
             return
         hole = list(hero.hole)
         board = list(e.board)
+        signature = (
+            tuple((card.v, card.s) for card in hole),
+            tuple((card.v, card.s) for card in board),
+            opp,
+        )
+        if signature == self._eq_signature and (
+                self.eq_value is not None or self.eq_pending):
+            return
+
+        self.eq_gen += 1
+        gen = self.eq_gen
+        self._eq_signature = signature
+        self.eq_value = None
+        self.eq_pending = True
+        self.eq_text = (
+            f"Estimating equity vs {opp} random "
+            f"{'hand' if opp == 1 else 'hands'}..."
+        )
+        self.eq_bars = (0, 0, 0)
+        self.draw_equity()
         sims = 3000 if len(board) >= 3 else 1600
 
         def work():
@@ -2610,19 +2731,53 @@ class Holdem:
         if gen != self.eq_gen or r is None:
             return
         win, tie, eq = r
-        made = hand_name(evaluate(hole + board)) if len(board) >= 3 else "-"
+        made = player_info.made_hand_view(hole, board)
+        made_text = ""
+        if made is not None:
+            made_text = f"\nMade hand: {made['description']}"
+            if made["board_plays"]:
+                made_text += " (board plays)"
         self.eq_bars = (win, tie, max(0.0, 1 - win - tie))
-        self.eq_text = (f"{eq*100:.0f}% vs {opp} "
-                        f"({'opponent' if opp == 1 else 'opponents'})   "
-                        f"win {win*100:.0f} / tie {tie*100:.0f}\n"
-                        f"{'Holding: ' + made if made != '-' else ''}")
+        self.eq_value = eq
+        self.eq_pending = False
+        self.eq_text = (
+            f"~{eq*100:.0f}% estimated equity vs {opp} random "
+            f"{'hand' if opp == 1 else 'hands'}\n"
+            f"Outright win {win*100:.0f}% | any tie {tie*100:.0f}%"
+            f"{made_text}"
+        )
         self._last_hero_eq = eq   # track for bad-beat detection
         self.draw_equity()
+        self._refresh_player_panel()
 
     def draw_equity(self):
         t = self.theme
         c = self.eq_cv
         c.delete("all")
+        e = self.engine
+        if e is None:
+            self.l_eq.config(text="-")
+            return
+        hero = e.players[self.hero_seat]
+        if hero.folded or hero.all_in or self.hand_over:
+            self.l_eq.config(text="-")
+            return
+
+        if not self.v_odds.get() or not self.aids_ok():
+            made = player_info.made_hand_view(hero.hole, e.board)
+            if made is None:
+                self.l_eq.config(text="-")
+            else:
+                suffix = " (board plays)" if made["board_plays"] else ""
+                self.l_eq.config(
+                    text=f"Made hand: {made['description']}{suffix}"
+                )
+            return
+
+        if self.eq_pending:
+            self.l_eq.config(text=self.eq_text)
+            return
+
         w = max(1, c.winfo_width())
         win, tie, lose = self.eq_bars
         x = 0
@@ -2767,6 +2922,7 @@ class Holdem:
         hero = e.players[self.hero_seat]
         self.l_stack.config(text=f"{hero.stack:,}"
                             + ("  ALL-IN" if hero.all_in else ""))
+        self._refresh_player_panel()
         self.draw_equity()
         self._draw_tournament_overlay()
         if getattr(self, "_mp_game_paused", False):
@@ -3382,30 +3538,34 @@ class Holdem:
             from .engine import chen
             sc = chen(p.hole)
             if sc >= 12:
-                return "premium — raise for value"
+                return "Practice guide: premium starting hand"
             if sc >= 9:
-                return "strong — raise, or 3-bet a single raiser"
+                return "Practice guide: strong starting hand"
             if sc >= 7:
-                return "playable — open in late position, fold to heat"
+                return "Practice guide: playable, position-sensitive hand"
             if call == 0:
-                return "weak, but checking is free"
-            return "weak — folding is fine"
+                return "Practice guide: weak hand; checking is free"
+            return "Practice guide: weak starting hand"
 
-        win, tie, eq = self.eq_bars[0], self.eq_bars[1], 0
-        eq = win + tie / 2
+        if self.eq_pending or self.eq_value is None:
+            return "Practice estimate: calculating random-hand equity..."
+        eq = self.eq_value
         if call == 0:
-            if eq > 0.7:
-                return f"~{eq*100:.0f}% equity — bet for value"
-            if eq > 0.45:
-                return f"~{eq*100:.0f}% — a small bet or a check both work"
-            return f"~{eq*100:.0f}% — check and see a free card"
+            return (
+                f"Practice estimate: ~{eq*100:.0f}% vs random hands; "
+                "checking costs 0"
+            )
         odds = call / (pot + call)
-        if eq > odds + 0.12:
-            return (f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds — "
-                    f"call, raising is fine too")
-        if eq > odds:
-            return f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds — thin call"
-        return f"~{eq*100:.0f}% vs {odds*100:.0f}% pot odds — fold"
+        edge = eq - odds
+        relation = (
+            "above" if edge > 0.02
+            else "near" if edge >= -0.02
+            else "below"
+        )
+        return (
+            f"Practice estimate: ~{eq*100:.0f}% vs random hands, "
+            f"{relation} {odds*100:.0f}% pot odds"
+        )
 
 
 def main():
