@@ -1,11 +1,15 @@
 # L5 scope — wiring the mental-poker crypto into the deal flow
 
-**Status:** planning. **Prereqs:** all complete and CI-green — the crypto
+**Status (2026-07-24): core integration complete and CI-green.** The crypto
 stack (`ristretto`, `elgamal`, `dleq`, `shuffle_mp`, `shuffle_proof`,
-`deck_audit`, `keygen_pop`) is built and tested (219 tests). L5 is the
-integration layer: turn seven tested modules into a playable,
-cheat-resistant deal by rewiring `holdem/p2p/session.py`, and retire the
-old commit-reveal `holdem/p2p/shuffle.py`.
+`deck_audit`, `keygen_pop`) now drives the hostless deal through
+`holdem/p2p/session.py`; replica betting, continuous play, table-wide voids,
+and terminal spectator delivery are implemented. The old commit-reveal
+shuffle is retired. The remaining v1 gates are the playable Godot client,
+silent-peer timeout, real transport, and a physical multi-machine playtest.
+
+The pre-implementation sections below are retained as the design record that
+led to the current code.
 
 This is software engineering, not cryptography. No new primitives.
 

@@ -1,131 +1,203 @@
-# Texas Hold'em
+<p align="center">
+  <img src="docs/assets/readme-hero.svg" alt="Texas Hold'em: Godot client, Python core, hostless by design" width="100%">
+</p>
 
-[![CI](https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml/badge.svg)](https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml)
+<p align="center">
+  <a href="https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nephrium83/texas-holdem/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/Godot-4.7.1-478CBF?style=flat-square&logo=godotengine&logoColor=white" alt="Godot 4.7.1">
+  <img src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10 through 3.13">
+  <img src="https://img.shields.io/badge/tests-350%20Python%20tests-1f7a5a?style=flat-square" alt="350 Python tests">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/nephrium83/texas-holdem?style=flat-square&color=c7834c" alt="MIT license"></a>
+</p>
 
-Texas Hold'em for the desktop, built around a headless, heavily tested
-Python game engine. The current playable harness uses Tkinter; the shipping
-client is being rebuilt in Godot 4.7, with Python remaining the authoritative
-engine and P2P sidecar.
+<p align="center">
+  <strong>A rules-correct Texas Hold'em engine evolving into a serverless Godot experience.</strong><br>
+  Godot renders the table. Python owns the rules. Every peer verifies the deal.
+</p>
 
-![Table](docs/screenshot.png)
+---
 
-## Features
+## Why this project
 
-- **Real betting rounds** — raises re-open action, the big blind gets its
-  option, position is enforced (UTG through button, heads-up handled
-  correctly), and the all-in under-raise rule is implemented: a short
-  all-in re-opens calls but not raises until a full raise follows.
-- **Three structures** — No-Limit, Pot-Limit, and Fixed-Limit with the
-  four-raise cap.
-- **Correct settlement** — layered side pots, uncalled-bet refunds, and
-  odd chips awarded left of the button.
-- **Opponents that play back** — four styles (Nit, Solid, Loose, Maniac)
-  across three skill levels. Decisions come from Chen-formula preflop
-  ranges with position and short-stack push/fold, and postflop Monte
-  Carlo equity weighed against pot odds: value bets, continuation bets,
-  semi-bluffs, and bluffs. Lower-skill opponents misread their own
-  equity rather than just folding more.
-- **Fast evaluator** — bitmask 5/6/7-card evaluation, roughly 26x faster
-  than a dict-based subset scan, verified against an independent
-  brute-force oracle.
-- **Responsive UI** — live equity runs on a background thread and stale
-  results are discarded; the table never blocks on math.
-- **Real table procedure** — the dead-button rule (busted blinds never
-  let anyone skip a post), sit-out with owed blinds on return (post now
-  or wait for the big blind), an action clock with a time bank that
-  tops up each orbit, and showdown order with mucking: the river
-  aggressor shows first, beaten hands muck, and all-in hands are always
-  tabled.
-- **Modern extras** — big blind ante and clock-based blind levels in
-  tournaments, run it twice on all-in pots (ask, always, or never),
-  UTG straddles in big-bet cash games, rabbit hunting, and cash-game
-  table stakes: 40-100 BB buy-ins with top-ups and auto-rebuying
-  opponents.
-- **Table options** — 2 to 9 seats, cash or tournament blinds, bet
-  slider with pot-fraction presets, coaching hints, live equity bar,
-  winner highlighting, two themes, adjustable speed, and F/C/R/N
-  hotkeys.
+Texas Hold'em is a play-money desktop poker project built around a deterministic
+Python engine and a hostless mental-poker protocol. Instead of moving poker
+logic into the UI or trusting one machine to deal, the architecture gives every
+peer the same rules engine, signed state transitions, and cryptographically
+verifiable deal inputs.
 
-## Requirements
+The current playable harness is Tkinter. The target client is Godot 4.7.1,
+connected to the Python sidecar through a locked newline-JSON protocol.
 
-Python 3.10+ with the project dependencies installed. Tk is required for the
-legacy playable harness; Godot 4.7.1 is required for the new client.
+<table>
+  <tr>
+    <td width="50%">
+      <strong>Rules before rendering</strong><br>
+      Betting legality, position, side pots, refunds, showdown order, and
+      settlement live in one headless engine.
+    </td>
+    <td width="50%">
+      <strong>No trusted dealer</strong><br>
+      Ristretto255 threshold ElGamal, DLEQ proofs, shuffle auditing, and
+      post-hand verification power the mental-poker core.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>Hostless continuous play</strong><br>
+      Stack carry, dead-button rotation, eliminations, heads-up transitions,
+      void-and-redeal, and final winner delivery run on every peer.
+    </td>
+    <td width="50%">
+      <strong>Built to be tested</strong><br>
+      350 Python tests, a 15-hand GUI smoke run, and Godot GUT execute in CI
+      across Python 3.10, 3.12, and 3.13.
+    </td>
+  </tr>
+</table>
 
-## Run
+## Project status
 
-From a clone:
+| Layer | Status | What that means |
+| --- | --- | --- |
+| Poker rules engine | Implemented | No-Limit, Pot-Limit, Fixed-Limit, side pots, refunds, odd chips, tournament and cash procedures |
+| Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, and cheat detection |
+| Hostless session | Implemented on the test transport | Signed betting, continuous hands, stack carry, bust-outs, spectators, and table-wide voids |
+| Godot sidecar bridge | Implemented | Versioned snapshots and commands over localhost newline-JSON |
+| Godot player experience | In progress | Godot 4.7.1 scaffold and GUT harness are in CI; the playable table is the current milestone |
+| Internet P2P transport | Planned for v1.x | Discovery, relay/NAT traversal, fragmentation, and real multi-machine play remain |
 
-```
-python -m holdem
-```
-
-Or install it:
-
-```
-pip install .
-holdem
-```
+> [!IMPORTANT]
+> This is an experimental, play-money project. The cryptographic protocol has
+> extensive automated coverage but has not received an independent security
+> audit. It is not intended for wagering, custody, or real-money play.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    G["Godot 4.7 client"] <-->|"localhost newline-JSON"| B["Python client bridge"]
+    B --> S["Hostless session coordinator"]
+    S --> E["Deterministic poker engine"]
+    S --> C["Ristretto255 mental-poker core"]
+    C <-->|"signed peer messages"| P["Other player sidecars"]
+
+    classDef client fill:#174b3b,stroke:#d6a568,color:#f8f0df
+    classDef core fill:#0b201a,stroke:#7cae98,color:#f8f0df
+    classDef peer fill:#302217,stroke:#d6a568,color:#f8f0df
+    class G client
+    class B,S,E,C core
+    class P peer
 ```
+
+The client is intentionally thin. It renders snapshots and sends commands; it
+does not recalculate legal actions, pots, winners, or card state. See the
+[Godot-sidecar protocol](docs/GODOT_PROTOCOL.md) for the versioned contract.
+
+## Poker engine
+
+- No-Limit, Pot-Limit, and Fixed-Limit betting with correct raise reopening.
+- Two to nine seats, including correct heads-up position and action order.
+- Layered side pots, uncalled-bet refunds, and odd chips left of the button.
+- Dead-button movement, owed blinds, sit-out/return, straddles, and big-blind ante.
+- Run it twice, rabbit hunting, showdown order, mucking, and all-in tabling.
+- Cash buy-in rules, top-ups, auto-rebuy, tournament levels, clocks, and time banks.
+- Four AI styles across three skill levels with range, equity, and pot-odds decisions.
+
+## Trustless deal
+
+The mental-poker path is peer-symmetric: every active seat participates in the
+key ceremony, shuffle, selective decryption, betting replica, and post-hand
+audit. A detected cheat or state divergence fails the hand closed for the
+entire table rather than allowing peers to continue on conflicting state.
+
+Implemented building blocks include:
+
+- Ristretto255 group operations backed by libsodium.
+- Threshold ElGamal encryption and re-encryption.
+- Schnorr proof-of-possession for key shares.
+- DLEQ-proven partial decryptions.
+- Optional cut-and-choose shuffle prevention plus mandatory post-hand audit.
+- Signed hostless wire messages and hand-scoped buffering.
+
+The real internet transport is deliberately separate from the protocol core.
+Today, multi-peer sessions are exercised through an in-memory transport; the
+libp2p/relay path and physical-machine playtest remain v1.x gate work.
+
+## Run the current playable harness
+
+```bash
+git clone https://github.com/nephrium83/texas-holdem.git
+cd texas-holdem
+python -m venv .venv
+python -m pip install -e .
+python -m holdem
+```
+
+Python 3.10 or newer is required. Tk is required for the legacy harness and is
+included with standard python.org Windows installers.
+
+<details>
+  <summary><strong>View the legacy Tkinter player interface</strong></summary>
+  <br>
+  <p align="center">
+    <img src="docs/screenshot.png" alt="Legacy Tkinter poker table" width="900">
+  </p>
+  <p>
+    This interface remains useful as a playable engine harness, but it is not
+    the target visual experience. The shipping client is being rebuilt in Godot.
+  </p>
+</details>
+
+## Test the project
+
+```bash
+python -m pip install -e . pytest
+python -m pytest -q
+python tests/gui_smoke.py
+godot --headless --path godot -s addons/gut/gut_cmdln.gd -gdir=res://test/unit -gexit
+```
+
+| CI job | Coverage |
+| --- | --- |
+| Python 3.10 / 3.12 / 3.13 | Engine, evaluator, settings, P2P crypto, session, transport, and sidecar tests |
+| GUI smoke | Boots the Tk harness headlessly and plays 15 hands |
+| Godot 4.7.1 | Runs the checked-in GUT suite headlessly |
+
+The crypto tests require a libsodium build exposing the Ristretto255 API. See
+[native/README.md](native/README.md) for discovery rules and build instructions.
+
+## Roadmap
+
+- [x] Rules-complete deterministic Python engine.
+- [x] Mental-poker key ceremony, shuffle, deal, and audit.
+- [x] Hostless betting replicas and continuous multi-hand sessions.
+- [x] Godot-sidecar protocol, socket bridge, scaffold, and CI.
+- [ ] Playable Godot client MVP.
+- [ ] Silent-peer timeout that triggers the existing table-wide void path.
+- [ ] Real libp2p transport and proof fragmentation.
+- [ ] Two-machine join-code playtest.
+
+The hard gate and deferred work are tracked in
+[L5_SCOPE.md](docs/L5_SCOPE.md). The full protocol and transport rationale live
+in [MULTIPLAYER.md](docs/MULTIPLAYER.md).
+
+## Repository map
+
+```text
 holdem/
-  engine.py          game state, betting legality, settlement, evaluator, AI
-  client_server.py   localhost newline-JSON bridge for the Godot client
-  p2p/               hostless session, mental-poker deal, signed transport
-  gui.py             retired Tkinter harness
+  engine.py              authoritative rules, betting, settlement, evaluator
+  client_view.py         private/public snapshot boundary
+  client_server.py       localhost bridge consumed by Godot
+  p2p/                   crypto, mental deal, replicated session, transports
 godot/
-  project.godot      Godot 4.7 client project
-  test/unit/         GUT client tests
+  project.godot          Godot 4.7 client project
+  test/unit/             GUT client tests
+docs/
+  GODOT_PROTOCOL.md      versioned client-sidecar contract
+  L5_SCOPE.md            implementation gate and current roadmap
+  MULTIPLAYER.md         serverless protocol and transport design
 ```
-
-`engine.py` never imports tkinter. Everything that decides who may act,
-for how much, and who wins is plain Python that runs headless — which is
-what makes the test suite below possible. Godot renders snapshots and sends
-commands through the versioned contract in
-[`docs/GODOT_PROTOCOL.md`](docs/GODOT_PROTOCOL.md); it does not duplicate
-poker rules.
-
-## Testing
-
-```
-pytest            # engine suite
-python tests/gui_smoke.py   # boots the real UI (needs a display)
-godot --headless --path godot -s addons/gut/gut_cmdln.gd \
-  -gdir=res://test/unit -gexit
-```
-
-The suite cross-checks the evaluator against a brute-force reference on
-20,000 random 7-card deals, pins known hands and Chen scores, verifies
-side-pot amounts, eligibility, and refunds on a deterministic three-way
-all-in, and includes regression tests for the under-raise rule, the
-dead-button rule under busts, big-blind-ante accounting (including the
-orphaned-ante side-pot case), straddle option order, run-it-twice pot
-splitting, showdown order and mucking, and owed blinds across sit-outs.
-A fuzz pass plays full games across every structure and seat count
-asserting three invariants: chips are conserved, no illegal action is
-ever taken, and every betting round closes with all live bets matched. CI runs the
-engine suite on Python 3.10/3.12/3.13 and boots the GUI under Xvfb to
-play 15 hands headless. It also runs the Godot 4.7.1 GUT suite headless.
-
-## Settings
-
-Every option has a scope — `CLIENT`, `TABLE_RULE`, or `SEAT` — defined in
-[`holdem/settings.py`](holdem/settings.py). Client settings (theme, speed,
-local aids) persist to a per-user config file; table rules (stakes,
-structure, timing) form a contract reducible to a short canonical hash.
-In-game, Settings (or Esc) pauses and opens a dialog split along those
-scopes; it never restarts the match.
-
-## Multiplayer
-
-The intended direction is serverless, peer-to-peer, play-money poker
-built on mental-poker cryptography — no central server, no trusted
-dealer. The full design and phased roadmap are in
-[docs/MULTIPLAYER.md](docs/MULTIPLAYER.md). The scope tags and rules hash
-above are the first piece of that plan: a table's join code will embed
-the rules hash so every client can verify it is playing the same game.
 
 ## License
 
-MIT
+Released under the [MIT License](LICENSE).

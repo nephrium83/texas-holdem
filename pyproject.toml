@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "holdem"
 version = "1.1.0"
-description = "Texas Hold'em (No-Limit, Pot-Limit, Fixed-Limit) with a Tkinter table and a headless, heavily tested game engine"
+description = "Texas Hold'em with a Godot client, Python rules engine, and mental-poker P2P protocol"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = ["Pillow>=10.0", "cryptography>=41.0"]
 authors = [{ name = "Adam LeRoux" }]
-keywords = ["poker", "texas-holdem", "tkinter", "game"]
+keywords = ["poker", "texas-holdem", "godot", "python", "peer-to-peer", "cryptography", "game"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
