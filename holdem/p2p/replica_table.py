@@ -89,17 +89,50 @@ class ReplicaTable:
 
     # ------------------------------------------------------------- lifecycle
 
-    def start_hand(self, button: int) -> None:
+    def start_hand(self, button: int, *, bb_seat: Optional[int] = None,
+                   sb_seat: Optional[int] = None) -> bool:
         """Deal the hand with a dummy deck. `button` is the pre-move button;
         the engine advances it -- read `self.button` AFTER this call and use
-        THAT for the mental deal, so deal_map matches the engine's order."""
+        THAT for the mental deal, so deal_map matches the engine's order.
+
+        For hand 1 pass only `button` (the engine's first-hand branch
+        derives positions from it). For every LATER hand of a continuous
+        session also pass the previous hand's played (bb_seat, sb_seat)
+        from `positions`, so the engine's dead-button rule advances the
+        chain exactly as a live table would: the BB moves one eligible
+        seat; the SB and button trail it and may land on busted seats.
+        Returns False when fewer than two seats can be dealt (the session
+        is over)."""
         self.engine.button = button
-        self.engine.start_hand(deck=Deck.from_indices(list(range(52))))
+        if bb_seat is not None:
+            self.engine.bb_seat = bb_seat
+        if sb_seat is not None:
+            self.engine.sb_seat = sb_seat
+        ok = self.engine.start_hand(deck=Deck.from_indices(list(range(52))))
         self._recompute_phase()
+        return bool(ok)
 
     @property
     def button(self) -> int:
         return self.engine.button
+
+    @property
+    def positions(self) -> tuple:
+        """(bb_seat, sb_seat, button) as played -- the dead-button chain
+        state to seed into the NEXT hand's replica."""
+        e = self.engine
+        return (e.bb_seat, e.sb_seat, e.button)
+
+    @property
+    def stacks(self) -> List[int]:
+        """Current stacks by seat (post-settle: the next hand's inputs)."""
+        return [p.stack for p in self.engine.players]
+
+    @property
+    def seats_dealt(self) -> List[int]:
+        """Seat indices dealt into this hand (busted seats excluded by the
+        engine's _dealt rule)."""
+        return [p.idx for p in self.engine.players if p.in_seat]
 
     @property
     def actor(self) -> Optional[int]:

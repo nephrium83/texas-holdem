@@ -207,6 +207,95 @@ def test_lobby_snapshot_before_hand():
     assert len(snap["seats"]) == 2
 
 
+# ------------------------------------------------ continuous play (client)
+
+def _checkdown(bus, sessions, order):
+    from holdem.p2p.replica_table import PHASE_BETTING
+    while sessions[order[0]]._replica.phase == PHASE_BETTING:
+        seat = sessions[order[0]]._replica.actor
+        assert client_view.apply_command(
+            sessions[order[seat]], "check_call")["verdict"] == "applied"
+        bus.drain()
+
+
+def test_next_hand_command_advances_the_table():
+    """The next_hand command drives the continuous session: after a hand
+    settles, every peer's client issues it and hand 2 begins, reported as
+    'started'. Mid-hand it reports 'not_ready'."""
+    bus, sessions, order = make_table(3)
+    # mid-hand: not ready
+    res = client_view.apply_command(sessions[order[0]], "next_hand")
+    assert res["command"] == "next_hand" and res["verdict"] == "not_ready"
+    assert res["ok"] is False
+
+    _checkdown(bus, sessions, order)
+    for cid in order:
+        assert sessions[cid].hand_result is not None
+    results = [client_view.apply_command(sessions[cid], "next_hand")
+               for cid in order]
+    bus.drain()
+    assert all(r["verdict"] == "started" and r["ok"] for r in results)
+    for cid in order:
+        assert sessions[cid]._hand_no == 2
+        snap = json_safe(client_view.snapshot(sessions[cid]))
+        assert snap["phase"] in ("dealing", "betting")
+        assert snap["session_over"] is False
+
+
+def test_snapshot_reports_session_over_and_winner():
+    """When the match ends, the snapshot carries session_over + the winning
+    seat so the client can show 'game over' and stop offering next_hand."""
+    from holdem.p2p.replica_table import PHASE_BETTING
+    bus, sessions, order = make_table(2, stacks=[500, 500])
+    # Heads-up, all-in every hand until one side owns all 1000 chips.
+    for _ in range(60):
+        while sessions[order[0]]._replica.phase == PHASE_BETTING:
+            seat = sessions[order[0]]._replica.actor
+            r = sessions[order[seat]]._replica
+            lg = r.engine.legal(r.actor)
+            act = "raise" if lg["can_raise"] else "call"
+            amt = lg["max_to"] if act == "raise" else 0
+            client_view.apply_command(
+                sessions[order[seat]], "raise_to", {"amount": amt}) \
+                if act == "raise" else \
+                client_view.apply_command(sessions[order[seat]], "check_call")
+            bus.drain()
+        verdicts = [client_view.apply_command(sessions[cid], "next_hand")
+                    for cid in order]
+        bus.drain()
+        if any(v["verdict"] == "session_over" for v in verdicts):
+            break
+    else:
+        pytest.fail("heads-up match did not resolve")
+
+    # Every peer that still has a replica agrees the match is over and names
+    # the same winner in its snapshot.
+    winners = set()
+    for cid in order:
+        snap = json_safe(client_view.snapshot(sessions[cid]))
+        if snap.get("phase") == "lobby":
+            continue                          # busted peer with no replica
+        assert snap["session_over"] is True
+        winners.add(snap["session_winner"])
+    assert len(winners) == 1 and winners.pop() is not None
+
+
+def test_eliminated_snapshot_receives_terminal_match_state():
+    """A busted client's retained hand view can still render the winner."""
+    _, sessions, order = make_table(3)
+    session = sessions[order[0]]
+    session._p2p_spectator = True
+    session._session_over = True
+    session._session_winner = 2
+    session._final_stacks = [0, 0, 1500]
+
+    snap = json_safe(client_view.snapshot(session))
+    assert snap["eliminated"] is True
+    assert snap["session_over"] is True
+    assert snap["session_winner"] == 2
+    assert snap["final_stacks"] == [0, 0, 1500]
+
+
 if __name__ == "__main__":
     passed = total = 0
     for name, fn in sorted(globals().items()):

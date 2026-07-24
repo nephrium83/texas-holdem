@@ -517,6 +517,32 @@ Single collected list of everything consciously pushed past v1, so none
 of it is lost in the inline prose above. Each item is *recorded, not
 built*; v1 ships without it.
 
+### The v2 gate (hard stop — set 2026-07-21)
+
+**No v2 item below is started before ALL of the following are true.**
+This is a hard boundary, not a guideline: v2 priorities must come from
+real play, and real play requires the whole v1 path to exist first.
+
+1. ~~Legacy commit-reveal shuffle deleted~~ — **DONE 2026-07-21**
+   (L5 step 4).
+2. ~~**Continuous play** — multi-hand sessions with stack carry,
+   dead-button rotation, eliminations, and heads-up, tested on the bus.~~
+   **DONE 2026-07-23.** Includes signed table-wide void propagation,
+   eliminated-seat lifecycle, and final-winner delivery to spectators.
+3. **Godot client MVP** — a full session playable against the local
+   sidecar through the client server (connect → hands → settle → next).
+4. **Dropout timeout → void** — a silent peer voids the hand instead of
+   hanging it. The void path exists; the timer trigger is pulled *into*
+   v1 — it is not v2 work.
+5. **Real-transport playtest** — a join-code hand between at least two
+   physical machines. (Backlog items 3–4 below graduate to the v1.x
+   ship path to make this possible; crossing this line opens the gate.)
+
+When the gate opens, v2 order comes from observed pain at real tables —
+void frequency drives #1, cheat pressure and table type drive #2, wire
+behaviour drives #5, player demand drives #7 — not from the numbering
+here.
+
 ### Cryptographic / protocol
 
 1. **VSS dropout continuance.** Verifiable Secret Sharing / threshold key
@@ -539,11 +565,15 @@ built*; v1 ships without it.
 3. **Real network transport.** Join-code → connection (libp2p per
    Phase 3, DHT/relay/NAT traversal). L5 is transport-decoupled and
    tested headless; the real transport plugs in afterward.
+   *Reclassified 2026-07-21: this is v1.x ship-path work, not v2 polish —
+   the product does not ship without it. It is gate criterion 5, built
+   after the Godot MVP.*
 
 4. **Multi-instance integration realism.** Running copies on Unraid +
    laptop to simulate internet peers end-to-end. A later integration-test
    milestone, after the headless coordinator and the transport both
-   exist.
+   exist. *Reclassified 2026-07-21: lands with #3 as part of closing the
+   gate (v1.x).*
 
 5. **Proof fragmentation on the wire.** ~1.3 MB (hex) proofs should be
    chunked/streamed rather than sent as one frame; depends on the real
@@ -555,6 +585,12 @@ built*; v1 ships without it.
    Godot client are connected to the finished coordinator *after* L5.
    L5 itself is headless (Q10). The client↔engine contract (§5) is
    already pinned, so this is wiring, not design.
+   *Status 2026-07-23: in progress — the sidecar half is DONE
+   (`holdem/client_server.py`, localhost TCP + newline-JSON per
+   GODOT_PROTOCOL.md, tested over a real socket). The Tkinter half is
+   RETIRED, not migrated. The Godot 4.7 scaffold and GUT smoke suite run
+   headless in CI; the playable Godot half is the current focus and is gate
+   criterion 3.*
 
 ### Persistence (beyond crash-survival)
 

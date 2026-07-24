@@ -175,6 +175,28 @@ def _frame(msg: dict) -> bytes:
     return struct.pack(">I", len(body)) + body
 
 
+def _wire_payload(msg: dict) -> dict:
+    """Return all action-specific fields for the signed wire envelope.
+
+    Legacy session messages already use ``{"type", "payload"}``, while the
+    hostless coordinator emits flat dictionaries because those are also its
+    internal state-machine messages. Fold flat fields into ``payload`` here so
+    signing never silently discards data at the transport boundary.
+    """
+    payload = msg.get("payload", {})
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise TypeError("message payload must be a dict")
+    payload = dict(payload)
+    for key, value in msg.items():
+        if key not in ("type", "payload"):
+            if key in payload and payload[key] != value:
+                raise ValueError(f"conflicting message field: {key}")
+            payload[key] = value
+    return payload
+
+
 # Control frames exchanged with the *relay server* (not peers) are the only
 # messages that legitimately travel unsigned: they are addressed to the relay
 # itself, never dispatched to the game session, and carry no game authority.
@@ -192,7 +214,7 @@ def _sign_frame(msg: dict) -> bytes:
     if "sig" in msg or msg.get("type") in _RELAY_CONTROL_TYPES:
         return _frame(msg)
     from holdem.p2p import wire as _wire
-    signed = json.loads(_wire.pack(msg.get("type", ""), msg.get("payload", {})))
+    signed = json.loads(_wire.pack(msg.get("type", ""), _wire_payload(msg)))
     return _frame(signed)
 
 

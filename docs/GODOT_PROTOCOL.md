@@ -8,9 +8,10 @@ it builds on); both are covered by `tests/test_client_view.py`. If this
 document and that code ever disagree, the code is authoritative and this
 document is the bug.
 
-Status: draft v1. The message schemas below are stable (they mirror tested
-code). The transport framing (§2) and connection lifecycle (§7) are the
-parts still open to change; they are marked where so.
+Status: v1. The message schemas mirror tested code. The transport framing
+(§2) and connection lifecycle (§7) are implemented by the sidecar's client
+server (`holdem/client_server.py`, `tests/test_client_server.py`) and are
+now locked.
 
 ---
 
@@ -42,7 +43,7 @@ client cannot leak what it was never given.
 
 ---
 
-## 2. Transport and framing  *(open — leaning as below)*
+## 2. Transport and framing  *(locked — implemented)*
 
 The sidecar listens on a **localhost TCP socket** (default `127.0.0.1`, a
 port the client is told at launch). Messages are **UTF-8 JSON objects, one
@@ -51,10 +52,10 @@ no additional framing. Both directions use the same framing.
 
 Godot side: `StreamPeerTCP`, read to the next `\n`, `JSON.parse_string`.
 
-WebSocket (`WebSocketPeer`, one JSON text frame per message) is an equally
-acceptable alternative if preferred; the message bodies in §4–§6 are
-unchanged. This choice is not yet locked — raise it before building the
-client's networking layer.
+WebSocket was considered and passed over: the sidecar serves plain TCP +
+newline-JSON (`holdem/client_server.py`). The message bodies in §4–§6
+would carry over unchanged if a WebSocket listener were ever added
+alongside; nothing in the schemas assumes the transport.
 
 Every message is a JSON object with a `"type"` field. Unknown message types
 must be ignored by both sides (forward compatibility).
@@ -90,6 +91,7 @@ v1; lobby/seating commands are §8 (not yet finalised).
 | `fold`       | (none)             | fold the current hand                          |
 | `check_call` | (none)             | check if nothing is owed, otherwise call       |
 | `raise_to`   | `{"amount": <int>}`| raise so your total this street becomes amount |
+| `next_hand`  | (none)             | advance after a settled or voided hand         |
 
 `amount` in `raise_to` is an **absolute target** (your total wagered on this
 street after the raise), not a delta. Legal bounds are given to you in the
@@ -113,6 +115,15 @@ For each command the sidecar replies with:
   `"buffered"` (accepted but queued behind an earlier action) |
   `"stale"` (a duplicate). On an unknown command, `ok` is `false` and an
   `"error"` string is present instead of `verdict`.
+
+For `next_hand`, `verdict` is one of:
+
+- `"started"` — the next hand is underway.
+- `"not_ready"` — the current hand has not settled or voided.
+- `"eliminated"` — this seat is busted and no longer participates in deals.
+- `"session_over"` — the match has ended.
+
+`ok` is true for `started`, `eliminated`, and `session_over`.
 
 A fresh **snapshot** (§5) is sent immediately after the command result, so
 the client can render from that rather than mutating local state itself.
@@ -175,6 +186,10 @@ the latest snapshot; it never advances state on its own.
 | `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
 | `result`      | object \| null  | settlement result when `phase` is `settled` (see §6)         |
+| `session_over`| bool            | true once at most one seat has chips                         |
+| `session_winner` | int \| null  | winning seat when `session_over`; null for no winner          |
+| `eliminated`  | bool            | local seat is busted and excluded from later deals            |
+| `final_stacks`| array \| null   | final stack by seat once `session_over`                       |
 | `seats`       | array           | one entry per seat, in seat order                            |
 | `you`         | object          | data private to the local seat                               |
 
@@ -187,6 +202,26 @@ the latest snapshot; it never advances state on its own.
 | `betting`  | a betting round is open                                                  |
 | `settled`  | the hand is over and paid out; `result` is populated                     |
 | `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand |
+
+### Continuous-session lifecycle
+
+After `settled` or `void`, the client sends `next_hand`. Every participating
+sidecar derives the next hand from its identical replica: settled stacks carry
+forward, while a void redeals from the current hand's original stacks and
+position chain.
+
+A busted sidecar becomes a lightweight spectator. It no longer participates in
+the mental-poker deal and ignores later hand traffic, but remains subscribed to
+the signed match lifecycle. When the final hand ends, `session_over`,
+`session_winner`, and `final_stacks` are pushed to active and eliminated
+clients alike.
+
+Any authenticated peer may fail the current hand closed. A locally detected
+deal failure or replica desync broadcasts an idempotent signed hand-void
+message; every current participant enters `phase: "void"` and uses the same
+redeal inputs. In an n-of-n protocol, a malicious peer can already halt by
+disconnecting, so v1 favors safety and attribution over trying to continue a
+possibly divergent hand.
 
 ### `seats[i]`
 
@@ -264,9 +299,9 @@ the winner is not shown, exactly as at a real table.
 
 ---
 
-## 7. Connection lifecycle  *(open)*
+## 7. Connection lifecycle  *(implemented)*
 
-Current shape (subject to change as the sidecar's client server is built):
+As implemented by `holdem/client_server.py`:
 
 1. Sidecar starts, begins its P2P work, and listens on the local port.
 2. Client connects. Sidecar sends `{"type":"hello","protocol":1}` then an
@@ -276,6 +311,8 @@ Current shape (subject to change as the sidecar's client server is built):
    whenever remote events change the game.
 4. On disconnect the client may reconnect and will receive a fresh
    `hello` + `snapshot` reflecting current state.
+5. An eliminated client may reconnect to its retained hand view and later
+   receives the terminal winner through a pushed snapshot.
 
 Not yet specified: how a player joins/creates a table, the seating/ready
 handshake, reconnection identity, and chat. These live in `MULTIPLAYER.md`
@@ -289,9 +326,6 @@ message types.
 - Lobby / table creation / join / ready / seat selection (P2P lobby exists
   in the sidecar; not yet exposed as client messages here).
 - Chat.
-- Continuous play across hands (the sidecar advancing to the next hand:
-  button rotation and stack carry are the engine's job; the trigger and
-  timing are being wired).
 - Mid-hand dropout **timeout** (the void path exists; the timer for a peer
   that simply goes silent is not yet wired).
 - Rebuys / sit-out / sit-in commands (engine supports them; not yet exposed).
@@ -308,6 +342,11 @@ These will be added as message types without breaking §4–§6.
   view) and `card_str` (§3 encoding).
 - `tests/test_client_view.py` — exercises the no-leak invariant, the phase
   transitions, showdown reveals, and command verdicts over real hands.
+- `holdem/client_server.py` — the localhost server itself: §2 framing,
+  §7 hello, §4 command handling, §5 unprompted pushes (coalesced, via
+  `Session.on_state_changed`).
+- `tests/test_client_server.py` — the whole protocol over a real socket
+  against live hostless hands on the in-memory bus.
 
 Build the Godot client against these. When in doubt, run a sidecar and read
 the actual JSON.

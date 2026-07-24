@@ -2,9 +2,10 @@
 
 [![CI](https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml/badge.svg)](https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml)
 
-Texas Hold'em for the desktop: a Tkinter table on top of a headless,
-heavily tested game engine. No dependencies beyond the Python standard
-library.
+Texas Hold'em for the desktop, built around a headless, heavily tested
+Python game engine. The current playable harness uses Tkinter; the shipping
+client is being rebuilt in Godot 4.7, with Python remaining the authoritative
+engine and P2P sidecar.
 
 ![Table](docs/screenshot.png)
 
@@ -47,7 +48,8 @@ library.
 
 ## Requirements
 
-Python 3.10+ with Tk (bundled with the standard python.org installers).
+Python 3.10+ with the project dependencies installed. Tk is required for the
+legacy playable harness; Godot 4.7.1 is required for the new client.
 
 ## Run
 
@@ -68,19 +70,29 @@ holdem
 
 ```
 holdem/
-  engine.py   game state, betting legality, settlement, evaluator, AI
-  gui.py      Tkinter table, canvas rendering, threaded equity
+  engine.py          game state, betting legality, settlement, evaluator, AI
+  client_server.py   localhost newline-JSON bridge for the Godot client
+  p2p/               hostless session, mental-poker deal, signed transport
+  gui.py             retired Tkinter harness
+godot/
+  project.godot      Godot 4.7 client project
+  test/unit/         GUT client tests
 ```
 
 `engine.py` never imports tkinter. Everything that decides who may act,
 for how much, and who wins is plain Python that runs headless — which is
-what makes the test suite below possible.
+what makes the test suite below possible. Godot renders snapshots and sends
+commands through the versioned contract in
+[`docs/GODOT_PROTOCOL.md`](docs/GODOT_PROTOCOL.md); it does not duplicate
+poker rules.
 
 ## Testing
 
 ```
 pytest            # engine suite
 python tests/gui_smoke.py   # boots the real UI (needs a display)
+godot --headless --path godot -s addons/gut/gut_cmdln.gd \
+  -gdir=res://test/unit -gexit
 ```
 
 The suite cross-checks the evaluator against a brute-force reference on
@@ -94,7 +106,7 @@ A fuzz pass plays full games across every structure and seat count
 asserting three invariants: chips are conserved, no illegal action is
 ever taken, and every betting round closes with all live bets matched. CI runs the
 engine suite on Python 3.10/3.12/3.13 and boots the GUI under Xvfb to
-play 15 hands headless.
+play 15 hands headless. It also runs the Godot 4.7.1 GUT suite headless.
 
 ## Settings
 
