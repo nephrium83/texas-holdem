@@ -76,6 +76,17 @@ def snapshot(session) -> dict:
     snap["void_reason"] = session.void_reason if session.hand_voided else None
     snap["result"] = session.hand_result
 
+    # Continuous-session envelope: whether the whole match is over (at most
+    # one seat with chips) and, if so, the winning seat. Lets the client
+    # show "game over" and stop offering next_hand. Absent/false mid-match.
+    session_over = getattr(session, "_session_over", False)
+    snap["session_over"] = session_over
+    snap["session_winner"] = (getattr(session, "_session_winner", None)
+                              if session_over else None)
+    snap["eliminated"] = getattr(session, "_p2p_spectator", False)
+    snap["final_stacks"] = (getattr(session, "_final_stacks", None)
+                            if session_over else None)
+
     # Showdown reveals: at a contested showdown (result carries scored runs)
     # the audit has made every hole public, so the client can table them.
     # A hand that ended by folds has no runs and reveals nothing.
@@ -107,12 +118,19 @@ def _lobby_snapshot(session) -> dict:
         })
     my_seat = order.index(session.local_conn_id) \
         if session.local_conn_id in order else -1
+    session_over = getattr(session, "_session_over", False)
     return {
         "type": "snapshot",
         "phase": "lobby",
         "hand_num": getattr(session, "_hand_no", 0),
         "seats": seats,
         "you": {"seat": my_seat},
+        "session_over": session_over,
+        "session_winner": (getattr(session, "_session_winner", None)
+                           if session_over else None),
+        "eliminated": getattr(session, "_p2p_spectator", False),
+        "final_stacks": (getattr(session, "_final_stacks", None)
+                         if session_over else None),
     }
 
 
@@ -133,6 +151,17 @@ def apply_command(session, command: str,
         verdict = session.send_bet_action("call")
     elif command == "raise_to":
         verdict = session.send_bet_action("raise", int(payload["amount"]))
+    elif command == "next_hand":
+        # Advance the continuous session past a settled/voided hand. This
+        # is a table-wide step: every peer's sidecar makes the same call
+        # and derives the same next hand from identical replicas. The
+        # verdict ("started" / "session_over" / "eliminated" / "not_ready")
+        # is reported back rather than mapped to applied/rejected, since it
+        # is not a betting action.
+        verdict = session.next_p2p_hand()
+        return {"type": "command_result", "command": command,
+                "ok": verdict in ("started", "session_over", "eliminated"),
+                "verdict": verdict}
     else:
         raise ValueError(f"unknown command: {command!r}")
     return {"type": "command_result", "command": command,

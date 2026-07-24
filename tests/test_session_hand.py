@@ -154,7 +154,9 @@ def test_desync_is_detected_and_voids():
     bus.drain()
     assert victim.hand_voided
     assert "desync" in victim.void_reason
-    assert not sessions[order[honest_idx]].hand_voided        # honest peer agrees w/ actor
+    # A single detector fails the whole n-of-n hand closed; nobody may keep
+    # betting on a state one participant has rejected.
+    assert all(sessions[cid].hand_voided for cid in order)
 
 
 def test_bet_action_seat_spoof_dropped():

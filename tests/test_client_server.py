@@ -285,3 +285,87 @@ def test_contested_showdown_reveal_reaches_the_watcher():
         finally:
             await srv.stop()
     asyncio.run(inner())
+
+
+def test_next_hand_command_over_the_socket_starts_hand_two():
+    """A client drives continuous play over the wire: after a hand settles,
+    its next_hand command starts hand 2, and the follow-up snapshot shows
+    the new hand. Every peer's sidecar advances (driven here directly for
+    the non-watched seats)."""
+    async def inner():
+        bus, sessions, order = make_table(3)
+        watch = 0
+        srv = await serve(sessions[order[watch]])
+        try:
+            w, _ = await open_client(srv)
+            # Settle hand 1 (checkdown) via the sessions.
+            while sessions[order[0]]._replica.phase == PHASE_BETTING:
+                seat = sessions[order[0]]._replica.actor
+                assert sessions[order[seat]].send_bet_action("call") \
+                    == "applied"
+                bus.drain()
+            settled = await w.last_snapshot()
+            assert settled is not None and settled["phase"] == "settled"
+            assert settled["session_over"] is False
+
+            # The OTHER peers advance directly; the watched peer advances via
+            # its client's next_hand command.
+            for cid in order[1:]:
+                assert sessions[cid].next_p2p_hand() == "started"
+            await w.command("next_hand")
+            res = await w.recv()
+            assert res["command"] == "next_hand"
+            assert res["verdict"] == "started" and res["ok"] is True
+            bus.drain()
+
+            assert sessions[order[watch]]._hand_no == 2
+            snap = await w.last_snapshot()
+            assert snap is not None
+            assert snap["hand_num"] == 2
+            assert snap["phase"] in ("dealing", "betting")
+            w.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())
+
+
+def test_stop_restores_the_exact_previous_state_hook():
+    """Stopping a sidecar server must not strand its bound callback."""
+    async def inner():
+        _, sessions, order = make_sessions(2)
+        session = sessions[order[0]]
+        calls = []
+        previous = lambda: calls.append("previous")
+        session.on_state_changed = previous
+        srv = await serve(session)
+        assert session.on_state_changed is srv._installed_hook
+
+        session._notify_state_changed()
+        await asyncio.sleep(0)
+        assert calls == ["previous"]
+
+        await srv.stop()
+        assert session.on_state_changed is previous
+        session._notify_state_changed()
+        assert calls == ["previous", "previous"]
+    asyncio.run(inner())
+
+
+def test_client_server_rejects_double_start_and_can_restart():
+    async def inner():
+        _, sessions, order = make_sessions(2)
+        session = sessions[order[0]]
+        srv = ClientServer(session)
+        await srv.start()
+        with pytest.raises(RuntimeError, match="already started"):
+            await srv.start()
+        await srv.stop()
+
+        await srv.start()
+        try:
+            wire_client, snap = await open_client(srv)
+            assert snap["phase"] == "lobby"
+            wire_client.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())

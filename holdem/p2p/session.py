@@ -32,6 +32,11 @@ from typing import Callable, List, Optional
 
 _log = logging.getLogger(__name__)
 
+_HOSTLESS_PAYLOAD_TYPES = frozenset({
+    "key_announce", "deck_round", "deal_share", "audit_open",
+    "bet_action", "hand_void", "session_end",
+})
+
 
 @dataclass
 class Player:
@@ -127,6 +132,17 @@ class Session:
         # and the deal deadlocks); ones for a past hand are ignored.
         self._hand_no = 0                       # current hand (0 = none begun)
         self._msg_buffer: list = []             # [(conn_id, msg)] for future hands
+        # Continuous-session state (next_p2p_hand): the shared table
+        # config, the CURRENT hand's inputs (the revert point for a
+        # voided hand's redeal), and the terminal flags.
+        self._table_cfg: dict | None = None
+        self._hand_stacks: list | None = None
+        self._hand_positions: tuple | None = None
+        self._session_over = False
+        self._session_winner: int | None = None
+        self._final_stacks: list | None = None
+        self._session_end_announced = False
+        self._p2p_spectator = False
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
         self.on_state_changed: Optional[Callable[[], None]] = None
@@ -158,6 +174,7 @@ class Session:
             self._peer_last_hash[conn_id] = msg["hash"]
 
         t = msg.get("type")
+        body = self._hostless_body(msg) if t in _HOSTLESS_PAYLOAD_TYPES else msg
         if t == "player_info":
             self._on_player_info(conn_id, msg)
         elif t == "player_list":
@@ -186,10 +203,29 @@ class Session:
             self._on_adjust_blinds(conn_id, msg)
         # --- mental-poker deal (L5, hostless) ---
         elif t in ("key_announce", "deck_round", "deal_share", "audit_open"):
-            self._on_deal_message(conn_id, msg)
+            self._on_deal_message(conn_id, body)
         # --- hostless betting (L5): replica action ---
         elif t == "bet_action":
-            self._on_bet_action(conn_id, msg)
+            self._on_bet_action(conn_id, body)
+        elif t == "hand_void":
+            self._on_hand_void(conn_id, body)
+        elif t == "session_end":
+            self._on_session_end(conn_id, body)
+
+    @staticmethod
+    def _hostless_body(msg: dict) -> dict:
+        """Unwrap a verified wire envelope for the hostless state machines.
+
+        The coordinator uses flat dictionaries internally. Real transport
+        carries those fields inside the signed ``payload`` envelope, while
+        the in-memory harness delivers the flat form directly.
+        """
+        payload = msg.get("payload")
+        if not isinstance(payload, dict):
+            return dict(msg)
+        body = dict(payload)
+        body["type"] = msg.get("type")
+        return body
 
     # ------------------------------------------------------------------
     # Mental-poker deal (L5) — hostless, peer-symmetric. Each peer drives
@@ -201,18 +237,27 @@ class Session:
         """Shared, stable per-game id (every peer holds the same seat order)."""
         return "poker|" + "|".join(self._seat_order)
 
-    def begin_hand(self, hand_no: int, button: int = 0) -> None:
+    def begin_hand(self, hand_no: int, button: int = 0,
+                   seats_in: Optional[list] = None) -> None:
         """Start this seat's mental-poker deal for a hand and kick off the DKG.
 
         Hostless and peer-symmetric: every peer calls this for the same hand,
-        with the same (hand_no, button). All peers must have begun before the
-        exchange settles, or an early key_announce would be dropped by a peer
-        that has no driver yet.
+        with the same (hand_no, button, seats_in). All participating peers
+        must have begun before the exchange settles, or an early key_announce
+        would be dropped by a peer that has no driver yet. `seats_in` is the
+        set of seat indices dealt into the hand (default: every seat); busted
+        seats are excluded by the caller and take no part in the deal.
         """
         from holdem.p2p.mental_deal_driver import MentalDealDriver
         order = list(self._seat_order)
         if self.local_conn_id not in order:
             raise RuntimeError("cannot begin hand: local seat not in seat order")
+        if seats_in is None:
+            seats_in = list(range(len(order)))
+        local = order.index(self.local_conn_id)
+        if local not in seats_in:
+            raise RuntimeError("cannot begin hand: local seat is not dealt in "
+                               "(busted seats spectate via next_p2p_hand)")
         self._deal_hole = [None, None]
         self._deal_board = [None] * 5
         self._deal_outbox = []
@@ -220,8 +265,8 @@ class Session:
         self._deal_driver = MentalDealDriver(
             session_id=self._deal_session_id(),
             hand_no=hand_no,
-            local_seat=order.index(self.local_conn_id),
-            seats_in=list(range(len(order))),
+            local_seat=local,
+            seats_in=list(seats_in),
             button=button,
             master_secret=self._deal_master_secret,
             send=self._deal_outbox.append,      # buffer; _flush_deal routes them
@@ -246,10 +291,23 @@ class Session:
 
     def _hand_msg_ok(self, conn_id: str, msg: dict) -> bool:
         """Hand-scope filter for deal/bet messages: buffer future-hand ones,
-        drop stale ones, admit current-hand ones."""
-        h = msg.get("hand", self._hand_no)
+        drop stale ones, admit current-hand ones. A busted spectator drops
+        everything -- it plays no further hands, so buffering would only
+        accumulate."""
+        if self._p2p_spectator:
+            return False
+        raw_hand = msg.get("hand", self._hand_no)
+        if isinstance(raw_hand, bool):
+            return False
+        try:
+            h = int(raw_hand)
+        except (TypeError, ValueError):
+            _log.warning("session: malformed hand number ignored")
+            return False
         if h > self._hand_no:
-            self._msg_buffer.append((conn_id, dict(msg)))
+            buffered = dict(msg)
+            buffered["hand"] = h
+            self._msg_buffer.append((conn_id, buffered))
             return False
         return h == self._hand_no
 
@@ -275,7 +333,7 @@ class Session:
     def _on_deal_message(self, conn_id: str, msg: dict) -> None:
         if not self._hand_msg_ok(conn_id, msg):
             return
-        if self._deal_driver is None:
+        if self._deal_driver is None or self.hand_voided:
             return                              # no active hand yet
         # Seat-spoofing defence: the seat a message claims must be the
         # sender's own seat (the transport already authenticates conn_id).
@@ -289,6 +347,53 @@ class Session:
                 return
         self._deal_driver.handle(dict(msg))
         self._flush_deal()
+
+    def _on_hand_void(self, conn_id: str, msg: dict) -> None:
+        """Fail the current hand closed when any authenticated seat voids it."""
+        if not self._hand_msg_ok(conn_id, msg):
+            return
+        try:
+            seat = int(msg["seat"])
+        except (KeyError, TypeError, ValueError):
+            return
+        order = self._seat_order
+        if conn_id != self.local_conn_id:
+            if not (0 <= seat < len(order) and order[seat] == conn_id):
+                _log.warning("session: hand_void from %s claims seat %s "
+                             "-- dropping", conn_id, seat)
+                return
+        reason = str(msg.get("reason", "peer voided the hand"))[:512]
+        self._void_hand(reason, announce=False)
+
+    def _on_session_end(self, conn_id: str, msg: dict) -> None:
+        """Receive final match state, including on already-busted spectators."""
+        try:
+            seat = int(msg["seat"])
+            hand = int(msg["hand"])
+            stacks = [int(v) for v in msg["stacks"]]
+            raw_winner = msg.get("winner")
+            winner = None if raw_winner is None else int(raw_winner)
+        except (KeyError, TypeError, ValueError):
+            return
+        order = self._seat_order
+        if conn_id != self.local_conn_id:
+            if not (0 <= seat < len(order) and order[seat] == conn_id):
+                _log.warning("session: session_end from %s claims seat %s "
+                             "-- dropping", conn_id, seat)
+                return
+        if hand < self._hand_no or len(stacks) != len(order):
+            return
+        if any(stack < 0 for stack in stacks):
+            return
+        expected_total = (self._table_cfg or {}).get("total_chips")
+        if expected_total is not None and sum(stacks) != expected_total:
+            _log.warning("session: session_end has wrong chip total -- dropping")
+            return
+        alive = [i for i, stack in enumerate(stacks) if stack > 0]
+        expected_winner = alive[0] if len(alive) == 1 else None
+        if len(alive) > 1 or winner != expected_winner:
+            return
+        self._finish_session(stacks, announce=False)
 
     def _flush_deal(self) -> None:
         """Route buffered driver emissions. Each is broadcast to the OTHER
@@ -348,24 +453,133 @@ class Session:
     def start_p2p_hand(self, *, hand_no: int, names: list, stacks: list,
                        sb: int, bb: int, structure: str = "No-Limit",
                        button: int = 0) -> None:
-        """Run one fully-hostless hand: replica engine for betting, mental
-        deal for the cards. Every peer calls this with the same shared
-        config. Orchestration order matters: the replica's start_hand MOVES
-        the button (blinds / dead-button rule), and that post-move button
-        is what drives the mental deal's deal_map -- so the replica starts
-        first and the deal is begun with replica.button."""
+        """Begin a continuous hostless session and run its first hand:
+        replica engine for betting, mental deal for the cards. Every peer
+        calls this with the same shared config; each LATER hand is started
+        with next_p2p_hand(). Orchestration order matters: the replica's
+        start_hand MOVES the button (blinds / dead-button rule), and that
+        post-move button is what drives the mental deal's deal_map -- so
+        the replica starts first and the deal is begun with
+        replica.button."""
+        self._table_cfg = {"names": list(names), "sb": int(sb),
+                           "bb": int(bb), "structure": structure,
+                           "button": int(button),
+                           "total_chips": sum(int(stack) for stack in stacks)}
+        self._session_over = False
+        self._session_winner = None
+        self._final_stacks = None
+        self._session_end_announced = False
+        self._p2p_spectator = False
+        self._begin_p2p_hand(hand_no=hand_no, stacks=list(stacks),
+                             positions=None)
+
+    def _begin_p2p_hand(self, *, hand_no: int, stacks: list,
+                        positions) -> bool:
+        """Construct and start one hand of the continuous session from
+        explicit inputs. `positions` is the previous hand's played
+        (bb_seat, sb_seat, button) triple -- the dead-button chain state --
+        or None for the first hand (and a first-hand redeal)."""
         from holdem.p2p.replica_table import ReplicaTable
+        cfg = self._table_cfg
         self.hand_voided = False
         self.void_reason = None
         self.hand_result = None
         self._own_hole_set = False
+        self._hand_stacks = list(stacks)
+        self._hand_positions = positions
         self._replica = ReplicaTable(
             session_id=self._deal_session_id(), hand_no=hand_no,
-            names=list(names), stacks=list(stacks), sb=sb, bb=bb,
-            structure=structure)
-        self._replica.start_hand(button)
-        self.begin_hand(hand_no, button=self._replica.button)
+            names=list(cfg["names"]), stacks=list(stacks),
+            sb=cfg["sb"], bb=cfg["bb"], structure=cfg["structure"])
+        if positions is None:
+            ok = self._replica.start_hand(cfg["button"])
+        else:
+            bb_seat, sb_seat, btn = positions
+            ok = self._replica.start_hand(btn, bb_seat=bb_seat,
+                                          sb_seat=sb_seat)
+        if not ok:                              # fewer than 2 seats dealt
+            self._replica = None
+            self._finish_session(stacks, announce=False)
+            return False
+        self.begin_hand(hand_no, button=self._replica.button,
+                        seats_in=self._replica.seats_dealt)
         self._pump_hand()
+        return True
+
+    def next_p2p_hand(self) -> str:
+        """Advance the continuous session to its next hand. Every peer
+        calls this once the previous hand has settled or voided; identical
+        replicas mean identical next-hand inputs on every peer, and
+        hand-scoped message buffering absorbs any call-order skew.
+
+        Returns:
+          "started"      -- the next hand's deal is underway
+          "session_over" -- at most one seat still has chips; no next hand
+                            (session_winner holds that seat, if any)
+          "eliminated"   -- the LOCAL seat busted: this session stops
+                            playing and drops later hands' gameplay messages;
+                            final lifecycle updates are still accepted
+          "not_ready"    -- the previous hand is still in progress
+        """
+        if self._table_cfg is None or self._replica is None:
+            return "not_ready"
+        if self._session_over:
+            return "session_over"
+        if self._p2p_spectator:
+            return "eliminated"
+        voided = self.hand_voided
+        if not voided and self.hand_result is None:
+            return "not_ready"
+        if voided:
+            # Chips reverted (settle never ran); redeal the same seats
+            # with the same button, a live room's misdeal rule: re-running
+            # the position advance from the SAME previous chain state
+            # reproduces the voided hand's positions exactly.
+            stacks = list(self._hand_stacks)
+            positions = self._hand_positions
+        else:
+            stacks = self._replica.stacks       # settled: identical everywhere
+            positions = self._replica.positions  # played chain state
+        alive = [i for i, s in enumerate(stacks) if s > 0]
+        if len(alive) < 2:
+            self._finish_session(stacks, announce=True)
+            return "session_over"
+        if self.local_seat not in alive:
+            # Busted: stop playing. The final settled snapshot (replica,
+            # result, reveals) is retained for the client. Gameplay messages
+            # for later hands are dropped, while session_end remains accepted.
+            self._p2p_spectator = True
+            self._msg_buffer.clear()
+            self._notify_state_changed()
+            return "eliminated"
+        started = self._begin_p2p_hand(hand_no=self._hand_no + 1,
+                                       stacks=stacks, positions=positions)
+        return "started" if started else "session_over"
+
+    def _finish_session(self, stacks: list, *, announce: bool) -> None:
+        """Record final stacks and optionally announce them to all spectators."""
+        final = [int(stack) for stack in stacks]
+        alive = [i for i, stack in enumerate(final) if stack > 0]
+        winner = alive[0] if len(alive) == 1 else None
+        if self._session_over:
+            if self._final_stacks is not None and self._final_stacks != final:
+                _log.warning("session: conflicting session_end ignored")
+            return
+        self._session_over = True
+        self._session_winner = winner
+        self._final_stacks = final
+        self._p2p_spectator = self.local_seat not in alive
+        self._msg_buffer.clear()
+        self._notify_state_changed()
+        if announce and not self._session_end_announced:
+            self._session_end_announced = True
+            self._transport.broadcast({
+                "type": "session_end",
+                "hand": self._hand_no,
+                "seat": self.local_seat,
+                "winner": winner,
+                "stacks": final,
+            })
 
     def send_bet_action(self, action: str, amount: int = 0) -> str:
         """Act for the LOCAL seat: apply to our own replica first, then
@@ -421,15 +635,23 @@ class Session:
         self._pump_hand()
         self._notify_state_changed()
 
-    def _void_hand(self, reason: str) -> None:
-        """Void the hand (desync, deal abort, audit failure). Chips revert
-        to their pre-hand state because settle() never ran; a settled hand
-        is final and cannot be voided."""
-        if self.hand_voided:
-            return
+    def _void_hand(self, reason: str, *, announce: bool = True) -> bool:
+        """Void this hand everywhere and retain its pre-hand redeal inputs."""
+        if self.hand_voided or self.hand_result is not None:
+            return False
         self.hand_voided = True
-        self.void_reason = reason
+        self.void_reason = str(reason)[:512]
         _log.warning("session: HAND VOIDED — %s", reason)
+
+        self._notify_state_changed()
+        if announce:
+            self._transport.broadcast({
+                "type": "hand_void",
+                "hand": self._hand_no,
+                "seat": self.local_seat,
+                "reason": self.void_reason,
+            })
+        return True
 
     def _pump_hand(self) -> None:
         """Advance the hand's orchestration to quiescence: feed recovered

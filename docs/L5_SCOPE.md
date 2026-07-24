@@ -525,8 +525,10 @@ real play, and real play requires the whole v1 path to exist first.
 
 1. ~~Legacy commit-reveal shuffle deleted~~ — **DONE 2026-07-21**
    (L5 step 4).
-2. **Continuous play** — multi-hand sessions with stack carry,
-   dead-button rotation, eliminations, and heads-up, tested on the bus.
+2. ~~**Continuous play** — multi-hand sessions with stack carry,
+   dead-button rotation, eliminations, and heads-up, tested on the bus.~~
+   **DONE 2026-07-23.** Includes signed table-wide void propagation,
+   eliminated-seat lifecycle, and final-winner delivery to spectators.
 3. **Godot client MVP** — a full session playable against the local
    sidecar through the client server (connect → hands → settle → next).
 4. **Dropout timeout → void** — a silent peer voids the hand instead of
@@ -583,11 +585,12 @@ here.
    Godot client are connected to the finished coordinator *after* L5.
    L5 itself is headless (Q10). The client↔engine contract (§5) is
    already pinned, so this is wiring, not design.
-   *Status 2026-07-21: in progress — the sidecar half is DONE
+   *Status 2026-07-23: in progress — the sidecar half is DONE
    (`holdem/client_server.py`, localhost TCP + newline-JSON per
    GODOT_PROTOCOL.md, tested over a real socket). The Tkinter half is
-   RETIRED, not migrated. The Godot half is the current focus and is
-   gate criterion 3.*
+   RETIRED, not migrated. The Godot 4.7 scaffold and GUT smoke suite run
+   headless in CI; the playable Godot half is the current focus and is gate
+   criterion 3.*
 
 ### Persistence (beyond crash-survival)
 

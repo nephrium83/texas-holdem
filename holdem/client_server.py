@@ -43,6 +43,10 @@ class ClientServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._conns: set[_Conn] = set()
         self._prev_hook = None
+        # Bound methods are equal but not identical on repeated attribute
+        # access. Retain the exact object installed on the Session so stop()
+        # can prove callback ownership before restoring the previous hook.
+        self._installed_hook = self._state_changed
 
     @property
     def port(self) -> int:
@@ -50,30 +54,43 @@ class ClientServer:
         return self._port
 
     async def start(self) -> None:
+        if self._server is not None:
+            raise RuntimeError("client server already started")
         self._loop = asyncio.get_running_loop()
         self._server = await asyncio.start_server(
             self._accept, self._host, self._port)
         self._port = self._server.sockets[0].getsockname()[1]
         # Chain, never clobber, any state hook already installed.
         self._prev_hook = self._session.on_state_changed
-        self._session.on_state_changed = self._state_changed
+        self._session.on_state_changed = self._installed_hook
         _log.info("client server listening on %s:%s", self._host, self._port)
 
     async def stop(self) -> None:
-        if self._session.on_state_changed is self._state_changed:
+        if self._session.on_state_changed is self._installed_hook:
             self._session.on_state_changed = self._prev_hook
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-        for conn in list(self._conns):
+        server, self._server = self._server, None
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        conns = list(self._conns)
+        for conn in conns:
             conn.close()
+        if conns:
+            await asyncio.gather(
+                *(conn.wait_closed() for conn in conns),
+                return_exceptions=True,
+            )
         await asyncio.sleep(0)          # let reader loops observe the close
+        self._loop = None
 
     # -- state push ----------------------------------------------------
 
     def _state_changed(self) -> None:
         if self._prev_hook is not None:
-            self._prev_hook()
+            try:
+                self._prev_hook()
+            except Exception:
+                _log.exception("previous state-change hook failed")
         loop = self._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self._mark_all_dirty)
@@ -107,6 +124,12 @@ class _Conn:
         try:
             self._writer.close()
         except Exception:                        # already gone: fine
+            pass
+
+    async def wait_closed(self) -> None:
+        try:
+            await self._writer.wait_closed()
+        except (AttributeError, ConnectionError):
             pass
 
     async def run(self) -> None:

@@ -31,3 +31,21 @@ jobs:
           sudo apt-get install -y python3-tk xvfb
       - name: Boot the GUI headless and play 15 hands
         run: xvfb-run -a python3 tests/gui_smoke.py
+
+  godot-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Godot 4.7.1
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.1
+          use-dotnet: false
+          include-templates: false
+      - name: Run GUT tests headless
+        working-directory: godot
+        run: >-
+          godot --headless --path .
+          -s addons/gut/gut_cmdln.gd
+          -gdir=res://test/unit
+          -gexit

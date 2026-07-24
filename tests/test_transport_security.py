@@ -76,6 +76,28 @@ def test_sign_frame_roundtrips():
     assert back["payload"]["pot"] == 100
 
 
+@pytest.mark.parametrize("message", [
+    {"type": "key_announce", "hand": 2, "seat": 1,
+     "X_hex": "aa", "pop_hex": "bb"},
+    {"type": "deck_round", "hand": 2, "round": 1, "seat": 1,
+     "deck": ["ciphertext"]},
+    {"type": "deal_share", "hand": 2, "position": 4, "seat_from": 1,
+     "D_hex": "aa", "dleq_hex": "bb"},
+    {"type": "audit_open", "hand": 2, "seat": 1, "shares": ["share"]},
+    {"type": "bet_action", "hand": 2, "seq": 4, "seat": 1,
+     "action": "call", "amount": 0, "digest": "abc"},
+    {"type": "hand_void", "hand": 2, "seat": 1, "reason": "desync"},
+    {"type": "session_end", "hand": 8, "seat": 1, "winner": 1,
+     "stacks": [0, 1000]},
+])
+def test_sign_frame_preserves_flat_hostless_fields(message):
+    """Coordinator dictionaries survive the signed payload boundary intact."""
+    blob = t._sign_frame(message)
+    back = wire.unpack(blob[4:])
+    body = Session._hostless_body(back)
+    assert body == message
+
+
 def test_presigned_dict_not_double_wrapped():
     pre = json.loads(wire.pack("chat", {"text": "hi"}))
     blob = t._sign_frame(pre)
