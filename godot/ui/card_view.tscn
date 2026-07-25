@@ -1,0 +1,16 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://ui/card_view.gd" id="1_script"]
+[ext_resource type="StyleBox" path="res://ui/card_face_up.tres" id="2_face_up"]
+
+[node name="CardView" type="PanelContainer"]
+custom_minimum_size = Vector2(56, 78)
+theme_override_styles/panel = ExtResource("2_face_up")
+script = ExtResource("1_script")
+
+[node name="CardLabel" type="Label" parent="."]
+unique_name_in_owner = true
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 20
+text = ""

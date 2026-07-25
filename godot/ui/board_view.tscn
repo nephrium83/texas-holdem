@@ -1,0 +1,23 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://ui/board_view.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://ui/card_view.tscn" id="2_card"]
+
+[node name="BoardView" type="HBoxContainer"]
+theme_override_constants/separation = 8
+script = ExtResource("1_script")
+
+[node name="Card0" parent="." instance=ExtResource("2_card")]
+unique_name_in_owner = true
+
+[node name="Card1" parent="." instance=ExtResource("2_card")]
+unique_name_in_owner = true
+
+[node name="Card2" parent="." instance=ExtResource("2_card")]
+unique_name_in_owner = true
+
+[node name="Card3" parent="." instance=ExtResource("2_card")]
+unique_name_in_owner = true
+
+[node name="Card4" parent="." instance=ExtResource("2_card")]
+unique_name_in_owner = true

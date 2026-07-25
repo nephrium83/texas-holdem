@@ -1,0 +1,63 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://ui/table_view.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://ui/seat_view.tscn" id="2_seat"]
+[ext_resource type="PackedScene" path="res://ui/board_view.tscn" id="3_board"]
+
+[node name="TableView" type="Control"]
+custom_minimum_size = Vector2(1000, 700)
+script = ExtResource("1_script")
+
+[node name="HandLabel" type="Label" parent="."]
+unique_name_in_owner = true
+position = Vector2(430, 235)
+theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
+theme_override_font_sizes/font_size = 13
+text = ""
+
+[node name="PotLabel" type="Label" parent="."]
+unique_name_in_owner = true
+position = Vector2(430, 260)
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+theme_override_font_sizes/font_size = 16
+text = "Pot: 0"
+
+[node name="BoardView" parent="." instance=ExtResource("3_board")]
+unique_name_in_owner = true
+position = Vector2(344, 301)
+
+[node name="Seat0" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(425.0, 515.0)
+
+[node name="Seat1" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(155.0, 456.5)
+
+[node name="Seat2" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(11.4, 308.4)
+
+[node name="Seat3" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(61.3, 140.0)
+
+[node name="Seat4" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(281.4, 30.1)
+
+[node name="Seat5" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(568.6, 30.1)
+
+[node name="Seat6" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(788.7, 140.0)
+
+[node name="Seat7" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(838.6, 308.4)
+
+[node name="Seat8" parent="." instance=ExtResource("2_seat")]
+unique_name_in_owner = true
+position = Vector2(695.0, 456.5)
