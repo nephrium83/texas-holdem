@@ -1,0 +1,77 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://ui/seat_view.gd" id="1_script"]
+[ext_resource type="PackedScene" path="res://ui/card_view.tscn" id="2_card"]
+
+[sub_resource type="StyleBoxFlat" id="StyleSeat"]
+bg_color = Color(0.055, 0.145, 0.116, 0.9)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.76, 0.52, 0.3, 0.6)
+corner_radius_top_left = 8
+corner_radius_top_right = 8
+corner_radius_bottom_right = 8
+corner_radius_bottom_left = 8
+content_margin_left = 10.0
+content_margin_top = 8.0
+content_margin_right = 10.0
+content_margin_bottom = 8.0
+
+[node name="SeatView" type="PanelContainer"]
+custom_minimum_size = Vector2(150, 150)
+theme_override_styles/panel = SubResource("StyleSeat")
+script = ExtResource("1_script")
+
+[node name="Content" type="VBoxContainer" parent="."]
+theme_override_constants/separation = 2
+
+[node name="NameLabel" type="Label" parent="Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+theme_override_font_sizes/font_size = 14
+text = "Empty seat"
+autowrap_mode = 2
+
+[node name="InfoRow" type="HBoxContainer" parent="Content"]
+theme_override_constants/separation = 6
+
+[node name="PosBadge" type="Label" parent="Content/InfoRow"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.94, 0.72, 0.44, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+
+[node name="StackLabel" type="Label" parent="Content/InfoRow"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+
+[node name="BetLabel" type="Label" parent="Content/InfoRow"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+
+[node name="StatusLabel" type="Label" parent="Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+
+[node name="TurnIndicator" type="Label" parent="Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.94, 0.72, 0.44, 1)
+theme_override_font_sizes/font_size = 12
+text = ""
+
+[node name="HoleCards" type="HBoxContainer" parent="Content"]
+theme_override_constants/separation = 4
+
+[node name="CardA" parent="Content/HoleCards" instance=ExtResource("2_card")]
+unique_name_in_owner = true
+
+[node name="CardB" parent="Content/HoleCards" instance=ExtResource("2_card")]
+unique_name_in_owner = true
