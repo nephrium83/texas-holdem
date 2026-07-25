@@ -95,3 +95,29 @@ func test_raise_pressed_calls_sidecar_raise_to_with_amount():
 	main._sidecar = fake
 	main.get_node("%BettingControls").raise_pressed.emit(120)
 	assert_eq(fake.calls, [["raise_to", 120]])
+
+
+func test_snapshot_fans_out_turn_state_to_next_hand_control():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	main._on_snapshot_received(snapshot)
+	assert_true(main.get_node("%NextHandControl").visible)
+	assert_true(main.get_node("%NextHandControl/Margin/Content/NextHandButton").visible)
+
+
+func test_mid_hand_state_hides_next_hand_control():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())  # turn.state == "your_turn"
+	assert_false(main.get_node("%NextHandControl").visible)
+
+
+func test_next_hand_pressed_calls_sidecar_next_hand():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%NextHandControl").next_hand_pressed.emit()
+	assert_eq(fake.calls, [["next_hand"]])

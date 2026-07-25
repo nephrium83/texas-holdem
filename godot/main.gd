@@ -3,14 +3,15 @@ extends Control
 
 ## Wires the Godot client together: forwards every snapshot
 ## (GODOT_PROTOCOL.md section 5) to the table, the player-info panel,
-## and the betting controls, and forwards the betting controls' player
-## commands (section 4) to the sidecar. Holds no game logic itself --
-## it is pure plumbing between already-built, independently-tested
-## pieces (#4, #5, #6).
+## the betting controls, and the next-hand control, and forwards their
+## player commands (section 4) to the sidecar. Holds no game logic
+## itself -- it is pure plumbing between already-built,
+## independently-tested pieces (#4, #5, #6, #7).
 
 @onready var _table_view: TableView = %TableView
 @onready var _betting_controls: BettingControls = %BettingControls
 @onready var _player_info_panel: PlayerInfoPanel = %PlayerInfoPanel
+@onready var _next_hand_control: NextHandControl = %NextHandControl
 
 ## Untyped on purpose: production wiring points this at the real
 ## %SidecarClient child, but tests substitute a lightweight fake --
@@ -25,6 +26,7 @@ func _ready() -> void:
 	_betting_controls.fold_pressed.connect(_on_fold_pressed)
 	_betting_controls.check_call_pressed.connect(_on_check_call_pressed)
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
+	_next_hand_control.next_hand_pressed.connect(_on_next_hand_pressed)
 	_connect_to_sidecar_from_cmdline()
 
 
@@ -33,6 +35,8 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 	_player_info_panel.apply_snapshot(snapshot)
 	var you: Dictionary = snapshot.get("you", {})
 	_betting_controls.apply_legal(you.get("legal", {}))
+	var turn: Dictionary = snapshot.get("turn", {})
+	_next_hand_control.apply_turn_state(str(turn.get("state", "lobby")))
 
 
 func _on_fold_pressed() -> void:
@@ -45,6 +49,10 @@ func _on_check_call_pressed() -> void:
 
 func _on_raise_pressed(amount: int) -> void:
 	_sidecar.raise_to(amount)
+
+
+func _on_next_hand_pressed() -> void:
+	_sidecar.next_hand()
 
 
 ## The sidecar's listening port is OS-assigned (client_server.py binds
