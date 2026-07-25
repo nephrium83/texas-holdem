@@ -1,0 +1,88 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://ui/betting_controls.gd" id="1_script"]
+
+[sub_resource type="StyleBoxFlat" id="StylePanel"]
+bg_color = Color(0.027, 0.071, 0.059, 0.98)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.76, 0.52, 0.3, 0.75)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+
+[node name="BettingControls" type="PanelContainer"]
+custom_minimum_size = Vector2(480, 130)
+theme_override_styles/panel = SubResource("StylePanel")
+script = ExtResource("1_script")
+
+[node name="Margin" type="MarginContainer" parent="."]
+theme_override_constants/margin_left = 16
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 16
+theme_override_constants/margin_bottom = 12
+
+[node name="Content" type="VBoxContainer" parent="Margin"]
+theme_override_constants/separation = 8
+
+[node name="ActionRow" type="HBoxContainer" parent="Margin/Content"]
+theme_override_constants/separation = 10
+
+[node name="FoldButton" type="Button" parent="Margin/Content/ActionRow"]
+unique_name_in_owner = true
+disabled = true
+text = "Fold"
+
+[node name="CheckCallButton" type="Button" parent="Margin/Content/ActionRow"]
+unique_name_in_owner = true
+disabled = true
+text = "Check"
+
+[node name="RaiseButton" type="Button" parent="Margin/Content/ActionRow"]
+unique_name_in_owner = true
+disabled = true
+text = "Raise to 0"
+
+[node name="SliderRow" type="HBoxContainer" parent="Margin/Content"]
+theme_override_constants/separation = 10
+
+[node name="RaiseSlider" type="HSlider" parent="Margin/Content/SliderRow"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(300, 0)
+layout_mode = 2
+size_flags_horizontal = 3
+editable = false
+min_value = 0.0
+max_value = 100.0
+step = 1.0
+
+[node name="RaiseAmountLabel" type="Label" parent="Margin/Content/SliderRow"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+text = "0"
+
+[node name="PresetRow" type="HBoxContainer" parent="Margin/Content"]
+theme_override_constants/separation = 8
+
+[node name="PresetHalfPot" type="Button" parent="Margin/Content/PresetRow"]
+unique_name_in_owner = true
+disabled = true
+text = "1/2 Pot"
+
+[node name="PresetTwoThirdsPot" type="Button" parent="Margin/Content/PresetRow"]
+unique_name_in_owner = true
+disabled = true
+text = "2/3 Pot"
+
+[node name="PresetPot" type="Button" parent="Margin/Content/PresetRow"]
+unique_name_in_owner = true
+disabled = true
+text = "Pot"
+
+[node name="PresetAllIn" type="Button" parent="Margin/Content/PresetRow"]
+unique_name_in_owner = true
+disabled = true
+text = "All In"
