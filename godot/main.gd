@@ -61,9 +61,17 @@ func _on_next_hand_pressed() -> void:
 ## yet specify that hand-off mechanism -- no launcher exists yet either
 ## (noted in #4) -- so this uses a --sidecar-port= command-line argument
 ## as a placeholder convention until a real one is designed.
+##
+## Uses get_cmdline_user_args(), NOT get_cmdline_args(): the latter
+## returns only engine-recognized arguments and is empty for a run like
+## `godot --path godot -- --sidecar-port=1234` -- verified live, since
+## this is exactly the invocation a person actually launching the
+## client would use, and it silently connected to nothing until this
+## was caught by an actual end-to-end run rather than a unit test (no
+## live socket existed to test this line against before now).
 func _connect_to_sidecar_from_cmdline() -> void:
 	var prefix := "--sidecar-port="
-	for arg in OS.get_cmdline_args():
+	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with(prefix):
 			var port := int(arg.substr(prefix.length()))
 			_sidecar.connect_to_sidecar("127.0.0.1", port)
