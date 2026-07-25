@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -42,6 +42,9 @@ jobs:
           version: 4.7.1
           use-dotnet: false
           include-templates: false
+      - name: Import project (builds .godot cache; GUT class_names load here)
+        working-directory: godot
+        run: godot --headless --path . --import
       - name: Run GUT tests headless
         working-directory: godot
         run: >-
@@ -49,3 +52,16 @@ jobs:
           -s addons/gut/gut_cmdln.gd
           -gdir=res://test/unit
           -gexit
+          | tee gut_output.txt
+      - name: Fail if GUT produced no run summary
+        working-directory: godot
+        run: |
+          if ! grep -q "Run Summary" gut_output.txt; then
+            echo "::error::GUT did not emit a run summary - tests did not execute (likely an import/class_name failure)."
+            exit 1
+          fi
+          if grep -qE "[1-9][0-9]* failing tests" gut_output.txt; then
+            echo "::error::GUT reported failing tests."
+            exit 1
+          fi
+          echo "GUT run summary present and no failures."

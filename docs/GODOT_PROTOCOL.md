@@ -150,9 +150,43 @@ the latest snapshot; it never advances state on its own.
   "sb_seat": 0,
   "bb_seat": 1,
   "action_on": 0,
+  "turn": {
+    "state": "your_turn",
+    "headline": "Your turn | Flop | check available",
+    "street": "flop",
+    "street_label": "Flop",
+    "actor": 0,
+    "actor_name": "Ada",
+    "pot": 90,
+    "your_stack": 455,
+    "effective_stack": 455,
+    "decision": {
+      "action_label": "Check",
+      "to_call": 0,
+      "pot_now": 90,
+      "pot_after_call": 90,
+      "pot_odds": 0.0,
+      "pot_odds_pct": 0.0,
+      "stack_after_call": 455,
+      "effective_stack": 455,
+      "min_raise_to": 20,
+      "max_raise_to": 455,
+      "can_raise": true,
+      "call_is_all_in": false
+    }
+  },
+  "verification": {
+    "state": "audit_pending",
+    "label": "Deal active | final audit pending"
+  },
+  "events": [
+    { "seq": 1, "event": "hand_started", "kind": "hand",
+      "text": "--- Hand #7 (5/10) ---", "hand_num": 7, "street": "preflop" }
+  ],
   "voided": false,
   "void_reason": null,
   "result": null,
+  "settlement": null,
   "seats": [
     { "seat": 0, "name": "Ada", "stack": 455, "bet": 0, "folded": false,
       "all_in": false, "in_seat": true, "sitting_out": false,
@@ -163,6 +197,12 @@ the latest snapshot; it never advances state on its own.
   ],
   "you": {
     "hole": ["Ah", "Kd"],
+    "made_hand": {
+      "name": "High Card",
+      "description": "Ace-high, King-Ten-Seven-Two kickers",
+      "best_five": ["Ah", "Kd", "10h", "7d", "2c"],
+      "board_plays": false
+    },
     "legal": { "to_call": 0, "can_check": true, "can_raise": true,
                "min_to": 20, "max_to": 455, "pot": 90 }
   }
@@ -183,9 +223,13 @@ the latest snapshot; it never advances state on its own.
 | `sb_seat`     | int             | small-blind seat index                                       |
 | `bb_seat`     | int             | big-blind seat index                                         |
 | `action_on`   | int             | seat index to act, or `-1` if nobody is to act               |
+| `turn`        | object          | authoritative player-facing state and decision facts          |
+| `verification`| object          | truthful deal/audit status for the current phase               |
+| `events`      | array           | sequenced, append-only events for the current hand              |
 | `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
 | `result`      | object \| null  | settlement result when `phase` is `settled` (see §6)         |
+| `settlement`  | object \| null  | display-ready pot, payout, hand, refund, and local-net summary |
 | `session_over`| bool            | true once at most one seat has chips                         |
 | `session_winner` | int \| null  | winning seat when `session_over`; null for no winner          |
 | `eliminated`  | bool            | local seat is busted and excluded from later deals            |
@@ -249,6 +293,7 @@ Private to the local seat.
 | field   | type          | notes                                                                    |
 |---------|---------------|--------------------------------------------------------------------------|
 | `hole`  | array of card | your two hole cards. **Absent** while `phase` is `dealing` (not yet dealt).|
+| `made_hand` | object | exact local hand name, deciding ranks, best five, and `board_plays`; present from the flop onward |
 | `legal` | object        | **present only when it is your turn to act** — see below. Absent otherwise.|
 
 `you.legal` (present iff `action_on == your seat` and `phase == betting`):
@@ -265,6 +310,50 @@ Private to the local seat.
 The presence of `you.legal` is the client's cue that it is this player's
 turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 `can_raise`, and the `[min_to, max_to]` slider bounds.
+
+### `turn`: render this, do not reinterpret it
+
+`turn.state` is the single source of truth for the player-information panel:
+
+| state | client treatment |
+|-------|------------------|
+| `lobby` / `dealing` | waiting or verification presentation; no betting controls |
+| `your_turn` | show `turn.decision` and enable only snapshot-legal actions |
+| `waiting` | name `actor_name`; hide all local decision facts |
+| `folded_waiting` | show that the local seat folded while the hand continues |
+| `all_in_waiting` | remove betting controls and show runout/audit progress |
+| `resolving` | betting closed; wait for street progression or settlement |
+| `hand_complete` | replace the decision card with `settlement` |
+| `voided` | show `void_reason` and that stacks were restored |
+| `eliminated` | spectator state; no betting or next-hand control |
+| `match_complete` | terminal winner/final-stack presentation |
+
+`turn.decision` is present only for `your_turn`. It includes display-ready
+pot odds, pot after calling, stack after calling, effective stack, and the
+legal raise-to range. Godot must not recalculate these poker facts.
+
+### `verification`
+
+The labels deliberately avoid claiming more than the protocol has proven:
+
+- `in_progress` while peer deal contributions are being verified.
+- `audit_pending` during betting: the hand is active, but the mandatory
+  post-hand audit has not completed.
+- `verified` only after the audit and settlement complete.
+- `voided` when a proof, replica, or peer failure closed the hand.
+
+### `events`: current-hand action ledger
+
+Every snapshot carries the full current hand's append-only events. `seq`
+starts at 1 for each hand and increases without gaps. A reconnect therefore
+receives enough history to rebuild the log, while an already-connected client
+can animate only events whose `seq` it has not seen.
+
+Common `event` values are `hand_started`, `post_blind`, `action`,
+`deal_board`, `showdown`, `refund`, and `award`. Structured fields include
+`seat`, `action`, `amount`, absolute `to`, `pot_after`, `board`, pot/run
+indices, winners, and exact payouts. `text` is a ready-to-display fallback.
+No pre-showdown event contains another seat's hole cards.
 
 ---
 
@@ -296,6 +385,19 @@ post-hand audit has already made every player's cards public, so each entry
 in `seats` for a still-in player carries its `hole`. Table those cards. A
 hand that ended by folds (`result.runs` empty) reveals **no** `hole` fields —
 the winner is not shown, exactly as at a real table.
+
+### Display-ready `settlement`
+
+`result` remains the canonical engine result. `settlement` is the companion
+view intended for presentation and contains:
+
+- `headline`, local `outcome`, total pot, and local gross win/net/stack;
+- every main/side pot and run, with exact per-seat payouts including odd chips;
+- exact hand descriptions and best-five cards for showdown seats;
+- uncalled-bet refund attribution.
+
+The client should render `settlement` rather than decode evaluator score tuples
+or reproduce side-pot and odd-chip rules.
 
 ---
 

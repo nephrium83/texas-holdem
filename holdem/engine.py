@@ -220,24 +220,28 @@ def equity(hole, board, n_opp, sims, rng):
     sample = rng.sample
     ev = evaluate
     wins = ties = 0
+    equity_share = 0.0
 
     for _ in range(sims):
         draw = sample(remaining, need)
         full_board = board + draw[:need_board] if need_board else board
         me = ev(hole + full_board)
         k = need_board
-        best = None
+        opponent_scores = []
         for _o in range(n_opp):
             sc = ev((draw[k], draw[k + 1]) + tuple(full_board))
             k += 2
-            if best is None or sc > best:
-                best = sc
+            opponent_scores.append(sc)
+        best = max(opponent_scores)
         if me > best:
             wins += 1
+            equity_share += 1.0
         elif me == best:
             ties += 1
+            tied_opponents = sum(score == me for score in opponent_scores)
+            equity_share += 1.0 / (1 + tied_opponents)
 
-    return (wins / sims, ties / sims, (wins + ties * 0.5) / sims)
+    return (wins / sims, ties / sims, equity_share / sims)
 
 
 def chen(hole) -> float:
@@ -352,6 +356,8 @@ class Engine:
         self.river_aggr = None    # last bettor/raiser on the river
         self.straddler = None
         self.events = []          # (kind, text) for the log
+        self.public_events = []   # structured, current-hand client events
+        self._event_seq = 0
 
     # -- helpers -----------------------------------------------------------
 
@@ -390,8 +396,19 @@ class Engine:
                 return j
         return None
 
-    def emit(self, kind, text):
+    def emit(self, kind, text, **payload):
         self.events.append((kind, text))
+        self._event_seq += 1
+        event = {
+            "seq": self._event_seq,
+            "kind": kind,
+            "event": payload.pop("event", kind),
+            "text": text,
+            "hand_num": self.hand_no,
+            "street": self.street,
+        }
+        event.update(payload)
+        self.public_events.append(event)
 
     def drain(self):
         out = self.events
@@ -527,10 +544,14 @@ class Engine:
         self.raises_this_street = 0
         self.river_aggr = None
         self.straddler = None
+        self.public_events = []
+        self._event_seq = 0
         self.hand_no += 1
 
         self.emit("hand", f"--- Hand #{self.hand_no}  ({self.sb}/{self.bb}"
-                          + (" +ante" if self.bb_ante else "") + ") ---")
+                          + (" +ante" if self.bb_ante else "") + ") ---",
+                  event="hand_started", small_blind=self.sb,
+                  big_blind=self.bb, ante=self.bb if self.bb_ante else 0)
 
         # blinds
         self.sb_i = None
@@ -539,7 +560,9 @@ class Engine:
             self._post(self.sb_seat, self.sb, "SB")
             self.sb_i = self.sb_seat
         else:
-            self.emit("blind", "small blind is dead")
+            self.emit("blind", "small blind is dead",
+                      event="post_blind", seat=None, blind="dead_sb",
+                      amount=0, all_in=False)
         self.bb_i = self.bb_seat
         self._post(self.bb_seat, self.bb, "BB")
 
@@ -570,7 +593,10 @@ class Engine:
                 self.straddler = utg
                 self.current_bet = max(self.current_bet, u.bet)
                 self.min_raise = max(self.min_raise, 2 * self.bb)
-                self.emit("blind", f"{u.name} straddles to {u.bet}")
+                self.emit("blind", f"{u.name} straddles to {u.bet}",
+                          event="post_blind", seat=utg, blind="straddle",
+                          amount=u.bet, all_in=u.all_in,
+                          pot_after=self.pot)
                 first = self._next(utg, lambda q: q.in_seat)
 
         # deal, starting left of the button seat
@@ -598,7 +624,9 @@ class Engine:
         self._commit(p, amt)
         p.last_action = f"{label} {amt}"
         self.emit("blind", f"{p.name} posts {label} {amt}"
-                           + (" (all-in)" if p.all_in else ""))
+                           + (" (all-in)" if p.all_in else ""),
+                  event="post_blind", seat=i, blind=label.lower(),
+                  amount=amt, all_in=p.all_in, pot_after=self.pot)
 
     def _post_dead(self, i, amount, label):
         p = self.players[i]
@@ -608,7 +636,10 @@ class Engine:
         if p.stack == 0:
             p.all_in = True
         self.emit("blind", f"{p.name} posts {label} {amt}"
-                           + (" (all-in)" if p.all_in else ""))
+                           + (" (all-in)" if p.all_in else ""),
+                  event="post_blind", seat=i, blind=label.lower(),
+                  amount=amt, all_in=p.all_in, dead=True,
+                  pot_after=self.pot)
 
     def _commit(self, p, amt):
         amt = max(0, min(amt, p.stack))
@@ -674,21 +705,36 @@ class Engine:
         if action == "fold":
             p.folded = True
             p.last_action = "FOLD"
-            self.emit("fold", f"{p.name} folds")
+            self.emit("fold", f"{p.name} folds",
+                      event="action", seat=i, action="fold",
+                      amount=0, to=p.bet, pot_after=self.pot)
 
         elif action == "call":
             amt = lg["to_call"]
             if amt == 0:
                 p.last_action = "CHECK"
-                self.emit("check", f"{p.name} checks")
+                self.emit("check", f"{p.name} checks",
+                          event="action", seat=i, action="check",
+                          amount=0, to=p.bet, pot_after=self.pot)
             else:
                 self._commit(p, amt)
                 if p.all_in:
                     p.last_action = f"ALL-IN {p.bet}"
-                    self.emit("bet", f"{p.name} calls {amt} and is all-in")
+                    self.emit(
+                        "bet",
+                        f"{p.name} calls {amt} and is all-in | pot {self.pot}",
+                        event="action", seat=i, action="call",
+                        amount=amt, to=p.bet, all_in=True,
+                        pot_after=self.pot,
+                    )
                 else:
                     p.last_action = f"CALL {amt}"
-                    self.emit("bet", f"{p.name} calls {amt}")
+                    self.emit(
+                        "bet", f"{p.name} calls {amt} | pot {self.pot}",
+                        event="action", seat=i, action="call",
+                        amount=amt, to=p.bet, all_in=False,
+                        pot_after=self.pot,
+                    )
 
         elif action == "raise":
             target = min(int(amount), lg["max_to"])
@@ -724,11 +770,24 @@ class Engine:
             shown = add if opening else p.bet
             if p.all_in:
                 p.last_action = f"ALL-IN {p.bet}"
-                self.emit("raise", f"{p.name} is all-in for {p.bet}")
+                self.emit(
+                    "raise",
+                    f"{p.name} is all-in for {p.bet} | pot {self.pot}",
+                    event="action", seat=i,
+                    action="bet" if opening else "raise",
+                    amount=add, to=p.bet, all_in=True,
+                    full_raise=full, pot_after=self.pot,
+                )
             else:
                 p.last_action = (f"BET {add}" if opening
                                  else f"RAISE {p.bet}")
-                self.emit("raise", f"{p.name} {verb} {shown}")
+                self.emit(
+                    "raise", f"{p.name} {verb} {shown} | pot {self.pot}",
+                    event="action", seat=i,
+                    action="bet" if opening else "raise",
+                    amount=add, to=p.bet, all_in=False,
+                    full_raise=full, pot_after=self.pot,
+                )
 
         self.need_to_act.discard(i)
         self.actor = self._seek((i + 1) % len(self.players))
@@ -758,7 +817,8 @@ class Engine:
             return
         self.emit("street",
                   f"=== {self.street.upper()}  "
-                  f"[{' '.join(str(c) for c in self.board)}] ===")
+                  f"[{' '.join(str(c) for c in self.board)}] ===",
+                  event="deal_board", board=list(self.board))
         self._open_round((self.button + 1) % len(self.players))
 
     # -- rabbit hunt -------------------------------------------------------
@@ -802,7 +862,11 @@ class Engine:
                 p.stack += back
                 p.all_in = p.stack == 0
                 result["refund"] = (p.idx, back)
-                self.emit("pot", f"{back} returned to {p.name} (uncalled)")
+                self.emit(
+                    "pot", f"{back} returned to {p.name} (uncalled)",
+                    event="refund", seat=p.idx, amount=back,
+                    pot_after=self.pot,
+                )
 
         alive = self.contested()
 
@@ -819,9 +883,11 @@ class Engine:
                 boards = [b1, b2]
                 result["tabled"] = True
                 self.emit("street", "=== RUN 1  ["
-                          + " ".join(str(c) for c in b1) + "] ===")
+                          + " ".join(str(c) for c in b1) + "] ===",
+                          event="deal_board", run=1, board=list(b1))
                 self.emit("street", "=== RUN 2  ["
-                          + " ".join(str(c) for c in b2) + "] ===")
+                          + " ".join(str(c) for c in b2) + "] ===",
+                          event="deal_board", run=2, board=list(b2))
             else:
                 if len(self.board) < 5:
                     result["tabled"] = True
@@ -878,14 +944,20 @@ class Engine:
                     sc = result["runs"][r]["scores"]
                     best = max(sc[i] for i in elig)
                     winners = [i for i in elig if sc[i] == best]
-                pot["runs"].append({"winners": winners,
-                                    "amount": shares[r]})
+                payout_map = {i: 0 for i in winners}
+                run_result = {
+                    "winners": winners,
+                    "amount": shares[r],
+                    "payouts": payout_map,
+                }
+                pot["runs"].append(run_result)
                 union.update(winners)
 
                 share, rem = divmod(shares[r], len(winners))
                 for i in winners:
                     self.players[i].won += share
                     self.players[i].stack += share
+                    payout_map[i] += share
                 # odd chips go to the first winner left of the button
                 j = self.button
                 while rem > 0:
@@ -893,6 +965,7 @@ class Engine:
                     if j in winners:
                         self.players[j].won += 1
                         self.players[j].stack += 1
+                        payout_map[j] += 1
                         rem -= 1
 
             pot["winners"] = sorted(union)
@@ -924,18 +997,32 @@ class Engine:
                     if best_so_far is None or sc0[j] > best_so_far:
                         best_so_far = sc0[j]
                     nm = hand_name(sc0[j])
-                    self.emit("show", f"{self.players[j].name} shows {nm}")
+                    self.emit(
+                        "show", f"{self.players[j].name} shows {nm}",
+                        event="showdown", seat=j, shown=True,
+                        hand=nm, score=sc0[j],
+                        best=list(result["runs"][0]["best"][j]),
+                    )
                 else:
                     result["mucked"].add(j)
-                    self.emit("fold", f"{self.players[j].name} mucks")
+                    self.emit(
+                        "fold", f"{self.players[j].name} mucks",
+                        event="showdown", seat=j, shown=False, mucked=True,
+                    )
 
         # 7. narrate the pots
         for k, pot in enumerate(result["pots"]):
             name = "Main pot" if k == 0 else f"Side pot {k}"
             if len(alive) == 1:
                 who = self.players[pot["runs"][0]["winners"][0]].name
-                self.emit("pot", f"{who} wins {pot['amount']} "
-                                 f"(everyone else folded)")
+                award = pot["runs"][0]
+                self.emit(
+                    "pot",
+                    f"{who} wins {pot['amount']} (everyone else folded)",
+                    event="award", pot_index=k, run=1,
+                    amount=pot["amount"], winners=award["winners"],
+                    payouts=award["payouts"], uncontested=True,
+                )
                 continue
             for r, run in enumerate(pot["runs"]):
                 who = ", ".join(self.players[i].name for i in run["winners"])
@@ -943,7 +1030,10 @@ class Engine:
                                 [run["winners"][0]])
                 tag = f" (run {r+1})" if nruns > 1 else ""
                 self.emit("pot",
-                          f"{name}{tag} {run['amount']} -> {who} ({lab})")
+                          f"{name}{tag} {run['amount']} -> {who} ({lab})",
+                          event="award", pot_index=k, run=r + 1,
+                          amount=run["amount"], winners=run["winners"],
+                          payouts=run["payouts"], hand=lab)
 
         for p in self.players:
             p.total_live = 0
