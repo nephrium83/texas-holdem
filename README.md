@@ -88,12 +88,25 @@ poker rules.
 
 ## Testing
 
+Install dev dependencies first:
+
 ```
-pytest            # engine suite
-python tests/gui_smoke.py   # boots the real UI (needs a display)
+pip install -e .[dev]
+```
+
+Then run the suites:
+
+```
+pytest                        # engine + subprocess integration
+python tests/gui_smoke.py     # boots the real UI (needs a display)
 godot --headless --path godot -s addons/gut/gut_cmdln.gd \
   -gdir=res://test/unit -gexit
 ```
+
+`pytest-timeout` is included in `[dev]` and enforces a 60-second ceiling
+on subprocess integration tests.  If `godot` is not in PATH the Godot
+sidecar test is skipped automatically; set `GODOT_BIN=/path/to/godot` to
+override.
 
 The suite cross-checks the evaluator against a brute-force reference on
 20,000 random 7-card deals, pins known hands and Chen scores, verifies
