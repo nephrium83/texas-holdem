@@ -30,11 +30,16 @@ import threading
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
+from holdem.p2p.timeout import (
+    Clock, DeadlineToken, FakeClock, RealClock, DEFAULT_PHASE_TIMEOUTS,
+)
+
 _log = logging.getLogger(__name__)
 
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
+    "timeout_proposal",
 })
 
 
@@ -46,6 +51,7 @@ class Player:
     avatar_b64:        str
     is_host:           bool  = False
     ready:             bool  = False
+    unavailable:       bool  = False   # set by timeout; peer stays seated
     seat_index:        int   = -1
     # X25519 pubkey for hole-card encryption (populated from player_info)
     x25519_pubkey_hex: str   = ""
@@ -55,7 +61,7 @@ class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
 
     def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
-                 transport=None):
+                 transport=None, clock: Optional[Clock] = None):
         self.is_host    = is_host
         # transport module (or a mock) providing broadcast()/send().
         # Defaults to the real global transport; tests inject an
@@ -64,6 +70,12 @@ class Session:
             from holdem.p2p import transport as _t_module
             transport = _t_module
         self._transport = transport
+
+        # --- timeout machinery (Phase 3) ---
+        self._clock: Clock = clock if clock is not None else RealClock()
+        self._deadline_started_at: Optional[float] = None
+        self._current_deadline_token: Optional[DeadlineToken] = None
+        self._phase_timeout: dict[str, float] = dict(DEFAULT_PHASE_TIMEOUTS)
         self.state      = "LOBBY"
         # conn_id -> Player (includes local player once we have a conn_id)
         self.players:   dict[str, Player] = {}
@@ -211,6 +223,8 @@ class Session:
             self._on_hand_void(conn_id, body)
         elif t == "session_end":
             self._on_session_end(conn_id, body)
+        elif t == "timeout_proposal":
+            self._on_timeout_proposal(conn_id, body)
 
     @staticmethod
     def _hostless_body(msg: dict) -> dict:
@@ -312,6 +326,7 @@ class Session:
         return h == self._hand_no
 
     def _notify_state_changed(self) -> None:
+        self._maybe_start_deadline()
         if self.on_state_changed is not None:
             self.on_state_changed()
 
@@ -1084,3 +1099,179 @@ class Session:
     def set_host_engine(self, engine) -> None:
         """Register the host-side engine for action routing (host only)."""
         self._engine = engine
+
+    # ------------------------------------------------------------------
+    # Timeout machinery (Phase 3)
+    # ------------------------------------------------------------------
+
+    def check_deadlines(self) -> None:
+        """Broadcast a timeout_proposal if the current deadline has expired.
+
+        Call this periodically from the event loop (e.g. every second).
+        Tests advance the FakeClock then call this directly — no sleeping.
+        """
+        if self._current_deadline_token is None or self._deadline_started_at is None:
+            return
+        token = self._current_deadline_token
+        elapsed = self._clock.monotonic() - self._deadline_started_at
+        limit   = self._phase_timeout.get(token.phase, 30.0)
+        if elapsed >= limit:
+            self._broadcast_timeout_proposal(token)
+
+    def _broadcast_timeout_proposal(self, token: DeadlineToken) -> None:
+        self._transport.broadcast({
+            "type":         "timeout_proposal",
+            "hand":         self._hand_no,
+            "token": {
+                "hand_id":    token.hand_id,
+                "phase":      token.phase,
+                "actor":      token.actor,
+                "action_seq": token.action_seq,
+            },
+            "missing_seat": None,
+        })
+        # The broadcaster is the first peer to act on its own proposal.
+        # InMemoryBus (and real transports) exclude the sender from their
+        # own broadcasts, so self-apply here to keep all replicas in sync.
+        self._apply_timeout(token)
+
+    def _on_timeout_proposal(self, conn_id: str, msg: dict) -> None:
+        """Receive and validate a timeout proposal; apply if it matches the
+        current deadline and the action sequence still agrees."""
+        if not self._hand_msg_ok(conn_id, msg):
+            return
+        if self._replica is None or self.hand_voided:
+            return
+
+        # Reconstruct the token from the wire.
+        raw = msg.get("token", {})
+        try:
+            token = DeadlineToken(
+                hand_id    = str(raw["hand_id"]),
+                phase      = str(raw["phase"]),
+                actor      = raw.get("actor"),          # may be None
+                action_seq = int(raw["action_seq"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            _log.warning("session: malformed timeout_proposal from %s", conn_id)
+            return
+
+        # Reject if this proposal is not for the current deadline.
+        if token != self._current_deadline_token:
+            _log.debug("session: stale timeout_proposal from %s (token mismatch)",
+                       conn_id)
+            return
+
+        # Reject if the replica has already advanced past the proposal's seq.
+        if token.action_seq != self._replica.next_seq:
+            _log.debug("session: out-of-order timeout_proposal from %s "
+                       "(seq %d, expected %d)",
+                       conn_id, token.action_seq, self._replica.next_seq)
+            return
+
+        self._apply_timeout(token)
+
+    def _apply_timeout(self, token: DeadlineToken) -> None:
+        """Apply the phase-specific consequence of an accepted timeout."""
+        self._clear_deadline()
+        if token.phase == "betting":
+            self._apply_betting_timeout(token)
+        elif token.phase in ("deal_shuffle", "deal_decrypt"):
+            self._apply_deal_timeout(token)
+        else:
+            _log.warning("session: unhandled timeout phase %r", token.phase)
+
+    def _apply_betting_timeout(self, token: DeadlineToken) -> None:
+        """Fold (if facing a bet) or check (if not) on behalf of the timed-out actor.
+
+        The action goes through the normal apply_action path so digest
+        checking and _pump_hand stay on the single happy path.
+        """
+        if self._replica is None or self.hand_voided:
+            return
+        try:
+            seat = self._seat_order.index(token.actor)
+        except ValueError:
+            _log.warning("session: betting timeout actor %r not in seat order",
+                         token.actor)
+            return
+        legal  = self._replica.engine.legal(seat)
+        action = "fold" if legal.get("to_call", 0) > 0 else "check"
+        verdict = self._replica.apply_action(token.action_seq, seat, action, 0)
+        if verdict == "applied":
+            self._pump_hand()
+            self._notify_state_changed()
+
+    def _apply_deal_timeout(self, token: DeadlineToken) -> None:
+        """Void the hand when a deal-phase contribution never arrived.
+
+        Stacks are preserved (existing void-and-redeal path). The missing
+        peer (if identifiable) is marked unavailable; it is NOT removed.
+        """
+        if self._replica is None or self.hand_voided:
+            return
+        actor = token.actor
+        reason = f"deal timeout: {token.phase}"
+        if actor is not None:
+            reason += f" (peer {actor!r} did not contribute)"
+            with self._lock:
+                if actor in self.players:
+                    self.players[actor].unavailable = True
+        self._void_hand(reason)
+
+    def _maybe_start_deadline(self) -> None:
+        """Evaluate whether a deadline needs to be started or cleared after
+        any state change.  Called automatically by _notify_state_changed."""
+        # No deadline when no active, non-settled hand exists.
+        if self._replica is None or self.hand_voided or self.hand_result is not None:
+            self._clear_deadline()
+            return
+
+        # If the deal is still in flight, track a deal deadline regardless of
+        # the replica's betting phase (betting cannot proceed without holes).
+        if (self._deal_driver is not None
+                and not self.deal_done()
+                and not self.deal_aborted()):
+            token = DeadlineToken(
+                hand_id    = self._deal_session_id(),
+                phase      = "deal_shuffle",
+                actor      = None,
+                action_seq = self._replica.next_seq,
+            )
+            if token != self._current_deadline_token:
+                self._start_deadline(token)
+            return
+
+        # Deal is done (or absent). Track the current actor's betting turn.
+        from holdem.p2p.replica_table import PHASE_BETTING
+        if self._replica.phase != PHASE_BETTING:
+            self._clear_deadline()
+            return
+
+        actor = self._replica.actor
+        if actor is None or not (0 <= actor < len(self._seat_order)):
+            self._clear_deadline()
+            return
+
+        actor_conn = self._seat_order[actor]
+        if actor_conn == self.local_conn_id:
+            # It is our turn; we set no deadline on ourselves.
+            self._clear_deadline()
+            return
+
+        token = DeadlineToken(
+            hand_id    = self._deal_session_id(),
+            phase      = "betting",
+            actor      = actor_conn,
+            action_seq = self._replica.next_seq,
+        )
+        if token != self._current_deadline_token:
+            self._start_deadline(token)
+
+    def _start_deadline(self, token: DeadlineToken) -> None:
+        self._current_deadline_token = token
+        self._deadline_started_at   = self._clock.monotonic()
+
+    def _clear_deadline(self) -> None:
+        self._current_deadline_token = None
+        self._deadline_started_at   = None
