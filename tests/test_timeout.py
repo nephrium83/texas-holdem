@@ -283,7 +283,12 @@ class TestBettingTimeout:
         assert r.engine.players[actor_seat].folded
 
     def test_betting_timeout_checks_actor_no_bet(self):
-        """When there is no bet to face and the actor times out, they are checked."""
+        """When there is no bet to face and the actor times out, they are checked.
+
+        Tracked in https://github.com/nephrium83/texas-holdem/issues/11
+        Requires a real mental-poker deal to reach a genuine postflop state;
+        remove the skip below once the integration harness supports that.
+        """
         # Find a game state where the first actor has no bet to face.
         # Preflop: UTG always faces a BB, so we need to get to postflop.
         clk = FakeClock()
@@ -735,7 +740,12 @@ class TestRaceConditions:
 class TestConvergence:
     def test_three_replicas_converge_after_timeout(self):
         """Timeout proposal delivered to three peers in different orders;
-        all end in identical state."""
+        all end in identical state.
+
+        Tracked in https://github.com/nephrium83/texas-holdem/issues/12
+        The skip below fires when peer0 is the preflop actor; remove it
+        by fixing button/seating so peer0 is never the actor.
+        """
         bus, sessions, order = make_table(3)
         s0, s1, s2 = (sessions[c] for c in order)
 
