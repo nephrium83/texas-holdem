@@ -1040,3 +1040,47 @@ class Session:
     def player_list(self) -> list[Player]:
         with self._lock:
             return list(self.players.values())
+
+    # ------------------------------------------------------------------
+    # Public configuration and decision API (Phase 2)
+    # ------------------------------------------------------------------
+
+    @property
+    def seat_order(self) -> list[str]:
+        """Read-only view of the current seat order (copy)."""
+        return list(self._seat_order)
+
+    @property
+    def replica(self):
+        """The ReplicaTable for the current hand, or None between hands."""
+        return self._replica
+
+    def configure_seats(self, order: list[str]) -> None:
+        """Set the seat order for the next (or only) hand.
+
+        Validates:
+        - 2–9 seats
+        - All seat IDs are unique
+        - The local conn_id (if known) appears exactly once
+        - No active hand is in progress
+
+        Raises:
+            ValueError:  order fails structural validation
+            RuntimeError: called during an active hand
+        """
+        if self._replica is not None and not self.hand_voided and self.hand_result is None:
+            raise RuntimeError("cannot change seat order during an active hand")
+        if len(order) < 2:
+            raise ValueError(f"seat order needs at least 2 seats, got {len(order)}")
+        if len(order) > 9:
+            raise ValueError(f"seat order needs at most 9 seats, got {len(order)}")
+        if len(set(order)) != len(order):
+            raise ValueError("seat order contains duplicate conn_ids")
+        if self.local_conn_id and self.local_conn_id not in order:
+            raise ValueError(
+                f"local conn_id {self.local_conn_id!r} not in seat order")
+        self._seat_order = list(order)
+
+    def set_host_engine(self, engine) -> None:
+        """Register the host-side engine for action routing (host only)."""
+        self._engine = engine
