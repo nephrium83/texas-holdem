@@ -113,8 +113,8 @@ def test_action_rejects_wrong_seat_owner():
 
     class _Eng:
         actor = 0
-    s._engine = _Eng()
-    s._seat_order = ["A", "B"]
+    s.set_host_engine(_Eng())
+    s.configure_seats(["A", "B"])
     s._VALID_ACTIONS = {"fold", "call", "raise", "check", "bet"}
 
     fired = []

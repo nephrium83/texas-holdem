@@ -31,7 +31,7 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
-        s._seat_order = list(order)
+        s.configure_seats(list(order))
         bus.register(cid, s)
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]
@@ -45,7 +45,7 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
 
 
 def replicas(sessions, order):
-    return [sessions[c]._replica for c in order]
+    return [sessions[c].replica for c in order]
 
 
 def assert_synced(sessions, order):
@@ -55,7 +55,7 @@ def assert_synced(sessions, order):
 
 def act(bus, sessions, order, action, amount=0):
     """The current actor's SESSION acts; everyone else hears it on the bus."""
-    seat = sessions[order[0]]._replica.actor
+    seat = sessions[order[0]].replica.actor
     assert seat is not None
     verdict = sessions[order[seat]].send_bet_action(action, amount)
     assert verdict == "applied", f"seat {seat} {action}: {verdict}"
@@ -68,7 +68,7 @@ def test_hand_starts_synced_with_private_holes():
     assert_synced(sessions, order)
     for cid in order:
         s = sessions[cid]
-        assert s._replica.phase == PHASE_BETTING
+        assert s.replica.phase == PHASE_BETTING
         assert all(c is not None for c in s.deal_hole_cards)
         assert s._own_hole_set
     # privacy across sessions: 6 distinct cards, none shared
@@ -82,7 +82,7 @@ def test_full_checkdown_hand_settles_identically():
     """Calls/checks to showdown: streets reveal + advance automatically,
     the audit runs, settle is identical everywhere, chips conserved."""
     bus, sessions, order = make_table(3)
-    while sessions[order[0]]._replica.phase == PHASE_BETTING:
+    while sessions[order[0]].replica.phase == PHASE_BETTING:
         act(bus, sessions, order, "call")
     # the pump carried everything else: streets, audit, settlement
     results = [sessions[c].hand_result for c in order]
@@ -90,31 +90,31 @@ def test_full_checkdown_hand_settles_identically():
     assert all(r == results[0] for r in results)
     for cid in order:
         s = sessions[cid]
-        assert s._replica.phase == PHASE_SETTLED
+        assert s.replica.phase == PHASE_SETTLED
         assert s.deal_done() and not s.hand_voided
-        assert len(s._replica.engine.board) == 5
-        assert sum(p.stack for p in s._replica.engine.players) == 1500
+        assert len(s.replica.engine.board) == 5
+        assert sum(p.stack for p in s.replica.engine.players) == 1500
     assert len(results[0]["winners"]) >= 1
 
 
 def test_fold_out_settles_without_board():
     bus, sessions, order = make_table(3)
-    while sessions[order[0]]._replica.phase == PHASE_BETTING:
+    while sessions[order[0]].replica.phase == PHASE_BETTING:
         act(bus, sessions, order, "fold")
     results = [sessions[c].hand_result for c in order]
     assert all(r is not None and r == results[0] for r in results)
     for cid in order:
-        assert sessions[cid]._replica.engine.board == []       # no reveal needed
+        assert sessions[cid].replica.engine.board == []       # no reveal needed
         assert sessions[cid].deal_done()                       # audit still ran
-        assert sum(p.stack for p in sessions[cid]._replica.engine.players) == 1500
+        assert sum(p.stack for p in sessions[cid].replica.engine.players) == 1500
 
 
 def test_all_in_lockup_cascades_to_settlement():
     """All-in preflop with three stack sizes: one drain cascades every
     street reveal, the audit, and a layered side-pot settlement."""
     bus, sessions, order = make_table(3, stacks=[200, 60, 120])
-    while sessions[order[0]]._replica.phase == PHASE_BETTING:
-        r = sessions[order[0]]._replica
+    while sessions[order[0]].replica.phase == PHASE_BETTING:
+        r = sessions[order[0]].replica
         lg = r.engine.legal(r.actor)
         if lg["can_raise"]:
             act(bus, sessions, order, "raise", lg["max_to"])
@@ -124,19 +124,19 @@ def test_all_in_lockup_cascades_to_settlement():
     assert all(r is not None and r == results[0] for r in results)
     assert len(results[0]["pots"]) >= 2                        # side pots layered
     for cid in order:
-        assert len(sessions[cid]._replica.engine.board) == 5   # ran out fully
-        assert sum(p.stack for p in sessions[cid]._replica.engine.players) == 380
+        assert len(sessions[cid].replica.engine.board) == 5   # ran out fully
+        assert sum(p.stack for p in sessions[cid].replica.engine.players) == 380
 
 
 def test_out_of_turn_action_rejected_everywhere():
     bus, sessions, order = make_table(3)
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     wrong = (actor + 1) % 3
-    d0 = sessions[order[0]]._replica.state_digest()
+    d0 = sessions[order[0]].replica.state_digest()
     verdict = sessions[order[wrong]].send_bet_action("call")
     assert verdict == "rejected"                # local replica refuses; nothing sent
     bus.drain()
-    assert sessions[order[0]]._replica.state_digest() == d0
+    assert sessions[order[0]].replica.state_digest() == d0
     assert_synced(sessions, order)
 
 
@@ -145,11 +145,11 @@ def test_desync_is_detected_and_voids():
     on the next action. Corrupt a NON-actor so it voids on receipt when its
     digest disagrees with the acting peer's attached snapshot."""
     bus, sessions, order = make_table(3)
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     victim_idx = next(i for i in range(3) if i != actor)
     honest_idx = next(i for i in range(3) if i != actor and i != victim_idx)
     victim = sessions[order[victim_idx]]
-    victim._replica.engine.players[honest_idx].stack += 1     # silent corruption
+    victim.replica.engine.players[honest_idx].stack += 1     # silent corruption
     sessions[order[actor]].send_bet_action("call")
     bus.drain()
     assert victim.hand_voided
@@ -161,12 +161,12 @@ def test_desync_is_detected_and_voids():
 
 def test_bet_action_seat_spoof_dropped():
     bus, sessions, order = make_table(3)
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     spoofer = order[(actor + 1) % 3]                    # not the actor
     forged = {"type": "bet_action", "seq": 0, "seat": actor,
               "action": "fold", "amount": 0}
     sessions[order[0]].handle_message(spoofer, forged)  # claims actor's seat
-    assert sessions[order[0]]._replica.next_seq == 0    # dropped, not applied
+    assert sessions[order[0]].replica.next_seq == 0    # dropped, not applied
     assert not sessions[order[0]].hand_voided
 
 

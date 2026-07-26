@@ -29,7 +29,7 @@ def make_table(n):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
-        s._seat_order = list(order)
+        s.configure_seats(list(order))
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order
@@ -131,11 +131,11 @@ def test_next_hand_after_settle_no_deadlock():
         sessions[cid].start_p2p_hand(hand_no=1, button=0, **_cfg(3))
     bus.drain()
     # everyone folds to end hand 1
-    while sessions[order[0]]._replica.phase == "betting":
-        seat = sessions[order[0]]._replica.actor
+    while sessions[order[0]].replica.phase == "betting":
+        seat = sessions[order[0]].replica.actor
         sessions[order[seat]].send_bet_action("fold")
         bus.drain()
-    stacks = [p.stack for p in sessions[order[0]]._replica.engine.players]
+    stacks = [p.stack for p in sessions[order[0]].replica.engine.players]
     # start hand 2, staggered, with the carried stacks
     names = [f"P{i}" for i in range(3)]
     sessions["peer0"].start_p2p_hand(hand_no=2, button=1, names=names,

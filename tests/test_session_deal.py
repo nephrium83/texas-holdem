@@ -36,7 +36,7 @@ def make_table(n):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
-        s._seat_order = list(order)
+        s.configure_seats(list(order))
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order

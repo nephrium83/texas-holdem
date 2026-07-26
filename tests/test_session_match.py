@@ -34,7 +34,7 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
         # Stable per-seat device secrets make deals reproducible across runs.
         s._deal_master_secret = bytes([i + 1]) * 32
         s.local_conn_id = cid
-        s._seat_order = list(order)
+        s.configure_seats(list(order))
         bus.register(cid, s)
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]
@@ -49,13 +49,13 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
 
 def assert_synced(sessions, order, alive=None):
     idxs = alive if alive is not None else range(len(order))
-    digs = [sessions[order[i]]._replica.state_digest() for i in idxs]
+    digs = [sessions[order[i]].replica.state_digest() for i in idxs]
     assert len(set(digs)) == 1, f"replicas diverged: {digs}"
 
 
 def act(bus, sessions, order, action, amount=0, ref=0, alive=None):
     """The current actor's SESSION acts; everyone else hears it."""
-    seat = sessions[order[ref]]._replica.actor
+    seat = sessions[order[ref]].replica.actor
     assert seat is not None
     verdict = sessions[order[seat]].send_bet_action(action, amount)
     assert verdict == "applied", f"seat {seat} {action}: {verdict}"
@@ -64,13 +64,13 @@ def act(bus, sessions, order, action, amount=0, ref=0, alive=None):
 
 
 def checkdown(bus, sessions, order, ref=0, alive=None):
-    while sessions[order[ref]]._replica.phase == PHASE_BETTING:
+    while sessions[order[ref]].replica.phase == PHASE_BETTING:
         act(bus, sessions, order, "call", ref=ref, alive=alive)
 
 
 def allin_hand(bus, sessions, order, ref=0, alive=None):
-    while sessions[order[ref]]._replica.phase == PHASE_BETTING:
-        r = sessions[order[ref]]._replica
+    while sessions[order[ref]].replica.phase == PHASE_BETTING:
+        r = sessions[order[ref]].replica
         lg = r.engine.legal(r.actor)
         if lg["can_raise"]:
             act(bus, sessions, order, "raise", lg["max_to"],
@@ -93,11 +93,11 @@ def test_two_hands_carry_stacks_and_rotate_button():
     hand 2 on every peer -- button advances, stacks carry from hand 1's
     settle, and all replicas agree on the new hand's state."""
     bus, sessions, order = make_table(3)
-    btn1 = sessions[order[0]]._replica.button
-    end1 = [sessions[order[0]]._replica.stacks[i] for i in range(3)]
+    btn1 = sessions[order[0]].replica.button
+    end1 = [sessions[order[0]].replica.stacks[i] for i in range(3)]
 
     checkdown(bus, sessions, order)
-    settled = [sessions[order[0]]._replica.stacks[i] for i in range(3)]
+    settled = [sessions[order[0]].replica.stacks[i] for i in range(3)]
     assert sum(settled) == 1500
     assert any(a != b for a, b in zip(settled, end1))    # chips actually moved
 
@@ -105,13 +105,13 @@ def test_two_hands_carry_stacks_and_rotate_button():
     assert set(verdicts.values()) == {"started"}
     for cid in order:
         assert sessions[cid]._hand_no == 2
-        assert sessions[cid]._replica.phase == PHASE_BETTING
+        assert sessions[cid].replica.phase == PHASE_BETTING
         assert all(c is not None for c in sessions[cid].deal_hole_cards)
     assert_synced(sessions, order)
 
     # hand 2 opens with hand 1's settled stacks (minus this hand's blinds,
     # which the replicas all posted identically); button moved forward.
-    btn2 = sessions[order[0]]._replica.button
+    btn2 = sessions[order[0]].replica.button
     assert btn2 != btn1
     # fresh private holes for hand 2 (deal actually re-ran)
     every = []
@@ -124,20 +124,20 @@ def test_button_walks_full_orbit_over_many_hands():
     """Over several hands the button visits every seat: the dead-button
     chain is advancing, not sticking."""
     bus, sessions, order = make_table(4, stacks=[10000] * 4)
-    seen = {sessions[order[0]]._replica.button}
+    seen = {sessions[order[0]].replica.button}
     for _ in range(8):
         checkdown(bus, sessions, order)
         v = next_all(bus, sessions, order)
         if set(v.values()) == {"session_over"}:
             break
-        seen.add(sessions[order[0]]._replica.button)
+        seen.add(sessions[order[0]].replica.button)
     assert len(seen) == 4, f"button only visited {seen}"
 
 
 def test_next_hand_not_ready_mid_hand():
     """next_p2p_hand refuses while the hand is live (no settle/void yet)."""
     bus, sessions, order = make_table(3)
-    assert sessions[order[0]]._replica.phase == PHASE_BETTING
+    assert sessions[order[0]].replica.phase == PHASE_BETTING
     assert sessions[order[0]].next_p2p_hand() == "not_ready"
 
 
@@ -145,7 +145,7 @@ def test_malformed_hand_number_is_ignored():
     """Untrusted wire data cannot crash or pollute future-hand buffering."""
     bus, sessions, order = make_table(3)
     target = sessions[order[0]]
-    before = target._replica.state_digest()
+    before = target.replica.state_digest()
 
     target.handle_message(order[1], {
         "type": "bet_action",
@@ -157,7 +157,7 @@ def test_malformed_hand_number_is_ignored():
         "digest": before,
     })
 
-    assert target._replica.state_digest() == before
+    assert target.replica.state_digest() == before
     assert target._msg_buffer == []
 
 
@@ -169,8 +169,8 @@ def test_deal_cheat_void_reverts_and_redeals_same_seats():
     invalid proof; the hand-void broadcast is idempotent when those local
     detections overlap."""
     bus, sessions, order = make_table(3)
-    stacks_before = [sessions[order[0]]._replica.stacks[i] for i in range(3)]
-    btn = sessions[order[0]]._replica.button
+    stacks_before = [sessions[order[0]].replica.stacks[i] for i in range(3)]
+    btn = sessions[order[0]].replica.button
 
     # A forged deal_share with a garbage proof, attributed to seat 2,
     # delivered to every peer -> each coordinator aborts -> hand voids
@@ -191,7 +191,7 @@ def test_deal_cheat_void_reverts_and_redeals_same_seats():
     # Redeal: same seats dealt, same button, stacks reverted to pre-void
     # (settle never ran) minus this fresh hand's identically-posted blinds.
     for cid in order:
-        r = sessions[cid]._replica
+        r = sessions[cid].replica
         assert r.button == btn
         assert sorted(r.seats_dealt) == [0, 1, 2]
         assert not sessions[cid].hand_voided
@@ -200,7 +200,7 @@ def test_deal_cheat_void_reverts_and_redeals_same_seats():
     # committed chips (blinds) equal the table's starting bankroll. (The
     # 500-each start is the true baseline; stacks_before was read after
     # hand 1 had already posted its blinds, so it is short by them.)
-    e = sessions[order[0]]._replica.engine
+    e = sessions[order[0]].replica.engine
     assert sum(p.stack for p in e.players) + e.pot == 1500
 
 
@@ -212,7 +212,7 @@ def test_elimination_drops_seat_and_shrinks_next_deal():
     bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
     allin_hand(bus, sessions, order)
     # Someone must have gone to zero for a clean elimination test.
-    stacks = [sessions[order[0]]._replica.stacks[i] for i in range(3)]
+    stacks = [sessions[order[0]].replica.stacks[i] for i in range(3)]
     busted = [i for i, s in enumerate(stacks) if s == 0]
     assert busted, f"no elimination occurred (stacks {stacks})"
     survivors = [i for i in range(3) if stacks[i] > 0]
@@ -239,7 +239,7 @@ def test_elimination_drops_seat_and_shrinks_next_deal():
         assert verdicts[order[i]] == "eliminated"
     # The live hand contains only survivors.
     ref = survivors[0]
-    r = sessions[order[ref]]._replica
+    r = sessions[order[ref]].replica
     assert sorted(r.seats_dealt) == sorted(survivors)
     assert_synced(sessions, order, alive=survivors)
     # A busted session keeps its final settled snapshot for the client.
@@ -273,7 +273,7 @@ def test_heads_up_positions_and_play():
     acts first preflop) holds, and a heads-up hand plays to settle across
     both replicas."""
     bus, sessions, order = make_table(2, stacks=[500, 500])
-    r = sessions[order[0]]._replica
+    r = sessions[order[0]].replica
     # HU: button and SB are the same seat.
     assert r.engine.button == r.engine.sb_seat
     assert r.engine.bb_seat != r.engine.button
@@ -283,9 +283,9 @@ def test_heads_up_positions_and_play():
     checkdown(bus, sessions, order)
     for cid in order:
         assert sessions[cid].hand_result is not None
-        assert sessions[cid]._replica.stacks == \
-            sessions[order[0]]._replica.stacks       # identical settle
-    assert sum(sessions[order[0]]._replica.stacks) == 1000
+        assert sessions[cid].replica.stacks == \
+            sessions[order[0]].replica.stacks       # identical settle
+    assert sum(sessions[order[0]].replica.stacks) == 1000
 
 
 def test_full_match_runs_to_a_single_winner():
@@ -296,8 +296,8 @@ def test_full_match_runs_to_a_single_winner():
     total = 900
     for _ in range(60):                       # generous bound; must terminate
         alive_now = [i for i in range(3)
-                     if sessions[order[i]]._replica is not None
-                     and sessions[order[i]]._replica.stacks[i] > 0]
+                     if sessions[order[i]].replica is not None
+                     and sessions[order[i]].replica.stacks[i] > 0]
         ref = next(i for i in range(3)
                    if not sessions[order[i]]._p2p_spectator)
         allin_hand(bus, sessions, order, ref=ref,
@@ -321,7 +321,7 @@ def test_full_match_runs_to_a_single_winner():
     for i, cid in enumerate(order):
         assert sessions[cid]._p2p_spectator is (i != w)
     # the winner's session holds all chips in its last replica
-    assert sessions[order[w]]._replica.stacks[w] == total
+    assert sessions[order[w]].replica.stacks[w] == total
 
 
 def test_all_peers_agree_on_winner_each_settlement():
@@ -346,8 +346,8 @@ def test_second_hand_carries_stacks_and_rotates_button():
     checkdown(bus, sessions, order)
     settled1 = [sessions[c].hand_result for c in order]
     assert all(r is not None for r in settled1)
-    stacks_after_1 = sessions[order[0]]._replica.stacks
-    btn1 = sessions[order[0]]._replica.button
+    stacks_after_1 = sessions[order[0]].replica.stacks
+    btn1 = sessions[order[0]].replica.button
 
     verdicts = next_all(bus, sessions, order)
     assert set(verdicts.values()) == {"started"}
@@ -355,10 +355,10 @@ def test_second_hand_carries_stacks_and_rotates_button():
     assert_synced(sessions, order)
     for c in order:
         assert sessions[c]._hand_no == 2
-        assert sessions[c]._replica.phase == PHASE_BETTING
+        assert sessions[c].replica.phase == PHASE_BETTING
         # the stacks hand 2 was constructed from == hand 1's settled stacks
         assert sessions[c]._hand_stacks == stacks_after_1
-    btn2 = sessions[order[0]]._replica.button
+    btn2 = sessions[order[0]].replica.button
     assert btn2 != btn1                     # dead-button rotation happened
     # chips conserved: hand 2's carry-in stacks (pre-blind) sum to the total
     assert sum(sessions[order[0]]._hand_stacks) == 1500
@@ -372,8 +372,8 @@ def test_button_advances_one_seat_each_hand():
     for _ in range(5):
         checkdown(bus, sessions, order)
         # settled boundary: chips are conserved here (mid-hand they sit in the pot)
-        assert sum(sessions[order[0]]._replica.stacks) == 4000
-        seen.append(sessions[order[0]]._replica.button)
+        assert sum(sessions[order[0]].replica.stacks) == 4000
+        seen.append(sessions[order[0]].replica.button)
         v = next_all(bus, sessions, order)
         if set(v.values()) != {"started"}:
             break
@@ -397,12 +397,12 @@ def test_replica_desync_void_propagates_and_redeals():
     bus, sessions, order = make_table(3, stacks=list(START))
     carry_in = list(sessions[order[0]]._hand_stacks)   # pre-blind hand-1 input
     assert carry_in == START
-    btn_voided = sessions[order[0]]._replica.button
+    btn_voided = sessions[order[0]].replica.button
 
     # corrupt a non-actor so it voids on the next action's digest check
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     victim_idx = next(i for i in range(3) if i != actor)
-    sessions[order[victim_idx]]._replica.engine.players[actor].stack += 1
+    sessions[order[victim_idx]].replica.engine.players[actor].stack += 1
     sessions[order[actor]].send_bet_action("call")
     bus.drain()
     assert all(sessions[cid].hand_voided for cid in order)
@@ -414,15 +414,15 @@ def test_replica_desync_void_propagates_and_redeals():
     for c in order:
         assert sessions[c]._hand_no == 2
         assert sessions[c]._hand_stacks == carry_in    # reverted, not paid
-        assert sessions[c]._replica.button == btn_voided   # same button
+        assert sessions[c].replica.button == btn_voided   # same button
     assert_synced(sessions, order)
 
 
 def _shove_hand(bus, sessions, order, alive):
     """Everyone still alive goes all-in; returns the settled result."""
     ref = alive[0]
-    while sessions[order[ref]]._replica.phase == PHASE_BETTING:
-        r = sessions[order[ref]]._replica
+    while sessions[order[ref]].replica.phase == PHASE_BETTING:
+        r = sessions[order[ref]].replica
         seat = r.actor
         lg = r.engine.legal(seat)
         a = ("raise", lg["max_to"]) if lg["can_raise"] else ("call", 0)
@@ -439,7 +439,7 @@ def test_busted_seat_spectates_survivors_play_on():
     outcome the deal produced."""
     bus, sessions, order = make_table(4, stacks=[300, 300, 300, 300])
     _shove_hand(bus, sessions, order, alive=[0, 1, 2, 3])
-    stacks = sessions[order[0]]._replica.stacks
+    stacks = sessions[order[0]].replica.stacks
     dead = [i for i, s in enumerate(stacks) if s == 0]
     alive = [i for i, s in enumerate(stacks) if s > 0]
     assert sum(stacks) == 1200                      # settled: chips conserved
@@ -458,7 +458,7 @@ def test_busted_seat_spectates_survivors_play_on():
         assert verdicts[order[i]] == "started"
         assert sessions[order[i]]._hand_no == 2
     assert_synced(sessions, order, alive=alive)
-    dealt = sessions[order[alive[0]]]._replica.seats_dealt
+    dealt = sessions[order[alive[0]]].replica.seats_dealt
     for i in dead:
         assert i not in dealt                               # dead seats not dealt
     for i in alive:
@@ -471,7 +471,7 @@ def test_heads_up_allin_resolves_session_or_chops():
     survive and play on. Both outcomes are legal; the cards choose."""
     bus, sessions, order = make_table(2, stacks=[1000, 1000])
     _shove_hand(bus, sessions, order, alive=[0, 1])
-    stacks = sessions[order[0]]._replica.stacks
+    stacks = sessions[order[0]].replica.stacks
     assert sum(stacks) == 2000                      # settled: conserved
     alive = [i for i, s in enumerate(stacks) if s > 0]
 
@@ -495,14 +495,14 @@ def test_heads_up_multi_hand_alternates_blinds():
     bus, sessions, order = make_table(2, stacks=[2000, 2000], sb=25, bb=50)
     buttons = []
     for _ in range(4):
-        r = sessions[order[0]]._replica
+        r = sessions[order[0]].replica
         # heads-up: exactly two dealt, button == SB seat, they differ from BB
         assert r.seats_dealt == [0, 1]
         assert r.engine.button == r.engine.sb_seat
         assert r.engine.sb_seat != r.engine.bb_seat
         buttons.append(r.engine.button)
         checkdown(bus, sessions, order)
-        assert sum(sessions[order[0]]._replica.stacks) == 4000   # settled: conserved
+        assert sum(sessions[order[0]].replica.stacks) == 4000   # settled: conserved
         assert_synced(sessions, order)
         v = next_all(bus, sessions, order)
         if set(v.values()) != {"started"}:
@@ -519,10 +519,10 @@ def test_long_session_conserves_chips_and_stays_synced():
     total = 2400
     hands = 0
     for _ in range(30):
-        alive = [i for i, s in enumerate(sessions[order[0]]._replica.stacks)
+        alive = [i for i, s in enumerate(sessions[order[0]].replica.stacks)
                  if s > 0]
         checkdown(bus, sessions, order)
-        assert sum(sessions[order[0]]._replica.stacks) == total
+        assert sum(sessions[order[0]].replica.stacks) == total
         assert_synced(sessions, order, alive=alive)
         hands += 1
         v = next_all(bus, sessions, order)
