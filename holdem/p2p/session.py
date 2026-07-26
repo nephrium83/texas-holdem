@@ -33,6 +33,7 @@ from typing import Callable, List, Optional
 from holdem.p2p.timeout import (
     Clock, DeadlineToken, FakeClock, RealClock, DEFAULT_PHASE_TIMEOUTS,
 )
+from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
 
 _log = logging.getLogger(__name__)
 
@@ -61,7 +62,8 @@ class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
 
     def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
-                 transport=None, clock: Optional[Clock] = None):
+                 transport=None, clock: Optional[Clock] = None,
+                 sink: Optional[EventSink] = None):
         self.is_host    = is_host
         # transport module (or a mock) providing broadcast()/send().
         # Defaults to the real global transport; tests inject an
@@ -70,6 +72,10 @@ class Session:
             from holdem.p2p import transport as _t_module
             transport = _t_module
         self._transport = transport
+
+        # --- structured event logging (Phase 4) ---
+        self._log_sink: EventSink = sink if sink is not None else NullSink()
+        self._last_digest: Optional[str] = None   # previous replica digest
 
         # --- timeout machinery (Phase 3) ---
         self._clock: Clock = clock if clock is not None else RealClock()
@@ -158,6 +164,33 @@ class Session:
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
         self.on_state_changed: Optional[Callable[[], None]] = None
+
+        self._emit_event("sidecar_started")
+
+    # ------------------------------------------------------------------
+    # Structured event logging helper
+    # ------------------------------------------------------------------
+
+    def _emit_event(self, event: str, **extra) -> None:
+        """Emit one JSONL state event to the configured sink.
+
+        Common fields are assembled automatically; callers add hand/seq/phase/
+        digest and any event-specific fields via keyword arguments.  This
+        method must never raise — a broken sink must not affect game state.
+        """
+        import time as _time
+        try:
+            payload: dict = {
+                "v":     SCHEMA_VERSION,
+                "type":  "state_event",
+                "ts":    _time.time(),
+                "peer":  self.local_conn_id or "",
+                "event": event,
+            }
+            payload.update(extra)
+            self._log_sink.emit(payload)
+        except Exception:
+            pass   # logging must never crash the game
 
     # ------------------------------------------------------------------
     # Message dispatch (called by transport on_message handler)
@@ -327,6 +360,18 @@ class Session:
 
     def _notify_state_changed(self) -> None:
         self._maybe_start_deadline()
+        if self._replica is not None:
+            new_digest = self._replica.state_digest()
+            if new_digest != self._last_digest:
+                self._emit_event(
+                    "digest_changed",
+                    hand       = self._hand_no,
+                    seq        = self._replica.next_seq,
+                    phase      = self._replica.phase,
+                    old_digest = self._last_digest or "",
+                    new_digest = new_digest,
+                )
+                self._last_digest = new_digest
         if self.on_state_changed is not None:
             self.on_state_changed()
 
@@ -518,6 +563,14 @@ class Session:
             return False
         self.begin_hand(hand_no, button=self._replica.button,
                         seats_in=self._replica.seats_dealt)
+        self._last_digest = self._replica.state_digest()
+        self._emit_event(
+            "hand_started",
+            hand   = self._hand_no,
+            seq    = self._replica.next_seq,
+            phase  = self._replica.phase,
+            digest = self._last_digest,
+        )
         self._pump_hand()
         return True
 
@@ -585,6 +638,9 @@ class Session:
         self._final_stacks = final
         self._p2p_spectator = self.local_seat not in alive
         self._msg_buffer.clear()
+        self._emit_event("sidecar_stopping",
+                         hand=self._hand_no, reason="session_complete",
+                         winner=winner)
         self._notify_state_changed()
         if announce and not self._session_end_announced:
             self._session_end_announced = True
@@ -607,6 +663,14 @@ class Session:
         verdict = self._replica.apply_action(seq, seat, action, amount)
         if verdict != "applied":
             return verdict
+        self._emit_event(
+            "action_applied",
+            hand   = self._hand_no,
+            seq    = self._replica.next_seq,
+            phase  = self._replica.phase,
+            digest = self._replica.state_digest(),
+            seat   = seat, action = action, amount = int(amount),
+        )
         self._transport.broadcast({
             "type": "bet_action", "hand": self._hand_no, "seq": seq, "seat": seat,
             "action": action, "amount": int(amount),
@@ -635,8 +699,21 @@ class Session:
                 _log.warning("session: bet_action from %s claims seat %s "
                              "— dropping", conn_id, seat)
                 return
+        self._emit_event(
+            "action_received",
+            hand=self._hand_no, seq=seq, seat=seat,
+            action=action, amount=amount,
+        )
         verdict = self._replica.apply_action(seq, seat, action, amount)
         if verdict == "applied":
+            self._emit_event(
+                "action_applied",
+                hand   = self._hand_no,
+                seq    = self._replica.next_seq,
+                phase  = self._replica.phase,
+                digest = self._replica.state_digest(),
+                seat   = seat, action = action, amount = amount,
+            )
             # Desync detection: the sender attached its post-apply digest.
             # Compare only when we applied exactly that action (a buffered
             # later action draining in the same call would legitimately
@@ -657,6 +734,7 @@ class Session:
         self.hand_voided = True
         self.void_reason = str(reason)[:512]
         _log.warning("session: HAND VOIDED — %s", reason)
+        self._emit_event("hand_voided", hand=self._hand_no, reason=self.void_reason)
 
         self._notify_state_changed()
         if announce:
@@ -737,17 +815,19 @@ class Session:
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
         """Host receives identity from a newly connected peer."""
         payload = msg.get("payload", {})
+        nickname = payload.get("nickname", "Player")
         with self._lock:
             self.players[conn_id] = Player(
                 conn_id           = conn_id,
                 peer_id           = msg.get("pubkey", "")[:16],
-                nickname          = payload.get("nickname",           "Player"),
+                nickname          = nickname,
                 avatar_b64        = payload.get("avatar_b64",         ""),
                 x25519_pubkey_hex = payload.get("x25519_pubkey_hex",  ""),
                 is_host           = False,
             )
             if conn_id not in self._join_order:
                 self._join_order.append(conn_id)
+        self._emit_event("peer_connected", conn_id=conn_id, nickname=nickname)
         if self.is_host:
             # Tell the peer their host-side conn_id so they can self-identify
             self._transport.send(conn_id, {"type": "player_ack",
@@ -945,6 +1025,8 @@ class Session:
                 is_host           = self.is_host,
                 ready             = True,
             )
+        self._emit_event("peer_connected",
+                         conn_id=conn_id, nickname=self.local_nickname)
         if self.is_host:
             self._broadcast_player_list()
 
@@ -1119,6 +1201,14 @@ class Session:
             self._broadcast_timeout_proposal(token)
 
     def _broadcast_timeout_proposal(self, token: DeadlineToken) -> None:
+        self._emit_event(
+            "timeout_proposed",
+            hand        = self._hand_no,
+            seq         = token.action_seq,
+            phase       = self._replica.phase if self._replica else "unknown",
+            actor       = token.actor,
+            token_phase = token.phase,
+        )
         self._transport.broadcast({
             "type":         "timeout_proposal",
             "hand":         self._hand_no,
@@ -1174,6 +1264,15 @@ class Session:
     def _apply_timeout(self, token: DeadlineToken) -> None:
         """Apply the phase-specific consequence of an accepted timeout."""
         self._clear_deadline()
+        self._emit_event(
+            "timeout_applied",
+            hand        = self._hand_no,
+            seq         = token.action_seq,
+            phase       = self._replica.phase if self._replica else token.phase,
+            digest      = self._replica.state_digest() if self._replica else "",
+            actor       = token.actor,
+            token_phase = token.phase,
+        )
         if token.phase == "betting":
             self._apply_betting_timeout(token)
         elif token.phase in ("deal_shuffle", "deal_decrypt"):
@@ -1217,6 +1316,7 @@ class Session:
             with self._lock:
                 if actor in self.players:
                     self.players[actor].unavailable = True
+            self._emit_event("peer_unavailable", conn_id=actor)
         self._void_hand(reason)
 
     def _maybe_start_deadline(self) -> None:
