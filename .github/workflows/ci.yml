@@ -33,6 +33,29 @@ jobs:
       - name: Run sidecar integration tests
         run: pytest tests/test_sidecar_integration.py -v
 
+  godot-sidecar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Godot 4.7.1
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.1
+          use-dotnet: false
+          include-templates: false
+      - name: Import Godot project (build .godot cache)
+        working-directory: godot
+        run: godot --headless --path . --import
+      - name: Install Python deps
+        run: python -m pip install -e . pytest
+      - name: Run Godot sidecar integration test
+        run: pytest tests/test_godot_sidecar.py -v --timeout=60
+        env:
+          GODOT_BIN: godot
+
   gui-smoke:
     runs-on: ubuntu-latest
     steps:
