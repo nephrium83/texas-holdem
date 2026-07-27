@@ -1,0 +1,32 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1_script"]
+[ext_resource type="Script" path="res://net/sidecar_client.gd" id="2_sidecar_script"]
+[ext_resource type="PackedScene" path="res://ui/table_view.tscn" id="3_table"]
+[ext_resource type="PackedScene" path="res://ui/betting_controls.tscn" id="4_betting"]
+[ext_resource type="PackedScene" path="res://ui/player_info_panel.tscn" id="5_panel"]
+[ext_resource type="PackedScene" path="res://ui/next_hand_control.tscn" id="6_next_hand"]
+
+[node name="Main" type="Control"]
+custom_minimum_size = Vector2(1370, 850)
+script = ExtResource("1_script")
+
+[node name="SidecarClient" type="Node" parent="."]
+unique_name_in_owner = true
+script = ExtResource("2_sidecar_script")
+
+[node name="TableView" parent="." instance=ExtResource("3_table")]
+unique_name_in_owner = true
+position = Vector2(0, 0)
+
+[node name="BettingControls" parent="." instance=ExtResource("4_betting")]
+unique_name_in_owner = true
+position = Vector2(250, 710)
+
+[node name="PlayerInfoPanel" parent="." instance=ExtResource("5_panel")]
+unique_name_in_owner = true
+position = Vector2(1010, 20)
+
+[node name="NextHandControl" parent="." instance=ExtResource("6_next_hand")]
+unique_name_in_owner = true
+position = Vector2(750, 710)

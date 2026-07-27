@@ -1,13 +1,15 @@
 # Multiplayer design
 
-Status: **design**. No networking code exists yet. This document is the
-plan the current codebase is being shaped toward. It records decisions
-already made so they survive between work sessions.
+Status (2026-07-24): **protocol core implemented; internet transport pending**.
+The mental-poker deal, signed hostless session, continuous play, and Godot
+sidecar bridge are implemented and tested headlessly. Discovery, relay/NAT
+traversal, proof fragmentation, and a real multi-machine playtest remain
+v1.x work. This document preserves the full design and the decisions behind it.
 
 The headline choice: **serverless, peer-to-peer, play money.** Strangers
 should be able to play a fair game with no central server and no trusted
 dealer. That is a solved problem in cryptography — *mental poker*, posed
-by Shamir, Rivest, and Adleman in 1979 — and this is a plan to implement
+by Shamir, Rivest, and Adleman in 1979 — and this project is implementing
 a practical, modern version of it.
 
 Play money only. Real-money handling turns a cryptography project into a
