@@ -97,6 +97,33 @@ def _wrap_with_drain(session, bus: InMemoryBus) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Hand starter (test / integration helper)
+# ---------------------------------------------------------------------------
+
+def _deal_first_hand(sessions: dict, order: list, bus: InMemoryBus, *,
+                     sb: int, bb: int, stack: int,
+                     structure: str = "No-Limit") -> None:
+    """Start hand 1 on every seat and drive the bus to quiescence.
+
+    Every seat calls ``start_p2p_hand`` with the same shared parameters
+    (the same discipline the Godot client uses when it triggers game-start
+    for a multi-seat table), then ``bus.drain()`` delivers the mental-poker
+    deal messages until the queue is empty.
+
+    NOT called by the production ``run()`` path -- the Godot client
+    triggers the first hand.  Used by tests and the two-process harness.
+    """
+    names  = [sessions[cid].local_nickname for cid in order]
+    stacks = [stack] * len(order)
+    for cid in order:
+        sessions[cid].start_p2p_hand(
+            hand_no=1, names=list(names), stacks=list(stacks),
+            sb=sb, bb=bb, structure=structure, button=0,
+        )
+    bus.drain()
+
+
+# ---------------------------------------------------------------------------
 # Bot driver
 # ---------------------------------------------------------------------------
 
