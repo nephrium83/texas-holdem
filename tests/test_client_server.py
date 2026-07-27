@@ -37,7 +37,7 @@ def make_sessions(n):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
-        s._seat_order = list(order)
+        s.configure_seats(list(order))
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order
@@ -150,7 +150,7 @@ def test_connect_mid_hand_gets_full_betting_snapshot():
 def test_command_applies_then_fresh_snapshot_and_peers_sync():
     async def inner():
         bus, sessions, order = make_table(2)
-        actor = sessions[order[0]]._replica.actor
+        actor = sessions[order[0]].replica.actor
         srv = await serve(sessions[order[actor]])
         try:
             w, snap0 = await open_client(srv)
@@ -163,7 +163,7 @@ def test_command_applies_then_fresh_snapshot_and_peers_sync():
             assert snap1["type"] == "snapshot"
             assert snap1["action_on"] != actor       # turn moved on
             bus.drain()                              # peers hear the action
-            digests = {sessions[c]._replica.state_digest() for c in order}
+            digests = {sessions[c].replica.state_digest() for c in order}
             assert len(digests) == 1                 # replicas stay in sync
             w.close()
         finally:
@@ -174,7 +174,7 @@ def test_command_applies_then_fresh_snapshot_and_peers_sync():
 def test_out_of_turn_command_rejected_never_trusted():
     async def inner():
         bus, sessions, order = make_table(2)
-        actor = sessions[order[0]]._replica.actor
+        actor = sessions[order[0]].replica.actor
         other = 1 - actor
         srv = await serve(sessions[order[other]])
         try:
@@ -195,7 +195,7 @@ def test_out_of_turn_command_rejected_never_trusted():
 def test_bad_commands_answer_with_error():
     async def inner():
         bus, sessions, order = make_table(2)
-        actor = sessions[order[0]]._replica.actor
+        actor = sessions[order[0]].replica.actor
         srv = await serve(sessions[order[actor]])
         try:
             w, _ = await open_client(srv)
@@ -217,7 +217,7 @@ def test_bad_commands_answer_with_error():
 def test_unprompted_push_when_a_remote_player_acts():
     async def inner():
         bus, sessions, order = make_table(2)
-        actor = sessions[order[0]]._replica.actor
+        actor = sessions[order[0]].replica.actor
         other = 1 - actor
         srv = await serve(sessions[order[other]])    # we watch the non-actor
         try:
@@ -238,7 +238,7 @@ def test_unprompted_push_when_a_remote_player_acts():
 def test_fold_out_over_the_socket_settles_and_reveals_nothing():
     async def inner():
         bus, sessions, order = make_table(2)
-        actor = sessions[order[0]]._replica.actor
+        actor = sessions[order[0]].replica.actor
         srv = await serve(sessions[order[actor]])
         try:
             w, _ = await open_client(srv)
@@ -267,8 +267,8 @@ def test_contested_showdown_reveal_reaches_the_watcher():
             w, _ = await open_client(srv)
             # Drive a full checkdown via the sessions themselves; the
             # watcher's client should end up with the settled snapshot.
-            while sessions[order[0]]._replica.phase == PHASE_BETTING:
-                seat = sessions[order[0]]._replica.actor
+            while sessions[order[0]].replica.phase == PHASE_BETTING:
+                seat = sessions[order[0]].replica.actor
                 assert sessions[order[seat]].send_bet_action("call") \
                     == "applied"
                 bus.drain()
@@ -299,8 +299,8 @@ def test_next_hand_command_over_the_socket_starts_hand_two():
         try:
             w, _ = await open_client(srv)
             # Settle hand 1 (checkdown) via the sessions.
-            while sessions[order[0]]._replica.phase == PHASE_BETTING:
-                seat = sessions[order[0]]._replica.actor
+            while sessions[order[0]].replica.phase == PHASE_BETTING:
+                seat = sessions[order[0]].replica.actor
                 assert sessions[order[seat]].send_bet_action("call") \
                     == "applied"
                 bus.drain()

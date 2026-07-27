@@ -46,7 +46,7 @@ def snapshot(session) -> dict:
     Returns a lobby snapshot when no hand is in progress, otherwise a full
     in-hand snapshot for the local seat.
     """
-    replica = getattr(session, "_replica", None)
+    replica = session.replica
     if replica is None:
         return _lobby_snapshot(session)
 
@@ -134,7 +134,7 @@ def snapshot(session) -> dict:
 
 def _lobby_snapshot(session) -> dict:
     """Table membership before a hand is running."""
-    order = list(getattr(session, "_seat_order", []) or [])
+    order = list(session.seat_order)
     players = getattr(session, "players", {}) or {}
     seats = []
     for i, cid in enumerate(order):

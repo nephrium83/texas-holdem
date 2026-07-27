@@ -1,9 +1,12 @@
-﻿name: CI
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+
+env:
+  PYTEST_TIMEOUT: "60"
 
 jobs:
   engine-tests:
@@ -17,9 +20,44 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
-        run: python -m pip install -e . pytest
+        run: python -m pip install -e .[dev]
       - name: Run engine tests
         run: pytest -q
+
+  sidecar-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -e .[dev]
+      - name: Run sidecar integration tests
+        run: pytest tests/test_sidecar_integration.py -v
+
+  godot-sidecar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Godot 4.7.1
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.7.1
+          use-dotnet: false
+          include-templates: false
+      - name: Import Godot project (build .godot cache)
+        working-directory: godot
+        run: godot --headless --path . --import
+      - name: Install Python deps
+        run: python -m pip install -e .[dev]
+      - name: Run Godot sidecar integration test
+        run: pytest tests/test_godot_sidecar.py -v --timeout=$PYTEST_TIMEOUT
+        env:
+          GODOT_BIN: godot
 
   gui-smoke:
     runs-on: ubuntu-latest

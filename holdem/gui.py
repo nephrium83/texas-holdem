@@ -505,9 +505,8 @@ class Holdem:
         tk.Label(win, text="Kick Player", bg=t["panel"], fg=t["accent"],
                  font=("Segoe UI", 12, "bold")).pack(pady=(12, 8))
 
-        with sess._lock:
-            others = [(p.conn_id, p.nickname)
-                      for p in sess.players.values() if not p.is_host]
+        others = [(p.conn_id, p.nickname)
+                  for p in sess.player_list() if not p.is_host]
 
         lb = tk.Listbox(win, bg=t["bg"], fg=t["text"], relief="flat",
                         selectmode="single", height=6,
@@ -999,7 +998,7 @@ class Holdem:
         self._mp_rit       = ts.get("rit",       "Ask")
         self._mp_straddles = ts.get("straddles",  False)
 
-        seat_order = sess._seat_order or list(sess.players.keys())
+        seat_order = sess.seat_order or list(sess.players.keys())
         n = max(2, len(seat_order))
 
         self._mp_seat_to_peer = {}
@@ -1049,8 +1048,8 @@ class Holdem:
         self._show(self.table)
 
         if self._mp_is_host:
-            sess._engine  = self.engine
-            sess._seat_order = seat_order
+            sess.set_host_engine(self.engine)
+            sess.configure_seats(seat_order)
             sess.on_action = lambda seat, act, amt: self.root.after(
                 0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
             self.say("hand", "=== Multiplayer Game (Host) ===")
@@ -1067,7 +1066,7 @@ class Holdem:
         and broadcast state."""
         e    = self.engine
         sess = self._mp_session
-        seat_order = sess._seat_order
+        seat_order = sess.seat_order
         for i, cid in enumerate(seat_order):
             sp = sess.players.get(cid)
             if sp and not sp.is_host and i < len(e.players):

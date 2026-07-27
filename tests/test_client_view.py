@@ -32,7 +32,7 @@ def make_table(n, stacks=None):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
-        s._seat_order = list(order)
+        s.configure_seats(list(order))
         s._deal_master_secret = bytes([100 + i]) * 32   # deterministic deal
         bus.register(cid, s)
         sessions[cid] = s
@@ -111,7 +111,7 @@ def test_snapshots_across_seats_reveal_disjoint_holes():
 
 def test_legal_only_for_the_actor():
     bus, sessions, order = make_table(3)
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     for i, cid in enumerate(order):
         snap = client_view.snapshot(sessions[cid])
         if i == actor:
@@ -129,14 +129,14 @@ def test_legal_only_for_the_actor():
 
 def test_command_drives_the_hand():
     bus, sessions, order = make_table(3)
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     res = client_view.apply_command(sessions[order[actor]], "check_call")
     assert res["ok"] and res["verdict"] == "applied"
     bus.drain()
     # the turn advanced for everyone
     for cid in order:
-        assert sessions[cid]._replica.actor != actor or \
-            sessions[cid]._replica.actor is None
+        assert sessions[cid].replica.actor != actor or \
+            sessions[cid].replica.actor is None
         action = client_view.snapshot(sessions[cid])["events"][-1]
         assert action["event"] == "action"
         assert action["seat"] == actor
@@ -144,7 +144,7 @@ def test_command_drives_the_hand():
 
 def test_command_from_wrong_seat_is_reported_not_applied():
     bus, sessions, order = make_table(3)
-    actor = sessions[order[0]]._replica.actor
+    actor = sessions[order[0]].replica.actor
     wrong = (actor + 1) % 3
     res = client_view.apply_command(sessions[order[wrong]], "fold")
     assert not res["ok"]
@@ -163,8 +163,8 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
     """Play a full checkdown; the settled snapshot reveals every seat's
     cards (audit made them public) and carries the result."""
     bus, sessions, order = make_table(3)
-    while sessions[order[0]]._replica.phase == "betting":
-        seat = sessions[order[0]]._replica.actor
+    while sessions[order[0]].replica.phase == "betting":
+        seat = sessions[order[0]].replica.actor
         client_view.apply_command(sessions[order[seat]], "check_call")
         bus.drain()
     snap = json_safe(client_view.snapshot(sessions[order[0]]))
@@ -186,8 +186,8 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
 
 def test_foldout_settled_snapshot_reveals_nothing():
     bus, sessions, order = make_table(3)
-    while sessions[order[0]]._replica.phase == "betting":
-        seat = sessions[order[0]]._replica.actor
+    while sessions[order[0]].replica.phase == "betting":
+        seat = sessions[order[0]].replica.actor
         client_view.apply_command(sessions[order[seat]], "fold")
         bus.drain()
     snap = client_view.snapshot(sessions[order[0]])
@@ -214,7 +214,7 @@ def test_lobby_snapshot_before_hand():
     s = Session(is_host=True, nickname="P0", avatar_b64="",
                 transport=InMemoryTransport(bus, "peer0"))
     s.local_conn_id = "peer0"
-    s._seat_order = list(order)
+    s.configure_seats(list(order))
     snap = client_view.snapshot(s)
     assert snap["phase"] == "lobby"
     assert snap["you"]["seat"] == 0
@@ -225,8 +225,8 @@ def test_lobby_snapshot_before_hand():
 
 def _checkdown(bus, sessions, order):
     from holdem.p2p.replica_table import PHASE_BETTING
-    while sessions[order[0]]._replica.phase == PHASE_BETTING:
-        seat = sessions[order[0]]._replica.actor
+    while sessions[order[0]].replica.phase == PHASE_BETTING:
+        seat = sessions[order[0]].replica.actor
         assert client_view.apply_command(
             sessions[order[seat]], "check_call")["verdict"] == "applied"
         bus.drain()
@@ -263,9 +263,9 @@ def test_snapshot_reports_session_over_and_winner():
     bus, sessions, order = make_table(2, stacks=[500, 500])
     # Heads-up, all-in every hand until one side owns all 1000 chips.
     for _ in range(60):
-        while sessions[order[0]]._replica.phase == PHASE_BETTING:
-            seat = sessions[order[0]]._replica.actor
-            r = sessions[order[seat]]._replica
+        while sessions[order[0]].replica.phase == PHASE_BETTING:
+            seat = sessions[order[0]].replica.actor
+            r = sessions[order[seat]].replica
             lg = r.engine.legal(r.actor)
             act = "raise" if lg["can_raise"] else "call"
             amt = lg["max_to"] if act == "raise" else 0
