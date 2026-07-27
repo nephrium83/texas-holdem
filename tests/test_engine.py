@@ -565,6 +565,40 @@ def test_rules_hash_canonical_and_sensitive():
 
 
 
+def test_legal_your_bet_zero_before_street_contribution():
+    """your_bet is 0 for a seat that has not yet put chips in this street."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(5))
+    e.button = 0
+    e.start_hand()
+    # UTG (first actor preflop) has not yet contributed anything.
+    assert e.legal(e.actor)["your_bet"] == 0
+
+
+def test_legal_your_bet_equals_own_bet_field():
+    """your_bet mirrors p.bet for every seat -- zero and non-zero cases."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(5))
+    e.button = 0
+    e.start_hand()
+    # Preflop: SB posted 10, BB posted 20, UTG 0 -- all three should agree.
+    for i, p in enumerate(e.players):
+        assert e.legal(i)["your_bet"] == p.bet, (
+            f"seat {i}: legal['your_bet']={e.legal(i)['your_bet']} != p.bet={p.bet}"
+        )
+
+
+def test_legal_your_bet_nonzero_after_raise():
+    """After a player raises, their your_bet reflects chips committed."""
+    ps = [Player(i, f"P{i}", 1000) for i in range(3)]
+    e = Engine(ps, 10, 20, "No-Limit", random.Random(5))
+    e.button = 0
+    e.start_hand()
+    raiser = e.actor   # UTG acts first
+    e.act(raiser, "raise", 60)
+    assert e.legal(raiser)["your_bet"] == 60
+
+
 if __name__ == "__main__":
     import inspect
     import tempfile
