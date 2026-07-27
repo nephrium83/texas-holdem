@@ -53,7 +53,7 @@ func _run() -> int:
 	print("GODOT_CONNECTED")
 
 	# Read and verify the hello message.
-	var hello := _read_json_line(client)
+	var hello: Variant = _read_json_line(client)
 	if not hello is Dictionary:
 		printerr("GODOT_ERROR: expected hello dict, got: %s" % str(hello))
 		return 1
@@ -63,7 +63,7 @@ func _run() -> int:
 	print("GODOT_HELLO:%d" % int(hello.get("protocol", -1)))
 
 	# Read and verify the initial snapshot.
-	var snap := _read_json_line(client)
+	var snap: Variant = _read_json_line(client)
 	if not snap is Dictionary:
 		printerr("GODOT_ERROR: expected snapshot dict, got: %s" % str(snap))
 		return 1
