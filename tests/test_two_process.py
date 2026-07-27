@@ -103,17 +103,33 @@ class EventCollector:
                 self._new.notify_all()
 
     def wait_for(self, predicate, timeout: float = STARTUP_TIMEOUT) -> Optional[dict]:
-        """Block until predicate(event) is True; return the matching event."""
+        """Block until predicate(event) is True; return the matching event.
+
+        Predicate is called WITHOUT holding the internal lock so that it may
+        safely call other EventCollector methods (e.g. event_count) without
+        deadlocking.  self._lock and self._new share the same underlying mutex,
+        so any predicate that calls event_count() would deadlock if evaluated
+        inside a ``with self._new:`` block.
+        """
         deadline = time.monotonic() + timeout
-        with self._new:
-            while True:
-                for e in self._events:
-                    if predicate(e):
-                        return e
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
-                self._new.wait(timeout=min(remaining, 1.0))
+        checked = 0  # index of first event not yet evaluated
+        while True:
+            # Snapshot newly-arrived events under the lock, then release it.
+            with self._lock:
+                new_events = list(self._events[checked:])
+                checked = len(self._events)
+            # Evaluate predicate outside the lock so predicates may call
+            # event_count() or other lock-acquiring helpers freely.
+            for e in new_events:
+                if predicate(e):
+                    return e
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            # Wait up to 0.5 s for the reader thread to notify us of new events.
+            with self._new:
+                if len(self._events) == checked:
+                    self._new.wait(timeout=min(remaining, 0.5))
 
     def all_of_type(self, t: str) -> list[dict]:
         with self._lock:
