@@ -165,18 +165,26 @@ class Session:
         # can re-render from the local replica on its own thread.
         self.on_state_changed: Optional[Callable[[], None]] = None
 
-        self._emit_event("sidecar_started")
+        self._safe_emit("sidecar_started")
 
     # ------------------------------------------------------------------
     # Structured event logging helper
     # ------------------------------------------------------------------
 
-    def _emit_event(self, event: str, **extra) -> None:
+    def _safe_emit(self, event: str, **extra) -> None:
         """Emit one JSONL state event to the configured sink.
 
         Common fields are assembled automatically; callers add hand/seq/phase/
-        digest and any event-specific fields via keyword arguments.  This
-        method must never raise — a broken sink must not affect game state.
+        digest and any event-specific fields via keyword arguments.
+
+        The outer try/except is load-bearing, not defensive boilerplate.
+        In a replicated state machine, every code path that mutates engine
+        or replica state must be atomic from the perspective of the other
+        peers.  A broken or slow sink (misconfigured stdout, disk full, etc.)
+        must never prevent apply_action, _void_hand, or any timeout handler
+        from completing — those paths must converge identically on every node
+        whether logging succeeds or not.  Swallowing sink exceptions here is
+        the contract; do not remove the bare except.
         """
         import time as _time
         try:
@@ -363,7 +371,7 @@ class Session:
         if self._replica is not None:
             new_digest = self._replica.state_digest()
             if new_digest != self._last_digest:
-                self._emit_event(
+                self._safe_emit(
                     "digest_changed",
                     hand       = self._hand_no,
                     seq        = self._replica.next_seq,
@@ -564,7 +572,7 @@ class Session:
         self.begin_hand(hand_no, button=self._replica.button,
                         seats_in=self._replica.seats_dealt)
         self._last_digest = self._replica.state_digest()
-        self._emit_event(
+        self._safe_emit(
             "hand_started",
             hand   = self._hand_no,
             seq    = self._replica.next_seq,
@@ -638,7 +646,7 @@ class Session:
         self._final_stacks = final
         self._p2p_spectator = self.local_seat not in alive
         self._msg_buffer.clear()
-        self._emit_event("sidecar_stopping",
+        self._safe_emit("sidecar_stopping",
                          hand=self._hand_no, reason="session_complete",
                          winner=winner)
         self._notify_state_changed()
@@ -663,7 +671,7 @@ class Session:
         verdict = self._replica.apply_action(seq, seat, action, amount)
         if verdict != "applied":
             return verdict
-        self._emit_event(
+        self._safe_emit(
             "action_applied",
             hand   = self._hand_no,
             seq    = self._replica.next_seq,
@@ -699,14 +707,14 @@ class Session:
                 _log.warning("session: bet_action from %s claims seat %s "
                              "— dropping", conn_id, seat)
                 return
-        self._emit_event(
+        self._safe_emit(
             "action_received",
             hand=self._hand_no, seq=seq, seat=seat,
             action=action, amount=amount,
         )
         verdict = self._replica.apply_action(seq, seat, action, amount)
         if verdict == "applied":
-            self._emit_event(
+            self._safe_emit(
                 "action_applied",
                 hand   = self._hand_no,
                 seq    = self._replica.next_seq,
@@ -734,7 +742,7 @@ class Session:
         self.hand_voided = True
         self.void_reason = str(reason)[:512]
         _log.warning("session: HAND VOIDED — %s", reason)
-        self._emit_event("hand_voided", hand=self._hand_no, reason=self.void_reason)
+        self._safe_emit("hand_voided", hand=self._hand_no, reason=self.void_reason)
 
         self._notify_state_changed()
         if announce:
@@ -827,7 +835,7 @@ class Session:
             )
             if conn_id not in self._join_order:
                 self._join_order.append(conn_id)
-        self._emit_event("peer_connected", conn_id=conn_id, nickname=nickname)
+        self._safe_emit("peer_connected", conn_id=conn_id, nickname=nickname)
         if self.is_host:
             # Tell the peer their host-side conn_id so they can self-identify
             self._transport.send(conn_id, {"type": "player_ack",
@@ -1025,7 +1033,7 @@ class Session:
                 is_host           = self.is_host,
                 ready             = True,
             )
-        self._emit_event("peer_connected",
+        self._safe_emit("peer_connected",
                          conn_id=conn_id, nickname=self.local_nickname)
         if self.is_host:
             self._broadcast_player_list()
@@ -1201,7 +1209,7 @@ class Session:
             self._broadcast_timeout_proposal(token)
 
     def _broadcast_timeout_proposal(self, token: DeadlineToken) -> None:
-        self._emit_event(
+        self._safe_emit(
             "timeout_proposed",
             hand        = self._hand_no,
             seq         = token.action_seq,
@@ -1264,7 +1272,7 @@ class Session:
     def _apply_timeout(self, token: DeadlineToken) -> None:
         """Apply the phase-specific consequence of an accepted timeout."""
         self._clear_deadline()
-        self._emit_event(
+        self._safe_emit(
             "timeout_applied",
             hand        = self._hand_no,
             seq         = token.action_seq,
@@ -1316,7 +1324,7 @@ class Session:
             with self._lock:
                 if actor in self.players:
                     self.players[actor].unavailable = True
-            self._emit_event("peer_unavailable", conn_id=actor)
+            self._safe_emit("peer_unavailable", conn_id=actor)
         self._void_hand(reason)
 
     def _maybe_start_deadline(self) -> None:
