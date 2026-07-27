@@ -694,6 +694,14 @@ class Engine:
             "min_to": min_to,
             "max_to": max_to,
             "pot": self.pot,
+            # This seat's own contribution to the CURRENT street. Needed by
+            # any client sizing a raise as a fraction of the pot: raise_to
+            # targets are absolute, so a pot-fraction target must be built
+            # from the current bet level (your_bet + to_call), not from
+            # to_call alone -- those are only equal when this seat has put
+            # nothing in this street. Without this field the sizing cannot
+            # be computed client-side at all.
+            "your_bet": p.bet,
         }
 
     # -- actions -----------------------------------------------------------

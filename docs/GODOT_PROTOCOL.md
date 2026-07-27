@@ -306,6 +306,7 @@ Private to the local seat.
 | `min_to`     | int  | minimum absolute target for `raise_to`             |
 | `max_to`     | int  | maximum absolute target (your whole stack all-in)  |
 | `pot`        | int  | pot size (for pot-limit / bet-sizing UI)           |
+| `your_bet`   | int  | chips this seat has already put in on this street; needed to size a pot-fraction raise — `raise_to` targets are absolute, so `current_bet = your_bet + to_call` |
 
 The presence of `you.legal` is the client's cue that it is this player's
 turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,

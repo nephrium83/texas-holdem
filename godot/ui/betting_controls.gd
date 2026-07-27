@@ -118,15 +118,18 @@ func _on_preset_all_in_pressed() -> void:
 
 
 ## Pot-fraction presets size the raise as a fraction of the pot AFTER
-## calling (pot + to_call) -- e.g. "1/2 pot" adds half of that as the
-## raise on top of the call, matching how bet-sizing UIs commonly frame
-## a fractional raise. The result is clamped to [min_to, max_to]; the
-## sidecar is the actual authority on legality regardless.
+## calling (pot + to_call). The result is added on top of current_bet
+## (your_bet + to_call) because raise_to targets are absolute: the
+## total amount this seat wagers on the street, not a delta. Without
+## your_bet the formula is wrong whenever this seat has already put
+## chips in (blinds, re-raise situations). Clamped to [min_to, max_to].
 func _apply_preset(fraction: float) -> void:
 	var pot := int(_legal.get("pot", 0))
 	var to_call := int(_legal.get("to_call", 0))
+	var your_bet := int(_legal.get("your_bet", 0))
 	var pot_after_call := pot + to_call
-	var target := to_call + int(round(pot_after_call * fraction))
+	var current_bet := your_bet + to_call
+	var target := current_bet + int(round(pot_after_call * fraction))
 	var min_to := int(_legal.get("min_to", 0))
 	var max_to := int(_legal.get("max_to", 0))
 	_raise_slider.value = clamp(target, min_to, max_to)
