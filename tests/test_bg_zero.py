@@ -635,11 +635,12 @@ def test_simulator_works_at_m_equals_one():
 def test_real_transcript_is_determined_by_its_responses(m, n):
     """The step that makes real and simulated distributions identical.
 
-    Theorem 10 argues that a~, b~, r~, s~, t~ are uniform in both cases
-    and that, conditioned on them, the remaining commitments are UNIQUELY
-    determined by the verification equations. That is checkable: solve the
-    equations for c_A0, c_Bm and c_D0 from a real proof's responses alone,
-    and the real commitments must come back.
+    Theorem 10 argues that a~, b~, r~, s~, t~ are uniform in both cases.
+    Conditioned on those responses and the other c_D commitments supplied by
+    the transcript, the verification equations uniquely determine c_A0,
+    c_Bm and c_D0. That is checkable: solve those three equations from a real
+    proof's responses and supplied c_D values, and the real commitments must
+    come back.
 
     Without this, the simulator test above would show only that some
     accepting transcript exists, not that it has the real one's shape.
