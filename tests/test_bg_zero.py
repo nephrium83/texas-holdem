@@ -105,11 +105,16 @@ def test_valid_proof_verifies(m, n):
 
 
 def test_m_equals_one_is_supported():
-    """Unlike bg_svp's n >= 2, section 5.2 does not collapse at the minimum.
+    """Completeness at the boundary. Unlike bg_svp's n >= 2, section 5.2
+    does not collapse at the minimum.
 
     Its only forced quantity is t_{m+1}, which never needs to be free
     because d_{m+1} is publicly zero; the blinders a_0 and b_m stay
     unconstrained. See the module docstring.
+
+    COMPLETENESS ONLY -- prove/verify agreeing says nothing about
+    zero-knowledge. The SHVZK claim at m = 1 is covered by
+    test_simulator_works_at_m_equals_one.
     """
     setup = _setup(1, 3)
     assert _verify(setup, _prove(setup))
@@ -542,3 +547,131 @@ def test_svp_and_zero_domains_differ():
     because the group elements happen to fit."""
     from holdem.p2p import bg_svp
     assert Z._DOMAIN != bg_svp._DOMAIN
+
+
+# ------------------------------------------------------------- SHVZK
+#
+# prove()/verify() passing establishes COMPLETENESS and nothing else. The
+# zero-knowledge claim needs the simulator of Theorem 10, which is stated
+# for the interactive argument: it is handed x, picks the responses at
+# random, and derives the commitments from the verification equations.
+#
+# Under Fiat-Shamir x is a hash of the prover's own messages, so the
+# simulator cannot both choose x freely and produce commitments hashing to
+# it. That gap is closed by programming the random oracle, not by code, so
+# these tests use check_equations() with an explicit x rather than
+# verify(). What they establish is the testable half of the argument: that
+# an accepting transcript is a deterministic function of uniformly random
+# responses, identically in the real and simulated cases.
+
+
+def _pows(x, count):
+    out = [R.Scalar(b"\x01" + b"\x00" * 31)]
+    for _ in range(count - 1):
+        out.append(R.scalar_mul(out[-1], x))
+    return out
+
+
+def _simulate(ck, c_A, c_B, bmap, x, seed=0):
+    """Theorem 10's simulator.
+
+    Picks a~, b~, r~, s~ and t_0..t_2m at random with t_{m+1} = 0, sets
+    c_D0 = com(a~ * b~; t_0) and c_Dk = com(0; t_k) for k >= 1, then solves
+    the first two verification equations for c_A0 and c_Bm. No witness is
+    used anywhere.
+    """
+    m, n = len(c_A), bmap.n
+    a_t = [_s(seed + 7000 + j) for j in range(n)]
+    b_t = [_s(seed + 7100 + j) for j in range(n)]
+    r_t, s_t = _s(seed + 7200), _s(seed + 7300)
+    t = [_s(seed + 7400 + k) for k in range(2 * m + 1)]
+    t[m + 1] = ZERO
+
+    c_D = [P.commit(ck, [bmap.evaluate(a_t, b_t)], t[0])]
+    for k in range(1, 2 * m + 1):
+        c_D.append(P.commit(ck, [ZERO], t[k]))
+
+    xs = _pows(x, 2 * m + 1)
+    c_A0 = R.sub(P.commit(ck, a_t, r_t),
+                 R.multiscalar_mul(xs[1:m + 1], list(c_A)))
+    c_Bm = R.sub(P.commit(ck, b_t, s_t),
+                 R.multiscalar_mul([xs[m - j] for j in range(m)], list(c_B)))
+    t_t = ZERO
+    for k in range(2 * m + 1):
+        t_t = R.scalar_add(t_t, R.scalar_mul(xs[k], t[k]))
+
+    return Z.ZeroProof(c_A0=c_A0, c_Bm=c_Bm, c_D=c_D, a_tilde=a_t,
+                       b_tilde=b_t, r_tilde=r_t, s_tilde=s_t, t_tilde=t_t)
+
+
+@pytest.mark.parametrize("m,n", [(1, 1), (1, 3), (2, 2), (4, 3)])
+def test_simulator_produces_accepting_transcripts(m, n):
+    """The simulator never touches a witness, yet satisfies every equation.
+
+    That is what zero-knowledge means operationally: the transcript cannot
+    carry information about a_i or b_i, because one shaped like it can be
+    produced without them.
+    """
+    ck, bmap, _av, _rv, _bv, _sv, c_A, c_B, _ctx = _setup(m, n)
+    x = _s(31337)
+    sim = _simulate(ck, c_A, c_B, bmap, x)
+    assert Z.check_equations(ck, c_A, c_B, bmap, sim, x)
+    assert bytes(sim.c_D[m + 1]) == bytes(R.IDENTITY)
+
+
+def test_simulator_works_at_m_equals_one():
+    """The boundary case, which is the whole reason m >= 1 rather than
+    m >= 2. Section 5.3 collapses at n = 1 because delta_1 and delta_n
+    become the same forced variable; 5.2 has no such collision, so the
+    simulator retains {t_0, t_1} free at m = 1."""
+    ck, bmap, _av, _rv, _bv, _sv, c_A, c_B, _ctx = _setup(1, 2)
+    for i in range(4):                       # several independent draws
+        x = _s(900 + i)
+        sim = _simulate(ck, c_A, c_B, bmap, x, seed=100 * i)
+        assert Z.check_equations(ck, c_A, c_B, bmap, sim, x)
+
+
+@pytest.mark.parametrize("m,n", [(1, 2), (3, 3)])
+def test_real_transcript_is_determined_by_its_responses(m, n):
+    """The step that makes real and simulated distributions identical.
+
+    Theorem 10 argues that a~, b~, r~, s~, t~ are uniform in both cases
+    and that, conditioned on them, the remaining commitments are UNIQUELY
+    determined by the verification equations. That is checkable: solve the
+    equations for c_A0, c_Bm and c_D0 from a real proof's responses alone,
+    and the real commitments must come back.
+
+    Without this, the simulator test above would show only that some
+    accepting transcript exists, not that it has the real one's shape.
+    """
+    setup = _setup(m, n)
+    ck, bmap, _av, _rv, _bv, _sv, c_A, c_B, ctx = setup
+    p = _prove(setup)
+    x = Z._challenge(ck, n, m, bmap, ctx, c_A, c_B, p.c_A0, p.c_Bm, p.c_D)
+    xs = _pows(x, 2 * m + 1)
+
+    c_A0 = R.sub(P.commit(ck, p.a_tilde, p.r_tilde),
+                 R.multiscalar_mul(xs[1:m + 1], list(c_A)))
+    c_Bm = R.sub(P.commit(ck, p.b_tilde, p.s_tilde),
+                 R.multiscalar_mul([xs[m - j] for j in range(m)], list(c_B)))
+    c_D0 = R.sub(P.commit(ck, [bmap.evaluate(p.a_tilde, p.b_tilde)],
+                          p.t_tilde),
+                 R.multiscalar_mul(xs[1:], p.c_D[1:]))
+
+    assert bytes(c_A0) == bytes(p.c_A0)
+    assert bytes(c_Bm) == bytes(p.c_Bm)
+    assert bytes(c_D0) == bytes(p.c_D[0])
+
+
+def test_simulated_and_real_transcripts_have_the_same_shape():
+    """Same field types, same lengths, same fixed zero slot. Structural
+    only -- distributional identity is Theorem 10's proof obligation, not
+    something a test can discharge."""
+    setup = _setup(3, 3)
+    ck, bmap, _av, _rv, _bv, _sv, c_A, c_B, _ctx = setup
+    real = _prove(setup)
+    sim = _simulate(ck, c_A, c_B, bmap, _s(31337))
+    assert len(sim.c_D) == len(real.c_D)
+    assert len(sim.a_tilde) == len(real.a_tilde)
+    assert len(sim.b_tilde) == len(real.b_tilde)
+    assert bytes(sim.c_D[4]) == bytes(real.c_D[4]) == bytes(R.IDENTITY)

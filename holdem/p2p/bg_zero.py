@@ -393,6 +393,23 @@ def verify(ck: CommitmentKey,
     except ValueError:
         return False
 
+    return check_equations(ck, c_A, c_B, bmap, proof, x)
+
+
+def check_equations(ck: CommitmentKey, c_A: Sequence[Point],
+                    c_B: Sequence[Point], bmap: BilinearMap,
+                    proof: ZeroProof, x: Scalar) -> bool:
+    """The three verification equations, for an externally supplied x.
+
+    Split out from ``verify`` because the SHVZK simulator of Theorem 10 is
+    stated for the INTERACTIVE argument, where x is handed to it. Under
+    Fiat-Shamir x is a hash of the prover's own messages, so a simulator
+    cannot both choose x freely and produce commitments hashing to it --
+    that gap is closed by programming the random oracle, not by the code.
+    Exposing the equations lets the simulator be tested against exactly
+    what it is claimed to satisfy.
+    """
+    m = len(c_A)
     xs = _powers(x, 2 * m + 1)
     a_weights = xs[: m + 1]
     b_weights = [xs[m - j] for j in range(m + 1)]
@@ -421,4 +438,5 @@ def verify(ck: CommitmentKey,
     return True
 
 
-__all__ = ["BilinearMap", "ZeroProof", "prove", "verify"]
+__all__ = ["BilinearMap", "ZeroProof", "prove", "verify",
+           "check_equations"]
