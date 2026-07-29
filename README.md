@@ -124,9 +124,9 @@ Today, multi-peer sessions are exercised through an in-memory transport; the
 libp2p/relay path and physical-machine playtest remain v1.x gate work.
 
 **Performance policy:** detection-only audit is the v1 default while the
-cryptographic prevention path is benchmarked and optimized. Prevention remains
-available as an explicit opt-in; security parameters are not reduced to satisfy
-timing targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md) and
+cryptographic prevention path is benchmarked and integrated. Prevention remains
+planned as an explicit opt-in after that path is available; security parameters
+are not reduced to satisfy timing targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md) and
 the [L5 performance baseline](docs/L5_SCOPE.md).
 
 ## Run the current playable harness
