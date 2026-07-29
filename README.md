@@ -123,6 +123,12 @@ The real internet transport is deliberately separate from the protocol core.
 Today, multi-peer sessions are exercised through an in-memory transport; the
 libp2p/relay path and physical-machine playtest remain v1.x gate work.
 
+**Performance policy:** detection-only audit is the v1 default while the
+cryptographic prevention path is benchmarked and optimized. Prevention remains
+available as an explicit opt-in; security parameters are not reduced to satisfy
+timing targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md) and
+the [L5 performance baseline](docs/L5_SCOPE.md).
+
 ## Run the current playable harness
 
 ```bash
@@ -176,6 +182,7 @@ The crypto tests require a libsodium build exposing the Ristretto255 API. See
 - [ ] Silent-peer timeout that triggers the existing table-wide void path.
 - [ ] Real libp2p transport and proof fragmentation.
 - [ ] Two-machine join-code playtest.
+- [ ] Benchmark and optimize the complete cryptographic hand-start path ([#16](https://github.com/nephrium83/texas-holdem/issues/16)).
 
 The hard gate and deferred work are tracked in
 [L5_SCOPE.md](docs/L5_SCOPE.md). The full protocol and transport rationale live
