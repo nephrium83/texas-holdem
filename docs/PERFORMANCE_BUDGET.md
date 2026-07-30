@@ -24,6 +24,10 @@ These are engineering targets for the next integrated proof path, not claims abo
 
 The existing L5 baseline is the reference point until a new benchmark supersedes it: detection-only is about 0.18 seconds at nine seats, while the current prevention path is about 20 seconds at nine seats.
 
+The standalone Bayer–Groth shuffle proof has an initial proof-only benchmark in
+[`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md). It is not yet an
+end-to-end hand-start measurement.
+
 ## Benchmark protocol
 
 The benchmark issue is [Benchmark and optimize the complete cryptographic hand-start path](https://github.com/nephrium83/texas-holdem/issues/16).
