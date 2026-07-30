@@ -38,10 +38,13 @@ a prover has negligible chance over x unless every b_{i+1} = b_i*a_{i+1},
 which chains b~_1 = a~_1 up to b~_n = x*b into b = prod a_i.
 
 Fiat-Shamir (Scytl pitfall #2): the challenge hashes the COMPLETE
-transcript -- domain tag, the full commitment key (every generator, not
-just a seed reference), the statement (c_a, n, b), and every prover
-message (c_d, c_delta, c_Delta). Nothing the verifier checks is outside
-the hash.
+transcript -- domain tag, the invocation context, the full commitment key
+(every generator, not just a seed reference), the statement (c_a, n, b),
+and every prover message (c_d, c_delta, c_Delta). Nothing the verifier
+checks is outside the hash. The context is mandatory because this proof is
+an independently verifiable sub-argument: Theorem 8 invokes it against a
+shared c_b, so a statement-only challenge would permit cross-invocation
+replay whenever that statement recurs.
 
 n >= 2 is required: with n == 1 the construction forces d_1 = delta_1 =
 delta_n = 0, which destroys the zero-knowledge blinding of a~_1.
@@ -73,10 +76,13 @@ class SVPProof:
 
 
 def _challenge(ck: CommitmentKey, c_a: Point, n: int, b: Scalar,
-               c_d: Point, c_delta: Point, c_Delta: Point) -> Scalar:
+               c_d: Point, c_delta: Point, c_Delta: Point,
+               context: bytes) -> Scalar:
     """Fiat-Shamir challenge over the complete transcript."""
     h = hashlib.sha512()
     h.update(_DOMAIN)
+    h.update(len(context).to_bytes(4, "big"))
+    h.update(context)
     h.update(bytes(ck.H))
     for Gi in ck.Gs:
         h.update(bytes(Gi))
@@ -93,8 +99,12 @@ def _challenge(ck: CommitmentKey, c_a: Point, n: int, b: Scalar,
 
 
 def prove(ck: CommitmentKey, a: Sequence[Scalar], r: Scalar,
-          b: Scalar) -> SVPProof:
-    """Prove that comck(a; r) opens to values whose product is b."""
+          b: Scalar, context: bytes) -> SVPProof:
+    """Prove that comck(a; r) opens to values whose product is b.
+
+    ``context`` is mandatory and binds this independently verifiable
+    sub-proof to its surrounding protocol invocation.
+    """
     n = len(a)
     if n < 2:
         raise ValueError("single-value product argument requires n >= 2")
@@ -136,7 +146,8 @@ def prove(ck: CommitmentKey, a: Sequence[Scalar], r: Scalar,
     ]
     c_Delta = commit(ck, big, s_x)
 
-    x = _challenge(ck, commit(ck, a, r), n, b, c_d, c_delta, c_Delta)
+    x = _challenge(ck, commit(ck, a, r), n, b, c_d, c_delta, c_Delta,
+                   context)
 
     a_tilde = [R.scalar_add(R.scalar_mul(x, a[i]), d[i]) for i in range(n)]
     r_tilde = R.scalar_add(R.scalar_mul(x, r), r_d)
@@ -150,15 +161,16 @@ def prove(ck: CommitmentKey, a: Sequence[Scalar], r: Scalar,
 
 
 def verify(ck: CommitmentKey, c_a: Point, n: int, b: Scalar,
-           proof: SVPProof) -> bool:
-    """Verify a single-value product proof for statement (c_a, n, b)."""
+           context: bytes, proof: SVPProof) -> bool:
+    """Verify a single-value product proof bound to ``context``."""
     if n < 2 or n > ck.n:
         return False
     if len(proof.a_tilde) != n or len(proof.b_tilde) != n:
         return False
 
     try:
-        x = _challenge(ck, c_a, n, b, proof.c_d, proof.c_delta, proof.c_Delta)
+        x = _challenge(ck, c_a, n, b, proof.c_d, proof.c_delta,
+                       proof.c_Delta, context)
     except ValueError:
         return False
 
