@@ -113,12 +113,119 @@ _MC_TTL   = 1   # LAN-only; one hop
 # announce loop task handle (so we can cancel it)
 _announce_task: Optional[asyncio.Task] = None
 
+# The asyncio server, retained so stop() can actually close the listener.
+_server: Optional[asyncio.AbstractServer] = None
+
+# Every background task this module owns. asyncio holds only a WEAK
+# reference to a running task, so a task created and forgotten can be
+# garbage-collected mid-execution; and an un-awaited task that raises
+# discards the exception. Both were happening at five create_task sites.
+# Membership here gives each task an owner, a cancellation path, and a
+# place to surface failures.
+_tasks: "set[asyncio.Task]" = set()
+_tasks_lock = threading.Lock()
+
+# Set for the duration of stop(). Without it, a connection accepted between
+# the shutdown snapshot and the loop closing is never cancelled or joined:
+# its task is destroyed while pending and the coroutine's finally block
+# runs writer.close() against a closed loop, from a finaliser where nothing
+# can handle the error.
+_closing = False
+
+# Called with the exception from any tracked task that fails. Registered by
+# the owning session so a background failure becomes a lifecycle outcome
+# rather than a log line nobody reads.
+_task_error_callbacks: list[Callable] = []
+
 # C-3: Maximum allowed message size (1 MB) to prevent OOM DoS
 MAX_MSG = 1 << 20  # 1 048 576 bytes
+
+# How long stop() waits for cancelled tasks to finish before reporting them
+# as stragglers. Bounds shutdown latency: a task blocked in a default
+# executor thread (loop.getaddrinfo, used by the STUN query) does not stop
+# when its task is cancelled, and waiting on it would tie shutdown to a DNS
+# server's response time.
+_JOIN_TIMEOUT = 2.0
 
 # ---------------------------------------------------------------------------
 # Public registration API (call before starting)
 # ---------------------------------------------------------------------------
+
+def on_task_error(callback: Callable) -> None:
+    """Register a handler for exceptions raised by background tasks."""
+    _task_error_callbacks.append(callback)
+
+
+def event_loop() -> Optional[asyncio.AbstractEventLoop]:
+    """The transport's event loop, or None when it is not running."""
+    return _loop
+
+
+def peer_ids() -> list:
+    """conn_ids with a registered writer."""
+    with _writers_lock:
+        return list(_writers)
+
+
+def active_tasks() -> list:
+    """Background tasks this module currently owns."""
+    with _tasks_lock:
+        return [t for t in _tasks if not t.done()]
+
+
+def spawn(coro, name: str = "") -> "asyncio.Task":
+    """Create a tracked background task.
+
+    Must be called from inside the event loop thread. The task is retained
+    until it finishes -- otherwise CPython may collect it mid-flight -- and
+    its exception is routed to the registered error handlers instead of
+    being discarded when nobody awaits it. CancelledError is expected
+    during shutdown and is not reported as a failure.
+    """
+    if _closing:
+        # Refuse new work during shutdown, and close the coroutine so it
+        # does not surface as "coroutine was never awaited".
+        coro.close()
+        raise RuntimeError("transport is shutting down")
+    task = asyncio.get_event_loop().create_task(coro, name=name or None)
+    with _tasks_lock:
+        _tasks.add(task)
+
+    def _done(finished: "asyncio.Task") -> None:
+        with _tasks_lock:
+            _tasks.discard(finished)
+        if finished.cancelled():
+            return
+        exc = finished.exception()
+        if exc is None:
+            return
+        log.error("transport: background task %s failed: %r",
+                  finished.get_name(), exc)
+        for cb in list(_task_error_callbacks):
+            try:
+                cb(exc)
+            except Exception:
+                log.exception("transport: task-error callback failed")
+
+    task.add_done_callback(_done)
+    return task
+
+
+def spawn_threadsafe(coro, name: str = "", timeout: float = 5.0):
+    """spawn() from a thread other than the loop's.
+
+    spawn() must run inside the loop thread -- create_task binds the task
+    to the running loop -- so callers elsewhere (the session runs on its
+    own thread) need this hop. Returns the tracked asyncio.Task.
+    """
+    if _loop is None or _loop.is_closed():
+        raise RuntimeError("transport is not running")
+
+    async def _make():
+        return spawn(coro, name=name)
+
+    return asyncio.run_coroutine_threadsafe(_make(), _loop).result(timeout)
+
 
 def on_message(callback: Callable) -> None:
     """Register callback(conn_id, msg_dict)."""
@@ -307,8 +414,11 @@ def start_host(port: int = 0) -> str:
     )
     _listen_address = fut.result(timeout=10)
 
-    # Fire STUN in background — does not block the Tk main thread
-    asyncio.run_coroutine_threadsafe(_resolve_stun(), _loop)
+    # Fire STUN in the background — does not block the Tk main thread.
+    # Tracked: run_coroutine_threadsafe creates a task the registry never
+    # sees, so stop() could not cancel it and it was destroyed while
+    # pending, mid-DNS-resolution, on every shutdown.
+    spawn_threadsafe(_resolve_stun(), name="stun-resolve")
 
     return _listen_address
 
@@ -351,18 +461,32 @@ def _get_lan_ip() -> str:
 
 
 async def _start_server(port: int) -> str:
+    global _server
+
     async def _accept(reader, writer):
         addr = writer.get_extra_info("peername", ("unknown", 0))
         cid = _new_conn_id()
-        # L-5: use create_task instead of deprecated ensure_future
-        asyncio.create_task(
-            _handle_connection(reader, writer, cid, f"{addr[0]}:{addr[1]}")
-        )
+        try:
+            # Tracked, so the handler cannot be collected mid-connection
+            # and a failure inside it reaches the owning session.
+            spawn(_handle_connection(reader, writer, cid,
+                                     f"{addr[0]}:{addr[1]}"),
+                  name=f"conn-{cid[:8]}")
+        except RuntimeError:
+            # Shutting down: refuse the connection cleanly rather than
+            # starting a handler that stop() has already stopped waiting for.
+            log.debug("transport: refusing connection during shutdown")
+            writer.close()
 
     server = await asyncio.start_server(_accept, "0.0.0.0", port)
+    _server = server                     # retained so stop() can close it
     actual_port = server.sockets[0].getsockname()[1]
-    # Keep the server running in the background
-    asyncio.create_task(server.serve_forever())
+    # No serve_forever task. start_server already begins accepting
+    # (start_serving defaults to True), and serve_forever() exists only to
+    # block a coroutine -- which a run_forever loop does not need. Keeping
+    # it created a task that did not stop promptly on cancel and then made
+    # Server.wait_closed() block on itself, so every shutdown paid the full
+    # join timeout and the loop was closed with the server still open.
     # H-1: announce the real LAN IP, not the unroutable 0.0.0.0
     lan_ip = _get_lan_ip()
     return f"{lan_ip}:{actual_port}"
@@ -406,9 +530,8 @@ async def _connect_direct(host: str, port: int,
             f"Direct TCP connect to {host}:{port} failed: {exc}"
         ) from exc
     cid = _new_conn_id()
-    asyncio.create_task(  # L-5
-        _handle_connection(reader, writer, cid, f"{host}:{port}")
-    )
+    spawn(_handle_connection(reader, writer, cid, f"{host}:{port}"),
+          name=f"conn-{cid[:8]}")
     return cid
 
 
@@ -462,25 +585,27 @@ async def _connect_via_relay(relay_host: str, relay_port: int,
         raise ConnectionError(f"Relay handshake failed: {exc}") from exc
 
     cid = _new_conn_id()
-    asyncio.create_task(
-        _handle_connection(
-            reader, writer, cid, f"relay:{relay_host}:{relay_port}"
-        )
-    )
+    spawn(_handle_connection(reader, writer, cid,
+                             f"relay:{relay_host}:{relay_port}"),
+          name=f"conn-{cid[:8]}")
     log.info("transport: relay connection established (%s) room=%s",
              cid, room_code)
     return cid
 
 
 def send(conn_id: str, msg: dict) -> None:
-    """Send *msg* to the peer identified by *conn_id*."""
-    _ensure_loop()
-    # M-3: store future and attach an exception callback so failures are logged
+    """Send *msg* to the peer identified by *conn_id*.
+
+    A send after stop() is a no-op rather than an implicit restart:
+    _ensure_loop() here would resurrect a transport the caller has already
+    shut down, which is exactly the "orphaned transport" outcome the
+    lifecycle contract forbids.
+    """
+    if _loop is None or _loop.is_closed():
+        log.warning("transport.send: transport is not running")
+        return
     fut = asyncio.run_coroutine_threadsafe(_send_to(conn_id, msg), _loop)
-    fut.add_done_callback(
-        lambda f: log.warning("transport.send(%s) error: %s", conn_id, f.exception())
-        if not f.cancelled() and f.exception() else None
-    )
+    fut.add_done_callback(_report_send_failure)
 
 
 async def _send_to(conn_id: str, msg: dict) -> None:
@@ -492,17 +617,60 @@ async def _send_to(conn_id: str, msg: dict) -> None:
     try:
         writer.write(_sign_frame(msg))   # C-1: sign every peer-bound message
         await writer.drain()
+    except (OSError, ConnectionError, asyncio.IncompleteReadError) as exc:
+        # A failed write means this connection is gone. Logging and
+        # continuing left the peer registered and apparently healthy, so
+        # every later send queued into a dead socket and the session was
+        # never told. Drop it and let the disconnect callbacks run.
+        log.warning("transport: write to %s failed (%s) — dropping peer",
+                    conn_id, exc)
+        _drop_writer(conn_id)
+
+
+def _drop_writer(conn_id: str) -> None:
+    """Deregister and close one peer's writer. Safe to call twice."""
+    with _writers_lock:
+        writer = _writers.pop(conn_id, None)
+    if writer is None:
+        return
+    try:
+        writer.close()
     except Exception:
-        log.exception("transport.send error")
+        log.debug("transport: writer close raced", exc_info=True)
+    for cb in _disc_callbacks:
+        try:
+            cb(conn_id)
+        except Exception:
+            log.exception("on_disconnect callback error")
 
 
 def broadcast(msg: dict) -> None:
     """Send *msg* to every connected peer."""
-    _ensure_loop()
+    if _loop is None or _loop.is_closed():
+        log.warning("transport.broadcast: transport is not running")
+        return
     with _writers_lock:
         conn_ids = list(_writers.keys())
     for cid in conn_ids:
-        asyncio.run_coroutine_threadsafe(_send_to(cid, msg), _loop)
+        # Previously the future was discarded, so a whole-table send could
+        # fail with nothing recorded anywhere. Route it through the same
+        # error path as send().
+        fut = asyncio.run_coroutine_threadsafe(_send_to(cid, msg), _loop)
+        fut.add_done_callback(_report_send_failure)
+
+
+def _report_send_failure(fut) -> None:
+    if fut.cancelled():
+        return
+    exc = fut.exception()
+    if exc is None:
+        return
+    log.warning("transport: queued send failed: %r", exc)
+    for cb in list(_task_error_callbacks):
+        try:
+            cb(exc)
+        except Exception:
+            log.exception("transport: task-error callback failed")
 
 
 def disconnect(conn_id: str) -> None:
@@ -514,17 +682,148 @@ def disconnect(conn_id: str) -> None:
         _loop.call_soon_threadsafe(writer.close)
 
 
-def stop() -> None:
-    """Stop the transport and close all connections."""
-    global _announce_task
-    if _loop and not _loop.is_closed():
-        if _announce_task:
-            _loop.call_soon_threadsafe(_announce_task.cancel)
-            _announce_task = None
+def stop(timeout: float = 5.0) -> None:
+    """Stop the transport: close the listener, drain tasks, end the loop.
+
+    Idempotent, and safe to call without a prior start. Previously this
+    cancelled the announce task and closed writers, leaving the server
+    still accepting, connection handlers still running, and the event-loop
+    thread alive forever -- so a "stopped" transport still held sockets and
+    could still deliver messages into a dead session.
+
+    Called from outside the loop thread, so the async half is scheduled
+    onto the loop and waited for, then the loop is stopped and its thread
+    joined. After it returns, the module is back to its pre-start state and
+    start_host()/connect() may be used again.
+    """
+    global _loop, _thread, _announce_task, _server, _listen_address, _closing
+
+    with _loop_lock:
+        loop, thread = _loop, _thread
+        _loop, _thread = None, None
+
+    if loop is None or loop.is_closed():
+        _reset_state()
+        return
+
+    _closing = True                 # spawn() refuses new work from here
+
+    async def _shutdown() -> None:
+        """Tear down in dependency order.
+
+        Order matters and is easy to get wrong: Server.wait_closed() waits
+        for serve_forever AND every handler task, so awaiting it before
+        cancelling those tasks deadlocks until the outer timeout, after
+        which the loop is force-closed mid-teardown -- peers never see EOF
+        and tasks are destroyed while pending.
+
+        So: stop accepting, cancel and JOIN every task (their finally
+        blocks close their own writers), then confirm the sockets are down,
+        then reap the server.
+        """
+        global _server, _announce_task
+        server, _server = _server, None
+        _announce_task = None
+        if server is not None:
+            server.close()                  # stop accepting; do not await yet
+
+        # Keep our own references: a handler's finally pops its writer from
+        # _writers, so after the join there is nothing left to await on.
         with _writers_lock:
             writers = list(_writers.values())
-        for w in writers:
-            _loop.call_soon_threadsafe(w.close)
+
+        # Drain repeatedly: a connection accepted just before _closing took
+        # effect can register after the first snapshot, and a task missed
+        # here is a task destroyed while pending. Bounded so a task that
+        # will not stop cannot hang shutdown.
+        #
+        # The join itself is bounded because cancellation is not always
+        # prompt: a task blocked in loop.getaddrinfo (the STUN query) waits
+        # on a default-executor thread that cancelling does not interrupt,
+        # and waiting on it would tie shutdown latency to a DNS server.
+        stragglers: list = []
+        for _ in range(5):
+            with _tasks_lock:
+                tasks = [t for t in _tasks if not t.done()]
+            if not tasks:
+                break
+            for task in tasks:
+                task.cancel()
+            _done, pending = await asyncio.wait(tasks, timeout=_JOIN_TIMEOUT)
+            stragglers = list(pending)
+            if pending:
+                break                       # not going to stop; report below
+        if stragglers:
+            log.warning(
+                "transport: %d task(s) did not stop within %.1fs: %s",
+                len(stragglers), _JOIN_TIMEOUT,
+                ", ".join(sorted(t.get_name() for t in stragglers)))
+
+        async def _close(writer) -> None:
+            try:
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), 2.0)
+            except (OSError, ConnectionError, asyncio.TimeoutError):
+                pass                        # peer already gone, or not draining
+            except Exception:
+                log.debug("transport: writer close raced", exc_info=True)
+            finally:
+                # Force the socket down while the loop is still alive. A
+                # writer that survives to garbage collection finalises by
+                # calling close() -> loop.call_soon on a CLOSED loop, which
+                # raises RuntimeError from a __del__ where nothing can
+                # handle it. abort() is immediate and idempotent.
+                try:
+                    transport_obj = writer.transport
+                    if transport_obj is not None and \
+                            not transport_obj.is_closing():
+                        transport_obj.abort()
+                except Exception:
+                    log.debug("transport: abort raced", exc_info=True)
+
+        if writers:
+            await asyncio.gather(*(_close(w) for w in writers),
+                                 return_exceptions=True)
+        with _writers_lock:
+            _writers.clear()
+
+        if server is not None:
+            try:
+                await asyncio.wait_for(server.wait_closed(), 2.0)
+            except asyncio.TimeoutError:
+                log.warning("transport: server did not close within 2s")
+            except Exception:
+                log.debug("transport: server close raced", exc_info=True)
+
+    try:
+        asyncio.run_coroutine_threadsafe(_shutdown(), loop).result(timeout)
+    except Exception:
+        log.exception("transport: shutdown sequence failed")
+
+    loop.call_soon_threadsafe(loop.stop)
+    if thread is not None and thread.is_alive():
+        thread.join(timeout)
+        if thread.is_alive():
+            log.error("transport: loop thread did not exit within %.1fs",
+                      timeout)
+    try:
+        loop.close()
+    except Exception:
+        log.debug("transport: loop close raced", exc_info=True)
+    _reset_state()
+
+
+def _reset_state() -> None:
+    """Return the module to its pre-start state so it can start again."""
+    global _announce_task, _server, _listen_address, _closing
+    _closing = False
+    _announce_task = None
+    _server = None
+    _listen_address = ""
+    with _writers_lock:
+        _writers.clear()
+    with _tasks_lock:
+        _tasks.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +858,7 @@ def announce(rendezvous_key: str, address: str) -> None:
     # H-3: schedule the coroutine from *inside* the asyncio thread so we get a
     # real asyncio.Task (not a concurrent.futures.Future), making cancel() reliable.
     async def _schedule():
-        return asyncio.create_task(_loop_announce())
+        return spawn(_loop_announce(), name='announce')
 
     fut = asyncio.run_coroutine_threadsafe(_schedule(), _loop)
     _announce_task = fut.result(timeout=5)  # now a real asyncio.Task
