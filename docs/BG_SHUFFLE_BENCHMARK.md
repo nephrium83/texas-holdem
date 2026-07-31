@@ -51,14 +51,24 @@ AMD64 16 cores, 4×13 layout, 20 hands per configuration (1 cold + 19 warm).
 Warm p50 unless stated. Transport is excluded; byte counts are what a real
 transport would carry.
 
-| Seats | Detection p50 | Prevention p50 | Prevention p95 | Added | Budget target | |
-|---:|---:|---:|---:|---:|---|:--|
-| 2 | 24.9 ms | 399 ms | 409 ms | +375 ms | p95 under 5 s | pass |
-| 4 | 88.5 ms | 1,062 ms | 1,071 ms | +974 ms | p95 under 5 s | pass |
-| 9 | 623 ms | 4,106 ms | 4,117 ms | +3,483 ms | p95 under 10 s | pass |
+| Seats | Detection p50 | Prevention p50 | Prevention p95 | Budget target | |
+|---:|---:|---:|---:|---|:--|
+| 2 | 24.9 ms | 452 ms | 456 ms | p95 under 5 s | pass |
+| 4 | 88.5 ms | 1,267 ms | 1,272 ms | p95 under 5 s | pass |
+| 9 | 623 ms | 5,075 ms | 5,095 ms | p95 under 10 s | pass |
 
-All three targets pass with substantial headroom. Nine-seat prevention lands
-at about 4.1 s against the roughly 20 s cut-and-choose L5 baseline.
+All three targets pass with headroom. Nine-seat prevention lands at about
+5.1 s against the roughly 91 s projected for cut-and-choose.
+
+**These figures supersede an earlier measurement of 399 / 1,062 / 4,106 ms.**
+That baseline predates the soundness fix. Verification then did not
+recompute the multi-exponentiation statement from the input deck, which is
+the step that binds output to input; adding it costs a 52-term multiscalar
+over ciphertexts (~104 point operations) in both prove and verify, taking
+per-verification cost from 28.2 ms to 38.8 ms. Orchestration is unchanged
+(626 -> 634 ms at nine seats), so the whole difference is the cost of
+actually checking the shuffle. The earlier numbers measured a verifier that
+accepted forged decks and are not a target to regain.
 
 ### Where the time goes
 

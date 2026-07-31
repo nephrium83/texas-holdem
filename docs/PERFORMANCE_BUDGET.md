@@ -27,9 +27,12 @@ The Bayer–Groth prevention path is now integrated into `MentalDeal` behind a d
 
 | Seats | Detection p50 | Prevention p50 | Prevention p95 | Target | |
 | ---: | ---: | ---: | ---: | --- | :-- |
-| 2 | 24.9 ms | 399 ms | 409 ms | p95 under 5 s | pass |
-| 4 | 88.5 ms | 1,062 ms | 1,071 ms | p95 under 5 s | pass |
-| 9 | 623 ms | 4,106 ms | 4,117 ms | p95 under 10 s | pass |
+| 2 | 24.9 ms | 452 ms | 456 ms | p95 under 5 s | pass |
+| 4 | 88.5 ms | 1,267 ms | 1,272 ms | p95 under 5 s | pass |
+| 9 | 623 ms | 5,075 ms | 5,095 ms | p95 under 10 s | pass |
+
+These supersede an earlier 399 / 1,062 / 4,106 ms measurement taken before the
+shuffle-argument soundness fix; see [`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md).
 
 Method, per-phase breakdown, and byte counts are in
 [`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md); the harness is
@@ -47,8 +50,13 @@ about 4.5x — 20 seconds is closer to its four-seat cost. Details in
 axis, and `shuffle_proof.py` remains in the tree only as an unwired reference
 implementation.
 
+Event-loop responsiveness is measured separately by
+`benchmarks/event_loop_latency.py`. Message handling runs on a dispatch worker
+rather than the event loop, because inline verification blocked the loop for up
+to 2.9 s across a nine-seat hand and made timeouts fire spuriously.
+
 Per the optimization order below, the measured dominant phase is **verification**
-(2,284 ms of a 4,106 ms nine-seat hand), not proving (1,162 ms) or serialization
+(3,143 ms of a 5,075 ms nine-seat hand), not proving (1,269 ms) or serialization
 (35 ms). Verification scales quadratically in seats — one proof per shuffler but
 one verification per shuffler per peer — so batch verification of the
 multi-exponentiation argument is the first optimization to reach for if these
