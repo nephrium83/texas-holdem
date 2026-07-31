@@ -22,6 +22,13 @@ from holdem.p2p import wire
 from holdem.p2p.tcp_transport import MAX_LINE, SimpleTcpTransport
 
 
+# Waits below are outer deadlock guards, not timing assertions. The
+# property under test is that a frame arrives (or that the reader survived);
+# under full-suite socket load loopback delivery has been observed to exceed
+# a 5s budget, so the bound is generous on purpose.
+WAIT = 20
+
+
 class Recorder:
     """Stands in for a Session; records what reached handle_message."""
 
@@ -110,7 +117,7 @@ def test_normal_traffic_still_flows(listening):
     transport, recorder, client, _port = listening
     _handshake(client)
     client.sendall(b'{"type": "chat", "payload": {"text": "hi"}}\n')
-    assert recorder.arrived.wait(5), "a legal frame never arrived"
+    assert recorder.arrived.wait(20), "a legal frame never arrived"
     assert recorder.messages[0][1]["type"] == "chat"
 
 
@@ -137,7 +144,7 @@ def test_malformed_frames_do_not_kill_the_reader(listening, raw):
 
     # The reader must still be alive: a following legal frame gets through.
     client.sendall(b'{"type": "chat", "payload": {"text": "after"}}\n')
-    assert recorder.arrived.wait(5), "reader died on malformed input"
+    assert recorder.arrived.wait(20), "reader died on malformed input"
     assert recorder.messages[-1][1]["payload"]["text"] == "after"
 
 
@@ -149,7 +156,7 @@ def test_deeply_nested_frame_is_rejected_not_crashed(listening):
     time.sleep(0.2)
     assert not recorder.messages
     client.sendall(b'{"type": "chat", "payload": {"text": "alive"}}\n')
-    assert recorder.arrived.wait(5), "reader died on deep nesting"
+    assert recorder.arrived.wait(20), "reader died on deep nesting"
 
 
 # ------------------------------------------------------- handshake

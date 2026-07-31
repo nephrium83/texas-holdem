@@ -410,6 +410,13 @@ class Session:
         set of seat indices dealt into the hand (default: every seat); busted
         seats are excluded by the caller and take no part in the deal.
         """
+        if self.terminal_state is not None:
+            # A terminated session must not acquire a live deal driver: it
+            # would run a hand no peer agreed to, under a session id derived
+            # from state the table has already abandoned.
+            raise RuntimeError(
+                f"cannot begin a hand: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
         from holdem.p2p.mental_deal_driver import MentalDealDriver
         order = list(self._seat_order)
         if self.local_conn_id not in order:
@@ -713,6 +720,11 @@ class Session:
                             final lifecycle updates are still accepted
           "not_ready"    -- the previous hand is still in progress
         """
+        if self.terminal_state is not None:
+            # A terminated session has no next hand. Reported as
+            # session_over rather than raising, because callers already
+            # handle that verdict as "stop playing".
+            return "session_over"
         if self._table_cfg is None or self._replica is None:
             return "not_ready"
         if self._session_over:
@@ -995,9 +1007,42 @@ class Session:
             self.on_player_list_changed(snapshot)
 
     def _on_player_ack(self, conn_id: str, msg: dict) -> None:
-        """Peer receives its own host-side conn_id from the host."""
-        payload = msg.get("payload", {})
-        self.local_conn_id = payload.get("your_conn_id", "")
+        """Peer receives its own host-side conn_id from the host.
+
+        This is the ONLY other writer of _host_conn_id besides the (now
+        lobby-gated) election, and it previously accepted the assignment
+        from any sender in any state. Host identity is the authorization
+        token for every host-gated handler -- pause, resume, kick,
+        adjust_blinds, and session_end all check
+        ``conn_id == self._host_conn_id`` -- so one unsolicited player_ack
+        from a seated peer relocated that check onto the sender, mid-hand,
+        in the window host identity is meant to be frozen. It also
+        overwrote local_conn_id, which feeds the seat-spoof check and
+        _deal_session_id.
+
+        Three conditions now, all necessary:
+
+        * LOBBY only. Host identity is immutable once play begins.
+        * From the host, or from anyone only while the host is still
+          unknown -- this message is legitimately how a joining peer first
+          learns who the host is, so it cannot require a known host.
+        * A usable conn_id, so a malformed payload cannot blank out this
+          peer's own identity.
+        """
+        if self.terminal_state is not None or self.state != "LOBBY":
+            _log.warning("session: player_ack from %s ignored in state %s",
+                         conn_id, self.terminal_state or self.state)
+            return
+        if self._host_conn_id and conn_id != self._host_conn_id:
+            _log.warning("session: player_ack from non-host %s — ignoring",
+                         conn_id)
+            return
+        assigned = msg.get("payload", {}).get("your_conn_id")
+        if not isinstance(assigned, str) or not assigned:
+            _log.warning("session: player_ack from %s carried no usable "
+                         "conn_id — ignoring", conn_id)
+            return
+        self.local_conn_id = assigned
         self._host_conn_id = conn_id   # conn_id of the connection to the host
 
     def _on_game_start(self, conn_id: str, msg: dict) -> None:
@@ -1019,7 +1064,12 @@ class Session:
             _log.warning("session: game_start from non-host %s — ignoring",
                          conn_id)
             return
-        if self.state == "PLAYING":
+        if self.state == "PLAYING" or self.terminal_state is not None:
+            # Keyed on terminality as well as state: terminate() sets state
+            # to ENDED, so a freeze conditioned on PLAYING alone silently
+            # lapses the moment the session dies -- masked today only by the
+            # handle_message guard, and that guard is expected to relax for
+            # teardown messages.
             settings = payload.get("table_settings", {})
             same = (list(payload.get("seat_order", [])) == list(self._seat_order)
                     and bool(settings.get(self.PREVENTION_SETTING, False))
@@ -1286,6 +1336,10 @@ class Session:
 
     def start_game(self, table_settings: dict) -> None:
         """Host starts the game: broadcast game_start and transition to PLAYING."""
+        if self.terminal_state is not None:
+            raise RuntimeError(
+                f"cannot start a game: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
         if not self.is_host:
             raise RuntimeError("Only the host can start the game")
         with self._lock:
