@@ -69,7 +69,8 @@ class Session:
     def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
                  transport=None, clock: Optional[Clock] = None,
                  sink: Optional[EventSink] = None,
-                 require_prevention: bool = False):
+                 require_prevention: bool = False,
+                 master_secret: Optional[bytes] = None):
         self.is_host    = is_host
         # Local policy, NOT table state: refuse to be dealt into a table
         # that is not running Bayer-Groth prevention. The table-wide mode
@@ -145,11 +146,12 @@ class Session:
         self._deal_outbox: list[dict] = []      # driver emissions buffered for routing
         self._deal_hole: list = [None, None]    # this seat's hole cards (engine Cards)
         self._deal_board: list = [None] * 5     # the board (engine Cards)
-        # local device secret for deterministic key shares (crash-survival).
-        # NOTE: regenerated per process for now; persisting it across restarts
-        # is the separate persistence milestone.
-        import os as _os
-        self._deal_master_secret = _os.urandom(32)
+        # Local device secret for deterministic key shares. Persisted, so a
+        # crashed and reopened app rederives the SAME share for a seat --
+        # see device_secret.py. Loaded lazily on first use rather than in
+        # __init__, so merely constructing a Session touches no filesystem.
+        self._master_secret_override = master_secret
+        self._master_secret_cache: Optional[bytes] = None
 
         # --- hostless betting (L5): per-peer replica engine + orchestration ---
         self._replica = None                    # ReplicaTable for the current hand
@@ -308,6 +310,32 @@ class Session:
     def _deal_session_id(self) -> str:
         """Shared, stable per-game id (every peer holds the same seat order)."""
         return "poker|" + "|".join(self._seat_order)
+
+    @property
+    def _deal_master_secret(self) -> bytes:
+        """This device's secret for deriving key shares.
+
+        Read from disk on first use and cached. An explicitly supplied
+        ``master_secret`` wins, which is how tests get isolation and how a
+        caller managing its own key material opts out of the file.
+        """
+        if self._master_secret_override is not None:
+            return self._master_secret_override
+        if self._master_secret_cache is None:
+            from holdem.p2p import device_secret
+            self._master_secret_cache = device_secret.load_or_create()
+        return self._master_secret_cache
+
+    @_deal_master_secret.setter
+    def _deal_master_secret(self, secret: bytes) -> None:
+        """Override the device secret after construction.
+
+        Equivalent to passing ``master_secret=`` to __init__; kept as a
+        setter because several tests assign stable per-seat secrets to make
+        deals reproducible, and because a caller holding its own key
+        material should not be forced to decide before constructing.
+        """
+        self._master_secret_override = secret
 
     @property
     def prevention(self) -> bool:
