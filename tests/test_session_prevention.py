@@ -94,16 +94,32 @@ def test_non_boolean_setting_is_coerced_not_trusted():
         assert isinstance(s.prevention, bool)
 
 
-def test_mode_does_not_survive_into_a_later_table():
-    """_last_table_settings is only overwritten when non-empty, so the mode
-    is tracked separately; a second game_start with no settings must read
-    as detection-only rather than inheriting the first table's True."""
+def test_a_second_game_start_cannot_change_the_mode():
+    """Capabilities freeze once play begins.
+
+    This previously asserted that a second game_start RESET the mode to
+    detection-only. That is now refused outright instead, which is
+    strictly stronger: accepting it was a downgrade vector, since a forged
+    game_start mid-session could turn prevention off and nothing else
+    reads the mode from anywhere but this message.
+    """
     sessions, _ = make_table(2, settings={KEY: True})
     peer = sessions["peer1"]
     assert peer.prevention is True
-    peer._on_game_start({"payload": {"seat_order": ["peer0", "peer1"],
-                                     "table_settings": {}}})
-    assert peer.prevention is False
+    peer._on_game_start("peer0", {"payload": {
+        "seat_order": ["peer0", "peer1"], "table_settings": {}}})
+    assert peer.prevention is True
+
+
+def test_a_fresh_session_does_not_inherit_a_previous_mode():
+    """The mode is tracked in its own attribute rather than read back out
+    of _last_table_settings, which is only overwritten when non-empty. A
+    new session for a table with no settings must read as detection-only.
+    """
+    off, _ = make_table(2, settings={})
+    on, _ = make_table(2, settings={KEY: True})
+    assert all(s.prevention is False for s in off.values())
+    assert all(s.prevention is True for s in on.values())
 
 
 # ------------------------------------------------------- driver wiring

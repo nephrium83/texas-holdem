@@ -254,7 +254,7 @@ class Session:
         elif t == "player_ack":
             self._on_player_ack(conn_id, msg)
         elif t == "game_start":
-            self._on_game_start(msg)
+            self._on_game_start(conn_id, msg)
         elif t == "ready":
             self._on_ready(conn_id, msg)
         elif t == "action":
@@ -954,9 +954,36 @@ class Session:
         self.local_conn_id = payload.get("your_conn_id", "")
         self._host_conn_id = conn_id   # conn_id of the connection to the host
 
-    def _on_game_start(self, msg: dict) -> None:
-        self.state = "PLAYING"
+    def _on_game_start(self, conn_id: str, msg: dict) -> None:
+        """Adopt the host's table settings -- once, from the host only.
+
+        This message defines seat order and the table-wide prevention mode,
+        and both were previously rewritten by any peer at any time. A
+        forged game_start mid-hand could repoint every seat index (which
+        reassigns hole cards and blame) or turn prevention off for this
+        peer, a downgrade nothing else would notice because prevention is
+        read from exactly this message.
+
+        Capabilities are therefore frozen once play begins. A duplicate of
+        the legitimate message is accepted as a no-op rather than refused,
+        so retries and relay echoes stay harmless.
+        """
         payload = msg.get("payload", {})
+        if self._host_conn_id and conn_id != self._host_conn_id:
+            _log.warning("session: game_start from non-host %s — ignoring",
+                         conn_id)
+            return
+        if self.state == "PLAYING":
+            settings = payload.get("table_settings", {})
+            same = (list(payload.get("seat_order", [])) == list(self._seat_order)
+                    and bool(settings.get(self.PREVENTION_SETTING, False))
+                        == self._prevention)
+            if not same:
+                _log.warning(
+                    "session: game_start from %s would change settled table "
+                    "settings mid-session — ignoring", conn_id)
+            return
+        self.state = "PLAYING"
         self._seat_order = payload.get("seat_order", [])
         # Store table settings so _mp_new_game in gui.py can read them
         ts = payload.get("table_settings", {})

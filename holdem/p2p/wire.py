@@ -33,6 +33,15 @@ MAX_JSON_BYTES = 1 << 19        # 512 KiB; the largest real message is a
                                 # ~9 KB shuffle proof, so this is generous
 MAX_JSON_DEPTH = 64             # the protocol's deepest payload nests ~6
 
+# Envelope version this build speaks, and the set it will accept. The field
+# was previously written as a literal and only checked for presence, so a
+# peer announcing any version at all was accepted and its payload
+# interpreted under THIS version's rules -- which is exactly the situation
+# a version field exists to prevent. Widen SUPPORTED_VERSIONS only when a
+# build can genuinely honour the older semantics.
+PROTOCOL_VERSION = 1
+SUPPORTED_VERSIONS = frozenset({1})
+
 
 def _check_depth(raw: bytes) -> None:
     """Reject over-nested JSON with a linear scan and no allocation.
@@ -127,7 +136,7 @@ def pack(action_type: str, payload: dict, prev_hash: str = "0" * 64) -> bytes:
     Returns UTF-8 JSON bytes ready to send over the wire.
     """
     msg: dict = {
-        "v":       1,
+        "v":       PROTOCOL_VERSION,
         "type":    action_type,
         "payload": payload,
         "pubkey":  identity.public_key_bytes().hex(),
@@ -157,6 +166,17 @@ def unpack(raw: bytes) -> dict:
     for field in ("v", "type", "payload", "pubkey", "ts", "prev", "sig", "hash"):
         if field not in msg:
             raise ValueError("Missing field: %s" % field)
+
+    # Reject an incompatible version before interpreting anything else: the
+    # remaining checks all assume this version's envelope semantics.
+    # isinstance excludes bool deliberately -- True == 1 in Python, so a
+    # bool would otherwise pass as version 1.
+    version = msg["v"]
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or version not in SUPPORTED_VERSIONS:
+        raise ValueError(
+            f"unsupported protocol version {version!r} "
+            f"(this build speaks {sorted(SUPPORTED_VERSIONS)})")
 
     sig  = bytes.fromhex(msg.pop("sig"))
     h    = msg.pop("hash")
