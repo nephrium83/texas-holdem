@@ -132,6 +132,10 @@ _tasks_lock = threading.Lock()
 # can handle the error.
 _closing = False
 
+# Off-loop, serialized delivery of inbound messages. See dispatch.py.
+_worker = None                      # Optional[dispatch.MessageWorker]
+_worker_lock = threading.Lock()
+
 # Called with the exception from any tracked task that fails. Registered by
 # the owning session so a background failure becomes a lifecycle outcome
 # rather than a log line nobody reads.
@@ -171,6 +175,48 @@ def active_tasks() -> list:
     """Background tasks this module currently owns."""
     with _tasks_lock:
         return [t for t in _tasks if not t.done()]
+
+
+def _dispatch_handler(conn_id: str, msg: dict) -> None:
+    """Run every registered on_message callback for one frame."""
+    for cb in _msg_callbacks:
+        try:
+            cb(conn_id, msg)
+        except Exception:
+            log.exception("on_message callback error")
+
+
+def _ensure_worker():
+    """The dispatch worker, started on first use."""
+    global _worker
+    with _worker_lock:
+        if _worker is None or not _worker.is_alive():
+            from holdem.p2p.dispatch import MessageWorker
+            _worker = MessageWorker(
+                _dispatch_handler,
+                on_error=lambda exc: [cb(exc)
+                                      for cb in list(_task_error_callbacks)])
+            _worker.start()
+        return _worker
+
+
+def _deliver(conn_id: str, msg: dict) -> bool:
+    """Queue one inbound frame for off-loop handling. False if refused."""
+    if _closing:
+        return False
+    return _ensure_worker().submit(conn_id, msg)
+
+
+def dispatch_depth() -> int:
+    """Messages queued for handling (0 when idle). For tests and metrics."""
+    with _worker_lock:
+        return _worker.depth if _worker is not None else 0
+
+
+def dispatch_refused() -> int:
+    """Messages refused for backpressure since the worker started."""
+    with _worker_lock:
+        return _worker.refused if _worker is not None else 0
 
 
 def spawn(coro, name: str = "") -> "asyncio.Task":
@@ -370,11 +416,18 @@ async def _handle_connection(reader: asyncio.StreamReader,
     try:
         while True:
             msg = await _read_msg(reader)
-            for cb in _msg_callbacks:
-                try:
-                    cb(conn_id, msg)
-                except Exception:
-                    log.exception("on_message callback error")
+            # Handed to the dispatch worker rather than run here. Handlers
+            # verify shuffle proofs at ~35 ms each; inline they blocked the
+            # loop for 2.9 s across a nine-seat hand, so timeouts fired
+            # spuriously and honest peers looked unresponsive. Delivery is
+            # still serialized -- one consumer -- so ordering is unchanged.
+            if not _deliver(conn_id, msg):
+                # Backpressure: this peer is producing faster than handlers
+                # consume. Dropping it is the deterministic response and
+                # keeps one peer from stalling the whole table.
+                log.warning("transport: dispatch queue full — dropping %s",
+                            conn_id)
+                break
     except (asyncio.IncompleteReadError, ConnectionResetError, EOFError):
         pass
     except ValueError as exc:
@@ -813,9 +866,19 @@ def stop(timeout: float = 5.0) -> None:
     _reset_state()
 
 
+def _stop_worker(timeout: float = 5.0) -> None:
+    """Stop and join the dispatch worker. Idempotent."""
+    global _worker
+    with _worker_lock:
+        worker, _worker = _worker, None
+    if worker is not None:
+        worker.stop(timeout)
+
+
 def _reset_state() -> None:
     """Return the module to its pre-start state so it can start again."""
     global _announce_task, _server, _listen_address, _closing
+    _stop_worker()
     _closing = False
     _announce_task = None
     _server = None
