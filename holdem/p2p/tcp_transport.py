@@ -23,9 +23,20 @@ session calls) should use a queue; see tests/peer_worker.py.
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 import time
+
+from holdem.p2p import wire
+
+_log = logging.getLogger(__name__)
+
+# Longest single newline-terminated line accepted from a peer. Reading
+# until a newline with no bound lets a peer that never sends one grow the
+# buffer until the process dies -- and in the handshake that is reachable
+# before any authentication.
+MAX_LINE = wire.MAX_JSON_BYTES
 
 
 class SimpleTcpTransport:
@@ -89,15 +100,24 @@ class SimpleTcpTransport:
         sock.settimeout(10.0)
         # send ours
         sock.sendall((json.dumps({"conn_id": self._local_id}) + "\n").encode())
-        # read theirs
+        # Read theirs, bounded. An unbounded accumulate-until-newline lets a
+        # peer that never sends one grow this buffer without limit, before
+        # any authentication has happened.
         buf = b""
         while b"\n" not in buf:
             chunk = sock.recv(4096)
             if not chunk:
                 raise EOFError("peer closed during handshake")
             buf += chunk
-        peer_hello = json.loads(buf.split(b"\n", 1)[0])
-        peer_id: str = peer_hello["conn_id"]
+            if len(buf) > MAX_LINE:
+                raise ValueError(
+                    f"handshake exceeded {MAX_LINE} bytes without a newline")
+        peer_hello = wire.safe_loads(buf.split(b"\n", 1)[0])
+        if not isinstance(peer_hello, dict):
+            raise ValueError("handshake is not a JSON object")
+        peer_id = peer_hello.get("conn_id")
+        if not isinstance(peer_id, str) or not peer_id:
+            raise ValueError("handshake carried no usable conn_id")
         sock.settimeout(None)
 
         with self._writers_lock:
@@ -144,18 +164,50 @@ class SimpleTcpTransport:
         def _read() -> None:
             f = sock.makefile("rb")
             try:
-                for raw in f:
+                while True:
+                    # Bounded: readline(MAX_LINE + 1) caps a single line, so
+                    # a peer that never sends a newline cannot grow this
+                    # without limit. A truncated read means the line was
+                    # over-long, which is a protocol violation, not a frame
+                    # to skip -- keeping the connection would resynchronise
+                    # mid-message and interpret payload bytes as a frame.
+                    raw = f.readline(MAX_LINE + 1)
+                    if not raw:
+                        break                       # peer closed
+                    if len(raw) > MAX_LINE and not raw.endswith(b"\n"):
+                        _log.warning(
+                            "tcp: %s sent a line over %d bytes - dropping peer",
+                            peer_id, MAX_LINE)
+                        break
                     raw = raw.strip()
                     if not raw:
                         continue
                     try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
+                        msg = wire.safe_loads(raw)
+                    except ValueError as exc:
+                        # Malformed peer input is a protocol event, not a
+                        # local error: log it and keep serving the peer.
+                        _log.warning("tcp: %s sent an undecodable frame: %s",
+                                     peer_id, exc)
+                        continue
+                    if not isinstance(msg, dict):
+                        _log.warning("tcp: %s sent a non-object frame", peer_id)
                         continue
                     if self._session is not None:
                         self._session.handle_message(peer_id, msg)
+            except OSError as exc:
+                _log.debug("tcp: reader for %s ended: %s", peer_id, exc)
             except Exception:
-                pass
+                # A bug in message handling must not vanish. Previously this
+                # swallowed everything, so one unexpected exception killed
+                # the reader and left the peer connected but permanently
+                # deaf, with no protocol outcome recorded anywhere.
+                _log.exception("tcp: reader for %s failed", peer_id)
+            finally:
+                try:
+                    f.close()
+                except OSError:
+                    pass
 
         threading.Thread(target=_read, daemon=True,
                          name=f"tcp-reader-{peer_id}").start()

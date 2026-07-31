@@ -225,11 +225,13 @@ async def _read_msg(reader: asyncio.StreamReader) -> dict:
     if length > MAX_MSG:
         raise ValueError(f"oversized frame: {length} bytes (max {MAX_MSG})")
     body = await reader.readexactly(length)
-    # M-1: propagate JSON errors as ValueError so _handle_connection can close cleanly
-    try:
-        msg = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"malformed JSON frame: {exc}") from exc
+    # M-1: propagate JSON errors as ValueError so _handle_connection can close
+    # cleanly. safe_loads bounds size and nesting first: a frame small enough
+    # to pass the length check above can still be nested deeply enough that
+    # json.loads raises RecursionError, which is NOT a ValueError and used to
+    # escape _handle_connection entirely as an uncaught task exception.
+    from holdem.p2p import wire as _wire_mod
+    msg = _wire_mod.safe_loads(body)
     # C-1: every peer message MUST be a valid signed envelope. Relay-control
     # frames are the sole exception (addressed to the relay, not a session).
     if msg.get("type") in _RELAY_CONTROL_TYPES:
