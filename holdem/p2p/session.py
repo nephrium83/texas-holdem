@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from holdem.p2p.timeout import (
-    Clock, DeadlineToken, FakeClock, RealClock, DEFAULT_PHASE_TIMEOUTS,
+    Clock, DeadlineToken, RealClock, DEFAULT_PHASE_TIMEOUTS,
 )
 from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
 

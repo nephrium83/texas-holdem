@@ -102,6 +102,7 @@ from holdem.p2p import ristretto as R
 from holdem.p2p import bg_zero
 from holdem.p2p.bg_zero import BilinearMap, ZeroProof
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.bg_witness import require_witness
 from holdem.p2p.pedersen import CommitmentKey, commit
 
 
@@ -264,9 +265,13 @@ def prove(ck: CommitmentKey, c_A: Sequence[Point],
     for i in range(1, m):
         prev = partials[-1]
         partials.append([R.scalar_mul(prev[j], a[i][j]) for j in range(n)])
-    for j in range(n):
-        if bytes(partials[-1][j]) != bytes(b[j]):
-            raise ValueError("witness does not satisfy b == product of a_i")
+    require_witness(
+        all(bytes(partials[-1][j]) == bytes(b[j]) for j in range(n)),
+        "witness does not satisfy b == product of a_i")
+    # Continue with the claimed vector. Identical for an honest witness; for
+    # a cheating one it is the opening of c_b the prover actually holds,
+    # which is the case the verifier has to reject unaided.
+    partials[-1] = list(b)
 
     # c_B1 = c_A1 and c_Bm = c_b pin the ends; only the interior is fresh.
     s_list: List[Scalar] = [r[0]]

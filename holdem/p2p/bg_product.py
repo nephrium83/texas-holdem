@@ -29,6 +29,7 @@ from holdem.p2p import ristretto as R
 from holdem.p2p.bg_hadamard import HadamardProof
 from holdem.p2p.bg_svp import SVPProof
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.bg_witness import require_witness
 from holdem.p2p.pedersen import CommitmentKey, commit
 
 
@@ -122,8 +123,9 @@ def prove(ck: CommitmentKey, c_A: Sequence[Point],
             R.scalar_mul(row_products[-1][j], a[i][j])
             for j in range(n)
         ])
-    if bytes(_product(row_products[-1])) != bytes(b):
-        raise ValueError("witness does not satisfy product of all matrix entries")
+    require_witness(
+        bytes(_product(row_products[-1])) == bytes(b),
+        "witness does not satisfy product of all matrix entries")
 
     s_b = R.random_scalar()
     c_b = commit(ck, row_products[-1], s_b)
@@ -141,7 +143,8 @@ def verify(ck: CommitmentKey, c_A: Sequence[Point], n: int, b: Scalar,
            context: bytes, proof: ProductProof) -> bool:
     """Verify a Theorem 8 product proof. Returns False; never raises."""
     try:
-        m = _validate_shape(
+        # Called for its validation side effect; the returned m is unused.
+        _validate_shape(
             ck, c_A, [[] for _ in range(len(c_A))], None, n,
             check_vectors=False)
         hadamard_context = _child_context(

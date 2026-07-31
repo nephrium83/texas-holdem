@@ -57,6 +57,7 @@ from typing import List, Sequence
 
 from holdem.p2p import ristretto as R
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.bg_witness import require_witness
 from holdem.p2p.pedersen import CommitmentKey, commit
 
 
@@ -115,8 +116,12 @@ def prove(ck: CommitmentKey, a: Sequence[Scalar], r: Scalar,
     partials: List[Scalar] = [a[0]]
     for i in range(1, n):
         partials.append(R.scalar_mul(partials[-1], a[i]))
-    if bytes(partials[-1]) != bytes(b):
-        raise ValueError("witness does not satisfy prod(a) == b")
+    require_witness(bytes(partials[-1]) == bytes(b),
+                    "witness does not satisfy prod(a) == b")
+    # Use the claimed value from here on. Identical for an honest witness;
+    # for a cheating one it is the opening the prover actually holds, which
+    # is what the verifier must be able to reject on its own.
+    partials[-1] = b
 
     d = [R.random_scalar() for _ in range(n)]
     r_d = R.random_scalar()
