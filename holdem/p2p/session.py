@@ -82,15 +82,46 @@ class TerminalRecord:
     sequence: int
 
 
+@dataclass(frozen=True)
+class HandRecord:
+    """Forensic record of the one transition that ended a HAND.
+
+    Distinct from TerminalRecord because the two levels have genuinely
+    different lifetimes: a voided hand is RECOVERABLE -- next_p2p_hand
+    redeals the same seats at the same button and play continues -- whereas
+    a terminated session is absorbing. Collapsing them would either make
+    void permanent (breaking continuous play) or make session termination
+    recoverable (defeating its purpose).
+
+    Written once per hand, then cleared when the next hand begins.
+    """
+    hand_no: int
+    outcome: str
+    reason: str
+    blamed_seat: Optional[int]
+    monotonic_ts: float
+    sequence: int
+
+
 class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
 
-    #: Session-level terminal outcomes. Host loss during PLAYING is one of
-    #: them; it is NOT a fold, a timeout, or grounds for electing a host.
+    #: Session-level terminal outcomes. ABSORBING: once set, no local or
+    #: remote entry point may mutate protocol state again. Host loss during
+    #: PLAYING is one of them; it is NOT a fold, a timeout, or grounds for
+    #: electing a host.
     HOST_LOST = "HOST_LOST"
     ENDED_NORMAL = "ENDED_NORMAL"
     ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
     LOCAL_SHUTDOWN = "LOCAL_SHUTDOWN"
+
+    #: Hand-level outcomes. RECOVERABLE: the session plays on, and a voided
+    #: hand is redealt to the same seats at the same button.
+    HAND_COMPLETED = "COMPLETED"
+    VOID_PROTOCOL = "VOID_PROTOCOL"
+    VOID_PEER_LOST = "VOID_PEER_LOST"
+    VOID_TIMEOUT = "VOID_TIMEOUT"
+    VOID_LOCAL_ABORT = "VOID_LOCAL_ABORT"
 
     #: Key under table_settings carrying the table-wide shuffle-proof mode.
     #: Absent or false means detection-only, so a table created by an older
@@ -195,7 +226,8 @@ class Session:
         self._replica = None                    # ReplicaTable for the current hand
         self._own_hole_set = False              # local holes fed to replica yet?
         self._pumping = False                   # re-entrancy guard for _pump_hand
-        self.hand_voided = False
+        self._hand_record: Optional[HandRecord] = None
+        self._hand_seq = 0
         self.void_reason: str | None = None
         self.hand_result: dict | None = None    # normalized settle() result
         # on_hand_settled(result_dict) -- hand settled on this replica
@@ -509,14 +541,14 @@ class Session:
     def reveal_board_street(self, street: str) -> None:
         """Reveal a board street ("flop"/"turn"/"river"); called once the
         preceding betting round closes."""
-        if self._deal_driver is None:
+        if self.terminal_state is not None or self._deal_driver is None:
             return
         self._deal_driver.reveal_street(street)
         self._flush_deal()
 
     def open_deal_audit(self) -> None:
         """Open the post-hand audit (at showdown)."""
-        if self._deal_driver is None:
+        if self.terminal_state is not None or self._deal_driver is None:
             return
         self._deal_driver.open_audit()
         self._flush_deal()
@@ -652,6 +684,10 @@ class Session:
         post-move button is what drives the mental deal's deal_map -- so
         the replica starts first and the deal is begun with
         replica.button."""
+        if self.terminal_state is not None:
+            raise RuntimeError(
+                f"cannot start a hand: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
         self._table_cfg = {"names": list(names), "sb": int(sb),
                            "bb": int(bb), "structure": structure,
                            "button": int(button),
@@ -672,7 +708,7 @@ class Session:
         or None for the first hand (and a first-hand redeal)."""
         from holdem.p2p.replica_table import ReplicaTable
         cfg = self._table_cfg
-        self.hand_voided = False
+        self._hand_record = None
         self.void_reason = None
         self.hand_result = None
         self._own_hole_set = False
@@ -773,11 +809,16 @@ class Session:
         self._session_winner = winner
         self._final_stacks = final
         self._p2p_spectator = self.local_seat not in alive
-        self._msg_buffer.clear()
-        self._safe_emit("sidecar_stopping",
-                         hand=self._hand_no, reason="session_complete",
-                         winner=winner)
         self._notify_state_changed()
+        # A completed match permanently ends the session, so it goes through
+        # the one terminal mechanism. terminate() clears the message buffer,
+        # cancels the deadline, and emits sidecar_stopping.
+        self.terminate(
+            self.ENDED_NORMAL,
+            f"match complete; winner seat {winner}"
+            if winner is not None else "match complete",
+            event={"hand": self._hand_no, "reason": "session_complete",
+                   "winner": winner})
         if announce and not self._session_end_announced:
             self._session_end_announced = True
             self._transport.broadcast({
@@ -792,6 +833,12 @@ class Session:
         """Act for the LOCAL seat: apply to our own replica first, then
         broadcast the action with our post-apply state digest so every
         peer can verify we all agree (desync detection)."""
+        if self.terminal_state is not None:
+            # A terminated session must not apply to its replica, advance
+            # local betting state, or broadcast. Broadcasting here injected
+            # actions into a table this peer had already left, which is a
+            # desync source and not merely a local inconsistency.
+            return "rejected"
         if self._replica is None or self.hand_voided:
             return "rejected"
         seat = self.local_seat
@@ -863,15 +910,56 @@ class Session:
         self._pump_hand()
         self._notify_state_changed()
 
-    def _void_hand(self, reason: str, *, announce: bool = True) -> bool:
-        """Void this hand everywhere and retain its pre-hand redeal inputs."""
-        if self.hand_voided or self.hand_result is not None:
-            return False
-        self.hand_voided = True
-        self.void_reason = str(reason)[:512]
-        _log.warning("session: HAND VOIDED — %s", reason)
-        self._safe_emit("hand_voided", hand=self._hand_no, reason=self.void_reason)
+    @property
+    def hand_voided(self) -> bool:
+        """Derived from the hand record; not an independent truth source.
 
+        This used to be the authoritative void flag -- assigned in one
+        place, read in eleven -- which made hand termination a second
+        shutdown path with no record and no first-cause-wins guarantee. It
+        now reports what _end_hand decided.
+        """
+        rec = self._hand_record
+        return rec is not None and rec.outcome != self.HAND_COMPLETED
+
+    @property
+    def hand_record(self) -> Optional["HandRecord"]:
+        """The immutable record of how the current hand ended, or None."""
+        return self._hand_record
+
+    def _end_hand(self, outcome: str, reason: str, *,
+                  blamed_seat: Optional[int] = None,
+                  announce: bool = True) -> bool:
+        """The single hand-terminal transition. True if this call won.
+
+        Hand-level rather than session-level because a void is RECOVERABLE:
+        next_p2p_hand redeals the same seats at the same button and play
+        continues. Routing it through terminate() would make every void
+        permanently end the session and break continuous play.
+
+        Idempotent per hand, first cause wins, exactly one record and one
+        notification per hand. A terminated session ends no further hands.
+        """
+        if self.terminal_state is not None:
+            return False
+        if self._hand_record is not None or self.hand_result is not None:
+            return False
+        self._hand_seq += 1
+        self.void_reason = str(reason)[:512]
+        self._hand_record = HandRecord(
+            hand_no=self._hand_no,
+            outcome=outcome,
+            reason=self.void_reason,
+            blamed_seat=blamed_seat,
+            monotonic_ts=time.monotonic(),
+            sequence=self._hand_seq,
+        )
+        if outcome == self.HAND_COMPLETED:
+            return True
+
+        _log.warning("session: HAND VOIDED - %s", reason)
+        self._safe_emit("hand_voided", hand=self._hand_no,
+                        reason=self.void_reason, outcome=outcome)
         self._notify_state_changed()
         if announce:
             self._transport.broadcast({
@@ -881,6 +969,17 @@ class Session:
                 "reason": self.void_reason,
             })
         return True
+
+    def _void_hand(self, reason: str, *, announce: bool = True,
+                   outcome: str = "VOID_PROTOCOL",
+                   blamed_seat: Optional[int] = None) -> bool:
+        """Void this hand and retain its pre-hand redeal inputs.
+
+        Retained as the callers' entry point; the decision now lives in
+        _end_hand so hand termination has exactly one implementation.
+        """
+        return self._end_hand(outcome, reason, blamed_seat=blamed_seat,
+                              announce=announce)
 
     def _pump_hand(self) -> None:
         """Advance the hand's orchestration to quiescence: feed recovered
@@ -1122,7 +1221,8 @@ class Session:
 
     def terminate(self, state: str, reason: str, *,
                   conn_id: Optional[str] = None,
-                  seat: Optional[int] = None) -> bool:
+                  seat: Optional[int] = None,
+                  event: Optional[dict] = None) -> bool:
         """The single terminal transition. True if this call is the winner.
 
         Idempotent by construction: once a terminal state is set, every
@@ -1162,7 +1262,11 @@ class Session:
         # the fact, would mutate state whose owner has already ended.
         self._invalidate_pending_work()
 
-        self._safe_emit("sidecar_stopping", reason=f"{state}: {reason}")
+        # Callers may supply the sidecar_stopping payload so an existing
+        # event contract survives being routed through here.
+        self._safe_emit("sidecar_stopping",
+                        **(event if event is not None
+                           else {"reason": f"{state}: {reason}"}))
         if self.on_session_terminated:
             self.on_session_terminated(self.terminal_record)
         return True

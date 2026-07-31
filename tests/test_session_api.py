@@ -133,7 +133,11 @@ class TestConfigureSeats:
         )
         r.start_hand(0)
         s._replica = r
-        s.hand_voided = True               # mark voided
+        # Void through the real path. hand_voided is derived from the hand
+        # record now, so assigning it would bypass the single hand-terminal
+        # transition this test is meant to exercise.
+        s._void_hand("test void", announce=False)
+        assert s.hand_voided
         s.configure_seats(["A", "B"])      # must not raise
 
 

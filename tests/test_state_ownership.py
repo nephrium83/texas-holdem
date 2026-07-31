@@ -171,14 +171,24 @@ def test_events_are_refused_when_the_queue_is_full():
     """Backpressure must apply to lifecycle events too, or a disconnect
     storm becomes an unbounded queue."""
     blocked = threading.Event()
-    worker = MessageWorker(lambda cid, msg: blocked.wait(timeout=10),
-                           maxsize=4)
+    entered = threading.Event()
+
+    def park(cid, msg):
+        entered.set()
+        blocked.wait(timeout=10)
+
+    worker = MessageWorker(park, maxsize=4)
     worker.start()
     try:
+        # Park the consumer inside the handler FIRST, so the queue depth is
+        # deterministic. Without this the consumer may drain an extra item
+        # mid-flood and the accepted count becomes load-dependent.
+        worker.submit("peer", {"n": 0})
+        assert entered.wait(5), "consumer never entered the handler"
         accepted = sum(1 for _ in range(50)
                        if worker.submit_event(lambda: None))
-        assert accepted <= 5, f"event queue exceeded its bound ({accepted})"
-        assert worker.refused > 0
+        assert accepted == 4, f"event queue exceeded its bound ({accepted})"
+        assert worker.refused == 46
     finally:
         blocked.set()
         worker.stop()

@@ -576,7 +576,10 @@ class TestProposalValidation:
 
     def test_proposal_dropped_when_voided(self):
         s, token = self._session_with_active_hand()
-        s.hand_voided = True
+        # Void through the real path: hand_voided is derived from the hand
+        # record, so assigning it would bypass the transition under test.
+        s._void_hand("test void", announce=False)
+        assert s.hand_voided
         msg = {
             "type": "timeout_proposal",
             "hand": 1,
