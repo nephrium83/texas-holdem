@@ -186,6 +186,43 @@ def test_multi_exponentiation_uses_the_x_power_commitments(table):
         proof.a_commits, out_chunks, expected, proof.multi, M, N) is False
 
 
+def test_proof_is_bound_to_the_joint_public_key(table):
+    """A proof is about a shuffle under one key. Verified under a different
+    public key it must fail, or a proof could be lifted from another table's
+    key ceremony."""
+    out_deck = honest_output(table)
+    proof = S._prove_unchecked(
+        table["pk"], table["ck"], table["in_deck"], out_deck,
+        table["perm"], table["scalars"], M, N, CTX)
+    assert S.verify(table["pk"], table["ck"], table["in_deck"], out_deck,
+                    M, N, CTX, proof) is True
+    other_pk = R.mul_base(_s(4242))
+    assert bytes(other_pk) != bytes(table["pk"])
+    assert S.verify(other_pk, table["ck"], table["in_deck"], out_deck,
+                    M, N, CTX, proof) is False
+
+
+def test_proof_is_bound_to_the_commitment_key(table):
+    """The statement hashes every generator, so a proof does not carry over
+    to a different commitment key. Without this, a key whose trapdoor
+    someone knows could be substituted at verification time."""
+    out_deck = honest_output(table)
+    proof = S._prove_unchecked(
+        table["pk"], table["ck"], table["in_deck"], out_deck,
+        table["perm"], table["scalars"], M, N, CTX)
+    other_ck = P.CommitmentKey.generate(N, seed=b"a-different-seed")
+    assert bytes(other_ck.H) != bytes(table["ck"].H)
+    assert S.verify(table["pk"], other_ck, table["in_deck"], out_deck,
+                    M, N, CTX, proof) is False
+
+
+def test_commitment_key_is_nothing_up_my_sleeve(table):
+    """Soundness of every argument rests on nobody knowing the discrete-log
+    relations among the generators. verify_nums recomputes them from the
+    public seed, which is what makes that checkable rather than trusted."""
+    assert table["ck"].verify_nums() is True
+
+
 def test_forged_proof_is_rejected_at_every_supported_layout(table):
     """The break was layout-independent; so is its regression test."""
     for m, n in ((2, 26), (4, 13), (13, 4)):
