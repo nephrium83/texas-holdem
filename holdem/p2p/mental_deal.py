@@ -325,7 +325,18 @@ class MentalDeal:
     def _finish_keygen(self) -> List[dict]:
         # deterministic PK = sum of shares in canonical seat order
         ordered = [self._pubkeys[s] for s in self.seats_in]
-        self._joint_pk = eg.joint_public_key(ordered)
+        joint = eg.joint_public_key(ordered)
+        # Defence in depth. keygen_pop.verify already rejects an identity
+        # share, so reaching here should be impossible -- but under an
+        # identity joint key ElGamal degenerates to C1 = M and the deck is
+        # public, so this is worth failing closed on rather than trusting an
+        # upstream check. Without it the failure would surface as an uncaught
+        # ValueError from the first re-encryption, mid-protocol.
+        if bytes(joint) == bytes(R.IDENTITY):
+            return self._abort(
+                "key ceremony produced a degenerate (identity) joint key",
+                None)
+        self._joint_pk = joint
         self.phase = Phase.SHUFFLE
         # the shuffle chain starts from the inspection-verifiable trivial deck
         self._deck = eg.make_trivial_deck()
