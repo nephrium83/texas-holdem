@@ -5,9 +5,10 @@ This document defines the initial performance contract for serverless, cryptogra
 ## Product policy
 
 - **Detection-only** is the v1 default: the hand is audited and cheats are detected without making every shuffle carry a prevention proof.
-- **Prevention** is planned as an explicit opt-in after proof generation and verification are integrated and the complete path has been benchmarked.
+- **Prevention** is available as an explicit opt-in, set table-wide by the host via `bg_prevention` in the table settings. Proof generation and verification are integrated into `MentalDeal` and the complete path is benchmarked below.
 - No mode may reveal cards or accept a deal that failed its required verification.
 - Security parameters are not reduced to meet a timing target.
+- Prevention is not the default. Peers do not negotiate the mode, so a host that omits the flag downgrades the whole table to detection-only; a peer that will not accept that constructs its `Session` with `require_prevention=True` and refuses to be dealt in.
 
 ## Initial targets
 

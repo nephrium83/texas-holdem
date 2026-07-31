@@ -6,7 +6,7 @@
   <a href="https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nephrium83/texas-holdem/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Godot-4.7.1-478CBF?style=flat-square&logo=godotengine&logoColor=white" alt="Godot 4.7.1">
   <img src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10 through 3.13">
-  <img src="https://img.shields.io/badge/tests-350%20Python%20tests-1f7a5a?style=flat-square" alt="350 Python tests">
+  <img src="https://img.shields.io/badge/tests-662%20Python%20tests-1f7a5a?style=flat-square" alt="662 Python tests">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/nephrium83/texas-holdem?style=flat-square&color=c7834c" alt="MIT license"></a>
 </p>
 
@@ -49,7 +49,7 @@ connected to the Python sidecar through a locked newline-JSON protocol.
     </td>
     <td width="50%">
       <strong>Built to be tested</strong><br>
-      350 Python tests, a 15-hand GUI smoke run, and Godot GUT execute in CI
+      662 Python tests, a 15-hand GUI smoke run, and Godot GUT execute in CI
       across Python 3.10, 3.12, and 3.13.
     </td>
   </tr>
@@ -60,7 +60,7 @@ connected to the Python sidecar through a locked newline-JSON protocol.
 | Layer | Status | What that means |
 | --- | --- | --- |
 | Poker rules engine | Implemented | No-Limit, Pot-Limit, Fixed-Limit, side pots, refunds, odd chips, tournament and cash procedures |
-| Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, and cheat detection |
+| Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, cheat detection, and opt-in Bayer–Groth shuffle prevention |
 | Hostless session | Implemented on the test transport | Signed betting, continuous hands, stack carry, bust-outs, spectators, and table-wide voids |
 | Godot sidecar bridge | Implemented | Versioned snapshots and commands over localhost newline-JSON |
 | Godot player experience | In progress | Godot 4.7.1 scaffold and GUT harness are in CI; the playable table is the current milestone |
@@ -116,18 +116,28 @@ Implemented building blocks include:
 - Threshold ElGamal encryption and re-encryption.
 - Schnorr proof-of-possession for key shares.
 - DLEQ-proven partial decryptions.
-- Optional cut-and-choose shuffle prevention plus mandatory post-hand audit.
+- Bayer–Groth verifiable shuffle (opt-in prevention) plus mandatory post-hand audit.
+- Cut-and-choose shadow-deck shuffle proof, available standalone.
 - Signed hostless wire messages and hand-scoped buffering.
 
 The real internet transport is deliberately separate from the protocol core.
 Today, multi-peer sessions are exercised through an in-memory transport; the
 libp2p/relay path and physical-machine playtest remain v1.x gate work.
 
-**Performance policy:** detection-only audit is the v1 default while the
-cryptographic prevention path is benchmarked and integrated. Prevention remains
-planned as an explicit opt-in after that path is available; security parameters
-are not reduced to satisfy timing targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md) and
-the [L5 performance baseline](docs/L5_SCOPE.md).
+**Prevention mode.** The Bayer–Groth verifiable shuffle is integrated into the
+mental-deal coordinator as an explicit opt-in, set table-wide by the host
+(`bg_prevention` in the table settings). Every shuffler attaches a proof and
+every peer verifies it before accepting the deck; a missing, undecodable, or
+invalid proof voids the hand fail-closed and names the shuffler. Detection-only
+remains the default, and a table that does not set the flag behaves exactly as
+before.
+
+**Performance policy:** measured end to end at 0.40 s (2 seats), 1.06 s
+(4 seats), and 4.11 s (9 seats) against budget targets of p95 under 5 s and
+10 s respectively. Security parameters are not reduced to satisfy timing
+targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md), the
+[shuffle benchmark](docs/BG_SHUFFLE_BENCHMARK.md), and the
+[L5 performance baseline](docs/L5_SCOPE.md).
 
 ## Run the current playable harness
 
@@ -178,6 +188,7 @@ The crypto tests require a libsodium build exposing the Ristretto255 API. See
 - [x] Mental-poker key ceremony, shuffle, deal, and audit.
 - [x] Hostless betting replicas and continuous multi-hand sessions.
 - [x] Godot-sidecar protocol, socket bridge, scaffold, and CI.
+- [x] Bayer–Groth verifiable shuffle, integrated as opt-in prevention mode.
 - [ ] Playable Godot client MVP.
 - [ ] Silent-peer timeout that triggers the existing table-wide void path.
 - [ ] Real libp2p transport and proof fragmentation.

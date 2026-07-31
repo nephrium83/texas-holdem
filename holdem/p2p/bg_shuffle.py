@@ -7,8 +7,34 @@ argument.  It proves that ``out_deck[i]`` is a re-encryption of
 scalars.
 
 The existing ``shuffle_proof.py`` remains the v1 cut-and-choose path.  This
-module is deliberately standalone until its cost is measured in the full
-mental-poker startup flow.
+module is wired into ``mental_deal`` as the opt-in prevention layer.
+
+WHAT BINDS THE OUTPUT DECK TO THE INPUT DECK
+--------------------------------------------
+The product argument proves that the committed vectors ``a`` and ``b`` are
+a permutation of ``(i, x^i)``.  On its own that says nothing about any
+ciphertext.  The link is the multi-exponentiation argument, whose statement
+is the PUBLIC value
+
+    C = prod_j  in_deck[j] ^ (x^{j+1})
+
+which ``verify`` recomputes from the input deck and the challenge.  The
+honest relation ``prod_i out[i]^{b_i} = Enc(0; -rho) + C`` holds precisely
+because ``b_i = x^{perm(i)+1}`` re-indexes that sum over the input deck.
+
+This is the whole of the argument's soundness against a substituted deck,
+and it is easy to lose.  This module previously passed
+``proof.multi.vector_e_k[m]`` as that statement -- the prover's own claimed
+value -- which reduced the verifier's check to ``x != x`` and left the two
+decks connected only by the Fiat-Shamir hash.  That stops post-hoc
+tampering with a finished proof but not a prover who forges from the start:
+a shuffler could replace all 52 cards with copies of one card and every
+peer would accept.  The same change also ran the multi-exponentiation over
+the index matrix ``a`` instead of the ``x^perm`` matrix ``b``.
+
+If either of those is reintroduced, tests/test_bg_shuffle_soundness.py
+fails.  Do not "simplify" ``verify`` by reading the product out of the
+proof.
 """
 from __future__ import annotations
 
