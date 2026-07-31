@@ -61,10 +61,22 @@ class Player:
 class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
 
+    #: Key under table_settings carrying the table-wide shuffle-proof mode.
+    #: Absent or false means detection-only, so a table created by an older
+    #: build reads as detection-only rather than failing to parse.
+    PREVENTION_SETTING = "bg_prevention"
+
     def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
                  transport=None, clock: Optional[Clock] = None,
-                 sink: Optional[EventSink] = None):
+                 sink: Optional[EventSink] = None,
+                 require_prevention: bool = False):
         self.is_host    = is_host
+        # Local policy, NOT table state: refuse to be dealt into a table
+        # that is not running Bayer-Groth prevention. The table-wide mode
+        # itself arrives in game_start; this only decides whether this peer
+        # is willing to play under it. Without it a host could silently
+        # downgrade a table to detection-only and nobody would notice.
+        self.require_prevention = require_prevention
         # transport module (or a mock) providing broadcast()/send().
         # Defaults to the real global transport; tests inject an
         # in-memory one so N sessions can run in one process.
@@ -101,6 +113,11 @@ class Session:
         self._last_game_state: dict = {}
         # Last table settings (used by _mp_new_game in gui.py)
         self._last_table_settings: dict = {}
+        # Table-wide shuffle-proof mode, re-read from every game_start.
+        # Held separately from _last_table_settings because that dict is
+        # only overwritten when non-empty, which would let a stale True
+        # survive into a table that is running detection-only.
+        self._prevention: bool = False
 
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
@@ -292,6 +309,22 @@ class Session:
         """Shared, stable per-game id (every peer holds the same seat order)."""
         return "poker|" + "|".join(self._seat_order)
 
+    @property
+    def prevention(self) -> bool:
+        """Whether this table runs Bayer-Groth shuffle proofs.
+
+        Table-wide and uniform by construction: it rides in the same
+        game_start table_settings every peer already receives, so peers do
+        not negotiate and cannot disagree unless one is compromised or
+        running a different build. A peer that disagrees produces or
+        expects a proof the others do not, and the hand voids fail-closed
+        rather than silently dropping to detection-only.
+
+        Defaults to False when the key is absent, which is what a table
+        created by an older build looks like.
+        """
+        return self._prevention
+
     def begin_hand(self, hand_no: int, button: int = 0,
                    seats_in: Optional[list] = None) -> None:
         """Start this seat's mental-poker deal for a hand and kick off the DKG.
@@ -313,6 +346,14 @@ class Session:
         if local not in seats_in:
             raise RuntimeError("cannot begin hand: local seat is not dealt in "
                                "(busted seats spectate via next_p2p_hand)")
+        prevention = self.prevention
+        if self.require_prevention and not prevention:
+            # Fail closed rather than play on a downgraded table: a host
+            # that omits the setting would otherwise turn prevention off
+            # for everyone without any peer noticing.
+            raise RuntimeError(
+                "cannot begin hand: this peer requires Bayer-Groth "
+                "prevention but the table is running detection-only")
         self._deal_hole = [None, None]
         self._deal_board = [None] * 5
         self._deal_outbox = []
@@ -325,6 +366,7 @@ class Session:
             button=button,
             master_secret=self._deal_master_secret,
             send=self._deal_outbox.append,      # buffer; _flush_deal routes them
+            prevention=prevention,
         )
         self._deal_driver.start()
         self._flush_deal()
@@ -892,6 +934,9 @@ class Session:
         ts = payload.get("table_settings", {})
         if ts:
             self._last_table_settings = ts
+        # Read unconditionally: an absent key means detection-only, and
+        # must clear any mode carried over from an earlier table.
+        self._prevention = bool(ts.get(self.PREVENTION_SETTING, False))
         if self.on_game_start:
             self.on_game_start(payload)
 
@@ -1061,6 +1106,8 @@ class Session:
             seat_order = [p.conn_id for p in self.players.values()]
         self._seat_order = seat_order
         self._last_table_settings = table_settings
+        self._prevention = bool(
+            table_settings.get(self.PREVENTION_SETTING, False))
         payload = {"table_settings": table_settings, "seat_order": seat_order}
         self._transport.broadcast({"type": "game_start", "payload": payload})
         self.state = "PLAYING"
