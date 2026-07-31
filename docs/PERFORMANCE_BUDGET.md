@@ -22,11 +22,31 @@ These are engineering targets for the next integrated proof path, not claims abo
 | Prevention hand startup at nine seats | p95 under 10 s |
 | Typical hand startup above 20 s | performance failure requiring investigation |
 
-The existing L5 baseline is the reference point until a new benchmark supersedes it: detection-only is about 0.18 seconds at nine seats, while the current prevention path is about 20 seconds at nine seats.
+The Bayer–Groth prevention path is now integrated into `MentalDeal` behind a default-off flag and has been measured end to end. Against the targets above:
 
-The standalone Bayer–Groth shuffle proof has an initial proof-only benchmark in
-[`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md). It is not yet an
-end-to-end hand-start measurement.
+| Seats | Detection p50 | Prevention p50 | Prevention p95 | Target | |
+| ---: | ---: | ---: | ---: | --- | :-- |
+| 2 | 24.9 ms | 399 ms | 409 ms | p95 under 5 s | pass |
+| 4 | 88.5 ms | 1,062 ms | 1,071 ms | p95 under 5 s | pass |
+| 9 | 623 ms | 4,106 ms | 4,117 ms | p95 under 10 s | pass |
+
+Method, per-phase breakdown, and byte counts are in
+[`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md); the harness is
+`benchmarks/mental_deal_startup.py`. Detection-only at nine seats measures
+0.62 s here rather than the 0.18 s L5 figure, because this harness runs every
+seat in one process and counts all peers' work, not one peer's.
+
+The remaining unmeasured arm is the cut-and-choose path at roughly 20 seconds
+for nine seats. That figure is an L5 estimate: `shuffle_proof.py` is not wired
+into the coordinator, so it cannot be run through this harness for a
+like-for-like comparison.
+
+Per the optimization order below, the measured dominant phase is **verification**
+(2,284 ms of a 4,106 ms nine-seat hand), not proving (1,162 ms) or serialization
+(35 ms). Verification scales quadratically in seats — one proof per shuffler but
+one verification per shuffler per peer — so batch verification of the
+multi-exponentiation argument is the first optimization to reach for if these
+targets tighten.
 
 ## Benchmark protocol
 

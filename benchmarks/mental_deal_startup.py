@@ -87,7 +87,14 @@ def _run_hand(seats: list[int], prevention: bool, hand_no: int) -> dict:
                       prevention=prevention)
         for s in seats
     }
-    marks: dict[str, float] = {}
+    # Each mark stores (elapsed, crypto_elapsed_so_far). Phase boundaries
+    # cannot be measured by wall clock alone: the handle() call that
+    # completes the DKG also emits round 1, so _finish_keygen ->
+    # _maybe_emit_shuffle generates a proof inside the very call that ends
+    # the key ceremony. Subtracting the proof work accumulated up to each
+    # mark yields orchestration time that is comparable across modes,
+    # while total_ms stays true wall clock.
+    marks: dict[str, tuple[float, float]] = {}
     wire_bytes = 0
     proof_bytes = 0
 
@@ -106,16 +113,18 @@ def _run_hand(seats: list[int], prevention: bool, hand_no: int) -> dict:
             for s in seats:
                 queue.extend(deals[s].handle(dict(msg)))
 
-            now = time.perf_counter()
+            now = time.perf_counter() - started
+            crypto = (probes.prove.seconds + probes.verify.seconds
+                      + probes.encode.seconds + probes.decode.seconds)
             if "keygen" not in marks and \
                     all(deals[s].is_done_with_keygen() for s in seats):
-                marks["keygen"] = now - started
+                marks["keygen"] = (now, crypto)
             if "shuffle" not in marks and \
                     all(deals[s].is_shuffle_complete() for s in seats):
-                marks["shuffle"] = now - started
+                marks["shuffle"] = (now, crypto)
             if "deal" not in marks and \
                     all(deals[s].hole_complete() for s in seats):
-                marks["deal"] = now - started
+                marks["deal"] = (now, crypto)
         total = time.perf_counter() - started
 
     for s in seats:
@@ -125,9 +134,14 @@ def _run_hand(seats: list[int], prevention: bool, hand_no: int) -> dict:
         if not deals[s].hole_complete():
             raise RuntimeError(f"seat {s} never recovered its hole cards")
 
-    keygen = marks.get("keygen", 0.0)
-    shuffle = marks.get("shuffle", keygen)
-    deal = marks.get("deal", shuffle)
+    def net(name: str, fallback: float) -> float:
+        """Elapsed time at a mark with proof work removed."""
+        elapsed, crypto = marks.get(name, (None, None))
+        return fallback if elapsed is None else elapsed - crypto
+
+    keygen = net("keygen", 0.0)
+    shuffle = net("shuffle", keygen)
+    deal = net("deal", shuffle)
     return {
         "hand": hand_no,
         "total_ms": round(total * 1000, 3),
@@ -199,6 +213,10 @@ def _metadata() -> dict:
         "n": md.BG_N,
         "proof": "bayer-groth shuffle prevention",
         "measures": "in-process coordinator; excludes transport",
+        "phase_ms_note": (
+            "keygen_ms/shuffle_ms/deal_ms are orchestration time with "
+            "prove/verify/serialize subtracted, so they are comparable "
+            "across modes; total_ms is true wall clock and includes them"),
     }
 
 
