@@ -154,3 +154,90 @@ def test_default_peer_does_not_require_prevention():
     for s in sessions.values():
         assert s.require_prevention is False
         s.begin_hand(hand_no=1, button=0)      # must not raise
+
+
+# ------------------------------------------------------ end-to-end hand
+
+def make_deal_table(n, prevention):
+    """n Sessions on one bus with the seat order configured directly.
+
+    Follows tests/test_session_deal, which bypasses the lobby handshake;
+    _prevention is set to what start_game would have derived from the
+    table settings.
+    """
+    bus = InMemoryBus()
+    order = [f"peer{i}" for i in range(n)]
+    sessions = {}
+    for i, cid in enumerate(order):
+        s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
+                    transport=InMemoryTransport(bus, cid))
+        s.local_conn_id = cid
+        s.configure_seats(list(order))
+        s._prevention = prevention
+        bus.register(cid, s)
+        sessions[cid] = s
+    return bus, sessions, order
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_full_prevention_hand_over_real_sessions(n):
+    """The integration proof.
+
+    Convergence under prevention is only reachable if every round's proof
+    was generated, serialized onto the wire, decoded, and verified by every
+    peer -- a single failure aborts the hand instead. So agreement here
+    exercises the whole path, not just the flag.
+    """
+    bus, sessions, order = make_deal_table(n, prevention=True)
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+
+    decks = [[ct.to_hex() for ct in sessions[c]._deal_driver.deal.deck]
+             for c in order]
+    assert all(deck == decks[0] for deck in decks)
+    for cid in order:
+        deal = sessions[cid]._deal_driver.deal
+        assert deal.prevention is True
+        assert deal.abort_reason is None
+        assert deal.is_shuffle_complete()
+        assert deal.hole_complete()
+
+
+def test_prevention_hand_puts_proofs_on_the_wire():
+    """Guards the test above: if no proof were ever emitted, convergence
+    would still hold and the assertion would prove nothing."""
+    seen = []
+    bus, sessions, order = make_deal_table(2, prevention=True)
+    original = bus.enqueue
+
+    def spy(src, dst, msg):
+        if msg.get("type") == "deck_round" or (
+                isinstance(msg.get("payload"), dict)
+                and msg["payload"].get("round") is not None):
+            body = msg.get("payload", msg)
+            seen.append("proof" in body)
+        return original(src, dst, msg)
+
+    bus.enqueue = spy
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+    assert seen, "no deck_round crossed the bus"
+    assert all(seen), "a deck_round crossed the bus without a proof"
+
+
+def test_detection_only_hand_still_converges():
+    """The default path must be unaffected by any of the above."""
+    bus, sessions, order = make_deal_table(3, prevention=False)
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+    decks = [[ct.to_hex() for ct in sessions[c]._deal_driver.deal.deck]
+             for c in order]
+    assert all(deck == decks[0] for deck in decks)
+    for cid in order:
+        deal = sessions[cid]._deal_driver.deal
+        assert deal.prevention is False
+        assert deal.abort_reason is None
+        assert deal.hole_complete()

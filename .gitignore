@@ -17,3 +17,6 @@ native/*.dll
 native/*.so
 native/*.dylib
 native/*.lib
+
+# benchmark run output (machine-specific; recorded results live in docs/)
+benchmarks/*_result.json
