@@ -31,7 +31,10 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid))
-        # Stable per-seat device secrets make deals reproducible across runs.
+        # Stable per-seat device secrets keep the KEY ceremony reproducible.
+        # The deal itself is not: shuffle_mp draws a fresh CSPRNG
+        # permutation and fresh re-encryption scalars every run, as it
+        # must. Tests here may not assume a particular hand outcome.
         s._deal_master_secret = bytes([i + 1]) * 32
         s.local_conn_id = cid
         s.configure_seats(list(order))
@@ -169,7 +172,6 @@ def test_deal_cheat_void_reverts_and_redeals_same_seats():
     invalid proof; the hand-void broadcast is idempotent when those local
     detections overlap."""
     bus, sessions, order = make_table(3)
-    stacks_before = [sessions[order[0]].replica.stacks[i] for i in range(3)]
     btn = sessions[order[0]].replica.button
 
     # A forged deal_share with a garbage proof, attributed to seat 2,
@@ -208,13 +210,22 @@ def test_elimination_drops_seat_and_shrinks_next_deal():
     """A seat that busts is not dealt into the next hand: seats_dealt
     shrinks, the deal runs among survivors, and the busted LOCAL session
     reports 'eliminated' while survivors get 'started'."""
-    # Seat 1 is short; an all-in hand to a showdown will bust someone.
-    bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
-    allin_hand(bus, sessions, order)
-    # Someone must have gone to zero for a clean elimination test.
-    stacks = [sessions[order[0]].replica.stacks[i] for i in range(3)]
-    busted = [i for i, s in enumerate(stacks) if s == 0]
-    assert busted, f"no elimination occurred (stacks {stacks})"
+    # Seat 1 is short and everyone goes all in, so a showdown usually busts
+    # someone -- but not always: if the pot chops every way the table
+    # survives intact. The shuffle is genuinely random (see make_table), so
+    # that is a real outcome, and asserting it cannot happen made this test
+    # fail intermittently. Retry until the PRECONDITION holds; the
+    # behaviour under test below is still asserted at full strength.
+    for attempt in range(20):
+        bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
+        allin_hand(bus, sessions, order)
+        stacks = [sessions[order[0]].replica.stacks[i] for i in range(3)]
+        busted = [i for i, s in enumerate(stacks) if s == 0]
+        if busted:
+            break
+    else:
+        pytest.fail(f"no elimination in {attempt + 1} all-in hands "
+                    f"(last stacks {stacks})")
     survivors = [i for i in range(3) if stacks[i] > 0]
 
     # A next-hand action can arrive before this busted client processes its
@@ -295,9 +306,6 @@ def test_full_match_runs_to_a_single_winner():
     bus, sessions, order = make_table(3, stacks=[300, 300, 300])
     total = 900
     for _ in range(60):                       # generous bound; must terminate
-        alive_now = [i for i in range(3)
-                     if sessions[order[i]].replica is not None
-                     and sessions[order[i]].replica.stacks[i] > 0]
         ref = next(i for i in range(3)
                    if not sessions[order[i]]._p2p_spectator)
         allin_hand(bus, sessions, order, ref=ref,

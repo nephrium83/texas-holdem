@@ -34,8 +34,29 @@ Design commitments (from the settled L5 decisions)
   by the Phase D post-hand audit. Setting ``prevention=True`` opts into
   the Bayer-Groth prevention layer described below. The default is
   unchanged and byte-identical to the pre-prevention protocol.
-- **Fail-closed with attribution.** A protocol violation aborts the hand
-  and names the offending seat; there is no skip-and-continue.
+- **Fail-closed, with attribution wherever the evidence identifies a
+  seat.** A protocol violation aborts the hand; there is no
+  skip-and-continue. Every violation attributable to a seat from the
+  message that caused it names that seat: a bad PoP, an out-of-turn
+  shuffle, a bad decryption proof, an invalid prevention proof.
+
+  One case does not name a seat. In detection-only, a shuffler that
+  substitutes a card is caught by the Phase D multiset check, but that
+  check runs over the FINAL deck and says only that the chain was
+  corrupted somewhere -- ``bad_seat`` is None. Pinning the round would
+  mean auditing each intermediate deck, and since the audit shares are
+  computed against a specific deck's C0 values, that needs every seat to
+  open every round -- a new message exchange, not a local computation.
+  ``deck_audit.first_corrupt_round`` implements the analysis; nothing
+  invokes it, because the exchange that would feed it does not exist.
+
+  DESIGN DECISION PENDING: adding that exchange is a wire-protocol change
+  costing n x the audit on the failure path, and it is not required for
+  correctness -- the hand already voids fail-closed and no cards or chips
+  are at risk. Prevention mode does not have this gap at all: a corrupt
+  shuffle is rejected at the round that produced it, naming the shuffler,
+  before the deck is ever accepted. Tested both ways in
+  tests/test_deck_audit_soundness.py.
 
 Prevention mode (opt-in)
 ------------------------
@@ -683,9 +704,13 @@ class MentalDeal:
         if report.ok:
             self.phase = Phase.DONE
         else:
-            # void + attribute. A lying decryptor is named in bad_seats; a
-            # corrupt deck with no bad decryptor is a shuffler cheat (the
-            # exact round is recoverable from round_decks via a chain audit).
+            # Void, naming a seat when the evidence identifies one. A lying
+            # decryptor is pinned by its own failed DLEQ and appears in
+            # bad_seats. A corrupt deck with no bad decryptor is a shuffler
+            # cheat, but the multiset check only sees the final deck, so
+            # blame is None -- see the module docstring for why attributing
+            # it needs a new message exchange and why that is a pending
+            # design decision rather than a correctness gap.
             blame = report.bad_seats[0] if report.bad_seats else None
             self._abort("; ".join(report.problems) or "audit failed", blame)
 
