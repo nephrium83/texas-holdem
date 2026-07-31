@@ -200,6 +200,29 @@ def _ensure_worker():
         return _worker
 
 
+def _run_conn_callbacks(conn_id: str, address: str) -> None:
+    for cb in _conn_callbacks:
+        try:
+            cb(conn_id, address)
+        except Exception:
+            log.exception("on_connect callback error")
+
+
+def _run_disc_callbacks(conn_id: str) -> None:
+    for cb in _disc_callbacks:
+        try:
+            cb(conn_id)
+        except Exception:
+            log.exception("on_disconnect callback error")
+
+
+def _deliver_event(fn, *args) -> bool:
+    """Route a lifecycle callback onto the dispatch consumer."""
+    if _closing:
+        return False
+    return _ensure_worker().submit_event(fn, *args)
+
+
 def _deliver(conn_id: str, msg: dict) -> bool:
     """Queue one inbound frame for off-loop handling. False if refused."""
     if _closing:
@@ -408,11 +431,10 @@ async def _handle_connection(reader: asyncio.StreamReader,
     with _writers_lock:
         _writers[conn_id] = writer
     log.debug("transport: connected %s (%s)", conn_id, address)
-    for cb in _conn_callbacks:
-        try:
-            cb(conn_id, address)
-        except Exception:
-            log.exception("on_connect callback error")
+    # Onto the dispatch consumer, not this thread: connect/disconnect
+    # callbacks mutate the same Session state message handlers do, and
+    # handlers no longer run here. See dispatch.submit_event.
+    _deliver_event(_run_conn_callbacks, conn_id, address)
     try:
         while True:
             msg = await _read_msg(reader)
@@ -438,11 +460,7 @@ async def _handle_connection(reader: asyncio.StreamReader,
         with _writers_lock:
             _writers.pop(conn_id, None)
         log.debug("transport: disconnected %s", conn_id)
-        for cb in _disc_callbacks:
-            try:
-                cb(conn_id)
-            except Exception:
-                log.exception("on_disconnect callback error")
+        _deliver_event(_run_disc_callbacks, conn_id)
 
 
 # ---------------------------------------------------------------------------
@@ -690,11 +708,7 @@ def _drop_writer(conn_id: str) -> None:
         writer.close()
     except Exception:
         log.debug("transport: writer close raced", exc_info=True)
-    for cb in _disc_callbacks:
-        try:
-            cb(conn_id)
-        except Exception:
-            log.exception("on_disconnect callback error")
+    _deliver_event(_run_disc_callbacks, conn_id)
 
 
 def broadcast(msg: dict) -> None:

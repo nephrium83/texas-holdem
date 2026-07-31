@@ -74,15 +74,35 @@ class MessageWorker:
         back onto the event loop, which is the thread this exists to keep
         free.
         """
+        return self._enqueue(("msg", conn_id, msg), conn_id)
+
+    def submit_event(self, fn: Callable, *args) -> bool:
+        """Queue a non-message callback onto the SAME consumer.
+
+        Connection and disconnection callbacks mutate the same Session
+        state that message handlers do. Running them on the event-loop
+        thread while handlers run here would be a genuine data race --
+        introduced, not inherited, the moment message handling moved off
+        the loop. Routing them through this queue restores single-thread
+        ownership of protocol state and preserves the relative order of
+        "message from peer" and "peer went away".
+
+        Ordering matters concretely: a disconnect that overtook an
+        in-flight message would tear down state the handler is about to
+        touch.
+        """
+        return self._enqueue(("call", fn, args), getattr(fn, "__name__", "?"))
+
+    def _enqueue(self, item: tuple, label: str) -> bool:
         if self._stopping.is_set() or not self._started:
             return False
         try:
-            self._queue.put_nowait((conn_id, msg))
+            self._queue.put_nowait(item)
             return True
         except queue.Full:
             self.refused += 1
-            log.warning("dispatch: queue full (%d) — refusing message from %s",
-                        self._queue.maxsize, conn_id)
+            log.warning("dispatch: queue full (%d) — refusing work from %s",
+                        self._queue.maxsize, label)
             return False
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -124,15 +144,20 @@ class MessageWorker:
             item = self._queue.get()
             if item is _SENTINEL:
                 return
-            conn_id, msg = item
+            kind = item[0]
             try:
-                self._handler(conn_id, msg)
+                if kind == "msg":
+                    _kind, conn_id, msg = item
+                    self._handler(conn_id, msg)
+                else:
+                    _kind, fn, args = item
+                    fn(*args)
             except Exception as exc:
                 # A handler failure is a protocol event, not a reason to
                 # lose the worker: log it, report it, keep consuming.
                 # Dying here would leave every later message unprocessed
                 # with nothing recorded.
-                log.exception("dispatch: handler failed for %s", conn_id)
+                log.exception("dispatch: work item failed (%s)", kind)
                 if self._on_error is not None:
                     try:
                         self._on_error(exc)

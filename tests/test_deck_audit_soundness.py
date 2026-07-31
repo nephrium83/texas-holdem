@@ -130,12 +130,25 @@ def _reshare(deck, xs):
 
 def test_substituted_card_is_detected(table):
     """The shuffler swaps one card for a better one and honestly decrypts
-    the result. Only the multiset check can catch this."""
+    the result. Only the multiset check can catch this.
+
+    The replacement is chosen against the deck's actual contents. Hardcoding
+    one card made this pass 51 times in 52: when that card already sat at
+    the target position the substitution was a no-op and the multiset was
+    still correct.
+    """
+    honest = audit(table)
+    assert honest.ok, "control audit must pass before substituting"
+    already_here = honest.cards[4]
+    replacement = next(c for c in eg.CARDS if c != already_here)
+    point = eg._CARD_POINTS[list(eg.CARDS).index(replacement)]
+
     deck = list(table["deck"])
-    deck[4] = eg.encrypt(table["pk"], eg._CARD_POINTS[0], R.random_scalar())
+    deck[4] = eg.encrypt(table["pk"], point, R.random_scalar())
     report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]))
     assert report.ok is False
-    assert any("duplicated" in p or "missing" in p for p in report.problems)
+    assert any("duplicated" in p or "missing" in p for p in report.problems), \
+        report.problems
 
 
 def test_duplicated_card_is_detected(table):
