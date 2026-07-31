@@ -214,10 +214,22 @@ def _chunks(values: Sequence, n: int) -> List[list]:
 def _multi_prove(pk: Point, ck: CommitmentKey, statement: bytes,
                  a_commits: Sequence[Point], b_commits: Sequence[Point],
                  out_chunks: Sequence[Sequence[Ciphertext]],
-                 b_chunks: Sequence[Sequence[Scalar]],
                  matrix_a: Sequence[Sequence[Scalar]],
                  matrix_blinders: Sequence[Scalar], rho: Scalar,
-                 m: int, n: int) -> MultiExponentiationProof:
+                 product: Ciphertext, m: int, n: int
+                 ) -> MultiExponentiationProof:
+    """Prove ``product = Enc(0; -rho) + sum_ij matrix_a[i][j] * out[i][j]``.
+
+    The paper calls this sub-argument's exponent matrix A, which is why the
+    fields are named a_0/a_blinded. The shuffle instantiates it with the
+    **b** matrix (the x^perm powers) and ``b_commits`` as the exponent
+    commitments -- ``a_commits`` enters only the challenge hash. Passing
+    the index matrix here instead would prove a true statement about the
+    wrong exponents and leave the decks unlinked.
+
+    ``product`` is the public value the verifier recomputes from the INPUT
+    deck. It is a statement input, never read back out of the proof.
+    """
     length = 2 * m
     a_0 = [R.random_scalar() for _ in range(n)]
     r_0 = R.random_scalar()
@@ -258,7 +270,7 @@ def _multi_prove(pk: Point, ck: CommitmentKey, statement: bytes,
         for k in range(length)
     ]
     challenge = _multi_challenge(
-        statement, a_commits, b_commits, vector_e_k[m], a_0_commit,
+        statement, a_commits, b_commits, product, a_0_commit,
         commit_b_k, vector_e_k)
     challenge_powers = [_ONE, *_powers(challenge, length - 1)]
     x_array = challenge_powers[1:m + 1]
@@ -303,8 +315,10 @@ def _multi_verify(pk: Point, ck: CommitmentKey, statement: bytes,
         return False
     challenge_powers = [_ONE, *_powers(challenge, 2 * m - 1)]
     x_array = challenge_powers[1:m + 1]
-    c_a_x = R.multiscalar_mul(list(x_array), list(a_commits))
-    if R.add(c_a_x, proof.a_0_commit) != commit(
+    # The exponent commitments are b_commits: the shuffle instantiates this
+    # sub-argument with the x^perm matrix, not the permutation indices.
+    c_b_x = R.multiscalar_mul(list(x_array), list(b_commits))
+    if R.add(c_b_x, proof.a_0_commit) != commit(
             ck, proof.a_blinded, proof.r_blinded):
         return False
     c_b_k = R.multiscalar_mul(challenge_powers, proof.commit_b_k)
@@ -341,7 +355,25 @@ def prove(pk: Point, ck: CommitmentKey, in_deck: Sequence[Ciphertext],
         expected = reencrypt(pk, in_deck[source], scalars[i])
         if expected != out_deck[i]:
             raise ValueError("output deck does not match the shuffle witness")
+    return _prove_unchecked(pk, ck, in_deck, out_deck, perm, scalars,
+                            m, n, context)
 
+
+def _prove_unchecked(pk: Point, ck: CommitmentKey,
+                     in_deck: Sequence[Ciphertext],
+                     out_deck: Sequence[Ciphertext], perm: Sequence[int],
+                     scalars: Sequence[Scalar], m: int, n: int,
+                     context: bytes) -> ShuffleProof:
+    """The prover algorithm with NO witness self-check.
+
+    ``prove`` validates its witness before delegating here, but soundness
+    must never rest on the prover checking itself -- a real attacker just
+    deletes that check. This seam exists so the test suite can BE that
+    attacker: run the honest algorithm over a deck that is not a shuffle
+    of the input and confirm the verifier still rejects.
+
+    Not part of the public API; do not call it outside tests.
+    """
     statement = _statement_context(context, ck, pk, in_deck, out_deck, m, n)
     indices = [_scalar_int(i + 1) for i in range(m * n)]
     a_flat = [indices[source] for source in perm]
@@ -383,9 +415,12 @@ def prove(pk: Point, ck: CommitmentKey, in_deck: Sequence[Ciphertext],
     rho = _ZERO
     for scalar, weight in zip(scalars, b_flat):
         rho = R.scalar_sub(rho, R.scalar_mul(scalar, weight))
+    # The public statement value: sum_j x^{j+1} * in_deck[j]. The honest
+    # relation prod_i out[i]^{b_i} = Enc(0; -rho) + this holds exactly
+    # because b_i = x^{perm(i)+1} re-indexes the sum over the input deck.
     multi = _multi_prove(
-        pk, ck, statement, a_commits, b_commits, out_chunks, b_chunks,
-        a_chunks, a_blinders, rho, m, n)
+        pk, ck, statement, a_commits, b_commits, out_chunks,
+        b_chunks, b_blinders, rho, _dot_cipher(x_powers, in_deck), m, n)
     return ShuffleProof(a_commits=a_commits, b_commits=b_commits,
                         product=product, multi=multi)
 
@@ -421,10 +456,14 @@ def verify(pk: Point, ck: CommitmentKey, in_deck: Sequence[Ciphertext],
         if not bg_product.verify(ck, d_commits, n, claimed,
                                  product_context, proof.product):
             return False
+        # The verifier recomputes the multi-exponentiation statement from
+        # the PUBLIC input deck. This is the only step that binds out_deck
+        # to in_deck; taking the value from the proof instead would make
+        # the check vacuous and accept any forged deck.
+        expected = _dot_cipher(x_powers, in_deck)
         return _multi_verify(
             pk, ck, statement, proof.a_commits, proof.b_commits,
-            _chunks(out_deck, n), proof.multi.vector_e_k[m], proof.multi,
-            m, n)
+            _chunks(out_deck, n), expected, proof.multi, m, n)
     except (AttributeError, IndexError, TypeError, ValueError):
         return False
 
