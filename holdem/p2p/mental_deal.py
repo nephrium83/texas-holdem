@@ -123,6 +123,12 @@ BG_N = 13
 # nobody can hold a commitment trapdoor. Changing it is a wire break.
 BG_CK_SEED = b"poker.mentaldeal.bg.ck.v1"
 
+# Upper bound on messages held because they arrived before this seat could
+# act on them. A nine-seat hand legitimately has at most ~189 deal messages
+# in flight, so honest reordering never approaches this; it exists so a peer
+# replaying junk cannot grow the buffer without limit.
+MAX_HELD = 1024
+
 _BG_CK: Optional[CommitmentKey] = None
 
 
@@ -217,6 +223,9 @@ class MentalDeal:
     abort_reason: Optional[str] = None
     bad_seat: Optional[int] = None
     _announced: bool = False
+    # Messages that arrived before this seat could act on them, replayed
+    # as the state advances. The transport does not guarantee ordering.
+    _held: List[dict] = field(default_factory=list)
 
     def __post_init__(self):
         self.seats_in = sorted(self.seats_in)
@@ -301,9 +310,25 @@ class MentalDeal:
         }]
 
     def handle(self, msg: dict) -> List[dict]:
-        """Consume one inbound broadcast; return any outbound messages."""
+        """Consume one inbound broadcast; return any outbound messages.
+
+        A message that arrives before this seat can act on it is held and
+        replayed, not dropped. The transport is explicitly unordered (see
+        the module docstring), so a deck round can overtake the key
+        announcement it depends on, or a deal share can overtake the
+        shuffle. Dropping those silently stalls the seat forever: nothing
+        in the protocol retransmits.
+        """
         if self.phase == Phase.ABORTED:
             return []
+        if self._premature(msg):
+            self._hold(msg)
+            return []
+        out = self._dispatch(msg)
+        out.extend(self._drain_held())
+        return out
+
+    def _dispatch(self, msg: dict) -> List[dict]:
         mtype = msg.get("type")
         if mtype == "key_announce":
             return self._on_key_announce(msg)
@@ -314,6 +339,69 @@ class MentalDeal:
         if mtype == "audit_open":
             return self._on_audit_open(msg)
         return []
+
+    def _premature(self, msg: dict) -> bool:
+        """True if this message is valid but cannot be acted on YET.
+
+        Distinct from stale (already applied -- drop) and malformed
+        (abort). Only "too early" is held, so a duplicate or a bogus
+        message still takes its normal path rather than accumulating.
+        """
+        mtype = msg.get("type")
+        if mtype == "deck_round":
+            if self.phase == Phase.KEYGEN:
+                return True                 # joint key not formed yet
+            if self.phase != Phase.SHUFFLE:
+                return False                # chain finished: stale, not early
+            try:
+                round_no = int(msg["round"])
+            except (KeyError, ValueError, TypeError):
+                return False                # malformed: let _dispatch abort
+            return round_no > self._shuffle_round + 1
+        if mtype in ("deal_share", "audit_open"):
+            return self.phase in (Phase.KEYGEN, Phase.SHUFFLE)
+        return False
+
+    def _hold(self, msg: dict) -> None:
+        """Retain an early message, bounded.
+
+        The legitimate in-flight total for a hand is n key announces, n
+        deck rounds, n*2n deal shares and n audit opens -- 189 at nine
+        seats. MAX_HELD is far above that, so honest reordering never
+        reaches it, while a peer replaying junk cannot grow this without
+        limit.
+        """
+        if len(self._held) >= MAX_HELD:
+            self._abort(
+                f"more than {MAX_HELD} out-of-order messages held; "
+                f"refusing to buffer further", None)
+            return
+        self._held.append(dict(msg))
+
+    def _drain_held(self) -> List[dict]:
+        """Replay held messages that the new state has made actionable.
+
+        Loops because applying one held message can unblock another (round
+        2 arriving before round 1 unblocks once round 1 lands). Terminates
+        because every pass either consumes at least one message or stops.
+        """
+        out: List[dict] = []
+        while self._held and self.phase != Phase.ABORTED:
+            ready, self._held = self._held, []
+            consumed = False
+            for held in ready:
+                if self.phase == Phase.ABORTED:
+                    break
+                if self._premature(held):
+                    self._held.append(held)
+                else:
+                    out.extend(self._dispatch(held))
+                    consumed = True
+            if not consumed:
+                break
+        if self.phase == Phase.ABORTED:
+            self._held.clear()
+        return out
 
     # ---------------------------------------------------------------- Phase A
 
