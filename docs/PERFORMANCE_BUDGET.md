@@ -37,10 +37,15 @@ Method, per-phase breakdown, and byte counts are in
 0.62 s here rather than the 0.18 s L5 figure, because this harness runs every
 seat in one process and counts all peers' work, not one peer's.
 
-The remaining unmeasured arm is the cut-and-choose path at roughly 20 seconds
-for nine seats. That figure is an L5 estimate: `shuffle_proof.py` is not wired
-into the coordinator, so it cannot be run through this harness for a
-like-for-like comparison.
+The cut-and-choose path is now measured too, on a per-round basis and projected
+with a seat-chain model validated against the Bayer–Groth figures above: about
+91 seconds of proof work at nine seats, and 650 KB per proof against 3 KB. The
+roughly 20 second figure previously carried for it understates the cost by
+about 4.5x — 20 seconds is closer to its four-seat cost. Details in
+[`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md); harness is
+`benchmarks/shuffle_proof_comparison.py`. Bayer–Groth supersedes it on every
+axis, and `shuffle_proof.py` remains in the tree only as an unwired reference
+implementation.
 
 Per the optimization order below, the measured dominant phase is **verification**
 (2,284 ms of a 4,106 ms nine-seat hand), not proving (1,162 ms) or serialization

@@ -82,22 +82,63 @@ within noise, so there is no meaningful warmup cost to amortize.
 If the budget later tightens, the measured target is batch verification of
 the multi-exponentiation argument, not proof size or wire format.
 
+## Cut-and-choose comparison
+
+The third arm. `shuffle_proof.py` is not wired into the coordinator, so it
+cannot be run through the integrated harness, and wiring an inferior
+construction into the live protocol purely to benchmark it is the wrong
+trade. `benchmarks/shuffle_proof_comparison.py` instead measures both proof
+systems on the same 52-card shuffle and projects each to a full hand with
+the seat-chain model `seats * prove + seats² * verify` — one proof per
+shuffler, verified by every peer.
+
+The model is validated rather than assumed. Against the measured Bayer–Groth
+figures above it overpredicts by a consistent +6.6% on proving and +22.8% on
+verification at every seat count, so it is a conservative upper bound, and
+the same bias applies to the cut-and-choose projection.
+
+Per 52-card round, 5 samples, p50, k = 128:
+
+| | Prove | Verify | Proof size |
+|---|---:|---:|---:|
+| Bayer–Groth 4×13 | 138 ms | 35 ms | 3 KB |
+| Cut-and-choose k=128 | 1,023 ms | 1,010 ms | 650 KB |
+| Ratio | 7.4× | 29.2× | 217× |
+
+Projected proof work per hand:
+
+| Seats | Bayer–Groth | Cut-and-choose | |
+|---:|---:|---:|---:|
+| 2 | 0.41 s | 6.09 s | 15× |
+| 4 | 1.10 s | 20.25 s | 18× |
+| 9 | 4.04 s | 91.02 s | 23× |
+
+Two things this settles. Bayer–Groth supersedes cut-and-choose on every
+axis that matters — an order of magnitude in time and over two in bytes;
+650 KB per round is 5.9 MB per nine-seat hand against 78 KB. And the
+roughly 20 s nine-seat figure previously carried for cut-and-choose
+understates it by about 4.5×; 20 s is closer to its **four**-seat cost. That
+figure predates this harness and appears to have counted a single verifier
+rather than every peer.
+
+`k = 128` is a full security parameter for the cut-and-choose path, not a
+statistical one (see the module docstring). It was not reduced to flatter
+the comparison, and the benchmark refuses a lower value.
+
 ## Decision
 
-The Bayer–Groth prevention proof is fast enough to be offered as an opt-in
-prevention mode, and it is now wired into `MentalDeal` behind a default-off
-flag. It should still not become the default: the session layer does not yet
-enforce a uniform table-wide mode, which is the remaining gate.
+Bayer–Groth is the prevention path. It is wired into `MentalDeal` and
+established table-wide by the host via `bg_prevention`; the measured
+end-to-end cost meets every budget target with headroom.
 
-The comparison this document previously asked for is two-thirds complete.
-Detection-only and Bayer–Groth prevention are measured above on the same
-harness. The third arm — the existing cut-and-choose path — cannot be
-measured end to end because `shuffle_proof.py` was never wired into the
-coordinator, and wiring it was explicitly out of scope for the integration
-task. The roughly 20 s nine-seat figure in
-[`PERFORMANCE_BUDGET.md`](PERFORMANCE_BUDGET.md) remains the reference for
-that path and is an L5 estimate, not a measurement from this harness.
+`shuffle_proof.py` stays in the tree as an unwired reference implementation.
+It is a different construction resting on different assumptions (no
+commitment key, so the trapdoor class is structurally impossible), which
+makes it worth keeping as a cross-check, but nothing should ship on it.
 
-No timing result changes the security parameters. If the integrated path
-misses the performance budget, optimize the measured bottleneck or retain
-detection only as the default.
+Prevention remains non-default. That is now a product policy decision rather
+than an engineering gate: the path is integrated, measured, and within
+budget. Turning it on by default is a call about whether every table should
+pay 4 s at nine seats.
+
+No timing result changes the security parameters.
