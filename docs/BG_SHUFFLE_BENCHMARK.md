@@ -75,12 +75,12 @@ accepted forged decks and are not a target to regain.
 | Seats | Mode | Proving | Verifying | Serialization | Orchestration | Wire | Proofs |
 |---:|---|---:|---:|---:|---:|---:|---:|
 | 9 | detection | — | — | — | 623 ms | 104 KB | — |
-| 9 | prevention | 1,162 ms | 2,284 ms | 35 ms | 626 ms | 182 KB | 78 KB |
+| 9 | prevention | 1,269 ms | 3,143 ms | 35 ms | 634 ms | 182 KB | 78 KB |
 
 **Verification is the hot path, not proving or serialization.** A hand runs
 one proof per shuffler but `seats²` verifications, so proving scales linearly
 in seats while verification scales quadratically; at nine seats that is 9
-proofs against 81 verifications. Serialization is 35 ms of a 4.1 s hand and
+proofs against 81 verifications. Serialization is 35 ms of a 5.1 s hand and
 is not worth optimizing.
 
 Orchestration time (key ceremony, shuffle mechanics, deal) is measured with
@@ -149,6 +149,6 @@ makes it worth keeping as a cross-check, but nothing should ship on it.
 Prevention remains non-default. That is now a product policy decision rather
 than an engineering gate: the path is integrated, measured, and within
 budget. Turning it on by default is a call about whether every table should
-pay 4 s at nine seats.
+pay 5 s at nine seats.
 
 No timing result changes the security parameters.
