@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -58,8 +59,38 @@ class Player:
     x25519_pubkey_hex: str   = ""
 
 
+@dataclass(frozen=True)
+class TerminalRecord:
+    """Forensic record of the one transition that ended a session.
+
+    Immutable and written exactly once. A later terminal event is a no-op
+    and must not replace the original cause -- the first valid transition
+    wins, and reconstructing an incident needs to know which one it was.
+
+    Deliberately carries no private cards, secret shares, secret scalars,
+    or proof randomness.
+    """
+    session_id: str
+    hand_no: int
+    previous_state: str
+    terminal_state: str
+    terminal_reason: str
+    initiating_seat: Optional[int]
+    conn_id: Optional[str]
+    host_conn_id: str
+    monotonic_ts: float
+    sequence: int
+
+
 class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
+
+    #: Session-level terminal outcomes. Host loss during PLAYING is one of
+    #: them; it is NOT a fold, a timeout, or grounds for electing a host.
+    HOST_LOST = "HOST_LOST"
+    ENDED_NORMAL = "ENDED_NORMAL"
+    ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
+    LOCAL_SHUTDOWN = "LOCAL_SHUTDOWN"
 
     #: Key under table_settings carrying the table-wide shuffle-proof mode.
     #: Absent or false means detection-only, so a table created by an older
@@ -114,6 +145,13 @@ class Session:
         self._last_game_state: dict = {}
         # Last table settings (used by _mp_new_game in gui.py)
         self._last_table_settings: dict = {}
+        # --- terminal state (one transition, first cause wins) ---
+        self.terminal_state: Optional[str] = None
+        self.terminal_reason: Optional[str] = None
+        self.terminal_record: Optional[TerminalRecord] = None
+        self.on_session_terminated: Optional[Callable] = None
+        self._terminal_seq = 0
+
         # Table-wide shuffle-proof mode, re-read from every game_start.
         # Held separately from _last_table_settings because that dict is
         # only overwritten when non-empty, which would let a stale True
@@ -225,6 +263,14 @@ class Session:
 
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
+        if self.terminal_state is not None:
+            # A terminated session accepts no further protocol mutation.
+            # Messages already in flight when the session ended arrive here
+            # and must be inert rather than reviving a hand nobody is
+            # playing any more.
+            _log.debug("session: dropping %s from %s — session is %s",
+                       msg.get("type"), conn_id, self.terminal_state)
+            return
         # M-11 / H-3: per-message integrity is enforced at the transport
         # layer (C-1: every envelope is signature-verified in wire.unpack).
         # The hash *chain* linking successive messages is not yet threaded —
@@ -1024,15 +1070,87 @@ class Session:
     # Disconnect / host migration
     # ------------------------------------------------------------------
 
+    def terminate(self, state: str, reason: str, *,
+                  conn_id: Optional[str] = None,
+                  seat: Optional[int] = None) -> bool:
+        """The single terminal transition. True if this call is the winner.
+
+        Idempotent by construction: once a terminal state is set, every
+        later call is a no-op that leaves the original cause intact. That
+        matters because several subsystems can each notice the same failure
+        (a disconnect, a timeout, and a peer's hand_void), and without one
+        winner they would each half-terminate and record contradictory
+        reasons.
+
+        Runs on the owner thread. All transport-originated callers already
+        arrive on the dispatch consumer; local callers must too.
+        """
+        if self.terminal_state is not None:
+            _log.debug("session: %s ignored — already terminal (%s)",
+                       state, self.terminal_state)
+            return False
+
+        previous, self.state = self.state, "ENDED"
+        self.terminal_state = state
+        self.terminal_reason = reason
+        self._terminal_seq += 1
+        self.terminal_record = TerminalRecord(
+            session_id=self._deal_session_id(),
+            hand_no=self._hand_no,
+            previous_state=previous,
+            terminal_state=state,
+            terminal_reason=reason,
+            initiating_seat=seat,
+            conn_id=conn_id,
+            host_conn_id=self._host_conn_id,
+            monotonic_ts=time.monotonic(),
+            sequence=self._terminal_seq,
+        )
+
+        # Nothing queued may commit against a terminated session: a held
+        # message replayed later, or a proof that finishes verifying after
+        # the fact, would mutate state whose owner has already ended.
+        self._invalidate_pending_work()
+
+        self._safe_emit("sidecar_stopping", reason=f"{state}: {reason}")
+        if self.on_session_terminated:
+            self.on_session_terminated(self.terminal_record)
+        return True
+
+    def _invalidate_pending_work(self) -> None:
+        """Drop everything that could still mutate this session."""
+        self._msg_buffer = []
+        driver = self._deal_driver
+        if driver is not None and getattr(driver, "deal", None) is not None:
+            driver.deal._held.clear()
+        self._clear_deadline()
+
     def handle_disconnect(self, conn_id: str) -> None:
-        """Called by the transport on_disconnect handler for any dropped peer."""
+        """Called by the transport on_disconnect handler for any dropped peer.
+
+        Host loss is phase-dependent. In LOBBY nothing cryptographic is in
+        flight, so re-electing from already-authenticated membership is
+        safe. Once PLAYING, host identity is frozen: a promotion there would
+        hand host-only authority over an in-flight cryptographic protocol
+        to a peer that inherited none of its state, with no authenticated
+        transfer of that authority. So it terminates instead.
+        """
+        if self.terminal_state is not None:
+            return                          # already terminal; late event
+
         with self._lock:
             self.players.pop(conn_id, None)
             if conn_id in self._join_order:
                 self._join_order.remove(conn_id)
 
         if conn_id == self._host_conn_id:
-            # The host dropped — elect a new one
+            if self.state == "PLAYING":
+                self.terminate(
+                    self.HOST_LOST,
+                    f"host connection {conn_id} dropped during play",
+                    conn_id=conn_id)
+                return
+            # LOBBY only.
             self._elect_new_host()
         else:
             # A non-host peer dropped
@@ -1042,7 +1160,20 @@ class Session:
                 self.on_player_list_changed(list(self.players.values()))
 
     def _elect_new_host(self) -> None:
-        """Lowest-join-order peer becomes the new host."""
+        """Lowest-join-order peer becomes the new host. LOBBY only.
+
+        The guard is here, not only at the call site, on purpose: dormant
+        migration code that another callback can reach is exactly the
+        failure being removed. Any path that reaches this during PLAYING
+        refuses rather than promoting.
+        """
+        if self.state != "LOBBY":
+            _log.warning(
+                "session: refusing host election in state %s — host "
+                "identity is frozen once play begins", self.state)
+            return
+        if self.terminal_state is not None:
+            return
         if not self._join_order:
             return
         new_host_conn = self._join_order[0]
