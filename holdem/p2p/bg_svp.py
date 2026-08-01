@@ -57,6 +57,7 @@ from typing import List, Sequence
 
 from holdem.p2p import ristretto as R
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.bg_challenge import nonzero_challenge
 from holdem.p2p.bg_witness import require_witness
 from holdem.p2p.pedersen import CommitmentKey, commit
 
@@ -93,10 +94,7 @@ def _challenge(ck: CommitmentKey, c_a: Point, n: int, b: Scalar,
     h.update(bytes(c_d))
     h.update(bytes(c_delta))
     h.update(bytes(c_Delta))
-    x = R.scalar_reduce(h.digest())
-    if R.is_zero_scalar(x):                     # probability ~2^-252
-        raise ValueError("Fiat-Shamir challenge reduced to zero")
-    return x
+    return nonzero_challenge(h)
 
 
 def prove(ck: CommitmentKey, a: Sequence[Scalar], r: Scalar,

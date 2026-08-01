@@ -266,8 +266,12 @@ def _t(setup, **kw):
     args = dict(ck=ck, n=3, m=len(c_A), context=ctx, c_A=c_A, c_b=c_b,
                 c_B=c_B)
     args.update(kw)
+    # _transcript returns the unfinalized hash object so both challenges
+    # can draw from it. Finalize here: comparing hash objects with != would
+    # compare identity and every binding assertion below would pass
+    # vacuously.
     return H._transcript(args["ck"], args["n"], args["m"], args["context"],
-                         args["c_A"], args["c_b"], args["c_B"])
+                         args["c_A"], args["c_b"], args["c_B"]).digest()
 
 
 def test_transcript_binds_c_B():
@@ -310,8 +314,19 @@ def test_transcript_binds_every_statement_field():
         assert v != base
 
 
+def _h(data: bytes):
+    """A transcript hash object primed with ``data``.
+
+    _challenges takes the unfinalized hash so x and y can be drawn from
+    one preimage under different labels.
+    """
+    h = hashlib.sha512()
+    h.update(data)
+    return h
+
+
 def test_x_and_y_are_distinct_and_nonzero():
-    x, y = H._challenges(b"some-transcript")
+    x, y = H._challenges(_h(b"some-transcript"))
     assert not R.is_zero_scalar(x)
     assert not R.is_zero_scalar(y)
     assert bytes(x) != bytes(y)
@@ -320,8 +335,8 @@ def test_x_and_y_are_distinct_and_nonzero():
 def test_challenges_move_together_with_the_transcript():
     """Both are drawn from one transcript hash, so a prover regrinding
     for a favourable y necessarily regrinds x as well."""
-    x1, y1 = H._challenges(b"transcript-a")
-    x2, y2 = H._challenges(b"transcript-b")
+    x1, y1 = H._challenges(_h(b"transcript-a"))
+    x2, y2 = H._challenges(_h(b"transcript-b"))
     assert bytes(x1) != bytes(x2)
     assert bytes(y1) != bytes(y2)
 
@@ -351,7 +366,7 @@ def test_zero_context_binds_the_invocation():
 def test_production_map_comes_from_the_challenge():
     """5.1's map is y^1..y^n from the verifier challenge, built with the
     production constructor -- never free-form coefficients."""
-    _x, y = H._challenges(b"t")
+    _x, y = H._challenges(_h(b"t"))
     bmap = Z.BilinearMap.from_challenge(y, 4)
     assert bytes(bmap.coefficients[0]) == bytes(y)
     assert bmap.n == 4

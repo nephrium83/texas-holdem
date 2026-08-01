@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import List, Sequence
 
 from holdem.p2p import bg_product, ristretto as R
+from holdem.p2p.bg_challenge import nonzero_challenge
 from holdem.p2p.bg_product import ProductProof
 from holdem.p2p.elgamal import Ciphertext, encrypt, reencrypt
 from holdem.p2p.pedersen import CommitmentKey, commit
@@ -181,10 +182,7 @@ def _challenge_x(statement: bytes, a_commits: Sequence[Point]) -> Scalar:
     _field(h, statement)
     _field(h, b"permutation-commitments")
     _point_list(h, a_commits)
-    x = R.scalar_reduce(h.digest())
-    if R.is_zero_scalar(x):
-        raise ValueError("shuffle challenge x reduced to zero")
-    return x
+    return nonzero_challenge(h)
 
 
 def _challenge_yz(statement: bytes, a_commits: Sequence[Point],
@@ -194,12 +192,9 @@ def _challenge_yz(statement: bytes, a_commits: Sequence[Point],
     _field(h, b"product-challenges")
     _point_list(h, a_commits)
     _point_list(h, b_commits)
-    digest = h.digest()
-    y = R.scalar_reduce(hashlib.sha512(digest + b"y").digest())
-    z = R.scalar_reduce(hashlib.sha512(digest + b"z").digest())
-    if R.is_zero_scalar(y) or R.is_zero_scalar(z):
-        raise ValueError("shuffle challenge reduced to zero")
-    return y, z
+    # Two labelled draws from one preimage, each with its own counter --
+    # the same rule the Hadamard argument uses for its (x, y) pair.
+    return nonzero_challenge(h, b"y"), nonzero_challenge(h, b"z")
 
 
 def _multi_challenge(statement: bytes, a_commits: Sequence[Point],
@@ -215,10 +210,7 @@ def _multi_challenge(statement: bytes, a_commits: Sequence[Point],
     _field(h, bytes(a_0_commit))
     _point_list(h, commit_b_k)
     _cipher_list(h, vector_e_k)
-    challenge = R.scalar_reduce(h.digest())
-    if R.is_zero_scalar(challenge):
-        raise ValueError("multi-exponentiation challenge reduced to zero")
-    return challenge
+    return nonzero_challenge(h)
 
 
 def _validate(pk: Point, ck: CommitmentKey, in_deck: Sequence[Ciphertext],

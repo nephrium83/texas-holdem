@@ -102,6 +102,7 @@ from holdem.p2p import ristretto as R
 from holdem.p2p import bg_zero
 from holdem.p2p.bg_zero import BilinearMap, ZeroProof
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.bg_challenge import nonzero_challenge
 from holdem.p2p.bg_witness import require_witness
 from holdem.p2p.pedersen import CommitmentKey, commit
 
@@ -144,11 +145,15 @@ def _point_list(h: "hashlib._Hash", points: Sequence[Point]) -> None:
 
 def _transcript(ck: CommitmentKey, n: int, m: int, context: bytes,
                 c_A: Sequence[Point], c_b: Point,
-                c_B: Sequence[Point]) -> bytes:
-    """The bytes both challenges are drawn from.
+                c_B: Sequence[Point]) -> "hashlib._Hash":
+    """The transcript both challenges are drawn from.
 
     c_B is included, which is the whole point: Theorem 9 needs the
     partial-product commitments fixed before x and y exist.
+
+    Returns the hash object rather than a digest so both challenges draw
+    from one preimage via ``nonzero_challenge``, each with its own label
+    and its own counter sequence.
     """
     h = hashlib.sha512()
     _field(h, _DOMAIN)
@@ -161,20 +166,21 @@ def _transcript(ck: CommitmentKey, n: int, m: int, context: bytes,
     _point_list(h, c_A)
     _field(h, bytes(c_b))
     _point_list(h, c_B)
-    return h.digest()
+    return h
 
 
-def _challenges(transcript: bytes) -> tuple:
-    """Derive (x, y) from one transcript with distinct suffixes.
+def _challenges(transcript: "hashlib._Hash") -> tuple:
+    """Derive (x, y) from one transcript with distinct labels.
 
     Two draws from the same hash rather than two independent hashes: a
     prover grinding for a favourable y necessarily regrinds x as well,
     since both move together with any change to the transcript.
+
+    The labels keep the two streams separate, and each carries its own
+    counter, so a retry on x cannot shift y.
     """
-    x = R.scalar_reduce(hashlib.sha512(transcript + b"\x01x").digest())
-    y = R.scalar_reduce(hashlib.sha512(transcript + b"\x02y").digest())
-    if R.is_zero_scalar(x) or R.is_zero_scalar(y):
-        raise ValueError("Fiat-Shamir challenge reduced to zero")
+    x = nonzero_challenge(transcript, b"x")
+    y = nonzero_challenge(transcript, b"y")
     return x, y
 
 
