@@ -22,9 +22,51 @@ host-> all : {"type": "deal",    ...}
 The old host-coordinated commit-reveal shuffle (Phase 2's 6 shuffle_*
 message types) is RETIRED — dealing is the trustless mental-poker deal
 (key_announce / deck_round / deal_share / audit_open, see mental_deal.py).
+
+STATE OWNERSHIP — read this before adding a method
+--------------------------------------------------
+All mutable protocol state on this class has exactly ONE owner: the
+SessionOwner held by ``self._owner``. Nothing may mutate players,
+_join_order, _host_conn_id, _deal_driver, _replica, the hand record,
+_hand_no, state, _seat_order, deadline state, the outbox, or held-message
+buffers outside it.
+
+Mutations arrive from four different threads -- the transport dispatch
+consumer (inbound messages, connect/disconnect), the UI/main thread (local
+commands), whichever thread drives timeouts, and tests. Serialization used
+to be customary: it happened to hold because of scheduling, and
+terminate()'s check-then-set survived on luck rather than on any
+structural guarantee. It is now enforced.
+
+Two mechanisms:
+
+* ``@owned`` on every externally reachable mutating method. A foreign
+  thread is MARSHALLED -- it blocks to acquire the owner -- never silently
+  let through. This is the supported way in, and it is why callers keep
+  their synchronous return contracts.
+
+* ``_assert_owner()`` at inner decision points (_end_hand,
+  _elect_new_host, _invalidate_pending_work, terminate). These are only
+  reachable from owned contexts, so an unowned caller means a new path
+  bypassed the entry points; it raises rather than corrupting state
+  quietly.
+
+DO NOT mutate protocol state directly from another thread, and do not
+"just add a lock" for a new field. One owner means there is no lock
+ordering to remember, which is the only reason this stays correct across
+future patches. If a new method mutates protocol state, decorate it
+``@owned``; tests/test_session_ownership.py fails if you forget.
+
+The owner is a re-entrant lock rather than a worker thread deliberately:
+every caller here is synchronous (send_bet_action returns a verdict, the
+in-memory bus delivers inline and inspects immediately), so a queue would
+turn each into a future and rewrite the callers rather than fix ownership.
+What correctness needs is a total order and atomic check-then-set, and a
+single owner supplies both.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import threading
 import time
@@ -82,6 +124,68 @@ class TerminalRecord:
     sequence: int
 
 
+class SessionOwner:
+    """The one serialized execution context for a Session's protocol state.
+
+    Ownership is a re-entrant lock plus explicit owner identity rather than
+    a worker thread, for one concrete reason: every caller has a synchronous
+    contract. send_bet_action returns "applied"/"rejected", next_p2p_hand
+    returns a verdict, and the in-memory test bus delivers inline and
+    inspects the result immediately. Marshalling those onto another thread
+    would turn each into a future and rewrite the callers rather than fix
+    the ownership problem.
+
+    What this provides that "customary" serialization did not:
+
+    * a total order over all mutations, whoever initiates them
+    * ONE lock, so there is no lock-ordering discipline to remember and
+      therefore none to get wrong in a later patch
+    * check-then-set sequences (terminate, _end_hand, _elect_new_host) that
+      are atomic by construction rather than by scheduling luck
+    * re-entrancy, so an owned method calling another, or a UI callback
+      calling back in, does not self-deadlock
+
+    A thread that does not hold it is MARSHALLED -- it blocks to acquire --
+    never silently let through. Internal mutators call _assert_owner(), so a
+    path that bypasses the entry points raises instead of corrupting state.
+    """
+
+    __slots__ = ("_lock", "_thread", "_depth")
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._thread = None
+        self._depth = 0
+
+    def __enter__(self) -> "SessionOwner":
+        self._lock.acquire()
+        if self._depth == 0:
+            self._thread = threading.current_thread()
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self._depth -= 1
+        if self._depth == 0:
+            self._thread = None
+        self._lock.release()
+        return False
+
+    def held(self) -> bool:
+        """True iff the calling thread currently owns the session."""
+        return self._depth > 0 and self._thread is threading.current_thread()
+
+
+def owned(method):
+    """Run *method* as the session owner, marshalling foreign threads."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._owner:
+            return method(self, *args, **kwargs)
+    wrapper.__owned__ = True
+    return wrapper
+
+
 @dataclass(frozen=True)
 class HandRecord:
     """Forensic record of the one transition that ended a HAND.
@@ -133,6 +237,10 @@ class Session:
                  sink: Optional[EventSink] = None,
                  require_prevention: bool = False,
                  master_secret: Optional[bytes] = None):
+        # The one serialized execution context for this session's
+        # protocol state. Created first: every field below is only ever
+        # mutated while this is held.
+        self._owner = SessionOwner()
         self.is_host    = is_host
         # Local policy, NOT table state: refuse to be dealt into a table
         # that is not running Bayer-Groth prevention. The table-wide mode
@@ -293,6 +401,7 @@ class Session:
     # Message dispatch (called by transport on_message handler)
     # ------------------------------------------------------------------
 
+    @owned
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
         if self.terminal_state is not None:
@@ -431,6 +540,7 @@ class Session:
         """
         return self._prevention
 
+    @owned
     def begin_hand(self, hand_no: int, button: int = 0,
                    seats_in: Optional[list] = None) -> None:
         """Start this seat's mental-poker deal for a hand and kick off the DKG.
@@ -521,6 +631,7 @@ class Session:
             return False
         return h == self._hand_no
 
+    @owned
     def _notify_state_changed(self) -> None:
         self._maybe_start_deadline()
         if self._replica is not None:
@@ -538,6 +649,7 @@ class Session:
         if self.on_state_changed is not None:
             self.on_state_changed()
 
+    @owned
     def reveal_board_street(self, street: str) -> None:
         """Reveal a board street ("flop"/"turn"/"river"); called once the
         preceding betting round closes."""
@@ -546,6 +658,7 @@ class Session:
         self._deal_driver.reveal_street(street)
         self._flush_deal()
 
+    @owned
     def open_deal_audit(self) -> None:
         """Open the post-hand audit (at showdown)."""
         if self.terminal_state is not None or self._deal_driver is None:
@@ -673,6 +786,7 @@ class Session:
     def local_seat(self) -> int:
         return self._seat_order.index(self.local_conn_id)
 
+    @owned
     def start_p2p_hand(self, *, hand_no: int, names: list, stacks: list,
                        sb: int, bb: int, structure: str = "No-Limit",
                        button: int = 0) -> None:
@@ -741,6 +855,7 @@ class Session:
         self._pump_hand()
         return True
 
+    @owned
     def next_p2p_hand(self) -> str:
         """Advance the continuous session to its next hand. Every peer
         calls this once the previous hand has settled or voided; identical
@@ -829,6 +944,7 @@ class Session:
                 "stacks": final,
             })
 
+    @owned
     def send_bet_action(self, action: str, amount: int = 0) -> str:
         """Act for the LOCAL seat: apply to our own replica first, then
         broadcast the action with our post-apply state digest so every
@@ -910,6 +1026,20 @@ class Session:
         self._pump_hand()
         self._notify_state_changed()
 
+    def _assert_owner(self) -> None:
+        """Fail loudly if protocol state is mutated outside the owner.
+
+        Every externally reachable mutator is @owned, so reaching one of
+        these unowned means a new call path bypassed the entry points --
+        exactly the drift this exists to catch, and why ownership is
+        asserted rather than assumed.
+        """
+        if not self._owner.held():
+            raise RuntimeError(
+                "session protocol state mutated outside the owner "
+                f"(thread {threading.current_thread().name!r}); route the "
+                "call through an @owned entry point")
+
     @property
     def hand_voided(self) -> bool:
         """Derived from the hand record; not an independent truth source.
@@ -940,6 +1070,7 @@ class Session:
         Idempotent per hand, first cause wins, exactly one record and one
         notification per hand. A terminated session ends no further hands.
         """
+        self._assert_owner()
         if self.terminal_state is not None:
             return False
         if self._hand_record is not None or self.hand_result is not None:
@@ -970,6 +1101,7 @@ class Session:
             })
         return True
 
+    @owned
     def _void_hand(self, reason: str, *, announce: bool = True,
                    outcome: str = "VOID_PROTOCOL",
                    blamed_seat: Optional[int] = None) -> bool:
@@ -1144,6 +1276,7 @@ class Session:
         self.local_conn_id = assigned
         self._host_conn_id = conn_id   # conn_id of the connection to the host
 
+    @owned
     def _on_game_start(self, conn_id: str, msg: dict) -> None:
         """Adopt the host's table settings -- once, from the host only.
 
@@ -1219,6 +1352,7 @@ class Session:
     # Disconnect / host migration
     # ------------------------------------------------------------------
 
+    @owned
     def terminate(self, state: str, reason: str, *,
                   conn_id: Optional[str] = None,
                   seat: Optional[int] = None,
@@ -1235,6 +1369,12 @@ class Session:
         Runs on the owner thread. All transport-originated callers already
         arrive on the dispatch consumer; local callers must too.
         """
+        self._assert_owner()
+        # Atomic by construction: @owned holds the owner across this
+        # check and the assignment below, so two callers cannot both
+        # observe None. This was previously an unlocked check-then-set
+        # that happened to survive scheduling, which is not the same as
+        # being correct.
         if self.terminal_state is not None:
             _log.debug("session: %s ignored — already terminal (%s)",
                        state, self.terminal_state)
@@ -1273,12 +1413,14 @@ class Session:
 
     def _invalidate_pending_work(self) -> None:
         """Drop everything that could still mutate this session."""
+        self._assert_owner()
         self._msg_buffer = []
         driver = self._deal_driver
         if driver is not None and getattr(driver, "deal", None) is not None:
             driver.deal._held.clear()
         self._clear_deadline()
 
+    @owned
     def handle_disconnect(self, conn_id: str) -> None:
         """Called by the transport on_disconnect handler for any dropped peer.
 
@@ -1321,6 +1463,7 @@ class Session:
         failure being removed. Any path that reaches this during PLAYING
         refuses rather than promoting.
         """
+        self._assert_owner()
         if self.state != "LOBBY":
             _log.warning(
                 "session: refusing host election in state %s — host "
@@ -1405,6 +1548,7 @@ class Session:
         if self.on_player_list_changed:
             self.on_player_list_changed(snapshot)
 
+    @owned
     def add_local_player(self, conn_id: str) -> None:
         """Register the local host player once we know our own conn_id."""
         from holdem.p2p import identity as _id
@@ -1423,6 +1567,7 @@ class Session:
         if self.is_host:
             self._broadcast_player_list()
 
+    @owned
     def set_ready(self, conn_id: str, ready: bool) -> None:
         """Update a player's ready flag; host re-broadcasts the player list."""
         with self._lock:
@@ -1438,6 +1583,7 @@ class Session:
             players = list(self.players.values())
         return len(players) >= 2 and all(p.ready for p in players)
 
+    @owned
     def start_game(self, table_settings: dict) -> None:
         """Host starts the game: broadcast game_start and transition to PLAYING."""
         if self.terminal_state is not None:
@@ -1472,6 +1618,7 @@ class Session:
         r = Session._RANK_STRS
         return r[card.v] + s[card.s]
 
+    @owned
     def broadcast_game_state(self) -> None:
         """Host only: serialize engine state and broadcast to all peers."""
         if not self.is_host or self._engine is None:
@@ -1502,6 +1649,7 @@ class Session:
 
     _VALID_ACTIONS = frozenset(("fold", "call", "raise", "check"))
 
+    @owned
     def handle_game_action(self, conn_id: str, msg: dict) -> None:
         """Host only: validate and route an action from a peer."""
         if not self.is_host or self._engine is None:
@@ -1551,6 +1699,7 @@ class Session:
         """The ReplicaTable for the current hand, or None between hands."""
         return self._replica
 
+    @owned
     def configure_seats(self, order: list[str]) -> None:
         """Set the seat order for the next (or only) hand.
 
@@ -1577,6 +1726,7 @@ class Session:
                 f"local conn_id {self.local_conn_id!r} not in seat order")
         self._seat_order = list(order)
 
+    @owned
     def set_host_engine(self, engine) -> None:
         """Register the host-side engine for action routing (host only)."""
         self._engine = engine
@@ -1585,6 +1735,7 @@ class Session:
     # Timeout machinery (Phase 3)
     # ------------------------------------------------------------------
 
+    @owned
     def check_deadlines(self) -> None:
         """Broadcast a timeout_proposal if the current deadline has expired.
 
@@ -1624,6 +1775,7 @@ class Session:
         # own broadcasts, so self-apply here to keep all replicas in sync.
         self._apply_timeout(token)
 
+    @owned
     def _on_timeout_proposal(self, conn_id: str, msg: dict) -> None:
         """Receive and validate a timeout proposal; apply if it matches the
         current deadline and the action sequence still agrees."""
@@ -1700,6 +1852,7 @@ class Session:
             self._pump_hand()
             self._notify_state_changed()
 
+    @owned
     def _apply_deal_timeout(self, token: DeadlineToken) -> None:
         """Void the hand when a deal-phase contribution never arrived.
 
@@ -1718,6 +1871,7 @@ class Session:
             self._safe_emit("peer_unavailable", conn_id=actor)
         self._void_hand(reason)
 
+    @owned
     def _maybe_start_deadline(self) -> None:
         """Evaluate whether a deadline needs to be started or cleared after
         any state change.  Called automatically by _notify_state_changed."""

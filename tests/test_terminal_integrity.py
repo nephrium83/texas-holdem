@@ -317,7 +317,10 @@ def test_hand_voided_is_derived_not_assignable():
 def test_completed_hand_is_recorded_and_not_a_void():
     bus, sessions, order = table()
     s = sessions["peer1"]
-    assert s._end_hand(Session.HAND_COMPLETED, "showdown") is True
+    # _end_hand is an inner decision point reachable only from owned
+    # contexts; take ownership explicitly rather than mutating from outside.
+    with s._owner:
+        assert s._end_hand(Session.HAND_COMPLETED, "showdown") is True
     assert s.hand_record.outcome == Session.HAND_COMPLETED
     assert s.hand_voided is False
     assert s.terminal_state is None

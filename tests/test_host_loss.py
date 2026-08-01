@@ -123,7 +123,10 @@ def test_elect_new_host_refuses_to_run_while_playing():
     bus, sessions, order = make_peers(3)
     _start_playing(sessions, order)
     peer1 = sessions["peer1"]
-    peer1._elect_new_host()
+    # _elect_new_host is reachable only from owned contexts, so take
+    # ownership explicitly rather than mutating from outside it.
+    with peer1._owner:
+        peer1._elect_new_host()
     assert peer1.is_host is False
     assert peer1._host_conn_id == "peer0"
 
