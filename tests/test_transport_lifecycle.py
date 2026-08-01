@@ -74,12 +74,25 @@ def test_every_background_task_is_tracked():
 
 
 def test_connection_handler_is_tracked():
+    """The accepted connection gets its own tracked task.
+
+    Asserts on the conn- task by name, not on a count delta. A delta is
+    only sound if nothing else in the registry finishes meanwhile, and
+    something does: start_host also spawns a STUN query. On Python 3.10
+    that task fails immediately -- loop.sock_sendto arrived in 3.11 --
+    so it drops out of the registry at about the moment the handler
+    joins it, the count does not move, and the test fails on a platform
+    where the behaviour under test is entirely correct. Caught by CI on
+    3.10 while 3.12 stayed green.
+    """
     address = T.start_host(0)
     host, port = address.rsplit(":", 1)
-    before = len(T.active_tasks())
     with socket.create_connection(("127.0.0.1", int(port)), timeout=5):
-        assert wait_until(lambda: len(T.active_tasks()) > before, timeout=3.0), \
-            "connection handler task was not registered"
+        assert wait_until(lambda: any(t.get_name().startswith("conn-")
+                                      for t in T.active_tasks()),
+                          timeout=3.0), \
+            "connection handler task was not registered: " \
+            f"{[t.get_name() for t in T.active_tasks()]}"
 
 
 def test_task_exceptions_are_not_lost():
@@ -221,7 +234,13 @@ def test_connected_peer_is_dropped_by_stop():
     with no_thread_leaks():
         client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
         try:
-            wait_until(lambda: len(T.active_tasks()) > 1, timeout=3.0)
+            # Same reason as test_connection_handler_is_tracked: wait for
+            # the handler by name. A count threshold silently expires on
+            # 3.10, where the STUN task exits immediately, and stop() then
+            # runs before there is a peer to drop.
+            wait_until(lambda: any(t.get_name().startswith("conn-")
+                                   for t in T.active_tasks()),
+                       timeout=3.0)
             T.stop()
             client.settimeout(3)
             # The peer must observe a close, not hang forever.
