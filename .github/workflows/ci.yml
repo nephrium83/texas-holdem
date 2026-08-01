@@ -12,6 +12,11 @@ jobs:
   engine-tests:
     runs-on: ubuntu-latest
     strategy:
+      # Report every version. With the default fail-fast, the first job to
+      # fail cancels the rest, so a single failure hides whether the other
+      # supported versions were fine -- which happened three times while
+      # this matrix was first being exercised against the engine.
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.12", "3.13"]
     steps:
