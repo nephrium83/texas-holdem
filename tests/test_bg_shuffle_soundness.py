@@ -186,6 +186,53 @@ def test_multi_exponentiation_uses_the_x_power_commitments(table):
         proof.a_commits, out_chunks, expected, proof.multi, M, N) is False
 
 
+def test_verify_recomputes_target_from_statement_not_proof(table):
+    """Pins defect 1 at the PUBLIC boundary, where it actually lived.
+
+    test_verifier_recomputes_the_product_from_the_input_deck above calls
+    _multi_verify directly and hands it a correctly derived ``expected``.
+    That pins the sub-function, but the defect was in verify(), which
+    sourced that argument from the proof. Reintroducing it changes
+    nothing the sub-function test can see.
+
+    So this one goes through verify(). The proof below is internally
+    self-consistent -- the honest algorithm run over a deck that is not a
+    shuffle of the input -- and its E_m is therefore the multi-
+    exponentiation of the FORGED deck, not of in_deck. Every batched
+    equation balances. The single thing that separates it from a valid
+    proof is the equality E_m == sum_j x^{j+1} in_deck[j], and only a
+    verifier that derives the right-hand side from the statement can
+    check it.
+
+    The break this is written against sources the target from the proof
+    on BOTH sides. A one-sided break is not defect 1: ``product`` also
+    feeds _multi_challenge, so changing only the verifier desynchronizes
+    the challenge and the proof is rejected for an unrelated reason --
+    a rejection that looks like detection and is not.
+    """
+    foreign = [E.encrypt(table["pk"], point, _s(700 + i))
+               for i, point in enumerate(E._CARD_POINTS)]
+    forged = [E.reencrypt(table["pk"], foreign[src], table["scalars"][i])
+              for i, src in enumerate(table["perm"])]
+
+    proof = S._prove_unchecked(
+        table["pk"], table["ck"], table["in_deck"], forged,
+        table["perm"], table["scalars"], M, N, CTX)
+
+    statement = S._statement_context(
+        CTX, table["ck"], table["pk"], table["in_deck"], forged, M, N)
+    x = S._challenge_x(statement, proof.a_commits)
+    target = S._dot_cipher(S._powers(x, M * N), table["in_deck"])
+
+    # The premise: self-consistent proof, wrong target. If these ever
+    # coincide the test proves nothing, so assert the gap explicitly.
+    assert proof.multi.vector_e_k[M] != target, \
+        "forged proof happened to hit the real target; test is vacuous"
+
+    assert S.verify(table["pk"], table["ck"], table["in_deck"], forged,
+                    M, N, CTX, proof) is False
+
+
 def test_proof_is_bound_to_the_joint_public_key(table):
     """A proof is about a shuffle under one key. Verified under a different
     public key it must fail, or a proof could be lifted from another table's
