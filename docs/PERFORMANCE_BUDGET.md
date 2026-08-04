@@ -5,9 +5,10 @@ This document defines the initial performance contract for serverless, cryptogra
 ## Product policy
 
 - **Detection-only** is the v1 default: the hand is audited and cheats are detected without making every shuffle carry a prevention proof.
-- **Prevention** is planned as an explicit opt-in after proof generation and verification are integrated and the complete path has been benchmarked.
+- **Prevention** is available as an explicit opt-in, set table-wide by the host via `bg_prevention` in the table settings. Proof generation and verification are integrated into `MentalDeal` and the complete path is benchmarked below.
 - No mode may reveal cards or accept a deal that failed its required verification.
 - Security parameters are not reduced to meet a timing target.
+- Prevention is not the default. Peers do not negotiate the mode, so a host that omits the flag downgrades the whole table to detection-only; a peer that will not accept that constructs its `Session` with `require_prevention=True` and refuses to be dealt in.
 
 ## Initial targets
 
@@ -22,7 +23,44 @@ These are engineering targets for the next integrated proof path, not claims abo
 | Prevention hand startup at nine seats | p95 under 10 s |
 | Typical hand startup above 20 s | performance failure requiring investigation |
 
-The existing L5 baseline is the reference point until a new benchmark supersedes it: detection-only is about 0.18 seconds at nine seats, while the current prevention path is about 20 seconds at nine seats.
+The Bayer–Groth prevention path is now integrated into `MentalDeal` behind a default-off flag and has been measured end to end. Against the targets above:
+
+| Seats | Detection p50 | Prevention p50 | Prevention p95 | Target | |
+| ---: | ---: | ---: | ---: | --- | :-- |
+| 2 | 24.9 ms | 452 ms | 456 ms | p95 under 5 s | pass |
+| 4 | 88.5 ms | 1,267 ms | 1,272 ms | p95 under 5 s | pass |
+| 9 | 623 ms | 5,075 ms | 5,095 ms | p95 under 10 s | pass |
+
+These supersede an earlier 399 / 1,062 / 4,106 ms measurement taken before the
+shuffle-argument soundness fix; see [`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md).
+
+Method, per-phase breakdown, and byte counts are in
+[`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md); the harness is
+`benchmarks/mental_deal_startup.py`. Detection-only at nine seats measures
+0.62 s here rather than the 0.18 s L5 figure, because this harness runs every
+seat in one process and counts all peers' work, not one peer's.
+
+The cut-and-choose path is now measured too, on a per-round basis and projected
+with a seat-chain model validated against the Bayer–Groth figures above: about
+91 seconds of proof work at nine seats, and 650 KB per proof against 3 KB. The
+roughly 20 second figure previously carried for it understates the cost by
+about 4.5x — 20 seconds is closer to its four-seat cost. Details in
+[`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md); harness is
+`benchmarks/shuffle_proof_comparison.py`. Bayer–Groth supersedes it on every
+axis, and `shuffle_proof.py` remains in the tree only as an unwired reference
+implementation.
+
+Event-loop responsiveness is measured separately by
+`benchmarks/event_loop_latency.py`. Message handling runs on a dispatch worker
+rather than the event loop, because inline verification blocked the loop for up
+to 2.9 s across a nine-seat hand and made timeouts fire spuriously.
+
+Per the optimization order below, the measured dominant phase is **verification**
+(3,143 ms of a 5,075 ms nine-seat hand), not proving (1,269 ms) or serialization
+(35 ms). Verification scales quadratically in seats — one proof per shuffler but
+one verification per shuffler per peer — so batch verification of the
+multi-exponentiation argument is the first optimization to reach for if these
+targets tighten.
 
 ## Benchmark protocol
 

@@ -127,6 +127,34 @@ def test_hole_and_board_position_helpers():
     assert dm.board_positions(0, range(4)) == [10, 9, 8, 11, 12]
 
 
+@pytest.mark.parametrize("n", range(2, 10))
+def test_positions_are_disjoint_for_every_button(n):
+    """No deck position may ever be dealt twice.
+
+    Two seats sharing a position means two players hold the same card, and
+    the post-hand audit would not catch it: the deck itself is a perfectly
+    legal 52-card deck, so the multiset check passes. Nothing downstream
+    tests this, so it is asserted here exhaustively -- every table size
+    against every button -- rather than at the one or two spot values the
+    surrounding tests use.
+    """
+    seats = list(range(n))
+    for button in seats:
+        holes = dm.hole_positions(button, seats)
+        board = dm.board_positions(button, seats)
+
+        assert sorted(holes) == seats, f"n={n} button={button}: seats differ"
+        assert all(len(v) == 2 for v in holes.values()), \
+            f"n={n} button={button}: a seat did not get exactly two cards"
+        assert len(board) == 5, f"n={n} button={button}: board is not five"
+
+        used = [p for pair in holes.values() for p in pair] + list(board)
+        assert len(used) == len(set(used)), \
+            f"n={n} button={button}: a deck position is dealt twice"
+        assert all(0 <= p < 52 for p in used), \
+            f"n={n} button={button}: position outside the deck"
+
+
 # ------------------------------------------------------ THE ground-truth test
 
 def _deal_from_known_deck(n_players, button):

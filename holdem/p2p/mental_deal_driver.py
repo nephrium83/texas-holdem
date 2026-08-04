@@ -51,7 +51,12 @@ def label_to_card(label: str) -> Card:
 
 
 class MentalDealDriver:
-    """Drives one local seat's MentalDeal and bridges it to transport+engine."""
+    """Drives one local seat's MentalDeal and bridges it to transport+engine.
+
+    ``prevention`` opts this seat into Bayer-Groth shuffle proofs. It is a
+    table-wide setting the session layer must apply uniformly to every
+    peer in the hand; a table whose peers disagree voids the hand.
+    """
 
     def __init__(
         self,
@@ -63,6 +68,7 @@ class MentalDealDriver:
         button: int,
         master_secret: bytes,
         send: Callable[[dict], None],
+        prevention: bool = False,
     ):
         self.deal = MentalDeal(
             session_id=session_id,
@@ -71,6 +77,7 @@ class MentalDealDriver:
             seats_in=list(seats_in),
             button=button,
             master_secret=master_secret,
+            prevention=prevention,
         )
         self._send = send
 

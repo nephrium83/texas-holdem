@@ -101,6 +101,8 @@ from typing import List, Sequence, Tuple
 
 from holdem.p2p import ristretto as R
 from holdem.p2p.ristretto import Point, Scalar
+from holdem.p2p.bg_challenge import nonzero_challenge
+from holdem.p2p.bg_witness import require_witness
 from holdem.p2p.pedersen import CommitmentKey, commit
 
 
@@ -229,10 +231,7 @@ def _challenge(ck: CommitmentKey, n: int, m: int, bmap: BilinearMap,
     _field(h, bytes(c_A0))
     _field(h, bytes(c_Bm))
     _point_list(h, c_D)
-    x = R.scalar_reduce(h.digest())
-    if R.is_zero_scalar(x):                     # probability ~2^-252
-        raise ValueError("Fiat-Shamir challenge reduced to zero")
-    return x
+    return nonzero_challenge(h)
 
 
 # --------------------------------------------------------------------------
@@ -337,8 +336,8 @@ def prove(ck: CommitmentKey,
     sB: List[Scalar] = [*s, sm]
 
     d = _diagonals(A, B, m, bmap)
-    if not R.is_zero_scalar(d[m + 1]):
-        raise ValueError("witness does not satisfy sum a_i * b_{i-1} == 0")
+    require_witness(R.is_zero_scalar(d[m + 1]),
+                    "witness does not satisfy sum a_i * b_{i-1} == 0")
 
     c_A0 = commit(ck, a0, r0)
     c_Bm = commit(ck, bm, sm)

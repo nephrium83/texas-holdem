@@ -77,6 +77,14 @@ def verify(X: Point, proof: bytes, ctx: bytes = b"") -> bool:
     """
     if len(proof) != PROOF_BYTES:
         return False
+    # The identity share is rejected outright. X = identity means x = 0, a
+    # discrete log everybody knows, so the Schnorr proof is trivially
+    # forgeable: pick k, send (k*G, k), and s*G == R + c*identity holds for
+    # free. Such a share proves nothing and contributes nothing to the joint
+    # key -- and if every seat sent one the joint key would itself be the
+    # identity, under which ElGamal does not hide the message at all.
+    if bytes(X) == bytes(R.IDENTITY):
+        return False
     try:
         commitment = R.point_from_bytes(proof[:32])   # validates encoding
         s = Scalar(proof[32:])

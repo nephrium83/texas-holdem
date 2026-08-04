@@ -31,11 +31,50 @@ Design commitments (from the settled L5 decisions)
   process.
 - **Detection-only by default.** Per the settled decision, the v1 default
   attaches NO shuffle proof to a deck round; a cheating shuffle is caught
-  by the Phase D post-hand audit. The opt-in prevention layer (attaching
-  and verifying a shadow-deck shuffle_proof per round) wires in on top of
-  this and is added next.
-- **Fail-closed with attribution.** A protocol violation aborts the hand
-  and names the offending seat; there is no skip-and-continue.
+  by the Phase D post-hand audit. Setting ``prevention=True`` opts into
+  the Bayer-Groth prevention layer described below. The default is
+  unchanged and byte-identical to the pre-prevention protocol.
+- **Fail-closed, with attribution wherever the evidence identifies a
+  seat.** A protocol violation aborts the hand; there is no
+  skip-and-continue. Every violation attributable to a seat from the
+  message that caused it names that seat: a bad PoP, an out-of-turn
+  shuffle, a bad decryption proof, an invalid prevention proof.
+
+  One case does not name a seat. In detection-only, a shuffler that
+  substitutes a card is caught by the Phase D multiset check, but that
+  check runs over the FINAL deck and says only that the chain was
+  corrupted somewhere -- ``bad_seat`` is None. Pinning the round would
+  mean auditing each intermediate deck, and since the audit shares are
+  computed against a specific deck's C0 values, that needs every seat to
+  open every round -- a new message exchange, not a local computation.
+  ``deck_audit.first_corrupt_round`` implements the analysis; nothing
+  invokes it, because the exchange that would feed it does not exist.
+
+  DESIGN DECISION PENDING: adding that exchange is a wire-protocol change
+  costing n x the audit on the failure path, and it is not required for
+  correctness -- the hand already voids fail-closed and no cards or chips
+  are at risk. Prevention mode does not have this gap at all: a corrupt
+  shuffle is rejected at the round that produced it, naming the shuffler,
+  before the deck is ever accepted. Tested both ways in
+  tests/test_deck_audit_soundness.py.
+
+Prevention mode (opt-in)
+------------------------
+With ``prevention=True`` every shuffler attaches a Bayer-Groth shuffle
+argument (``bg_shuffle``) to its ``deck_round``, and every peer verifies
+it against the previous deck BEFORE accepting the new one. A missing,
+undecodable, or invalid proof all take the same abort path, attributed to
+the sending shuffler, each with its own reason string.
+
+Prevention is a TABLE-WIDE setting. This layer performs no negotiation
+and assumes the session layer established a uniform mode; a mixed-mode
+table voids the hand rather than silently degrading.
+
+The commitment key is NUMS-derived from a fixed public seed, so every
+peer reconstructs an identical key with nothing on the wire and the
+Scytl/Swiss-Post trapdoor class stays structurally impossible (see
+pedersen.py). ``shuffle_proof.py``'s cut-and-choose construction is
+untouched by this path and remains available standalone.
 
 Message types
 -------------
@@ -44,7 +83,11 @@ Message types
 - ``deck_round {round, seat, deck}`` (Phase B) -- the shuffled deck after
   round ``round`` (1-based), produced by ``seat``; ``deck`` is a list of
   [c0_hex, c1_hex] ciphertext pairs. Round 0 is the trivial deck, held
-  implicitly and never transmitted.
+  implicitly and never transmitted. In prevention mode the message
+  carries one additional key, ``proof`` (see bg_wire.py); in
+  detection-only mode the key is absent and an unsolicited one is
+  ignored, so a prevention-enabled peer cannot disrupt a
+  detection-only table.
 """
 from __future__ import annotations
 
@@ -61,8 +104,43 @@ from holdem.p2p import shuffle_mp
 from holdem.p2p import dleq
 from holdem.p2p import deal_map as dmap
 from holdem.p2p import deck_audit
+from holdem.p2p import bg_shuffle
+from holdem.p2p import bg_wire
+from holdem.p2p.pedersen import CommitmentKey
 from holdem.p2p.ristretto import Point, Scalar
 from holdem.p2p.elgamal import Ciphertext
+
+
+# ---------------------------------------------------------------- prevention
+# Bayer-Groth shuffle-argument parameters for a 52-card deck. The proof
+# arranges the deck as an m x n matrix, so m * n must equal 52; 4 x 13 is
+# the benchmarked configuration (docs/BG_SHUFFLE_BENCHMARK.md).
+BG_M = 4
+BG_N = 13
+
+# Public NUMS seed for the Pedersen commitment key. Every peer derives an
+# identical key from this constant, so no key material is transmitted and
+# nobody can hold a commitment trapdoor. Changing it is a wire break.
+BG_CK_SEED = b"poker.mentaldeal.bg.ck.v1"
+
+# Upper bound on messages held because they arrived before this seat could
+# act on them. A nine-seat hand legitimately has at most ~189 deal messages
+# in flight, so honest reordering never approaches this; it exists so a peer
+# replaying junk cannot grow the buffer without limit.
+MAX_HELD = 1024
+
+_BG_CK: Optional[CommitmentKey] = None
+
+
+def bg_commitment_key() -> CommitmentKey:
+    """The shared prevention-mode commitment key (derived once, cached).
+
+    Built lazily so a detection-only table never pays the derivation.
+    """
+    global _BG_CK
+    if _BG_CK is None:
+        _BG_CK = CommitmentKey.generate(BG_N, seed=BG_CK_SEED)
+    return _BG_CK
 
 
 class Phase(Enum):
@@ -120,6 +198,7 @@ class MentalDeal:
     seats_in: List[int]             # all seat indices in the hand (sorted)
     button: int
     master_secret: bytes            # local device secret (never sent)
+    prevention: bool = False        # opt-in Bayer-Groth shuffle proofs
 
     # --- internal state ---
     phase: Phase = Phase.KEYGEN
@@ -144,6 +223,9 @@ class MentalDeal:
     abort_reason: Optional[str] = None
     bad_seat: Optional[int] = None
     _announced: bool = False
+    # Messages that arrived before this seat could act on them, replayed
+    # as the state advances. The transport does not guarantee ordering.
+    _held: List[dict] = field(default_factory=list)
 
     def __post_init__(self):
         self.seats_in = sorted(self.seats_in)
@@ -228,9 +310,25 @@ class MentalDeal:
         }]
 
     def handle(self, msg: dict) -> List[dict]:
-        """Consume one inbound broadcast; return any outbound messages."""
+        """Consume one inbound broadcast; return any outbound messages.
+
+        A message that arrives before this seat can act on it is held and
+        replayed, not dropped. The transport is explicitly unordered (see
+        the module docstring), so a deck round can overtake the key
+        announcement it depends on, or a deal share can overtake the
+        shuffle. Dropping those silently stalls the seat forever: nothing
+        in the protocol retransmits.
+        """
         if self.phase == Phase.ABORTED:
             return []
+        if self._premature(msg):
+            self._hold(msg)
+            return []
+        out = self._dispatch(msg)
+        out.extend(self._drain_held())
+        return out
+
+    def _dispatch(self, msg: dict) -> List[dict]:
         mtype = msg.get("type")
         if mtype == "key_announce":
             return self._on_key_announce(msg)
@@ -241,6 +339,69 @@ class MentalDeal:
         if mtype == "audit_open":
             return self._on_audit_open(msg)
         return []
+
+    def _premature(self, msg: dict) -> bool:
+        """True if this message is valid but cannot be acted on YET.
+
+        Distinct from stale (already applied -- drop) and malformed
+        (abort). Only "too early" is held, so a duplicate or a bogus
+        message still takes its normal path rather than accumulating.
+        """
+        mtype = msg.get("type")
+        if mtype == "deck_round":
+            if self.phase == Phase.KEYGEN:
+                return True                 # joint key not formed yet
+            if self.phase != Phase.SHUFFLE:
+                return False                # chain finished: stale, not early
+            try:
+                round_no = int(msg["round"])
+            except (KeyError, ValueError, TypeError):
+                return False                # malformed: let _dispatch abort
+            return round_no > self._shuffle_round + 1
+        if mtype in ("deal_share", "audit_open"):
+            return self.phase in (Phase.KEYGEN, Phase.SHUFFLE)
+        return False
+
+    def _hold(self, msg: dict) -> None:
+        """Retain an early message, bounded.
+
+        The legitimate in-flight total for a hand is n key announces, n
+        deck rounds, n*2n deal shares and n audit opens -- 189 at nine
+        seats. MAX_HELD is far above that, so honest reordering never
+        reaches it, while a peer replaying junk cannot grow this without
+        limit.
+        """
+        if len(self._held) >= MAX_HELD:
+            self._abort(
+                f"more than {MAX_HELD} out-of-order messages held; "
+                f"refusing to buffer further", None)
+            return
+        self._held.append(dict(msg))
+
+    def _drain_held(self) -> List[dict]:
+        """Replay held messages that the new state has made actionable.
+
+        Loops because applying one held message can unblock another (round
+        2 arriving before round 1 unblocks once round 1 lands). Terminates
+        because every pass either consumes at least one message or stops.
+        """
+        out: List[dict] = []
+        while self._held and self.phase != Phase.ABORTED:
+            ready, self._held = self._held, []
+            consumed = False
+            for held in ready:
+                if self.phase == Phase.ABORTED:
+                    break
+                if self._premature(held):
+                    self._held.append(held)
+                else:
+                    out.extend(self._dispatch(held))
+                    consumed = True
+            if not consumed:
+                break
+        if self.phase == Phase.ABORTED:
+            self._held.clear()
+        return out
 
     # ---------------------------------------------------------------- Phase A
 
@@ -273,7 +434,18 @@ class MentalDeal:
     def _finish_keygen(self) -> List[dict]:
         # deterministic PK = sum of shares in canonical seat order
         ordered = [self._pubkeys[s] for s in self.seats_in]
-        self._joint_pk = eg.joint_public_key(ordered)
+        joint = eg.joint_public_key(ordered)
+        # Defence in depth. keygen_pop.verify already rejects an identity
+        # share, so reaching here should be impossible -- but under an
+        # identity joint key ElGamal degenerates to C1 = M and the deck is
+        # public, so this is worth failing closed on rather than trusting an
+        # upstream check. Without it the failure would surface as an uncaught
+        # ValueError from the first re-encryption, mid-protocol.
+        if bytes(joint) == bytes(R.IDENTITY):
+            return self._abort(
+                "key ceremony produced a degenerate (identity) joint key",
+                None)
+        self._joint_pk = joint
         self.phase = Phase.SHUFFLE
         # the shuffle chain starts from the inspection-verifiable trivial deck
         self._deck = eg.make_trivial_deck()
@@ -290,22 +462,93 @@ class MentalDeal:
             return self.seats_in[round_no - 1]
         return None
 
+    def _bg_ctx(self, round_no: int, seat: int) -> bytes:
+        """Statement binding for a prevention proof.
+
+        Binds session, hand, shuffle round, shuffling seat, and the
+        commitment-key identity, so a proof is valid for exactly one
+        (session, hand, round, seat, key) tuple and replaying it anywhere
+        else yields a different statement hash and a clean verify-False.
+
+        Fields are length-prefixed rather than delimiter-joined. No
+        collision exists under a plain separator today -- session_id is
+        the only variable-shape field and it comes first, while hand,
+        round and seat are separator-free integers -- but session_id IS
+        itself a "|"-joined string (see session._deal_session_id), so the
+        scheme would become ambiguous the moment a second string field is
+        added. Length prefixes cost nothing and remove the footgun.
+
+        The commitment key is additionally bound inside the proof itself --
+        bg_shuffle._statement_context hashes ck.H and every ck.Gs. Naming
+        the seed here too costs nothing and turns a key mismatch into an
+        attributable abort instead of a bare verification failure.
+        """
+        parts = [
+            b"poker.mentaldeal.bg.v1",
+            self.session_id.encode(),
+            str(self.hand_no).encode(),
+            str(round_no).encode(),
+            str(seat).encode(),
+            BG_CK_SEED,
+        ]
+        out = bytearray()
+        for part in parts:
+            out += len(part).to_bytes(4, "big")
+            out += part
+        return bytes(out)
+
     def _maybe_emit_shuffle(self) -> List[dict]:
         """If it is this seat's turn to shuffle the next round, produce and
         broadcast the shuffled deck. Changes NO local state -- the deck is
         applied uniformly by _on_deck_round when the echo arrives, so every
         seat (including this one) advances identically.
+
+        In prevention mode the shuffle witness (which is never transmitted)
+        is consumed here to build the Bayer-Groth proof and then discarded
+        with the local frame, so the no-local-state property holds either
+        way.
         """
         next_round = self._shuffle_round + 1
         if self._expected_shuffler(next_round) != self.seat:
             return []
-        deck, _wit = shuffle_mp.shuffle_deck(self._joint_pk, self._deck)
-        return [{
+        deck, wit = shuffle_mp.shuffle_deck(self._joint_pk, self._deck)
+        msg = {
             "type": "deck_round",
             "round": next_round,
             "seat": self.seat,
             "deck": [ct.to_hex() for ct in deck],
-        }]
+        }
+        if self.prevention:
+            proof = bg_shuffle.prove(
+                self._joint_pk, bg_commitment_key(), self._deck, deck,
+                wit.perm, wit.scalars, BG_M, BG_N,
+                self._bg_ctx(next_round, self.seat))
+            msg["proof"] = bg_wire.encode(proof)
+        return [msg]
+
+    def _prevention_failure(self, msg: dict, deck: List[Ciphertext],
+                            round_no: int, seat: int) -> Optional[str]:
+        """Check a round's prevention proof; None if it is acceptable.
+
+        Missing, undecodable, and invalid proofs are all unacceptable and
+        all reach the same abort, attributed to ``seat`` -- but each
+        returns its own reason so logs and tests can tell them apart.
+        """
+        raw = msg.get("proof")
+        if raw is None:
+            return (f"seat {seat} omitted the required shuffle proof "
+                    f"for round {round_no}")
+        try:
+            proof = bg_wire.decode(raw, BG_M, BG_N)
+        except ValueError as exc:
+            return (f"seat {seat} sent an undecodable shuffle proof "
+                    f"for round {round_no}: {exc}")
+        if not bg_shuffle.verify(
+                self._joint_pk, bg_commitment_key(), self._deck, deck,
+                BG_M, BG_N, self._bg_ctx(round_no, seat), proof):
+            return (f"seat {seat} sent an invalid shuffle proof "
+                    f"for round {round_no}")
+        return None
 
     def _on_deck_round(self, msg: dict) -> List[dict]:
         if self.phase != Phase.SHUFFLE:
@@ -343,9 +586,14 @@ class MentalDeal:
             return self._abort(
                 f"seat {seat} sent a deck containing a trivial ciphertext", seat)
 
-        # (prevention mode would verify a shadow-deck shuffle_proof here,
-        #  against self._deck as the previous deck. Detection-only default
-        #  relies on the Phase D audit instead.)
+        # Prevention mode: the round is only acceptable if it carries a
+        # valid Bayer-Groth proof against self._deck (the previous deck).
+        # Detection-only relies on the Phase D audit instead, and ignores
+        # any proof that happens to be attached.
+        if self.prevention:
+            failure = self._prevention_failure(msg, deck, round_no, seat)
+            if failure is not None:
+                return self._abort(failure, seat)
 
         # accept
         self._deck = deck
@@ -544,11 +792,16 @@ class MentalDeal:
         if report.ok:
             self.phase = Phase.DONE
         else:
-            # void + attribute. A lying decryptor is named in bad_seats; a
-            # corrupt deck with no bad decryptor is a shuffler cheat (the
-            # exact round is recoverable from round_decks via a chain audit).
+            # Void, naming a seat when the evidence identifies one. A lying
+            # decryptor is pinned by its own failed DLEQ and appears in
+            # bad_seats. A corrupt deck with no bad decryptor is a shuffler
+            # cheat, but the multiset check only sees the final deck, so
+            # blame is None -- see the module docstring for why attributing
+            # it needs a new message exchange and why that is a pending
+            # design decision rather than a correctness gap.
             blame = report.bad_seats[0] if report.bad_seats else None
             self._abort("; ".join(report.problems) or "audit failed", blame)
 
 
-__all__ = ["MentalDeal", "Phase", "derive_share"]
+__all__ = ["MentalDeal", "Phase", "derive_share", "bg_commitment_key",
+           "BG_M", "BG_N", "BG_CK_SEED"]

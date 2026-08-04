@@ -533,13 +533,60 @@ def test_transcript_is_length_prefixed():
     assert bytes(one) != bytes(two)
 
 
-def test_zero_challenge_is_rejected(monkeypatch):
-    """A challenge of zero would collapse the folding; bg_svp guards the
-    same way. Forced here because it is otherwise a ~2^-252 event."""
+def test_zero_challenge_is_retried_not_rejected(monkeypatch):
+    """A zero reduction advances the counter; the proof still verifies.
+
+    Rejecting was the old behaviour and it was wrong: under Fiat-Shamir
+    the transcript is fixed by the statement and the initial message, so
+    a prover whose transcript reduces to zero has nothing to resample.
+
+    The forced zero is keyed on the DIGEST, not on a call count. Keying
+    on call count would make prover and verifier hit the zero at
+    different points and land on different counters -- exactly the
+    divergence the retry rule exists to prevent.
+    """
+    from holdem.p2p import bg_challenge as C
+
     setup = _setup(2, 2)
+    real_R = C.R
+    real_reduce = real_R.scalar_reduce
+    poison: set = set()
+
+    class PoisonedR:
+        """Wraps ristretto, but one specific digest maps to zero.
+
+        The very first challenge attempt seen -- the prover's counter-0
+        preimage -- is adopted into ``poison`` and thereafter always
+        reduces to zero, for whoever hashes it. The verifier rebuilds the
+        same transcript, produces the same counter-0 digest, and is sent
+        down the same retry. That is the property under test.
+
+        Patched on bg_challenge alone so only challenge attempts are
+        affected; poisoning ristretto globally would also hit random
+        scalar generation and prove nothing about the challenge path.
+        """
+        def __getattr__(self, name):
+            return getattr(real_R, name)
+
+        def scalar_reduce(self, wide):
+            key = bytes(wide)
+            if not poison:
+                poison.add(key)
+            return ZERO if key in poison else real_reduce(wide)
+
+    monkeypatch.setattr(C, "R", PoisonedR())
     p = _prove(setup)
+    assert _verify(setup, p)
+    assert poison, "the retry path was never exercised"
+
+
+def test_always_zero_reduction_is_reported_not_looped(monkeypatch):
+    """The attempt bound is a backstop against a broken reduction, not a
+    tuning knob: it must surface rather than spin."""
+    setup = _setup(2, 2)
     monkeypatch.setattr(Z.R, "scalar_reduce", lambda _d: ZERO)
-    assert not _verify(setup, p)
+    with pytest.raises(RuntimeError, match="exhausted"):
+        _prove(setup)
 
 
 def test_svp_and_zero_domains_differ():
