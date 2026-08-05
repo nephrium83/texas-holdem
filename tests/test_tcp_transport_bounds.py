@@ -28,6 +28,12 @@ from holdem.p2p.tcp_transport import MAX_LINE, SimpleTcpTransport
 # a 5s budget, so the bound is generous on purpose.
 WAIT = 20
 
+# The handshake is a different kind of wait and gets its own bound. It is
+# not a deadlock guard: SimpleTcpTransport._handshake sets a 10s socket
+# timeout on its own side, so a server that is going to answer at all has
+# answered by then. Waiting longer here only delays the report.
+_HANDSHAKE_WAIT = 10
+
 
 class Recorder:
     """Stands in for a Session; records what reached handle_message."""
@@ -58,14 +64,45 @@ def listening():
 
 
 def _handshake(client, conn_id="attacker"):
+    """Complete the client half of the handshake, or fail saying why.
+
+    Every caller below depends on this having SUCCEEDED. The previous
+    version broke out of its read loop on a closed connection without
+    checking that it had received anything, and returned the empty
+    buffer. The caller then wrote a frame into a dead socket and failed
+    twenty seconds later as "a legal frame never arrived" -- a delivery
+    timeout standing in for a handshake that never happened, which sends
+    the reader looking at transport delivery instead of at the peer that
+    hung up.
+
+    So: a connection that closes, times out, or answers with something
+    the protocol does not accept fails HERE, reporting the buffer it got.
+    """
+    deadline = time.monotonic() + _HANDSHAKE_WAIT
     client.sendall(b'{"conn_id": "%s"}\n' % conn_id.encode())
-    client.settimeout(5)
     buf = b""
     while b"\n" not in buf:
-        chunk = client.recv(4096)
+        remaining = deadline - time.monotonic()
+        assert remaining > 0, (
+            f"server sent no handshake line within {_HANDSHAKE_WAIT}s; "
+            f"received {len(buf)} bytes so far: {buf[:200]!r}")
+        client.settimeout(remaining)
+        try:
+            chunk = client.recv(4096)
+        except socket.timeout:
+            continue                    # re-check the deadline and report
         if not chunk:
-            break
+            raise AssertionError(
+                "server closed the connection during the handshake after "
+                f"{len(buf)} bytes: {buf[:200]!r}")
         buf += chunk
+
+    line = buf.split(b"\n", 1)[0]
+    hello = wire.safe_loads(line)
+    assert isinstance(hello, dict), \
+        f"server handshake line is not a JSON object: {line[:200]!r}"
+    assert isinstance(hello.get("conn_id"), str) and hello["conn_id"], \
+        f"server handshake carried no usable conn_id: {hello!r}"
     return buf
 
 
@@ -112,12 +149,32 @@ def test_over_long_line_after_handshake_drops_the_peer(listening):
     assert not recorder.messages, "an over-long line was delivered as a frame"
 
 
+def _server_state(transport):
+    """Everything observable about the server half, for failure messages.
+
+    This test is intermittently flaky in CI (seen on 3.12 and 3.13) and
+    the bare "a legal frame never arrived" says nothing about WHY. The
+    three states below are distinguishable and point at different
+    causes: no peer means the server-side handshake never completed and
+    its exception was swallowed by _accept_thread; a registered peer
+    with no live reader means the reader thread died or never started;
+    both present means the frame was genuinely not delivered.
+    """
+    peers = sorted(transport._peers)
+    readers = sorted(t.name for t in threading.enumerate()
+                     if t.name.startswith("tcp-reader-") and t.is_alive())
+    accepts = sorted(t.name for t in threading.enumerate()
+                     if t.name.startswith("tcp-accept-") and t.is_alive())
+    return (f"peers={peers} live_readers={readers} live_accepts={accepts}")
+
+
 def test_normal_traffic_still_flows(listening):
     """The bounds must not break the honest path."""
     transport, recorder, client, _port = listening
     _handshake(client)
     client.sendall(b'{"type": "chat", "payload": {"text": "hi"}}\n')
-    assert recorder.arrived.wait(20), "a legal frame never arrived"
+    assert recorder.arrived.wait(WAIT), (
+        f"a legal frame never arrived within {WAIT}s -- {_server_state(transport)}")
     assert recorder.messages[0][1]["type"] == "chat"
 
 
