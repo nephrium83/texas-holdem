@@ -112,7 +112,8 @@ class SimpleTcpTransport:
             if len(buf) > MAX_LINE:
                 raise ValueError(
                     f"handshake exceeded {MAX_LINE} bytes without a newline")
-        peer_hello = wire.safe_loads(buf.split(b"\n", 1)[0])
+        hello_line, _, leftover = buf.partition(b"\n")
+        peer_hello = wire.safe_loads(hello_line)
         if not isinstance(peer_hello, dict):
             raise ValueError("handshake is not a JSON object")
         peer_id = peer_hello.get("conn_id")
@@ -124,7 +125,14 @@ class SimpleTcpTransport:
             self._peers[peer_id] = sock
 
         self._connected.set()
-        self._start_reader(peer_id, sock)
+        # ``leftover`` is everything recv() pulled in past the hello's
+        # newline. It was previously discarded, and the reader then opened a
+        # fresh makefile on the socket -- so a peer whose first frame shared
+        # a read with its handshake had that frame silently destroyed. The
+        # peer stayed registered and the reader stayed alive, waiting for
+        # bytes that had already been consumed, which is why the resulting
+        # failure looked like a delivery timeout with everything healthy.
+        self._start_reader(peer_id, sock, leftover)
 
     def wait_connected(self, timeout: float = 15.0) -> bool:
         """Block until at least one peer connects (or timeout)."""
@@ -160,9 +168,17 @@ class SimpleTcpTransport:
     # Receive
     # ------------------------------------------------------------------
 
-    def _start_reader(self, peer_id: str, sock: socket.socket) -> None:
+    def _start_reader(self, peer_id: str, sock: socket.socket,
+                      leftover: bytes = b"") -> None:
+        """Serve ``peer_id``, starting from any bytes the handshake over-read.
+
+        ``leftover`` is bounded by the handshake, which refuses more than
+        MAX_LINE before a newline, so seeding the loop with it cannot be
+        used to bypass the per-line cap below.
+        """
         def _read() -> None:
             f = sock.makefile("rb")
+            carry = leftover
             try:
                 while True:
                     # Bounded: readline(MAX_LINE + 1) caps a single line, so
@@ -171,7 +187,19 @@ class SimpleTcpTransport:
                     # over-long, which is a protocol violation, not a frame
                     # to skip -- keeping the connection would resynchronise
                     # mid-message and interpret payload bytes as a frame.
-                    raw = f.readline(MAX_LINE + 1)
+                    if b"\n" in carry:
+                        line, _, carry = carry.partition(b"\n")
+                        raw = line + b"\n"
+                    else:
+                        # Whatever the handshake over-read counts against
+                        # this line's budget, so the cap still applies to
+                        # the line as a whole rather than per read.
+                        budget = MAX_LINE + 1 - len(carry)
+                        chunk = f.readline(budget) if budget > 0 else b""
+                        if not chunk:
+                            break                   # peer closed
+                        raw = carry + chunk
+                        carry = b""
                     if not raw:
                         break                       # peer closed
                     if len(raw) > MAX_LINE and not raw.endswith(b"\n"):

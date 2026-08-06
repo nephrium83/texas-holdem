@@ -122,14 +122,30 @@ def main() -> None:
     # Monkey-patch transport to queue messages instead of calling directly.
     _orig_start_reader = transport._start_reader
 
-    def _queued_reader(peer_id: str, sock) -> None:
-        import socket as _socket
+    def _queued_reader(peer_id: str, sock, leftover: bytes = b"") -> None:
+        """Queueing stand-in for SimpleTcpTransport._start_reader.
 
+        ``leftover`` is whatever the handshake's recv() pulled in past the
+        hello's newline. It MUST be consumed here: this override shadows
+        the production reader entirely, so a copy that ignores it
+        reintroduces the dropped-frame defect inside the worker while the
+        real transport is fixed.
+        """
         def _read() -> None:
             import json as _json
             f = sock.makefile("rb")
+            carry = leftover
             try:
-                for raw in f:
+                while True:
+                    if b"\n" in carry:
+                        line, _, carry = carry.partition(b"\n")
+                        raw = line
+                    else:
+                        chunk = f.readline()
+                        if not chunk:
+                            break
+                        raw = carry + chunk
+                        carry = b""
                     raw = raw.strip()
                     if not raw:
                         continue
