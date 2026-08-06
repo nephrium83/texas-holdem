@@ -6,7 +6,7 @@
   <a href="https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nephrium83/texas-holdem/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Godot-4.7.1-478CBF?style=flat-square&logo=godotengine&logoColor=white" alt="Godot 4.7.1">
   <img src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10 through 3.13">
-  <img src="https://img.shields.io/badge/tests-662%20Python%20tests-1f7a5a?style=flat-square" alt="662 Python tests">
+  <img src="https://img.shields.io/badge/tests-1098%20Python%20tests-1f7a5a?style=flat-square" alt="1098 Python tests">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/nephrium83/texas-holdem?style=flat-square&color=c7834c" alt="MIT license"></a>
 </p>
 
@@ -49,7 +49,7 @@ connected to the Python sidecar through a locked newline-JSON protocol.
     </td>
     <td width="50%">
       <strong>Built to be tested</strong><br>
-      662 Python tests, a 15-hand GUI smoke run, and Godot GUT execute in CI
+      1098 Python tests, a 15-hand GUI smoke run, and Godot GUT execute in CI
       across Python 3.10, 3.12, and 3.13.
     </td>
   </tr>
