@@ -178,6 +178,100 @@ def test_normal_traffic_still_flows(listening):
     assert recorder.messages[0][1]["type"] == "chat"
 
 
+def test_frame_batched_with_the_handshake_is_not_lost(listening):
+    """A frame that shares a read with the handshake must still arrive.
+
+    _handshake reads with recv(4096) and then parses buf.split(b"\\n", 1)[0].
+    Everything after that first newline used to be discarded, and the reader
+    started a FRESH makefile on the socket -- so any frame already pulled
+    into the handshake buffer was gone with no error anywhere.
+
+    This is the deterministic form of the CI flake. The intermittent form
+    is the same race: the client sends its next frame as soon as it sees
+    the server hello, and the server's single recv can return the peer
+    hello and that frame together. Under load that is exactly when it
+    happens, which is why the failure was intermittent and why the peer
+    was always registered with a live reader -- the handshake succeeded,
+    the reader started, and it was waiting for bytes that had already been
+    consumed and thrown away.
+
+    Sent as ONE write so the two lines share a segment, and the discard is
+    forced rather than raced.
+    """
+    transport, recorder, client, _port = listening
+    client.sendall(b'{"conn_id": "batched"}\n'
+                   b'{"type": "chat", "payload": {"text": "batched"}}\n')
+
+    # Drain the server hello so the assertion below is about delivery, not
+    # about the handshake having happened at all.
+    client.settimeout(_HANDSHAKE_WAIT)
+    buf = b""
+    while b"\n" not in buf:
+        chunk = client.recv(4096)
+        assert chunk, "server closed during the batched handshake"
+        buf += chunk
+
+    assert recorder.arrived.wait(WAIT), (
+        "frame sharing the handshake read was dropped -- "
+        f"{_server_state(transport)}")
+    assert recorder.messages[0][1]["payload"]["text"] == "batched"
+
+
+def test_leftover_does_not_bypass_the_line_cap(listening):
+    """Seeding the reader from the handshake must not widen the bound.
+
+    The leftover counts against the same MAX_LINE budget as the rest of
+    the line. Otherwise a peer could batch its hello with an enormous
+    unterminated blob and get MAX_LINE of buffer for free -- reintroducing
+    the pre-authentication exhaustion this file exists to prevent, through
+    the fix for the dropped-frame defect.
+    """
+    transport, recorder, client, _port = listening
+    client.sendall(b'{"conn_id": "greedy"}\n' + b"z" * (MAX_LINE // 2))
+    dropped = False
+    try:
+        for _ in range(8):
+            client.sendall(b"z" * (MAX_LINE // 4))
+            time.sleep(0.02)
+        client.sendall(b"\n")
+    except OSError:
+        dropped = True
+    time.sleep(0.3)
+    assert not recorder.messages, "an over-long batched line became a frame"
+    if not dropped:
+        client.settimeout(2)
+        try:
+            assert client.recv(4096) == b"", "server kept the over-long peer"
+        except OSError:
+            pass
+
+
+def test_handshake_leftover_is_handed_to_the_reader(listening):
+    """The same defect at the seam, without waiting on delivery timing.
+
+    Several frames batched behind the hello must ALL arrive, in order. A
+    reader that starts from a fresh makefile sees none of them.
+    """
+    transport, recorder, client, _port = listening
+    payload = b'{"conn_id": "batch2"}\n'
+    for i in range(3):
+        payload += (b'{"type": "chat", "payload": {"text": "m%d"}}\n'
+                    % i)
+    client.sendall(payload)
+
+    def _three():
+        return len(recorder.messages) >= 3
+
+    deadline = time.monotonic() + WAIT
+    while not _three() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    texts = [m[1].get("payload", {}).get("text") for m in recorder.messages]
+    assert texts == ["m0", "m1", "m2"], (
+        f"batched frames lost or reordered: {texts} -- "
+        f"{_server_state(transport)}")
+
+
 # --------------------------------------------------- malformed input
 
 @pytest.mark.parametrize("raw", [
