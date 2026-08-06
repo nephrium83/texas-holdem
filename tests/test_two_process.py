@@ -31,6 +31,7 @@ instead of five) and keeps each assertion focused.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -72,6 +73,262 @@ def _start_worker(*extra_args: str) -> subprocess.Popen:
 def _send_cmd(proc: subprocess.Popen, cmd: dict) -> None:
     proc.stdin.write(json.dumps(cmd) + "\n")
     proc.stdin.flush()
+
+
+# ── failure diagnostics ───────────────────────────────────────────────────────
+#
+# test_02 is intermittently flaky in CI (3.12, twice) and has never once
+# reported why. The reason is structural, not incidental:
+#
+#   * CI sets PYTEST_TIMEOUT=60, which pytest-timeout applies to every test.
+#   * test_02 performs TWO sequential wait_for calls at DEAL_TIMEOUT=60 each.
+#
+# So the test can burn up to 120s while the harness kills it at 60. Its own
+# assertion messages -- which already try to dump the last three snapshots --
+# are unreachable in CI. Every observed failure has been "Failed: Timeout
+# (>60.0s) from pytest-timeout" carrying no state at all.
+#
+# The fix for that is not a longer timeout. It is to capture the evidence
+# BEFORE the harness fires, from a watchdog that is armed when the test
+# starts and disarmed when it passes. No timeout value changes here.
+#
+# Output goes to fd 2 directly rather than through sys.stderr, because
+# pytest buffers per-test captured output and pytest-timeout's thread method
+# terminates the process without flushing it. os.write to the real descriptor
+# survives that; a print() does not.
+
+_DIAG_LEAD = 12.0        # fire this many seconds before the ambient timeout
+_DIAG_TAIL = 40          # events to dump per process
+
+
+def _ambient_timeout() -> Optional[float]:
+    """The per-test timeout pytest-timeout will enforce, if any."""
+    raw = os.environ.get("PYTEST_TIMEOUT", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+_STDERR_TAIL_BYTES = 8192       # decoded tail kept for human reading
+_STDERR_LOUD = 32 * 1024        # volume worth reporting even on success
+
+
+class StderrSink:
+    """Byte-accurate record of what a worker wrote to stderr.
+
+    Counting LINES cannot test the pipe hypothesis. A worker can emit a
+    single enormous unterminated line, push the pipe to capacity, and be
+    recorded as zero lines until EOF. The quantity that matters is bytes
+    against the ~64KiB pipe buffer, so bytes are what this counts.
+
+    Reading goes through os.read on the raw descriptor rather than
+    iterating the text stream, so nothing is buffered on our side and the
+    count is the count the kernel saw.
+    """
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+        self.total = 0
+        self._tail = bytearray()
+        self._lock = threading.Lock()
+
+    def feed(self, chunk: bytes) -> None:
+        with self._lock:
+            self.total += len(chunk)
+            self._tail.extend(chunk)
+            if len(self._tail) > _STDERR_TAIL_BYTES:
+                del self._tail[:-_STDERR_TAIL_BYTES]
+
+    def tail_text(self) -> str:
+        with self._lock:
+            return bytes(self._tail).decode("utf-8", "replace")
+
+    @property
+    def loud(self) -> bool:
+        return self.total >= _STDERR_LOUD
+
+
+def _drain(stream, sink: StderrSink) -> threading.Thread:
+    """Continuously read a subprocess pipe into ``sink``.
+
+    stderr was previously never read. That is why no failure has ever
+    carried a worker traceback -- and it is also a live hypothesis for the
+    stall itself, since a subprocess that fills the pipe nobody drains
+    blocks forever on its next write.
+
+    Draining is required to capture stderr at all, which creates a trap:
+    if the stall IS a full pipe, draining cures it and the flake vanishes
+    with nothing to show for it. That is why ``total`` is reported on
+    SUCCESSFUL runs too, above _STDERR_LOUD. A cure with no measurement is
+    a correlation; a cure alongside "host wrote 48192 bytes" is evidence.
+    """
+    fd = stream.fileno()
+
+    def _pump() -> None:
+        try:
+            while True:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    return
+                sink.feed(chunk)
+        except Exception:                          # closed pipe on teardown
+            pass
+
+    t = threading.Thread(target=_pump, daemon=True,
+                         name=f"stderr-drain-{sink.label}")
+    t.start()
+    return t
+
+
+def _phases_seen(col: "EventCollector") -> list:
+    """Ordered distinct phases, so a stall shows where it stopped."""
+    out = []
+    for e in col.all_of_type("snapshot"):
+        phase = e.get("snap", {}).get("phase")
+        if phase and (not out or out[-1] != phase):
+            out.append(phase)
+    return out
+
+
+def _side_report(label: str, proc, col, stderr_sink, t0: float,
+                 t_start_hand: Optional[float]) -> str:
+    now = time.monotonic()
+    rc = proc.poll() if proc is not None else "no-process"
+    events = list(col._events) if col is not None else []
+
+    acks = [e for e in events if e.get("type") == "ack"]
+    errors = [e for e in events if e.get("type") == "error"]
+    digests = [e for e in events if e.get("event") == "digest_changed"]
+    snap = col.latest_snapshot() if col is not None else None
+
+    lines = [
+        f"--- {label} " + "-" * (66 - len(label)),
+        f"  process:        alive={rc is None} exit_code={rc!r}",
+        f"  since_launch:   {now - t0:.1f}s",
+        "  since_start_hand: "
+        + ("n/a" if t_start_hand is None else f"{now - t_start_hand:.1f}s"),
+        f"  events_total:   {len(events)}",
+        f"  acks:           {[a.get('op') for a in acks]}",
+        f"  start_hand_ack: {any(a.get('op') == 'start_hand' for a in acks)}",
+        f"  phases_seen:    {_phases_seen(col) if col else []}",
+        f"  digest_changed: {len(digests)}",
+        f"  latest_digest:  {col.latest_digest()!r}" if col else "  latest_digest:  n/a",
+        f"  errors:         {errors[-3:] if errors else '[]'}",
+        f"  latest_snapshot: {json.dumps(snap)[:600] if snap else 'none'}",
+    ]
+
+    lines.append(f"  event tail (last {_DIAG_TAIL}, ALL types, in order):")
+    for e in events[-_DIAG_TAIL:]:
+        lines.append("    " + json.dumps(e)[:300])
+
+    total = stderr_sink.total if stderr_sink is not None else -1
+    lines.append(
+        f"  stderr_bytes:   {total}"
+        + ("   <-- at or past the pipe-capacity danger zone"
+           if total >= _STDERR_LOUD else ""))
+    lines.append(f"  stderr tail (last {_STDERR_TAIL_BYTES}B decoded):")
+    if stderr_sink is not None:
+        for line in stderr_sink.tail_text().splitlines()[-_DIAG_TAIL:]:
+            lines.append("    " + line[:300])
+
+    return "\n".join(lines)
+
+
+def _dump(reason: str, cls, waiting_for: str) -> str:
+    """Full two-sided report. Never raises -- it runs on a failure path."""
+    try:
+        head = [
+            "",
+            "=" * 78,
+            f"TWO-PROCESS DIAGNOSTIC: {reason}",
+            f"  pending wait:  {waiting_for}",
+            f"  ambient pytest timeout: {_ambient_timeout()!r}s "
+            f"(DEAL_TIMEOUT={DEAL_TIMEOUT}s, used twice sequentially)",
+            "=" * 78,
+        ]
+        body = [
+            _side_report("HOST", cls.host_proc, cls.host_col,
+                         getattr(cls, "host_stderr", []),
+                         getattr(cls, "t0", time.monotonic()),
+                         getattr(cls, "t_start_hand", None)),
+            _side_report("GUEST", cls.guest_proc, cls.guest_col,
+                         getattr(cls, "guest_stderr", []),
+                         getattr(cls, "t0", time.monotonic()),
+                         getattr(cls, "t_start_hand", None)),
+            "=" * 78,
+            "",
+        ]
+        return "\n".join(head + body)
+    except Exception as exc:                       # diagnostics must not mask
+        return f"\n[diagnostic failed: {exc!r}]\n"
+
+
+def _emit_diag(text: str) -> None:
+    try:
+        os.write(2, text.encode("utf-8", "replace"))
+    except Exception:
+        pass
+
+
+def _report_stderr_volume(host_sink: StderrSink, guest_sink: StderrSink,
+                          config=None) -> None:
+    """Emit stderr volume on a SUCCESSFUL run, when it is high enough to matter.
+
+    This is the half of the instrumentation that can falsify the pipe
+    hypothesis rather than merely benefit from it. If draining stderr is
+    what stops the stall, then after this change CI goes green and the
+    failure diagnostics never run -- so without this line, "the flake went
+    away" would stay a correlation forever.
+
+    Silent below the threshold: a healthy run that writes a few hundred
+    bytes was never near capacity, and saying so on every green run would
+    train people to ignore it.
+
+    pytest's fd-level capture redirects fd 2 and DISCARDS it for passing
+    tests, so a bare os.write here would be swallowed in exactly the case
+    this exists to serve. Capture is suspended for the write. The failure
+    path does not need this -- captured output is replayed for failures --
+    which is why the watchdog controls worked before this was noticed.
+    """
+    if not (host_sink.loud or guest_sink.loud):
+        return
+    text = (f"\ntwo-process stderr volume: host={host_sink.total} bytes "
+            f"guest={guest_sink.total} bytes "
+            f"(threshold {_STDERR_LOUD}, pipe capacity typically 65536)\n")
+
+    capman = None
+    if config is not None:
+        capman = config.pluginmanager.getplugin("capturemanager")
+    if capman is None:
+        _emit_diag(text)
+        return
+    with capman.global_and_fixture_disabled():
+        _emit_diag(text)
+
+
+def _arm_watchdog(cls, waiting_for: str):
+    """Dump state shortly before pytest-timeout would kill the process.
+
+    Returns a cancel callable. If there is no ambient timeout (local runs
+    without PYTEST_TIMEOUT) the watchdog still arms, off DEAL_TIMEOUT, so the
+    same evidence appears locally.
+    """
+    ambient = _ambient_timeout()
+    budget = (ambient if ambient is not None else DEAL_TIMEOUT) - _DIAG_LEAD
+    if budget <= 0:
+        return lambda: None
+
+    timer = threading.Timer(
+        budget,
+        lambda: _emit_diag(_dump(
+            f"watchdog fired {budget:.0f}s in, before the harness timeout",
+            cls, waiting_for)),
+    )
+    timer.daemon = True
+    timer.start()
+    return timer.cancel
 
 
 # ── event collector ───────────────────────────────────────────────────────────
@@ -173,9 +430,25 @@ def shared_two_process(request):
     """
     host_proc = guest_proc = None
     host_col  = guest_col  = None
+    # stderr was never read on either process. Two consequences: no failure
+    # has ever carried a worker traceback, and a worker that writes enough to
+    # fill the ~64KB pipe would block forever on its next write.
+    #
+    # Draining it is required to capture stderr at all, so it is done here --
+    # but note the trap. If the stall IS a full stderr pipe, this change makes
+    # the flake disappear, and that must be reported as evidence for the
+    # cause, NOT as a fix. The line counts below are what distinguish the two:
+    # a run that drains tens of thousands of bytes was living dangerously; a
+    # run that drains a handful was never near the limit and the pipe theory
+    # is dead.
+    request.cls.host_stderr = host_stderr = StderrSink("host")
+    request.cls.guest_stderr = guest_stderr = StderrSink("guest")
+    request.cls.t0 = time.monotonic()
+    request.cls.t_start_hand = None
     try:
         host_proc = _start_worker("--role", "host", "--port", "0")
         host_col  = EventCollector(host_proc, "host")
+        _drain(host_proc.stderr, host_stderr)
 
         ready = host_col.wait_for(lambda e: e.get("type") == "ready",
                                   timeout=STARTUP_TIMEOUT)
@@ -184,6 +457,7 @@ def shared_two_process(request):
 
         guest_proc = _start_worker("--role", "guest", "--peer-port", str(port))
         guest_col  = EventCollector(guest_proc, "guest")
+        _drain(guest_proc.stderr, guest_stderr)
 
         h_conn = host_col.wait_for(lambda e: e.get("type") == "connected",
                                    timeout=STARTUP_TIMEOUT)
@@ -201,6 +475,10 @@ def shared_two_process(request):
         yield host_proc, guest_proc, host_col, guest_col
 
     finally:
+        # Before teardown, while the counts are final and the processes are
+        # still up: report volume if either side was anywhere near the pipe
+        # limit. This runs on passing runs too -- that is the point.
+        _report_stderr_volume(host_stderr, guest_stderr, request.config)
         for p in (guest_proc, host_proc):
             if p is None:
                 continue
@@ -235,6 +513,7 @@ class TestTwoSidecarProcess:
     # ---------------------------------------------------------------- step 2
     def test_02_deal_reaches_betting_phase(self):
         """After start_p2p_hand, both processes reach a betting phase."""
+        type(self).t_start_hand = time.monotonic()
         _send_cmd(self.guest_proc, {"op": "start_hand", "args": HAND_ARGS})
         _send_cmd(self.host_proc,  {"op": "start_hand", "args": HAND_ARGS})
 
@@ -244,8 +523,26 @@ class TestTwoSidecarProcess:
             phase = e.get("snap", {}).get("phase", "lobby")
             return phase not in ("lobby", "dealing", "void")
 
-        h_snap = self.host_col.wait_for(_post_deal, timeout=DEAL_TIMEOUT)
-        g_snap = self.guest_col.wait_for(_post_deal, timeout=DEAL_TIMEOUT)
+        # Armed before the waits, cancelled after them. Without this the
+        # harness kills the test at PYTEST_TIMEOUT and none of the assertion
+        # messages below ever run -- which is exactly what every observed CI
+        # failure looked like.
+        cancel = _arm_watchdog(
+            type(self), "host+guest snapshot with phase not in "
+                        "(lobby, dealing, void)")
+        try:
+            h_snap = self.host_col.wait_for(_post_deal, timeout=DEAL_TIMEOUT)
+            g_snap = self.guest_col.wait_for(_post_deal, timeout=DEAL_TIMEOUT)
+        finally:
+            cancel()
+
+        if h_snap is None or g_snap is None:
+            # Processes are still up here; teardown has not run, so nothing
+            # has been destroyed and no pipe has been closed yet.
+            _emit_diag(_dump(
+                f"host_reached={h_snap is not None} "
+                f"guest_reached={g_snap is not None}",
+                type(self), "post-deal snapshot"))
 
         assert h_snap is not None, (
             "host never reached a betting phase — "
@@ -298,10 +595,10 @@ class TestTwoSidecarProcess:
         g_acts = self.guest_col.has_any(_has_legal)
 
         if h_acts:
-            acting_proc, acting_col, other_col = (
+            acting_proc, _acting_col, other_col = (
                 self.host_proc, self.host_col, self.guest_col)
         elif g_acts:
-            acting_proc, acting_col, other_col = (
+            acting_proc, _acting_col, other_col = (
                 self.guest_proc, self.guest_col, self.host_col)
         else:
             pytest.skip("neither side has a legal-action snapshot yet")
