@@ -239,11 +239,24 @@ def test_leftover_does_not_bypass_the_line_cap(listening):
     time.sleep(0.3)
     assert not recorder.messages, "an over-long batched line became a frame"
     if not dropped:
-        client.settimeout(2)
+        # Drain to EOF rather than asserting the FIRST recv is empty. The
+        # server sends its own hello the moment it accepts, so that hello
+        # is still sitting in this socket's receive buffer -- an assertion
+        # on the first recv reads the hello and reports "server kept the
+        # peer" when the server did close. Caught by CI on all three Linux
+        # jobs while Windows timing hid it.
+        client.settimeout(3)
+        closed = False
         try:
-            assert client.recv(4096) == b"", "server kept the over-long peer"
+            while True:
+                if client.recv(4096) == b"":
+                    closed = True
+                    break
+        except socket.timeout:
+            closed = False
         except OSError:
-            pass
+            closed = True                  # reset is also a drop
+        assert closed, "server kept the over-long peer"
 
 
 def test_handshake_leftover_is_handed_to_the_reader(listening):
