@@ -25,8 +25,26 @@ Test ordering note
 All tests in TestTwoSidecarProcess share ONE class-scoped fixture (one pair
 of processes, one TCP connection, one deal).  Tests run in definition order
 and are cumulative: later tests assume earlier ones have already advanced
-the shared session state.  This makes the suite fast (one 20-30s deal
-instead of five) and keeps each assertion focused.
+the shared session state.  This keeps each assertion focused and pays for
+the process pair once.
+
+Because the state is shared, a single dead worker can otherwise be relaid
+as an independent-looking failure by every test that follows it.  The
+autouse liveness guard on the class exists to stop exactly that; see its
+docstring and the timeout ladder below.
+
+Measured timings
+----------------
+BWING, 2026-08-06, Python 3.13.3, 16 cores: a full pair -- spawn, connect,
+deal, digest convergence -- completes in 0.52s p50 over 30 consecutive
+iterations, and the whole five-test class runs in 2.3s.  Under 48 competing
+CPU hogs on 16 cores the pair takes 7-17s and still passes 12/12.
+
+Earlier revisions of this file described "a 20-30s deal", which was wrong by
+roughly two orders of magnitude and made a 60s budget look tight when it is
+in fact ~100x the observed cost.  That mattered: it made the 60s timeouts
+read as reasonable protocol timing rather than as the hazard they were.  A
+deal that has not finished in 45s is not a slow deal, it is a stalled one.
 """
 from __future__ import annotations
 
@@ -42,9 +60,55 @@ from typing import Optional
 import pytest
 
 WORKER = str(Path(__file__).parent / "peer_worker.py")
+
+# ── the timeout ladder ────────────────────────────────────────────────────────
+#
+# Four timeouts govern this file, and they used to be in the wrong order --
+# two of them sat at exactly 60s and raced each other:
+#
+#   * CI sets PYTEST_TIMEOUT=60, which pytest-timeout applies per test.
+#   * peer_worker.py's main loop gave up after 60s of queue silence, emitted
+#     {"type": "error", "msg": "idle timeout"} and exited 0.
+#
+# So a peer that waited out a stall killed ITSELF at the same instant the
+# harness killed the test, with an exit code indistinguishable from a clean
+# shutdown and an error event nobody read.  That single event then produced
+# four separate-looking failures: test_02 timed out, test_03 reported "no
+# digest_changed" for the dead side, test_04 skipped itself for want of a
+# legal-action snapshot (the source of the anomalous fourth skip in CI), and
+# test_05 wrote to the dead process and raised BrokenPipeError.  One stall,
+# four symptoms, none of them naming the cause.
+#
+# The ladder must be strictly ordered, every rung below the one above it:
+#
+#   DEAL_TIMEOUT       45s  the test's OWN budget -- it fails first, and it
+#                           is the only rung that produces a diagnosis
+#   watchdog           48s  PYTEST_TIMEOUT - _DIAG_LEAD; backstop for a hang
+#                           somewhere other than the deal waits
+#   PYTEST_TIMEOUT     60s  the harness, ambient from CI
+#   WORKER_IDLE        120s orphan-process protection ONLY
+#
+# WORKER_IDLE exists so a worker orphaned by a crashed pytest does not linger
+# forever.  It is not protocol timing and must never win a race against the
+# test that owns the process, so it sits strictly beyond every budget above.
 STARTUP_TIMEOUT = 20.0   # seconds to wait for "connected" from each side
-DEAL_TIMEOUT    = 60.0   # seconds for mental-poker deal to complete
+DEAL_TIMEOUT    = 45.0   # ONE absolute budget for the deal (see _remaining)
 ACTION_TIMEOUT  = 15.0   # seconds for an action to propagate to both sides
+CONNECT_TIMEOUT = 30.0   # ONE absolute budget for the whole startup handshake
+WORKER_IDLE_TIMEOUT = 120.0   # passed to every worker; see peer_worker.py
+
+
+def _remaining(deadline: float, floor: float = 0.0) -> float:
+    """Seconds left until ``deadline``.
+
+    Sequential waits must share one absolute deadline rather than each
+    getting a fresh timeout.  Two back-to-back waits at DEAL_TIMEOUT each
+    granted the test up to 2 x DEAL_TIMEOUT while the harness ran it for
+    PYTEST_TIMEOUT, so the test could never reach its own assertion
+    messages -- every observed CI failure was a bare harness timeout
+    carrying no state.
+    """
+    return max(floor, deadline - time.monotonic())
 
 HAND_ARGS = {
     "hand_no":   1,
@@ -61,7 +125,8 @@ HAND_ARGS = {
 
 def _start_worker(*extra_args: str) -> subprocess.Popen:
     return subprocess.Popen(
-        [sys.executable, WORKER, *extra_args],
+        [sys.executable, WORKER,
+         "--idle-timeout", repr(WORKER_IDLE_TIMEOUT), *extra_args],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -245,7 +310,8 @@ def _dump(reason: str, cls, waiting_for: str) -> str:
             f"TWO-PROCESS DIAGNOSTIC: {reason}",
             f"  pending wait:  {waiting_for}",
             f"  ambient pytest timeout: {_ambient_timeout()!r}s "
-            f"(DEAL_TIMEOUT={DEAL_TIMEOUT}s, used twice sequentially)",
+            f"(DEAL_TIMEOUT={DEAL_TIMEOUT}s as ONE absolute budget; "
+            f"worker idle timeout {WORKER_IDLE_TIMEOUT}s)",
             "=" * 78,
         ]
         body = [
@@ -331,14 +397,81 @@ def _arm_watchdog(cls, waiting_for: str):
     return timer.cancel
 
 
+# ── worker death and worker-reported errors ───────────────────────────────────
+
+# Grace period after a worker exits, so a final event already in flight on the
+# stdout pipe is still counted before we declare the wait unsatisfiable.
+_DEATH_GRACE = 0.5
+
+
+class WorkerDied(AssertionError):
+    """A worker process exited while the harness was still using it.
+
+    AssertionError so pytest renders it as a plain test failure rather than
+    an error, and so it can never be confused with a bug in the diagnostics.
+    """
+
+
+def _worker_errors(col: "EventCollector") -> list:
+    """Every ``{"type": "error"}`` record the worker emitted.
+
+    peer_worker only emits these for genuine faults: a failed snapshot, a
+    handle_message exception, an unknown or failed op, and the idle timeout.
+    None of them occur on a healthy run, so any of them is a failure.
+
+    They were previously collected and never inspected, which is how an
+    "idle timeout" record could sit politely in the collector while later
+    tests complained about missing digests and broken pipes instead.
+    """
+    return [e for e in col.all_of_type("error")]
+
+
+def _death_report(col: "EventCollector") -> str:
+    """Why a worker is gone, stated rather than inferred."""
+    proc = col._proc
+    rc = proc.poll()
+    errs = _worker_errors(col)
+    cause = errs[-1].get("msg") if errs else None
+
+    if rc == _IDLE_TIMEOUT_EXIT:
+        note = (f" -- exit {_IDLE_TIMEOUT_EXIT} is peer_worker's idle timeout: "
+                f"it waited {WORKER_IDLE_TIMEOUT:g}s for a counterpart that "
+                f"never spoke and gave up.  The stall is upstream of this.")
+    elif rc == 0:
+        note = " -- exited 0 (clean shutdown path)"
+    else:
+        note = ""
+
+    head = (f"{col._label} exited rc={rc}"
+            + (f"; last worker error: {cause}" if cause else
+               "; no worker error event was emitted")
+            + note)
+
+    body = _side_report(
+        col._label.upper(), proc, col,
+        getattr(col, "stderr_sink", None),
+        getattr(col, "t0", time.monotonic()),
+        getattr(_OWNER, "t_start_hand", None) if _OWNER else None)
+    return head + "\n" + body
+
+
+# Set by the fixture so single-sided reports can still reach class-level
+# timing context.  Module-level because EventCollector predates the class.
+_OWNER = None
+_IDLE_TIMEOUT_EXIT = 3          # must match peer_worker.IDLE_TIMEOUT_EXIT
+
+
 # ── event collector ───────────────────────────────────────────────────────────
 
 class EventCollector:
     """Reads JSONL from a subprocess stdout on a background thread."""
 
-    def __init__(self, proc: subprocess.Popen, label: str) -> None:
+    def __init__(self, proc: subprocess.Popen, label: str,
+                 stderr_sink: "StderrSink" = None) -> None:
         self._proc  = proc
         self._label = label
+        self.stderr_sink = stderr_sink
+        self.t0 = time.monotonic()
         self._events: list[dict] = []
         self._lock   = threading.Lock()
         self._new    = threading.Condition(self._lock)
@@ -367,9 +500,17 @@ class EventCollector:
         deadlocking.  self._lock and self._new share the same underlying mutex,
         so any predicate that calls event_count() would deadlock if evaluated
         inside a ``with self._new:`` block.
+
+        Raises WorkerDied if this collector's process exits while the wait is
+        outstanding.  Waiting out the full timeout on a dead process wastes
+        the budget and, worse, reports the wrong thing: the eventual failure
+        names a missing event when the real fact is that the worker is gone.
+        The death is stated immediately instead, with the exit code, the last
+        worker error record, the stderr tail and the recent event history.
         """
         deadline = time.monotonic() + timeout
         checked = 0  # index of first event not yet evaluated
+        grace_until = None      # set once the process is seen to have exited
         while True:
             # Snapshot newly-arrived events under the lock, then release it.
             with self._lock:
@@ -380,13 +521,25 @@ class EventCollector:
             for e in new_events:
                 if predicate(e):
                     return e
+
+            # A dead worker will never satisfy the predicate.  Allow a short
+            # grace period first: the deciding event may already be in the
+            # stdout pipe, and reporting a death that raced a success would
+            # be its own kind of misleading failure.
+            if self._proc.poll() is not None:
+                if grace_until is None:
+                    grace_until = time.monotonic() + _DEATH_GRACE
+                elif time.monotonic() >= grace_until:
+                    raise WorkerDied(_death_report(self))
+
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             # Wait up to 0.5 s for the reader thread to notify us of new events.
             with self._new:
                 if len(self._events) == checked:
-                    self._new.wait(timeout=min(remaining, 0.5))
+                    self._new.wait(timeout=min(remaining, 0.1 if grace_until
+                                               else 0.5))
 
     def all_of_type(self, t: str) -> list[dict]:
         with self._lock:
@@ -424,9 +577,10 @@ class EventCollector:
 def shared_two_process(request):
     """One pair of subprocesses shared across the entire test class.
 
-    Using class scope means the mental-poker deal runs once (~20-30s)
-    instead of once per test.  Tests are cumulative: test_deal starts the
-    hand, later tests observe or act on its state.
+    Using class scope means the mental-poker deal runs once instead of once
+    per test.  Tests are cumulative: test_deal starts the hand, later tests
+    observe or act on its state.  See the module docstring for measured
+    timings -- the deal costs ~0.5s, not the ~20-30s previously claimed here.
     """
     host_proc = guest_proc = None
     host_col  = guest_col  = None
@@ -445,24 +599,30 @@ def shared_two_process(request):
     request.cls.guest_stderr = guest_stderr = StderrSink("guest")
     request.cls.t0 = time.monotonic()
     request.cls.t_start_hand = None
+    global _OWNER
+    _OWNER = request.cls
+    # Startup is three sequential waits.  At STARTUP_TIMEOUT each they could
+    # total 60s and hit the same harness-timeout race the deal waits had, so
+    # they share one absolute deadline too.
+    connect_by = time.monotonic() + CONNECT_TIMEOUT
     try:
         host_proc = _start_worker("--role", "host", "--port", "0")
-        host_col  = EventCollector(host_proc, "host")
+        host_col  = EventCollector(host_proc, "host", host_stderr)
         _drain(host_proc.stderr, host_stderr)
 
         ready = host_col.wait_for(lambda e: e.get("type") == "ready",
-                                  timeout=STARTUP_TIMEOUT)
+                                  timeout=_remaining(connect_by))
         assert ready is not None, "host never emitted ready"
         port = ready["port"]
 
         guest_proc = _start_worker("--role", "guest", "--peer-port", str(port))
-        guest_col  = EventCollector(guest_proc, "guest")
+        guest_col  = EventCollector(guest_proc, "guest", guest_stderr)
         _drain(guest_proc.stderr, guest_stderr)
 
         h_conn = host_col.wait_for(lambda e: e.get("type") == "connected",
-                                   timeout=STARTUP_TIMEOUT)
+                                   timeout=_remaining(connect_by))
         g_conn = guest_col.wait_for(lambda e: e.get("type") == "connected",
-                                    timeout=STARTUP_TIMEOUT)
+                                    timeout=_remaining(connect_by))
         assert h_conn is not None, "host never saw peer connect"
         assert g_conn is not None, "guest never connected"
 
@@ -504,6 +664,37 @@ class TestTwoSidecarProcess:
     previous one's state.
     """
 
+    @pytest.fixture(autouse=True)
+    def _liveness_guard(self):
+        """Refuse to run a cumulative test on a pair that is already broken.
+
+        The tests share one process pair, so the first casualty used to be
+        laundered into a fresh-looking failure by every test after it: a dead
+        guest became "guest emitted no digest_changed events" in test_03, a
+        self-skip in test_04, and a BrokenPipeError in test_05 -- three
+        symptoms that named neither the death nor its cause.
+
+        This runs before each test, BEFORE any command is written to a pipe,
+        so a known death is reported as a death and the manufactured symptoms
+        never get the chance to occur.  Worker error records are promoted here
+        too: an "idle timeout" must not sit quietly in the collector while a
+        later assertion blames something else.
+        """
+        cls = type(self)
+        if getattr(cls, "host_col", None) is None:
+            yield                      # fixture setup failed; it reports itself
+            return
+        for col in (cls.host_col, cls.guest_col):
+            if col._proc.poll() is not None:
+                pytest.fail(_death_report(col), pytrace=False)
+            errs = _worker_errors(col)
+            if errs:
+                pytest.fail(
+                    f"{col._label} reported a worker error: "
+                    f"{errs[-1].get('msg')!r}\n" + _death_report(col),
+                    pytrace=False)
+        yield
+
     # ---------------------------------------------------------------- step 1
     def test_01_peers_connect(self):
         """Both processes establish a TCP connection."""
@@ -530,9 +721,16 @@ class TestTwoSidecarProcess:
         cancel = _arm_watchdog(
             type(self), "host+guest snapshot with phase not in "
                         "(lobby, dealing, void)")
+        # ONE absolute budget for the whole operation.  These two waits used
+        # to take DEAL_TIMEOUT each, so the pair could run for 2x the value
+        # the constant appears to promise while the harness allowed 60s
+        # total -- the test could not reach its own assertions.
+        deal_by = time.monotonic() + DEAL_TIMEOUT
         try:
-            h_snap = self.host_col.wait_for(_post_deal, timeout=DEAL_TIMEOUT)
-            g_snap = self.guest_col.wait_for(_post_deal, timeout=DEAL_TIMEOUT)
+            h_snap = self.host_col.wait_for(_post_deal,
+                                            timeout=_remaining(deal_by))
+            g_snap = self.guest_col.wait_for(_post_deal,
+                                             timeout=_remaining(deal_by))
         finally:
             cancel()
 

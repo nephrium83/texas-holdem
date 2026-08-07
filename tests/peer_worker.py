@@ -47,6 +47,22 @@ from holdem.p2p.events import EventSink
 from holdem import client_view
 
 
+# Exit code for idle-timeout termination.
+#
+# An idle timeout is an ABNORMAL end: the peer gave up waiting for a
+# counterpart that never spoke.  This used to exit 0, which made a worker that
+# had killed itself mid-deal indistinguishable from one that shut down cleanly
+# on request -- the harness had to infer "abnormal clean exit" from an error
+# event it never actually read.  The exit code now carries that meaning on its
+# own.  Safe to change because this worker exists solely as a test subprocess
+# of tests/test_two_process.py and has no other callers.
+IDLE_TIMEOUT_EXIT = 3
+
+# Fallback only.  The owning test passes --idle-timeout explicitly; see the
+# timeout ladder in tests/test_two_process.py.
+DEFAULT_IDLE_TIMEOUT = 120.0
+
+
 # ── stdout helpers ────────────────────────────────────────────────────────────
 
 def _emit(obj: dict) -> None:
@@ -73,6 +89,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--conn-id",   default=None, dest="conn_id",
                    help="local conn_id (defaults to role name)")
     p.add_argument("--seats",     type=int, default=2)
+    p.add_argument("--idle-timeout", type=float, default=DEFAULT_IDLE_TIMEOUT,
+                   dest="idle_timeout",
+                   help="seconds of queue silence before this worker gives up "
+                        "and exits %d.  This is orphan-process protection, "
+                        "NOT protocol timing: it must be set strictly beyond "
+                        "every budget of the test that owns the process, so "
+                        "it can never win a race against its owner."
+                        % IDLE_TIMEOUT_EXIT)
     return p.parse_args()
 
 
@@ -197,11 +221,14 @@ def main() -> None:
                      name="stdin-reader").start()
 
     # ── main loop ──────────────────────────────────────────────────────
+    idle_timed_out = False
     while True:
         try:
-            item = evt_queue.get(timeout=60)
+            item = evt_queue.get(timeout=args.idle_timeout)
         except queue.Empty:
-            _emit({"type": "error", "msg": "idle timeout"})
+            _emit({"type": "error",
+                   "msg": f"idle timeout ({args.idle_timeout:g}s)"})
+            idle_timed_out = True
             break
 
         if item[0] == "msg":
@@ -234,6 +261,13 @@ def main() -> None:
                 _emit({"type": "error", "msg": f"{op}: {exc}"})
 
     transport.close()
+
+    # An idle timeout is abnormal termination, so it must not look like a
+    # clean shutdown.  The explicit error event above remains the
+    # authoritative cause; this exit code is what lets the harness see the
+    # abnormality without having to read events at all.
+    if idle_timed_out:
+        sys.exit(IDLE_TIMEOUT_EXIT)
 
 
 if __name__ == "__main__":
