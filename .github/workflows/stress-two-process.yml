@@ -35,15 +35,15 @@ jobs:
             ( while :; do python -c "import hashlib; d=b'x'*4096; [None for _ in range(200000) if (d:=hashlib.sha512(d).digest())]" >/dev/null 2>&1; done ) &
           done
           hits=0
-          for i in $(seq 1 25); do
-            if ! timeout 300 python -m pytest tests/test_two_process.py -q -p no:randomly > iter.log 2>&1; then
+          for i in $(seq 1 8); do
+            if ! timeout 900 python -m pytest tests/ -q > iter.log 2>&1; then
               hits=$((hits+1))
               echo "=============== HIT on iteration $i ==============="
               cat iter.log
             fi
           done
           kill %1 %2 %3 %4 2>/dev/null || true
-          echo "SHARD COMPLETE hits=$hits of 25"
+          echo "SHARD COMPLETE hits=$hits of 8 FULL-SUITE runs"
           # Never fail the job: a hit is the DATA, not an error. Failing
           # would cancel sibling shards and cost samples.
           exit 0
