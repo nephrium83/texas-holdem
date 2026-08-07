@@ -1,0 +1,49 @@
+# TEMPORARY -- stress harness for the two-process host-command stall.
+# Lives on the stress/two-process-capture branch ONLY and must never be
+# merged to main. Its job is to make a rare, Linux-only flake occur often
+# enough to be classified by the PR #25 command-path classifier.
+name: stress-two-process
+
+on:
+  push:
+    branches: [stress/two-process-capture]
+  workflow_dispatch:
+
+env:
+  PYTEST_TIMEOUT: "60"
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12", "3.13"]
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: python -m pip install -e .[dev]
+      - name: Stress the two-process command path
+        run: |
+          # Contention: runners have few cores, so this pushes scheduling
+          # in the same direction as a loaded CI machine.
+          for i in 1 2 3 4; do
+            ( while :; do python -c "import hashlib; d=b'x'*4096; [None for _ in range(200000) if (d:=hashlib.sha512(d).digest())]" >/dev/null 2>&1; done ) &
+          done
+          hits=0
+          for i in $(seq 1 25); do
+            if ! timeout 300 python -m pytest tests/test_two_process.py -q -p no:randomly > iter.log 2>&1; then
+              hits=$((hits+1))
+              echo "=============== HIT on iteration $i ==============="
+              cat iter.log
+            fi
+          done
+          kill %1 %2 %3 %4 2>/dev/null || true
+          echo "SHARD COMPLETE hits=$hits of 25"
+          # Never fail the job: a hit is the DATA, not an error. Failing
+          # would cancel sibling shards and cost samples.
+          exit 0
