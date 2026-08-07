@@ -36,6 +36,7 @@ import json
 import queue
 import sys
 import threading
+import time
 
 # Ensure the repo root is importable when the script is run directly.
 import os as _os
@@ -52,6 +53,42 @@ from holdem import client_view
 def _emit(obj: dict) -> None:
     sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
     sys.stdout.flush()
+
+
+# ── command-path tracing ─────────────────────────────────────────────────────
+#
+# PR #22's watchdog caught the two-process stall and reported:
+#
+#   HOST   alive=True start_hand_ack=False phases_seen=[] stderr_bytes=0
+#   GUEST  alive=True start_hand_ack=True  phases_seen=['dealing']
+#
+# The host never acknowledged a start_hand its own stdin was handed, while
+# the guest processed the identical command. That narrows the failure to
+# the host's command path but does not say WHERE on it.
+#
+# These traces are emitted as ordinary events, so the existing collector
+# and the watchdog's event tail pick them up with no new plumbing. Each
+# carries seconds since process start. The stages split the five
+# possibilities that are otherwise indistinguishable:
+#
+#   no  stdin_open                      -> reader thread never started
+#   stdin_open, no stdin_line           -> reader blocked despite input
+#                                          (or bytes never arrived)
+#   stdin_line, no cmd_queued           -> read but not parsed/queued
+#   cmd_queued, no cmd_dequeued         -> queued, consumer never got to it
+#   cmd_dispatch, no ack                -> dispatch began and blocked
+#
+# msg_dequeued without a matching msg_done additionally identifies the
+# single consumer being stuck inside session.handle_message, which is the
+# leading hypothesis: the guest is told to start first, so its deal
+# messages can fill the host's queue ahead of the host's own start_hand.
+
+_T0 = time.monotonic()
+
+
+def _trace(stage: str, **fields) -> None:
+    _emit({"type": "trace", "stage": stage,
+           "t": round(time.monotonic() - _T0, 3), **fields})
 
 
 # ── event sink that writes to stdout ─────────────────────────────────────────
@@ -183,20 +220,26 @@ def main() -> None:
 
     # ── stdin reader thread ────────────────────────────────────────────
     def _stdin_reader() -> None:
+        _trace("stdin_open")
         for line in sys.stdin:
             line = line.strip()
             if not line:
                 continue
+            _trace("stdin_line", n=len(line))
             try:
                 cmd = json.loads(line)
-                evt_queue.put(("cmd", cmd))
             except json.JSONDecodeError:
-                pass
+                _trace("stdin_undecodable")
+                continue
+            evt_queue.put(("cmd", cmd))
+            _trace("cmd_queued", op=cmd.get("op"), depth=evt_queue.qsize())
+        _trace("stdin_eof")
 
     threading.Thread(target=_stdin_reader, daemon=True,
                      name="stdin-reader").start()
 
     # ── main loop ──────────────────────────────────────────────────────
+    _stalled = False
     while True:
         try:
             item = evt_queue.get(timeout=60)
@@ -206,14 +249,28 @@ def main() -> None:
 
         if item[0] == "msg":
             _, peer, msg = item
+            # msg_dequeued without msg_done means the single consumer is
+            # stuck inside handle_message and every queued command behind
+            # it -- including start_hand -- is starved.
+            _trace("msg_dequeued", mtype=msg.get("type"),
+                   depth=evt_queue.qsize())
+            # Defect injection for tests only: stall the single consumer
+            # inside message handling, which is what starves a queued
+            # command. Never set in normal runs.
+            _stall = _os.environ.get("PEER_WORKER_STALL_MS")
+            if _stall and not _stalled:
+                _stalled = True
+                time.sleep(int(_stall) / 1000.0)
             try:
                 session.handle_message(peer, msg)
             except Exception as exc:
                 _emit({"type": "error", "msg": f"handle_message: {exc}"})
+            _trace("msg_done", mtype=msg.get("type"))
 
         elif item[0] == "cmd":
             _, cmd = item
             op = cmd.get("op")
+            _trace("cmd_dispatch", op=op, depth=evt_queue.qsize())
             try:
                 if op == "start_hand":
                     session.start_p2p_hand(**cmd["args"])

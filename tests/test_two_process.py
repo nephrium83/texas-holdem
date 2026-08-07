@@ -192,6 +192,46 @@ def _phases_seen(col: "EventCollector") -> list:
     return out
 
 
+_CMD_STAGES = ("stdin_open", "stdin_line", "cmd_queued",
+               "cmd_dispatch", "msg_dequeued", "msg_done")
+
+
+def command_path(col) -> str:
+    """Where the command path stopped, stated rather than inferred.
+
+    peer_worker emits a trace event at each boundary. The captured CI
+    failure showed the host alive with start_hand_ack=False and no
+    snapshots, which is consistent with five different stalls; these
+    stages tell them apart without re-reading the whole event tail:
+
+      no stdin_open                -> reader thread never started
+      stdin_open, no stdin_line    -> blocked on read, or no bytes arrived
+      stdin_line, no cmd_queued    -> read but never parsed/queued
+      cmd_queued, no cmd_dispatch  -> queued, consumer never reached it
+      cmd_dispatch, no ack         -> dispatch began and blocked
+
+    msg_dequeued exceeding msg_done means the single consumer is stuck
+    inside session.handle_message, starving everything behind it.
+    """
+    if col is None:
+        return "n/a"
+    counts = {s: 0 for s in _CMD_STAGES}
+    last = {}
+    for e in list(col._events):
+        if e.get("type") != "trace":
+            continue
+        stage = e.get("stage")
+        if stage in counts:
+            counts[stage] += 1
+            last[stage] = e.get("t")
+    parts = [f"{s}={counts[s]}" + (f"@{last[s]}s" if s in last else "")
+             for s in _CMD_STAGES]
+    stuck = counts["msg_dequeued"] - counts["msg_done"]
+    if stuck > 0:
+        parts.append(f"IN-FLIGHT handle_message={stuck}")
+    return " ".join(parts)
+
+
 def _side_report(label: str, proc, col, stderr_sink, t0: float,
                  t_start_hand: Optional[float]) -> str:
     now = time.monotonic()
@@ -213,6 +253,7 @@ def _side_report(label: str, proc, col, stderr_sink, t0: float,
         f"  acks:           {[a.get('op') for a in acks]}",
         f"  start_hand_ack: {any(a.get('op') == 'start_hand' for a in acks)}",
         f"  phases_seen:    {_phases_seen(col) if col else []}",
+        f"  command_path:   {command_path(col)}",
         f"  digest_changed: {len(digests)}",
         f"  latest_digest:  {col.latest_digest()!r}" if col else "  latest_digest:  n/a",
         f"  errors:         {errors[-3:] if errors else '[]'}",
@@ -642,3 +683,122 @@ class TestTwoSidecarProcess:
 
         assert self.host_proc.returncode is not None
         assert self.guest_proc.returncode is not None
+
+
+# ── command-path classification ──────────────────────────────────────────────
+
+def test_command_path_reports_a_healthy_host():
+    """Control for the classifier: a working run reaches every stage.
+
+    Without this, a classifier that silently reported nothing would look
+    identical to a clean run.
+    """
+    proc = _start_worker("--role", "host", "--port", "0")
+    col = EventCollector(proc, "host")
+    sink = StderrSink("host")
+    _drain(proc.stderr, sink)
+    try:
+        assert col.wait_for(lambda e: e.get("type") == "ready",
+                            timeout=STARTUP_TIMEOUT), "host never emitted ready"
+        guest = _start_worker("--role", "guest", "--peer-port",
+                              str(col.all_of_type("ready")[0]["port"]))
+        EventCollector(guest, "guest")   # drain stdout so it cannot block
+        try:
+            assert col.wait_for(lambda e: e.get("type") == "connected",
+                                timeout=STARTUP_TIMEOUT)
+            _send_cmd(proc, {"op": "start_hand", "args": HAND_ARGS})
+            assert col.wait_for(
+                lambda e: e.get("type") == "ack" and e.get("op") == "start_hand",
+                timeout=STARTUP_TIMEOUT), "host never acked start_hand"
+            path = command_path(col)
+            for stage in ("stdin_open", "stdin_line", "cmd_queued",
+                          "cmd_dispatch"):
+                assert f"{stage}=0" not in path, f"{stage} never happened: {path}"
+        finally:
+            _send_cmd(guest, {"op": "quit"})
+            guest.terminate()
+    finally:
+        try:
+            _send_cmd(proc, {"op": "quit"})
+        except Exception:
+            pass
+        proc.terminate()
+
+
+def test_starved_consumer_is_classified_not_guessed():
+    """Reproduces the captured CI shape deterministically.
+
+    The observed failure was: host alive, stderr_bytes=0, no start_hand
+    ack, no snapshots, while the guest processed the identical command.
+    Five different stalls produce that, and the raw watchdog output could
+    not separate them.
+
+    Here the host's single consumer is stalled inside handle_message via
+    PEER_WORKER_STALL_MS -- injection, not a fix -- while a start_hand is
+    written and flushed to its stdin. The required classification is
+    cmd_queued > 0 with cmd_dispatch == 0: the command arrived, was
+    parsed, was queued, and the consumer never reached it.
+
+    That is the hypothesis the CI capture pointed at, because the guest
+    is told to start first and its deal traffic can fill the host's queue
+    ahead of the host's own command. This test does not prove that is
+    what happened in CI. It proves the instrumentation would say so.
+    """
+    env = dict(os.environ, PEER_WORKER_STALL_MS="8000")
+    host = subprocess.Popen(
+        [sys.executable, WORKER, "--role", "host", "--port", "0"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
+    hcol = EventCollector(host, "host")
+    hsink = StderrSink("host")
+    _drain(host.stderr, hsink)
+    guest = None
+    try:
+        ready = hcol.wait_for(lambda e: e.get("type") == "ready",
+                              timeout=STARTUP_TIMEOUT)
+        assert ready is not None
+        guest = _start_worker("--role", "guest", "--peer-port",
+                              str(ready["port"]))
+        gcol = EventCollector(guest, "guest")
+        assert hcol.wait_for(lambda e: e.get("type") == "connected",
+                             timeout=STARTUP_TIMEOUT)
+        assert gcol.wait_for(lambda e: e.get("type") == "connected",
+                             timeout=STARTUP_TIMEOUT)
+
+        # Guest first, exactly as test_02 does: its traffic reaches the
+        # host and occupies the consumer before the host's own command.
+        _send_cmd(guest, {"op": "start_hand", "args": HAND_ARGS})
+        assert hcol.wait_for(
+            lambda e: (e.get("type") == "trace"
+                       and e.get("stage") == "msg_dequeued"),
+            timeout=STARTUP_TIMEOUT), "host never began handling peer traffic"
+
+        _send_cmd(host, {"op": "start_hand", "args": HAND_ARGS})
+        assert hcol.wait_for(
+            lambda e: (e.get("type") == "trace"
+                       and e.get("stage") == "cmd_queued"),
+            timeout=STARTUP_TIMEOUT), "start_hand never reached the queue"
+
+        # The demonstrated state, now with a cause attached.
+        acked = hcol.wait_for(
+            lambda e: e.get("type") == "ack" and e.get("op") == "start_hand",
+            timeout=2.0)
+        assert acked is None, "consumer was not actually stalled"
+        assert host.poll() is None, "host died; this is a stall test"
+        assert hsink.total == 0, f"unexpected stderr: {hsink.tail_text()[:200]}"
+
+        path = command_path(hcol)
+        assert "cmd_queued=0" not in path, f"command never queued: {path}"
+        assert "cmd_dispatch=0" in path, (
+            f"expected a starved consumer, not a blocked dispatch: {path}")
+        assert "IN-FLIGHT handle_message=" in path, (
+            f"classifier did not identify the stuck consumer: {path}")
+    finally:
+        for p in (guest, host):
+            if p is None:
+                continue
+            try:
+                p.terminate()
+                p.wait(timeout=5)
+            except Exception:
+                pass
