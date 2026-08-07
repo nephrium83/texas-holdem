@@ -341,3 +341,140 @@ def test_commitment_key_is_nums_and_shared():
     assert ck is md.bg_commitment_key()             # cached
     assert ck.n == md.BG_N
     assert md.BG_M * md.BG_N == 52
+
+
+# ------------------------------------------- statement binding at the seam
+#
+# The sub-argument suite (test_bg_shuffle_soundness.py) proves bg_shuffle
+# rejects a prover who runs the honest algorithm over a deck it never
+# shuffled. That is the mathematical property. These tests pin the GAME
+# property built on top of it: that the statement MentalDeal verifies is
+# the locally accepted predecessor deck and this message's output deck,
+# bound to this round and seat -- and never anything the sender chose.
+#
+# Everything above is completeness or tamper-resistance: an honest proof
+# with a mutated deck, or a mutated proof. Both fail for easy reasons. A
+# proof that is mathematically VALID but about the wrong statement is the
+# case that already shipped once, in eaf21f7, one layer down.
+
+def test_valid_proof_over_a_foreign_input_deck_is_rejected():
+    """The forgery that completeness and tampering both miss.
+
+    The shuffler runs the honest prover, with an honest witness, over a
+    deck that is not the accepted round-1 input. Every internal equation
+    of the resulting proof balances -- it is a true statement about a
+    shuffle that really happened -- but the shuffle did not start from
+    the deck this table agreed on.
+
+    Only a verifier that supplies its OWN predecessor deck as the
+    statement can reject this. One that took the input from the sender,
+    or recomputed it from the message, would accept a deck of the
+    attacker's choosing while every existing prevention test stayed
+    green.
+    """
+    def forge(msg, deals):
+        pk = deals[0].joint_pk
+        # A deck the table never held: same size and structure, different
+        # ciphertexts. Encrypting the real card points keeps it plausible,
+        # so nothing but the statement binding can reject it.
+        foreign = [eg.encrypt(pk, point, R.scalar_reduce(
+                       (b"foreign-deck-seed-%03d" % i).ljust(64, b"\x00")))
+                   for i, point in enumerate(eg._CARD_POINTS)]
+        out, wit = shuffle_mp.shuffle_deck(pk, foreign)
+        proof = bg_shuffle.prove(
+            pk, md.bg_commitment_key(), foreign, out, wit.perm, wit.scalars,
+            md.BG_M, md.BG_N, deals[0]._bg_ctx(1, 0))
+        msg["deck"] = [ct.to_hex() for ct in out]
+        msg["proof"] = bg_wire.encode(proof)
+        return msg
+
+    seats = [0, 1]
+    deals, _ = run(seats, prevention=True, tamper=on_first_round(forge))
+    assert_aborted(deals, seats, "invalid shuffle proof", bad_seat=0)
+
+
+class _VerifyRecorder:
+    """Captures every argument bg_shuffle.verify is called with."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls = []
+
+    def __call__(self, pk, ck, in_deck, out_deck, m, n, context, proof):
+        self.calls.append({
+            "pk": bytes(pk),
+            "ck": ck,
+            "in_deck": [ct.to_hex() for ct in in_deck],
+            "out_deck": [ct.to_hex() for ct in out_deck],
+            "m": m, "n": n,
+            "context": context,
+        })
+        return self._real(pk, ck, in_deck, out_deck, m, n, context, proof)
+
+
+def test_verify_is_called_with_locally_derived_statement(monkeypatch):
+    """The boundary assertion. Deliberately unglamorous.
+
+    A forged-deck test proves the check currently rejects one attack.
+    This proves the check is fed the right statement at all, which is the
+    property whose accidental change would resurrect the defect class --
+    including in rounds and shapes no single attack test happens to
+    cover.
+
+    Every claim is against a locally derived value:
+      * round 1's input is the canonical trivial deck;
+      * round r's input is round r-1's OUTPUT, i.e. the deck this peer
+        previously accepted -- not anything carried by this message;
+      * the output is exactly the deck decoded from this deck_round;
+      * the context is _bg_ctx(round, seat) for the round and seat the
+        message declares;
+      * the key material is the joint public key and the shared NUMS
+        commitment key.
+    """
+    real = bg_shuffle.verify
+    rec = _VerifyRecorder(real)
+    monkeypatch.setattr(md.bg_shuffle, "verify", rec)
+
+    seats = [0, 1]
+    deals, delivered = run(seats, prevention=True)
+    for s in seats:
+        assert deals[s].phase != Phase.ABORTED, "honest hand should complete"
+
+    rounds = deck_rounds(delivered)
+    assert rounds, "no deck rounds were exchanged"
+    # Every peer verifies every round, the shuffler included -- it runs
+    # the same accept path as everyone else rather than trusting the deck
+    # it just produced. Pinned because a "skip my own round" optimisation
+    # would remove a peer's only local check that what it broadcast is
+    # what the table will accept.
+    assert len(rec.calls) == len(rounds) * len(seats), \
+        f"expected one verification per peer per round, got {len(rec.calls)}"
+
+    ref = deals[seats[0]]
+    by_round = {int(m["round"]): m for m in rounds}
+    trivial = [ct.to_hex() for ct in eg.make_trivial_deck()]
+
+    for call in rec.calls:
+        ctx_round = ctx_seat = None
+        for r, m in by_round.items():
+            if call["out_deck"] == list(m["deck"]):
+                ctx_round, ctx_seat = r, int(m["seat"])
+                break
+        assert ctx_round is not None, \
+            "verify saw an output deck that no deck_round carried"
+
+        # The predecessor is what this peer already accepted.
+        if ctx_round == 1:
+            assert call["in_deck"] == trivial, \
+                "round 1 must be verified against the trivial deck"
+        else:
+            prev = by_round[ctx_round - 1]
+            assert call["in_deck"] == list(prev["deck"]), (
+                f"round {ctx_round} was verified against something other "
+                f"than round {ctx_round - 1}'s accepted output")
+
+        assert call["context"] == ref._bg_ctx(ctx_round, ctx_seat), \
+            f"round {ctx_round} seat {ctx_seat}: context is not _bg_ctx"
+        assert call["pk"] == bytes(ref.joint_pk)
+        assert call["ck"] is md.bg_commitment_key()
+        assert (call["m"], call["n"]) == (md.BG_M, md.BG_N)
