@@ -10,6 +10,7 @@ same seat, and peers holding the first one aborted the hand with
 These tests pin the persistence, the failure mode it fixes, and the refusal
 to silently replace a corrupt secret.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -142,3 +143,109 @@ def test_share_is_stable_per_seat_and_hand(tmp_path, monkeypatch):
     assert a != derive_share(secret, "sess", 1, 1)      # seat
     assert a != derive_share(secret, "sess", 2, 0)      # hand
     assert a != derive_share(secret, "other", 1, 0)     # session
+
+
+# ------------------------------------------------- concurrent first launch
+#
+# This is the two-process CI stall, root-caused. PR #25's classifier caught
+# it on 3.13: the host dispatched start_hand and emitted no ack, because
+# start_p2p_hand RAISED:
+#
+#   start_hand: device secret at /home/runner/.config/holdem/device_secret
+#   is 0 bytes, expected 32. It will not be replaced automatically ...
+#
+# load_or_create's docstring claims "Concurrency-safe: the file is created
+# with O_EXCL, so two processes racing on first launch cannot clobber one
+# another -- the loser reads what the winner wrote."
+#
+# O_EXCL prevents CLOBBERING. It does not prevent a reader from observing
+# the file between the winner's os.open (which creates it at zero length)
+# and the winner's os.write. In that window the loser's very first _read
+# sees a 0-byte file and raises -- it never even reaches the O_EXCL path.
+#
+# It only bites on a FRESH config directory, which is exactly what CI has
+# every run and a developer machine essentially never has. That, not the
+# scheduler, is why every occurrence was on Linux CI.
+
+def test_racing_first_launch_does_not_see_a_partial_file(tmp_path, monkeypatch):
+    """A reader in the creation window must not observe a 0-byte secret.
+
+    The window is forced rather than raced: os.write is delayed for the
+    creating thread, and a second thread calls load_or_create inside that
+    delay. Without the fix the second thread raises ValueError on a
+    0-byte file. With it, no reader can observe a partial file at all.
+    """
+    import threading
+
+    target = tmp_path / "device_secret"
+    real_write = os.write
+    in_window = threading.Event()
+    release = threading.Event()
+
+    def slow_write(fd, data):
+        # Only stall the real secret-sized write, not incidental ones.
+        if len(data) == device_secret.SECRET_BYTES:
+            in_window.set()
+            release.wait(timeout=5.0)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", slow_write)
+
+    results = {}
+
+    def creator():
+        try:
+            results["creator"] = device_secret.load_or_create(target)
+        except BaseException as exc:                    # noqa: BLE001
+            results["creator"] = exc
+
+    def racer():
+        assert in_window.wait(timeout=5.0), "creation window never opened"
+        try:
+            results["racer"] = device_secret.load_or_create(target)
+        except BaseException as exc:                    # noqa: BLE001
+            results["racer"] = exc
+        finally:
+            release.set()
+
+    tc = threading.Thread(target=creator, name="creator")
+    tr = threading.Thread(target=racer, name="racer")
+    tc.start()
+    tr.start()
+    tr.join(timeout=15)
+    tc.join(timeout=15)
+
+    for who in ("creator", "racer"):
+        got = results.get(who)
+        assert not isinstance(got, BaseException), (
+            f"{who} failed during a concurrent first launch: {got!r}")
+        assert isinstance(got, bytes) and len(got) == device_secret.SECRET_BYTES, (
+            f"{who} returned {got!r}")
+
+    # Both must agree: a device has ONE secret, or key shares diverge.
+    assert results["creator"] == results["racer"], (
+        "racing launches produced different device secrets -- key shares "
+        "from the two would not agree")
+    assert target.read_bytes() == results["creator"]
+
+
+def test_no_reader_can_observe_a_zero_byte_secret(tmp_path, monkeypatch):
+    """Directly pins the invariant: the published path is never partial.
+
+    Records every size any reader could have seen during creation.
+    """
+    target = tmp_path / "device_secret"
+    seen = []
+    real_write = os.write
+
+    def watching_write(fd, data):
+        if len(data) == device_secret.SECRET_BYTES:
+            # What would a concurrent reader see right now?
+            seen.append(target.stat().st_size if target.exists() else None)
+        return real_write(fd, data)
+
+    monkeypatch.setattr(os, "write", watching_write)
+    device_secret.load_or_create(target)
+
+    assert all(s in (None, device_secret.SECRET_BYTES) for s in seen), (
+        f"the secret path was observable at a partial size: {seen}")
