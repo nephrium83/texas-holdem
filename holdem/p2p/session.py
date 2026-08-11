@@ -444,6 +444,8 @@ class Session:
 
         t = msg.get("type")
         body = self._hostless_body(msg) if t in _HOSTLESS_PAYLOAD_TYPES else msg
+        if t in _HOSTLESS_PAYLOAD_TYPES:
+            self._maybe_relay(conn_id, t, msg, body)
         if t == "player_info":
             self._on_player_info(conn_id, msg)
         elif t == "player_list":
@@ -627,6 +629,52 @@ class Session:
             elif h > self._hand_no:
                 self._msg_buffer.append((cid, m))
             # h < current: stale, dropped
+
+    def _maybe_relay(self, conn_id: str, mtype: str, envelope: dict,
+                     body: dict) -> None:
+        """Host only: forward an authenticated hostless envelope onward.
+
+        The production topology is a star -- only the host listens, joiners
+        only dial it -- while the hostless protocol is peer-symmetric. A
+        joiner's message therefore reaches the host and nobody else, and
+        a three-seat hand cannot leave KEYGEN. See
+        docs/TOPOLOGY_DECISION.md and tests/test_three_peer_topology.py.
+
+        The host is a COURIER, never the author. It forwards the envelope
+        it received: same v, type, payload, pubkey, ts, prev, sig and hash.
+        It does not re-sign, does not substitute its own pubkey, does not
+        rebuild the payload, and does not touch the claimed seat. The frame
+        is re-serialized on the way out, which is fine -- wire.unpack
+        verifies over canonical field values, not over the original bytes,
+        and _sign_frame leaves an already-signed message alone.
+
+        Forwarded ONLY after the author check below has passed, so the host
+        does not amplify a message its own recipients would reject. A
+        hostile author is dropped at the host rather than fanned out to the
+        table.
+
+        Never echoed back to the connection it arrived on: the author has
+        already applied it locally, and a returned copy would be a
+        duplicate the sequence check would then have to reject.
+        """
+        if not self.is_host:
+            return
+        if conn_id == self.local_conn_id:
+            return                       # our own emission, already fanned out
+        seat = body.get("seat", body.get("seat_from"))
+        if not isinstance(seat, int):
+            return
+        if not self._seat_author_ok(conn_id, body, seat):
+            _log.warning("session: refusing to relay %s from %s claiming "
+                         "seat %s -- not signed by that seat's bound key",
+                         mtype, conn_id, seat)
+            return
+        forward = getattr(self._transport, "broadcast_except", None)
+        if forward is None:
+            _log.warning("session: transport cannot relay (no "
+                         "broadcast_except); %s stays unforwarded", mtype)
+            return
+        forward(conn_id, envelope)
 
     def _bind_seat_keys(self) -> None:
         """Freeze seat -> signing key before the first hand.

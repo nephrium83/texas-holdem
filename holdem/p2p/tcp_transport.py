@@ -153,6 +153,18 @@ class SimpleTcpTransport:
             except OSError:
                 pass
 
+    def broadcast_except(self, exclude_conn_id: str, msg: dict) -> None:
+        """Send to all connected peers except one -- the relay seam."""
+        data = (json.dumps(msg, separators=(",", ":")) + "\n").encode()
+        with self._writers_lock:
+            socks = [s for cid, s in self._peers.items()
+                     if cid != exclude_conn_id]
+        for s in socks:
+            try:
+                s.sendall(data)
+            except OSError:
+                pass
+
     def send(self, to_conn: str, msg: dict) -> None:
         """Send to a specific peer by conn_id."""
         data = (json.dumps(msg, separators=(",", ":")) + "\n").encode()
