@@ -129,20 +129,49 @@ is the same standard the Bayer–Groth work was held to.
 ## 5. Precondition, then the implementation goal
 
 The relay design **depends on** the M-8 continuity work, so that lands
-first — not as a follow-up:
+first — not as a follow-up. But relay also changes what that work must
+be, and the change is not cosmetic.
 
-> Pin the Ed25519 pubkey to the `conn_id` on first signed message,
-> reject later mismatches fail-closed with attribution, and add the
-> `_on_player_list` host gate.
+**`pubkey ↔ conn_id` pinning is the wrong shape under relay.** The M-8
+audit proposed it while assuming one connection carries one author. A
+relaying host breaks exactly that assumption: the single host connection
+a joiner holds legitimately carries messages authored by *every* other
+seat. Pinning one key to that connection would reject all but the first
+author, and loosening the pin to "any admitted key" would restore the
+decorative signature the audit complained about.
+
+The model must separate two things the code currently conflates:
+
+| Concept | Is | Scope |
+|---|---|---|
+| **Transport hop** | `conn_id` | who handed me these bytes |
+| **Protocol author** | authenticated signing key → seat | who said it |
+
+`conn_id` remains sound for what it actually attests — the hop — and
+keeps its role in host-gated checks like `game_start`. It must stop
+being the identity that authorizes *seat* actions.
+
+So the precondition becomes:
+
+> Bind **seat → signing key** at hand start, and authorize every
+> seat-scoped message on the authenticated author of its envelope rather
+> than on the connection it arrived over. Add the `_on_player_list` host
+> gate in the same change.
+
+`_on_player_list`'s gate is unaffected by this correction: that message
+is host-authored by definition, so it is a hop-level check and stays
+one.
 
 Then:
 
 > Relay hostless protocol messages through the host. The host forwards
 > `key_announce`, `deck_round`, `deal_share`, `audit_open`, `bet_action`
-> and `hand_void` to every peer except the author. Recipients
-> authenticate the **author's signature**, not the delivering
-> connection, and reject any message whose author key does not match the
-> seat's pinned key. Each seat numbers its own messages monotonically
+> and `hand_void` to every peer except the author, **preserving the
+> original signed envelope byte-for-byte** — it is a courier, never a
+> re-signer, so a relayed message is indistinguishable from a direct one
+> to the recipient's verifier. Recipients authenticate the **author's
+> signature**, not the delivering connection, and reject any message
+> whose author key does not match the key bound to the seat it claims. Each seat numbers its own messages monotonically
 > per hand; a gap is a protocol outcome, not a stall. Gate on
 > `test_joiner_broadcast_does_not_reach_the_other_joiner` flipping from
 > xfail to pass — `strict=True` means it fails if it passes early.
