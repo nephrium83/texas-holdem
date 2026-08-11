@@ -99,6 +99,13 @@ class Player:
     seat_index:        int   = -1
     # X25519 pubkey for hole-card encryption (populated from player_info)
     x25519_pubkey_hex: str   = ""
+    # Full Ed25519 SIGNING key, hex. Distinct from x25519_pubkey_hex, which
+    # is a different key for a different purpose, and from peer_id, which is
+    # only the first 16 hex chars and so cannot authenticate anything. This
+    # is the protocol-author identity: seats are bound to it, and every
+    # seat-scoped message is authorized against it rather than against the
+    # connection that delivered it.
+    ed25519_pubkey_hex: str  = ""
 
 
 @dataclass(frozen=True)
@@ -315,6 +322,9 @@ class Session:
         # Engine ref (host only) and seat order
         self._engine     = None
         self._seat_order: list[str] = []
+        # Immutable seat -> Ed25519 signing key (hex). The protocol-author
+        # identity: bound once, before the first hand, and never changed.
+        self._seat_keys: dict[int, str] = {}
 
         # --- mental-poker deal (L5): per-hand coordinator for the local seat ---
         # One driver per hand; created in begin_hand(). The deal is hostless
@@ -486,6 +496,15 @@ class Session:
             return dict(msg)
         body = dict(payload)
         body["type"] = msg.get("type")
+        # Carry the ENVELOPE's author through the unwrap. Seat authority is
+        # the signing key, and it lives on the envelope, not in the payload
+        # -- dropping it here would make every remote hostless message
+        # unauthorizable. A payload-supplied "pubkey" must never win: the
+        # envelope's is the one wire.unpack verified.
+        if "pubkey" in msg:
+            body["pubkey"] = msg["pubkey"]
+        else:
+            body.pop("pubkey", None)
         return body
 
     # ------------------------------------------------------------------
@@ -609,6 +628,69 @@ class Session:
                 self._msg_buffer.append((cid, m))
             # h < current: stale, dropped
 
+    def _bind_seat_keys(self) -> None:
+        """Freeze seat -> signing key before the first hand.
+
+        Built from the host-authoritative seat order and the roster's
+        ed25519_pubkey_hex, which the host took from each joiner's VERIFIED
+        envelope rather than from anything a joiner could assert about
+        itself.
+
+        Idempotent and one-way: once populated it is never rebuilt, so a
+        later roster edit -- including one from a compromised or buggy host
+        -- cannot move a seat onto a different key mid-session. A seat that
+        cannot be resolved is simply absent from the table, and messages
+        claiming it are refused rather than silently trusted.
+        """
+        if self._seat_keys:
+            return                                # already frozen
+        bound: dict[int, str] = {}
+        with self._lock:
+            for seat, cid in enumerate(self._seat_order):
+                player = self.players.get(cid)
+                key = getattr(player, "ed25519_pubkey_hex", "") if player else ""
+                if key:
+                    bound[seat] = key
+        if bound:
+            self._seat_keys = bound
+
+    def _seat_author_ok(self, conn_id: str, msg: dict, seat: int) -> bool:
+        """Is this message authorized to act for ``seat``?
+
+        Two independent facts, and the delivering connection is neither:
+
+        * the envelope's signature is valid -- already enforced by
+          wire.unpack, which refuses to hand up anything it could not
+          verify against the key the envelope names;
+        * that key is the one bound to the seat the payload claims.
+
+        conn_id deliberately does NOT participate. That is what makes this
+        relay-compatible: once the host forwards B's envelope to C, the
+        delivering connection belongs to the host while the author is still
+        B, and an authorization rule keyed on the connection would reject
+        every relayed message or, worse, attribute it to the host.
+
+        Self-delivery is exempt: the local driver feeds its own emissions
+        back without a wire round-trip, so there is no envelope to check.
+
+        Fallback: with no binding established there is no author identity
+        to check against, and the pre-existing conn_id rule applies. That
+        is the in-memory harness, which carries no envelopes at all. On the
+        production path it is unreachable -- wire.unpack requires a pubkey
+        field on every message, and the host publishes signing keys for
+        every seat -- but it is a fallback rather than a hole and is
+        recorded as such.
+        """
+        if not (0 <= seat < len(self._seat_order)):
+            return False
+        if conn_id == self.local_conn_id:
+            return True
+        if self._seat_keys:
+            author = msg.get("pubkey")
+            expected = self._seat_keys.get(seat)
+            return bool(expected) and isinstance(author, str) and author == expected
+        return self._seat_order[seat] == conn_id
+
     def _hand_msg_ok(self, conn_id: str, msg: dict) -> bool:
         """Hand-scope filter for deal/bet messages: buffer future-hand ones,
         drop stale ones, admit current-hand ones. A busted spectator drops
@@ -673,14 +755,13 @@ class Session:
             return                              # no active hand yet
         # Seat-spoofing defence: the seat a message claims must be the
         # sender's own seat (the transport already authenticates conn_id).
-        order = self._seat_order
         claimed = msg.get("seat", msg.get("seat_from"))
-        if conn_id != self.local_conn_id:
-            if not (isinstance(claimed, int) and 0 <= claimed < len(order)
-                    and order[claimed] == conn_id):
-                _log.warning("session: deal msg from %s claims seat %s — dropping",
-                             conn_id, claimed)
-                return
+        if not (isinstance(claimed, int)
+                and self._seat_author_ok(conn_id, msg, claimed)):
+            _log.warning("session: deal msg via %s claims seat %s but is not "
+                         "signed by that seat's bound key — dropping",
+                         conn_id, claimed)
+            return
         self._deal_driver.handle(dict(msg))
         self._flush_deal()
 
@@ -692,12 +773,11 @@ class Session:
             seat = int(msg["seat"])
         except (KeyError, TypeError, ValueError):
             return
-        order = self._seat_order
-        if conn_id != self.local_conn_id:
-            if not (0 <= seat < len(order) and order[seat] == conn_id):
-                _log.warning("session: hand_void from %s claims seat %s "
-                             "-- dropping", conn_id, seat)
-                return
+        if not self._seat_author_ok(conn_id, msg, seat):
+            _log.warning("session: hand_void via %s claims seat %s but is "
+                         "not signed by that seat's bound key -- dropping",
+                         conn_id, seat)
+            return
         reason = str(msg.get("reason", "peer voided the hand"))[:512]
         self._void_hand(reason, announce=False)
 
@@ -711,13 +791,12 @@ class Session:
             winner = None if raw_winner is None else int(raw_winner)
         except (KeyError, TypeError, ValueError):
             return
-        order = self._seat_order
-        if conn_id != self.local_conn_id:
-            if not (0 <= seat < len(order) and order[seat] == conn_id):
-                _log.warning("session: session_end from %s claims seat %s "
-                             "-- dropping", conn_id, seat)
-                return
-        if hand < self._hand_no or len(stacks) != len(order):
+        if not self._seat_author_ok(conn_id, msg, seat):
+            _log.warning("session: session_end via %s claims seat %s but is "
+                         "not signed by that seat's bound key -- dropping",
+                         conn_id, seat)
+            return
+        if hand < self._hand_no or len(stacks) != len(self._seat_order):
             return
         if any(stack < 0 for stack in stacks):
             return
@@ -811,6 +890,7 @@ class Session:
         self._final_stacks = None
         self._session_end_announced = False
         self._p2p_spectator = False
+        self._bind_seat_keys()
         self._begin_p2p_hand(hand_no=hand_no, stacks=list(stacks),
                              positions=None)
 
@@ -992,12 +1072,11 @@ class Session:
         except (KeyError, ValueError, TypeError):
             return
         # seat-spoofing defence, same rule as the deal messages
-        order = self._seat_order
-        if conn_id != self.local_conn_id:
-            if not (0 <= seat < len(order) and order[seat] == conn_id):
-                _log.warning("session: bet_action from %s claims seat %s "
-                             "— dropping", conn_id, seat)
-                return
+        if not self._seat_author_ok(conn_id, msg, seat):
+            _log.warning("session: bet_action via %s claims seat %s but is not "
+                         "signed by that seat's bound key — dropping",
+                         conn_id, seat)
+            return
         self._safe_emit(
             "action_received",
             hand=self._hand_no, seq=seq, seat=seat,
@@ -1190,6 +1269,10 @@ class Session:
                 nickname          = nickname,
                 avatar_b64        = payload.get("avatar_b64",         ""),
                 x25519_pubkey_hex = payload.get("x25519_pubkey_hex",  ""),
+                # From the ENVELOPE, not the payload: wire.unpack has already
+                # verified the signature against this key, so it is the one
+                # fact about a joiner nobody can assert on its behalf.
+                ed25519_pubkey_hex = msg.get("pubkey", ""),
                 is_host           = False,
             )
             if conn_id not in self._join_order:
@@ -1202,7 +1285,22 @@ class Session:
             self._broadcast_player_list()
 
     def _on_player_list(self, conn_id: str, msg: dict) -> None:
-        """Non-host receives updated player list from the host."""
+        """Non-host receives updated player list from the host.
+
+        Host-gated, like _on_game_start and _on_player_ack. This one was
+        not, so any connected peer could inject roster entries and
+        overwrite nickname, is_host, ready, the x25519 key and now the
+        SIGNING key -- which would let an attacker choose the key a victim
+        binds to a seat, defeating author authentication before it began.
+
+        A hop-level check is the right kind here: player_list is
+        host-authored by definition, so the authority being tested really
+        is "which connection", not "which author".
+        """
+        if self._host_conn_id and conn_id != self._host_conn_id:
+            _log.warning("session: player_list from non-host %s — ignoring",
+                         conn_id)
+            return
         payload = msg.get("payload", {})
         players_data = payload.get("players", [])
         with self._lock:
@@ -1217,6 +1315,7 @@ class Session:
                         nickname          = p.get("nickname",          "Player"),
                         avatar_b64        = p.get("avatar_b64",        ""),
                         x25519_pubkey_hex = p.get("x25519_pubkey_hex", ""),
+                        ed25519_pubkey_hex = p.get("ed25519_pubkey_hex", ""),
                         is_host           = p.get("is_host",           False),
                         ready             = p.get("ready",             False),
                     )
@@ -1228,6 +1327,8 @@ class Session:
                     existing.avatar_b64        = p.get("avatar_b64",        existing.avatar_b64)
                     existing.is_host           = p.get("is_host",           existing.is_host)
                     existing.x25519_pubkey_hex = p.get("x25519_pubkey_hex", existing.x25519_pubkey_hex)
+                    existing.ed25519_pubkey_hex = p.get(
+                        "ed25519_pubkey_hex", existing.ed25519_pubkey_hex)
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data
@@ -1538,6 +1639,7 @@ class Session:
                     "nickname":          p.nickname,
                     "avatar_b64":        p.avatar_b64,
                     "x25519_pubkey_hex": p.x25519_pubkey_hex,
+                    "ed25519_pubkey_hex": p.ed25519_pubkey_hex,
                     "is_host":           p.is_host,
                     "ready":             p.ready,
                 }
@@ -1559,6 +1661,7 @@ class Session:
                 nickname          = self.local_nickname,
                 avatar_b64        = self.local_avatar,
                 x25519_pubkey_hex = _id.x25519_public_key_bytes().hex(),
+                ed25519_pubkey_hex = _id.public_key_bytes().hex(),
                 is_host           = self.is_host,
                 ready             = True,
             )

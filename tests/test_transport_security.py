@@ -91,11 +91,21 @@ def test_sign_frame_roundtrips():
      "stacks": [0, 1000]},
 ])
 def test_sign_frame_preserves_flat_hostless_fields(message):
-    """Coordinator dictionaries survive the signed payload boundary intact."""
+    """Coordinator dictionaries survive the signed payload boundary intact.
+
+    The unwrap now also carries the ENVELOPE's verified signing key up as
+    ``pubkey``, because seat authority is the author and the author lives
+    on the envelope -- dropping it made every remote hostless message
+    unauthorizable. So the property is "nothing is lost, and the verified
+    author is added", not bare equality.
+    """
     blob = t._sign_frame(message)
     back = wire.unpack(blob[4:])
     body = Session._hostless_body(back)
-    assert body == message
+    assert {k: v for k, v in body.items() if k != "pubkey"} == message, \
+        "a coordinator field was lost or altered across the boundary"
+    assert body["pubkey"] == back["pubkey"], \
+        "the unwrap did not carry the envelope's verified author"
 
 
 def test_presigned_dict_not_double_wrapped():
