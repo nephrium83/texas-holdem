@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import AUTHOR_SEQ_START, Session
+from holdem.p2p.timeout import FakeClock
 
 try:
     from holdem.p2p import ristretto as R           # noqa: F401
@@ -281,6 +282,192 @@ def test_an_unauthenticated_sender_cannot_move_a_seats_stream():
         f"altered that seat's stream: {before} -> {after}")
 
 
+def test_a_reordered_stream_closes_its_own_hole():
+    """N+1 before N, both eventually arrive: no void, and the hole closes.
+
+    The whole reason holes are reported rather than acted on. While only
+    N+1 has arrived the stream looks suppressed; it is not, and nothing may
+    happen on that basis.
+    """
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+
+    victim = sessions[order[1]]
+    base = dict(_first_hostless_from(bus, order[0]))
+    top = max(victim._author_seq_seen.get((1, 0), {0: ""}))
+
+    late, early = dict(base), dict(base)
+    early["author_seq"], late["author_seq"] = top + 1, top + 2
+
+    victim.handle_message(order[0], late)          # N+1 first
+    assert not victim.hand_voided, "reordering voided the hand"
+    assert victim.author_seq_holes(1, 0) == [top + 1], (
+        "the not-yet-arrived number should read as a hole while it is absent")
+
+    victim.handle_message(order[0], early)         # N arrives late
+    assert not victim.hand_voided, "the hole closing voided the hand"
+    assert victim.author_seq_holes(1, 0) == [], (
+        "a hole that has been filled must no longer be reported")
+
+
+def test_an_equivocating_author_fails_closed_with_attribution():
+    """Two DIFFERENT signed messages at one number is not a duplicate.
+
+    A set-based record answers only 'has this number been used', so the
+    second message would be dropped as a replay and the peers would diverge
+    silently. Storing the envelope fingerprint is what separates the two.
+    """
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+
+    victim = sessions[order[1]]
+    assert not victim.hand_voided, "precondition: hand is alive"
+
+    base = dict(_first_hostless_from(bus, order[0]))
+    n = 700
+    first, second = dict(base), dict(base)
+    first["author_seq"] = second["author_seq"] = n
+    first["hash"] = "a" * 64
+    second["hash"] = "b" * 64          # same number, different signed thing
+
+    victim.handle_message(order[0], first)
+    assert not victim.hand_voided, "the first message should be accepted"
+
+    victim.handle_message(order[0], second)
+    assert victim.hand_voided, (
+        "an author signing two different messages under one sequence number "
+        "must fail closed, not be dropped as a duplicate")
+    assert victim.void_reason and "author_seq" in victim.void_reason, (
+        f"the void must name the equivocation; got {victim.void_reason!r}")
+    assert "seat 0" in victim.void_reason, (
+        f"the void must attribute the seat; got {victim.void_reason!r}")
+
+
+def test_an_identical_replay_is_not_mistaken_for_equivocation():
+    """The inverse of the above: same number AND same envelope is benign."""
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+
+    victim = sessions[order[1]]
+    msg = dict(_first_hostless_from(bus, order[0]))
+    msg["author_seq"] = 800
+    msg["hash"] = "c" * 64
+
+    victim.handle_message(order[0], dict(msg))
+    victim.handle_message(order[0], dict(msg))
+    assert not victim.hand_voided, (
+        "an ordinary relay replay was treated as equivocation")
+
+
+# ── timeout integration ───────────────────────────────────────────────────
+
+def _arm(session, phase="deal_shuffle"):
+    """Put a real deadline on the session, then let it expire naturally.
+
+    These tests must not skip. Skipping on "no active deadline in this
+    phase" would leave the timeout integration -- the only thing that turns
+    a hole into an outcome -- asserted by nothing at all, while still
+    reporting green.
+
+    The deadline is a genuine DeadlineToken through the session's own
+    _start_deadline, so check_deadlines() fires on exactly the schedule it
+    always would; the test advances a FakeClock rather than shortening it.
+    """
+    from holdem.p2p.timeout import DeadlineToken
+    token = DeadlineToken(
+        hand_id=session._deal_session_id(), phase=phase,
+        actor=None,
+        action_seq=session._replica.next_seq if session._replica else 0)
+    session._start_deadline(token)
+    return token
+
+
+
+
+def test_a_hole_is_reported_by_the_timeout_that_was_going_to_fire_anyway():
+    """Holes ride along with the existing deadline; they do not cause it.
+
+    Suppress N, deliver N+1, let the ordinary deadline expire: the timeout
+    outcome must carry the missing number. No second timer, and the
+    deadline is the same one that would have fired regardless.
+    """
+    clk = FakeClock()
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    for s in sessions.values():
+        s._clock = clk
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+
+    victim = sessions[order[1]]
+    base = dict(_first_hostless_from(bus, order[0]))
+    top = max(victim._author_seq_seen.get((1, 0), {0: ""}))
+    ahead = dict(base)
+    ahead["author_seq"] = top + 2            # top+1 suppressed
+    victim.handle_message(order[0], ahead)
+
+    assert victim.author_seq_holes(1, 0) == [top + 1]
+    report = victim.author_seq_hole_report(1)
+    assert report == [{"seat": 0, "missing": [top + 1]}], (
+        f"the snapshot the timeout path reads is wrong: {report}")
+
+    _arm(victim)
+    emitted = []
+    victim._safe_emit = lambda name, **kw: emitted.append((name, kw))
+    clk.advance(1000.0)
+    victim.check_deadlines()
+    proposed = [kw for name, kw in emitted if name == "timeout_proposed"]
+    assert proposed, "the existing deadline did not fire"
+    assert proposed[0].get("author_seq_holes") == report, (
+        "the timeout did not carry the observed holes")
+
+
+def test_a_suppressed_tail_leaves_no_hole_and_the_timeout_still_fires():
+    """The stated blind spot, pinned so nobody assumes coverage.
+
+    Suppressing the LAST message of a stream leaves no higher number to
+    reveal it. author_seq_holes() is therefore empty, and the ordinary
+    phase deadline -- not sequencing -- is what catches the missing
+    progress. Sequence numbers cannot reveal a message whose existence was
+    never observed.
+    """
+    clk = FakeClock()
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    for s in sessions.values():
+        s._clock = clk
+    for cid in order:
+        sessions[cid].begin_hand(hand_no=1, button=0)
+    bus.drain()
+
+    victim = sessions[order[1]]
+    # Nothing further delivered: the tail is simply absent.
+    assert victim.author_seq_holes(1, 0) == [], (
+        "a suppressed tail must not manufacture a hole -- there is no "
+        "higher number to reveal it")
+
+    _arm(victim)
+    emitted = []
+    victim._safe_emit = lambda name, **kw: emitted.append((name, kw))
+    clk.advance(1000.0)
+    victim.check_deadlines()
+    proposed = [kw for name, kw in emitted if name == "timeout_proposed"]
+    assert proposed, (
+        "the ordinary timeout must still fire when the tail is suppressed")
+    assert proposed[0].get("author_seq_holes") == [], (
+        "there was no hole to report; the timeout stands on its own")
+
+
 def test_a_future_hand_message_survives_being_buffered_and_replayed():
     """The buffer feeds messages back through handle_message.
 
@@ -305,3 +492,12 @@ def test_a_future_hand_message_survives_being_buffered_and_replayed():
         "a future-hand message was recorded before its hand began; it will "
         "be dropped as a duplicate when the buffer replays it")
     assert late._msg_buffer, "the future-hand message was not buffered"
+
+    # ...and once that hand begins, the replay accounts for it exactly once.
+    late.begin_hand(hand_no=2, button=0)
+    recorded = late._author_seq_seen.get((2, 0), {})
+    assert AUTHOR_SEQ_START in recorded, (
+        "the buffered message was dropped instead of being applied when its "
+        "hand began -- this is the early key_announce the buffer exists for")
+    assert late.author_seq_holes(2, 0) == [], (
+        f"replay left a phantom hole: {late.author_seq_holes(2, 0)}")
