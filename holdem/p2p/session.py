@@ -80,6 +80,11 @@ from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
 
 _log = logging.getLogger(__name__)
 
+# First author_seq every (hand, seat) stream uses. Fixed here rather than
+# left to each send path to invent, so a receiver knows what "no messages
+# yet" means without guessing.
+AUTHOR_SEQ_START = 0
+
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
@@ -325,6 +330,10 @@ class Session:
         # Immutable seat -> Ed25519 signing key (hex). The protocol-author
         # identity: bound once, before the first hand, and never changed.
         self._seat_keys: dict[int, str] = {}
+        # Author sequencing, keyed (hand, seat). _out is what we have
+        # stamped; _in is the next value we will accept from each author.
+        self._author_seq_out: dict[tuple, int] = {}
+        self._author_seq_in: dict[tuple, int] = {}
 
         # --- mental-poker deal (L5): per-hand coordinator for the local seat ---
         # One driver per hand; created in begin_hand(). The deal is hostless
@@ -629,6 +638,75 @@ class Session:
             elif h > self._hand_no:
                 self._msg_buffer.append((cid, m))
             # h < current: stale, dropped
+
+    def _send_hostless(self, m: dict) -> None:
+        """The ONE place a local hostless message leaves this peer.
+
+        Eight types are broadcast from five call sites. Stamping author
+        identity and sequence at each would let them drift, and a type
+        that forgot to stamp would be indistinguishable, to a receiver,
+        from one that had been suppressed.
+
+        Stamped BEFORE the transport signs, so (hand, seat, author_seq) is
+        covered by the Ed25519 signature and a relaying host cannot
+        renumber a message without invalidating it.
+
+        ``seat`` is filled in when absent. timeout_proposal carried none at
+        all, so it could not be attributed, could not be sequenced, and --
+        since _maybe_relay keys on the claimed seat -- was never actually
+        relayed despite being in the hostless set.
+        """
+        seat = m.get("seat", m.get("seat_from"))
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            try:
+                seat = self.local_seat
+            except ValueError:
+                self._transport.broadcast(m)      # unseated; nothing to stamp
+                return
+            m["seat"] = seat
+        key = (int(m.get("hand", self._hand_no)), seat)
+        nxt = self._author_seq_out.get(key, AUTHOR_SEQ_START)
+        m["author_seq"] = nxt
+        self._author_seq_out[key] = nxt + 1
+        self._transport.broadcast(m)
+
+    def _author_seq_ok(self, seat: int, hand: int, msg: dict) -> bool:
+        """Contiguous and monotonic per (hand, author). Never a silent drop.
+
+        Authorship is checked by the caller FIRST: a sequence number only
+        means something once we know who is claiming it, or a stranger
+        could desynchronise another seat's counter.
+
+        * expected      -> accept, advance
+        * already seen  -> reject, do not apply (a relayed duplicate must
+                           not be applied twice)
+        * ahead         -> a GAP. Something between this author and us was
+                           lost, which is what a suppressing relay looks
+                           like once it lets later traffic through. Void
+                           the hand rather than continue on divergent
+                           state.
+
+        Total suppression cannot be caught here -- nothing arrives to
+        notice. That stays the timeout machinery's job.
+        """
+        got = msg.get("author_seq")
+        if not isinstance(got, int) or isinstance(got, bool):
+            return True              # unsequenced peer/harness: nothing to check
+        key = (hand, seat)
+        expected = self._author_seq_in.get(key, AUTHOR_SEQ_START)
+        if got == expected:
+            self._author_seq_in[key] = expected + 1
+            return True
+        if got < expected:
+            _log.warning("session: seat %s replayed author_seq %d (expected %d) "
+                         "in hand %s -- not applied", seat, got, expected, hand)
+            return False
+        _log.warning("session: author_seq gap from seat %s in hand %s: got %d, "
+                     "expected %d -- %d lost or suppressed",
+                     seat, hand, got, expected, got - expected)
+        self._void_hand(f"author sequence gap from seat {seat}: expected "
+                        f"{expected}, got {got}", blamed_seat=None)
+        return False
 
     def _maybe_relay(self, conn_id: str, mtype: str, envelope: dict,
                      body: dict) -> None:
