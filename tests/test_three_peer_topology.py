@@ -337,6 +337,40 @@ def test_three_real_sessions_deal_hole_cards_and_reach_betting(three_sessions):
             f"{p.label} reached {st['replica_phase']!r}, expected betting")
 
 
+def test_the_host_does_not_echo_a_relayed_envelope_back_to_its_author(
+        three_sessions):
+    """B must never receive its own authored envelope back from the host.
+
+    This needs its own assertion because the hand SURVIVES the failure. With
+    a relay that echoes (broadcast instead of broadcast_except), B's own
+    messages come back to it, the sequence bookkeeping recognises each as
+    the same (author_seq, fingerprint) already applied, drops it, and the
+    deal completes to betting exactly as before. Measured on this harness:
+
+        baseline    echoed_back_to_B = []
+        echo break  echoed_back_to_B = [deal_share, deck_round, key_announce]
+        both        hole_complete on all three peers, replica phase betting
+
+    So every other end-to-end assertion here is blind to it -- replay
+    protection is doing its job and hiding the waste. What is left is
+    doubled relay traffic and a peer re-processing its own emissions, which
+    only a trace of who received what can see.
+    """
+    a, b, c = three_sessions
+    b_seat = _status(b)["local_seat"]
+    for p in (a, b, c):
+        p.send({"op": "start_hand", "args": dict(HAND_ARGS)})
+    _await(c, lambda s: s["hole_complete"] or s["hand_voided"],
+           "hole cards recovered", timeout=DEAL_WAIT)
+
+    echoed = sorted({e.get("mtype") for e in b.all_of("recv")
+                     if e.get("seat") == b_seat})
+    assert echoed == [], (
+        f"the host echoed seat {b_seat}'s own envelopes back to it: {echoed}. "
+        "The deal still completes because replay protection drops them, so "
+        "nothing else in this file would notice.")
+
+
 def test_every_seats_deal_traffic_reaches_the_far_joiner(three_sessions):
     """C is wired only to the host, so everything from B arrived by relay.
 
