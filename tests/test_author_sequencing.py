@@ -126,6 +126,27 @@ def test_each_authors_numbers_start_at_zero_and_do_not_repeat():
             f"{key} is not contiguous from {AUTHOR_SEQ_START}: {sorted(nums)}")
 
 
+@pytest.mark.parametrize("mtype", HOSTLESS)
+def test_the_stamping_point_stamps_every_type(mtype):
+    """Every one of the eight, driven through _send_hostless directly.
+
+    The bus-observation test above cannot cover this: a single hand emits
+    only the types that hand happens to need, so a type skipped inside the
+    stamping point -- rather than by a call site that bypassed it -- goes
+    unobserved. A control that made bet_action skip the stamp fired nothing
+    until this existed. The two tests catch opposite failures: this one a
+    hole INSIDE the chokepoint, that one a send path that never reached it.
+    """
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    sessions[order[0]]._send_hostless({"type": mtype, "hand": 1, "seat": 0})
+
+    sent = [m for _, m in bus.carried if m.get("type") == mtype]
+    assert sent, f"{mtype} never reached the transport"
+    assert "author_seq" in sent[-1], (
+        f"{mtype} left the stamping point without an author_seq")
+
+
 # ── receiving ─────────────────────────────────────────────────────────────
 
 def _first_hostless_from(bus, frm):
@@ -135,8 +156,15 @@ def _first_hostless_from(bus, frm):
     return None
 
 
-def test_a_replayed_message_is_applied_only_once():
-    """The property that makes a relay unable to re-inject traffic."""
+def test_a_replayed_message_is_not_applied_twice():
+    """The property that makes a relay unable to re-inject traffic.
+
+    Asserted on whether the message reaches the state machine, not on the
+    bookkeeping set. A duplicate leaves that set unchanged whether it was
+    dropped or applied, so a test watching the set passes even when nothing
+    is being suppressed -- which a control confirmed by breaking the drop
+    and firing nothing.
+    """
     bus = RecordingBus()
     _, sessions, order = make_table(2, bus=bus)
     for cid in order:
@@ -146,16 +174,25 @@ def test_a_replayed_message_is_applied_only_once():
     victim = sessions[order[1]]
     original = _first_hostless_from(bus, order[0])
     assert original is not None, "peer0 sent no sequenced hostless message"
+    assert original["type"] in ("key_announce", "deck_round", "deal_share",
+                                "audit_open"), "expected a deal-driver type"
 
-    seat, hand = 0, original.get("hand", 1)
-    seen_before = set(victim._author_seq_seen.get((hand, seat), set()))
-    assert original["author_seq"] in seen_before, (
-        "precondition: the original should already have been recorded")
+    applied = []
+    victim._deal_driver.handle = lambda m: applied.append(m)
 
-    # Same message again, exactly as a replaying relay would deliver it.
-    victim.handle_message(order[0], dict(original))
-    assert victim._author_seq_seen.get((hand, seat)) == seen_before, (
-        "a replayed message changed the recorded stream")
+    # Control within the test: an UNSEEN number must reach the driver, so a
+    # later "nothing arrived" assertion cannot pass for the wrong reason.
+    fresh = dict(original)
+    fresh["author_seq"] = 500
+    victim.handle_message(order[0], fresh)
+    assert len(applied) == 1, (
+        "precondition failed: an unseen message did not reach the state "
+        f"machine, so this test cannot detect suppression ({applied})")
+
+    # The same number again, exactly as a replaying relay would deliver it.
+    victim.handle_message(order[0], dict(fresh))
+    assert len(applied) == 1, (
+        "a replayed message was applied a second time")
 
 
 def test_reordering_does_not_void_the_hand():
