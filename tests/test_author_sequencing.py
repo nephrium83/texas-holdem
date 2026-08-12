@@ -345,8 +345,18 @@ def test_an_equivocating_author_fails_closed_with_attribution():
         "must fail closed, not be dropped as a duplicate")
     assert victim.void_reason and "author_seq" in victim.void_reason, (
         f"the void must name the equivocation; got {victim.void_reason!r}")
-    assert "seat 0" in victim.void_reason, (
-        f"the void must attribute the seat; got {victim.void_reason!r}")
+
+    # Attribution has to be machine-readable, not just prose. A control that
+    # dropped blamed_seat while leaving the reason string intact fired
+    # nothing until this assertion existed -- the text said "seat 0" because
+    # it interpolates the seat regardless of what was actually recorded.
+    record = victim._hand_record
+    assert record is not None, "equivocation produced no hand record"
+    assert record.outcome == "VOID_EQUIVOCATION", (
+        f"wrong outcome recorded: {record.outcome!r}")
+    assert record.blamed_seat == 0, (
+        f"the equivocating seat must be attributed structurally, "
+        f"got blamed_seat={record.blamed_seat!r}")
 
 
 def test_an_identical_replay_is_not_mistaken_for_equivocation():
