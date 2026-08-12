@@ -32,8 +32,20 @@ KEY_A = "aa" * 32
 KEY_B = "bb" * 32
 
 
+class _Undeclared:
+    """A transport that says nothing about what it delivers."""
+
+    def broadcast(self, msg):
+        pass
+
+    def send(self, to, msg):
+        pass
+
+
 class _Spy:
-    """A transport that declares nothing, to exercise the default."""
+    """An explicitly declared compatibility transport."""
+
+    delivers_verified_envelopes = False
 
     def __init__(self):
         self.sent = []
@@ -85,14 +97,34 @@ def test_unsigned_transports_declare_themselves_unverified(mod_or_cls, name):
         f"{name} must declare delivers_verified_envelopes = False")
 
 
-def test_an_undeclared_transport_gets_the_compatibility_rule():
-    """The default is compat, and that is a deliberate, bounded choice.
+def test_an_undeclared_transport_is_refused_at_construction():
+    """Silence is an error, never compatibility mode.
 
-    A harness that forgot to declare would otherwise fail closed in a way
-    that reads as a protocol bug. What protects production is the explicit
-    declaration on the real transport, asserted above -- not this default.
+    This is the assertion that keeps the mode genuinely explicit. Defaulting
+    an undeclared transport to compat would be the same implicit downgrade
+    this refactor removed from _seat_author_ok, just relocated into
+    capability detection: someone adds a transport, forgets one attribute,
+    and the session concludes "no declaration -> compat -> trust the
+    delivering connection". A missing declaration is not evidence that
+    conn_id trust is safe; it is evidence that nobody has said.
     """
-    assert _session(_Spy()).author_mode == AUTHOR_MODE_COMPAT
+    with pytest.raises(TypeError, match="delivers_verified_envelopes"):
+        _session(_Undeclared())
+
+
+def test_a_non_bool_declaration_is_refused():
+    """Truthiness is not a declaration -- "no" would read as wire mode."""
+    class _Vague:
+        delivers_verified_envelopes = "yes"
+
+    with pytest.raises(TypeError, match="delivers_verified_envelopes"):
+        _session(_Vague())
+
+
+def test_an_undeclared_transport_is_usable_with_an_explicit_mode():
+    """The escape hatch is stating the mode, not omitting the declaration."""
+    s = _session(_Undeclared(), mode=AUTHOR_MODE_COMPAT)
+    assert s.author_mode == AUTHOR_MODE_COMPAT
 
 
 def test_an_unknown_mode_is_refused_at_construction():

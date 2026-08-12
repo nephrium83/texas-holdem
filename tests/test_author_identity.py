@@ -39,6 +39,13 @@ KEY_X = "ee" * 32          # a stranger's perfectly valid key
 
 
 class _Spy:
+    #: These suites hand the Session enveloped messages carrying a verified
+    #: "pubkey" and bind seat keys, which is the production arrangement, so
+    #: this double declares the production mode. Declared explicitly because
+    #: Session refuses to guess: an undeclared transport raises rather than
+    #: quietly selecting conn_id authorization.
+    delivers_verified_envelopes = True
+
     def __init__(self):
         self.sent = []
 

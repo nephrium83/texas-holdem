@@ -334,22 +334,31 @@ class Session:
         self._transport = transport
 
         # Which authorization rule this session runs under, decided ONCE and
-        # readable afterwards. A transport declares whether what it delivers
-        # has been signature-verified; the production module says so
-        # explicitly, and unsigned harness transports (InMemoryTransport,
-        # SimpleTcpTransport) do not, so they get the compatibility rule.
+        # readable afterwards. There is no default: a transport must declare
+        # whether what it delivers has been signature-verified, or the caller
+        # must state the mode outright.
         #
-        # An unrecognised transport is treated as compat rather than wire,
-        # because a harness that forgot to declare would otherwise fail
-        # closed in a way that looks like a protocol bug. What protects
-        # production is not this default but the explicit declaration on the
-        # real transport -- asserted by a test, so removing it is caught
-        # rather than silently downgrading production to conn_id trust.
+        # Silence is an ERROR rather than compatibility mode, and that is the
+        # point of the whole arrangement. Treating an undeclared transport as
+        # compat would be the same implicit downgrade this refactor removed
+        # from _seat_author_ok, merely relocated into capability detection:
+        # add a transport, forget one attribute, and the session quietly
+        # concludes "no declaration -> compat -> trust the delivering
+        # connection". A missing declaration is not evidence that conn_id
+        # trust is safe; it is evidence that nobody has said.
         if author_mode is None:
-            author_mode = (
-                AUTHOR_MODE_WIRE
-                if getattr(transport, "delivers_verified_envelopes", False)
-                else AUTHOR_MODE_COMPAT)
+            declared = getattr(transport, "delivers_verified_envelopes", None)
+            if not isinstance(declared, bool):
+                raise TypeError(
+                    f"{getattr(transport, '__name__', type(transport).__name__)} "
+                    "does not declare delivers_verified_envelopes (bool). A "
+                    "transport must state whether what it delivers has been "
+                    "signature-verified, because that decides whether seat "
+                    "authority comes from the signing key or from the "
+                    "delivering connection. Set the attribute on the "
+                    "transport, or pass author_mode= explicitly.")
+            author_mode = (AUTHOR_MODE_WIRE if declared
+                           else AUTHOR_MODE_COMPAT)
         if author_mode not in (AUTHOR_MODE_WIRE, AUTHOR_MODE_COMPAT):
             raise ValueError(f"unknown author_mode {author_mode!r}")
         self.author_mode = author_mode

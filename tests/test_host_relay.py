@@ -62,6 +62,13 @@ class StarBus:
 
 
 class StarTransport:
+    #: This suite delivers signed envelopes with a verified "pubkey" and
+    #: binds seat keys, i.e. the production arrangement, so it declares the
+    #: production mode. Declared explicitly because Session refuses to
+    #: guess: an undeclared transport raises rather than quietly selecting
+    #: conn_id authorization.
+    delivers_verified_envelopes = True
+
     def __init__(self, bus: StarBus, cid: str):
         self._bus, self._cid = bus, cid
 
