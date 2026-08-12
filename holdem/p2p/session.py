@@ -67,6 +67,8 @@ single owner supplies both.
 from __future__ import annotations
 
 import functools
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -79,6 +81,11 @@ from holdem.p2p.timeout import (
 from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
 
 _log = logging.getLogger(__name__)
+
+# First author_seq every (hand, seat) stream uses. Fixed here rather than
+# left to each send path to invent, so a receiver knows what "no messages
+# yet" means without guessing.
+AUTHOR_SEQ_START = 0
 
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
@@ -325,6 +332,19 @@ class Session:
         # Immutable seat -> Ed25519 signing key (hex). The protocol-author
         # identity: bound once, before the first hand, and never changed.
         self._seat_keys: dict[int, str] = {}
+        # Author sequencing, keyed (hand, seat). _out is the next number we
+        # will stamp; _seen maps each number received from that author to the
+        # fingerprint of the envelope it arrived in.
+        #
+        # A mapping rather than a set, and not for bookkeeping tidiness: a
+        # set can only answer "was this number used", which makes a second
+        # message under the same number a duplicate. Two DIFFERENT validly
+        # signed envelopes at one number is equivocation, and collapsing
+        # that into "duplicate" would drop the second quietly and leave two
+        # peers on different states with nothing recorded. The hash is what
+        # separates the harmless case from the hostile one.
+        self._author_seq_out: dict[tuple, int] = {}
+        self._author_seq_seen: dict[tuple, dict] = {}
 
         # --- mental-poker deal (L5): per-hand coordinator for the local seat ---
         # One driver per hand; created in begin_hand(). The deal is hostless
@@ -444,6 +464,19 @@ class Session:
 
         t = msg.get("type")
         body = self._hostless_body(msg) if t in _HOSTLESS_PAYLOAD_TYPES else msg
+        if t in _HOSTLESS_PAYLOAD_TYPES:
+            # Sequence is checked HERE, for all eight types together, because
+            # the counter that produces it is stamped in one place for all
+            # eight (_send_hostless). Validating a subset would be worse than
+            # validating none: the sender advances the counter on every
+            # hostless send, so a receiver watching only some types sees the
+            # others as gaps and voids a healthy hand. That is exactly what
+            # happened when this check was first wired into the deal path
+            # alone -- a bet_action between two deal messages looked like
+            # suppression.
+            if not self._hostless_seq_ok(conn_id, msg, body):
+                return
+            self._maybe_relay(conn_id, t, msg, body)
         if t == "player_info":
             self._on_player_info(conn_id, msg)
         elif t == "player_list":
@@ -627,6 +660,253 @@ class Session:
             elif h > self._hand_no:
                 self._msg_buffer.append((cid, m))
             # h < current: stale, dropped
+
+    def _send_hostless(self, m: dict) -> None:
+        """The ONE place a local hostless message leaves this peer.
+
+        Eight types are broadcast from five call sites. Stamping author
+        identity and sequence at each would let them drift, and a type
+        that forgot to stamp would be indistinguishable, to a receiver,
+        from one that had been suppressed.
+
+        Stamped BEFORE the transport signs, so (hand, seat, author_seq) is
+        covered by the Ed25519 signature and a relaying host cannot
+        renumber a message without invalidating it.
+
+        ``seat`` is filled in when absent. timeout_proposal carried none at
+        all, so it could not be attributed, could not be sequenced, and --
+        since _maybe_relay keys on the claimed seat -- was never actually
+        relayed despite being in the hostless set.
+        """
+        seat = m.get("seat", m.get("seat_from"))
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            try:
+                seat = self.local_seat
+            except ValueError:
+                self._transport.broadcast(m)      # unseated; nothing to stamp
+                return
+            m["seat"] = seat
+        key = (int(m.get("hand", self._hand_no)), seat)
+        nxt = self._author_seq_out.get(key, AUTHOR_SEQ_START)
+        m["author_seq"] = nxt
+        self._author_seq_out[key] = nxt + 1
+        self._transport.broadcast(m)
+
+    def _author_seq_ok(self, seat: int, hand: int, msg: dict,
+                       fingerprint: str) -> bool:
+        """Record one message in its author's stream. False means drop.
+
+        Authorship is checked by the caller FIRST: a sequence number only
+        means something once we know who is claiming it, or a stranger
+        could desynchronise a real seat's stream.
+
+        NOT contiguity-enforcing, and that is deliberate. An earlier
+        revision demanded the next expected number and voided the hand on
+        anything ahead of it. That contradicts a property this protocol is
+        built to have and has tests for: delivery may reorder, so seq 1
+        legitimately arrives before seq 0 and the replicas are still
+        required to converge (tests/test_convergence_chaos.py). Voiding
+        there turned honest reordering into a dead hand -- the enforcement
+        was detecting the network, not an attacker.
+
+        What the stream does give:
+
+        * duplicates are dropped -- applied at most once per (hand, seat,
+          author_seq), which is what stops a relay replaying traffic back
+          at the table, and preserves idempotence under a bus that may
+          deliver the same message twice;
+        * numbers are signed, so a relay cannot renumber or strip one
+          without invalidating the envelope (see _send_hostless);
+        * a hole is observable via author_seq_holes() rather than acted on
+          the instant it appears, because in-flight reordering and
+          suppression look identical until the stream stops.
+
+        Acting on a hole is the timeout machinery's job, which is also the
+        only thing that can catch TOTAL suppression -- where nothing
+        arrives and there is no gap to see.
+        """
+        got = msg.get("author_seq")
+        if not isinstance(got, int) or isinstance(got, bool):
+            return True              # unsequenced peer/harness: nothing to check
+        key = (hand, seat)
+        seen = self._author_seq_seen.setdefault(key, {})
+        prior = seen.get(got)
+        if prior is None:
+            seen[got] = fingerprint
+            return True
+        if prior == fingerprint:
+            _log.debug("session: seat %s re-sent author_seq %d in hand %s "
+                       "-- identical envelope, already applied, dropping",
+                       seat, got, hand)
+            return False
+        # Same number, two DIFFERENT validly signed envelopes. Not a
+        # duplicate: the author said two things under one sequence number,
+        # which is equivocation and the reason this map stores a hash rather
+        # than merely remembering the number was used. A set would have
+        # called the second one a duplicate and dropped it quietly, leaving
+        # two peers on different states with nothing recorded.
+        _log.warning("session: seat %s equivocated at author_seq %d in hand "
+                     "%s: %s vs %s", seat, got, hand, prior[:16],
+                     fingerprint[:16])
+        self._void_hand(
+            f"seat {seat} signed two different messages at author_seq {got} "
+            f"(envelopes {prior[:16]} and {fingerprint[:16]})",
+            outcome="VOID_EQUIVOCATION", blamed_seat=seat)
+        return False
+
+    @staticmethod
+    def _envelope_fingerprint(envelope: dict, body: dict) -> str:
+        """Identity of the signed thing this message came from.
+
+        The envelope hash is authoritative on the production path: it covers
+        every signed field, so two different messages from one author cannot
+        collide and a relay cannot make two different messages look alike.
+
+        The in-memory harness carries no envelope, so the body is hashed
+        canonically instead. That keeps the equivocation check meaningful
+        there -- same content hashes the same, different content does not --
+        without pretending an unsigned message is signed.
+        """
+        h = envelope.get("hash") if isinstance(envelope, dict) else None
+        if isinstance(h, str) and h:
+            return h
+        canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
+                               default=repr).encode("utf-8", "replace")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def author_seq_holes(self, hand: int, seat: int) -> list:
+        """Numbers missing below the highest one seen from (hand, seat).
+
+        Empty while a stream is merely out of order but complete. Non-empty
+        means something between that author and us has not arrived -- which
+        during a hand may still be reordering in flight, and is only
+        evidence once a deadline says waiting has become failure.
+
+        A late message filling a hole closes it, so this is re-read at the
+        moment it is needed rather than latched when a gap first appears.
+
+        Blind spot, stated because it bounds what this can prove: if the
+        TAIL of a stream is suppressed there is no higher number to reveal
+        the absence, and this returns []. Nothing here can see a message
+        whose existence was never observed; the phase deadline catches that
+        as missing progress instead.
+        """
+        seen = self._author_seq_seen.get((hand, seat))
+        if not seen:
+            return []
+        return [n for n in range(AUTHOR_SEQ_START, max(seen)) if n not in seen]
+
+    def author_seq_hole_report(self, hand: Optional[int] = None) -> list:
+        """Every unresolved hole in a hand, as [{seat, missing}] records.
+
+        Snapshotted by the timeout path so a liveness failure can say what
+        it observed missing. Empty when every stream is whole.
+        """
+        h = self._hand_no if hand is None else hand
+        out = []
+        for (khand, seat) in sorted(self._author_seq_seen):
+            if khand != h:
+                continue
+            missing = self.author_seq_holes(khand, seat)
+            if missing:
+                out.append({"seat": seat, "missing": missing})
+        return out
+
+    def _hostless_seq_ok(self, conn_id: str, envelope: dict,
+                         body: dict) -> bool:
+        """Gate for every inbound hostless message. False means drop.
+
+        The mirror of _send_hostless: one stamping point on the way out, one
+        validating point on the way in, both covering the same eight types.
+
+        Deliberately permissive in three cases, each of which must NOT
+        consume a sequence number:
+
+        * self-delivery -- the local driver feeds its own emissions back
+          without a wire round-trip, and the sender already counted them on
+          the way out;
+        * an unattributable message (no integer seat) -- there is no author
+          to sequence, and the type's own handler still drops it;
+        * a message whose authorship does not check out -- returning False
+          here would be indistinguishable to a caller from a sequence
+          failure, but far worse than that, advancing the counter would let
+          any stranger desynchronise a real seat's stream and void the hand
+          on the next legitimate message. Authorship must be settled before
+          a sequence number means anything, so an unauthorized message is
+          passed through untouched for the handler to reject with its own
+          diagnosis.
+
+        Ordering matters relative to _maybe_relay, which runs after this: a
+        replayed or out-of-sequence message is dropped BEFORE the host can
+        fan it out, so the relay cannot amplify a replay to the whole table.
+        """
+        if conn_id == self.local_conn_id:
+            return True
+        seat = body.get("seat", body.get("seat_from"))
+        if not isinstance(seat, int) or isinstance(seat, bool):
+            return True
+        if not self._seat_author_ok(conn_id, body, seat):
+            return True
+        try:
+            hand = int(body.get("hand", self._hand_no))
+        except (TypeError, ValueError):
+            return True              # _hand_msg_ok owns malformed hand numbers
+        if hand != self._hand_no:
+            # Not a stream we are tracking yet. A future-hand message is
+            # buffered by _hand_msg_ok and fed back through handle_message by
+            # _replay_buffer, so recording it here would mark it seen on the
+            # first pass and drop it as a duplicate on the second -- losing
+            # precisely the early key_announce the buffer exists to keep.
+            # Stale hands are dropped downstream.
+            return True
+        return self._author_seq_ok(
+            seat, hand, body, self._envelope_fingerprint(envelope, body))
+
+    def _maybe_relay(self, conn_id: str, mtype: str, envelope: dict,
+                     body: dict) -> None:
+        """Host only: forward an authenticated hostless envelope onward.
+
+        The production topology is a star -- only the host listens, joiners
+        only dial it -- while the hostless protocol is peer-symmetric. A
+        joiner's message therefore reaches the host and nobody else, and
+        a three-seat hand cannot leave KEYGEN. See
+        docs/TOPOLOGY_DECISION.md and tests/test_three_peer_topology.py.
+
+        The host is a COURIER, never the author. It forwards the envelope
+        it received: same v, type, payload, pubkey, ts, prev, sig and hash.
+        It does not re-sign, does not substitute its own pubkey, does not
+        rebuild the payload, and does not touch the claimed seat. The frame
+        is re-serialized on the way out, which is fine -- wire.unpack
+        verifies over canonical field values, not over the original bytes,
+        and _sign_frame leaves an already-signed message alone.
+
+        Forwarded ONLY after the author check below has passed, so the host
+        does not amplify a message its own recipients would reject. A
+        hostile author is dropped at the host rather than fanned out to the
+        table.
+
+        Never echoed back to the connection it arrived on: the author has
+        already applied it locally, and a returned copy would be a
+        duplicate the sequence check would then have to reject.
+        """
+        if not self.is_host:
+            return
+        if conn_id == self.local_conn_id:
+            return                       # our own emission, already fanned out
+        seat = body.get("seat", body.get("seat_from"))
+        if not isinstance(seat, int):
+            return
+        if not self._seat_author_ok(conn_id, body, seat):
+            _log.warning("session: refusing to relay %s from %s claiming "
+                         "seat %s -- not signed by that seat's bound key",
+                         mtype, conn_id, seat)
+            return
+        forward = getattr(self._transport, "broadcast_except", None)
+        if forward is None:
+            _log.warning("session: transport cannot relay (no "
+                         "broadcast_except); %s stays unforwarded", mtype)
+            return
+        forward(conn_id, envelope)
 
     def _bind_seat_keys(self) -> None:
         """Freeze seat -> signing key before the first hand.
@@ -828,7 +1108,7 @@ class Session:
                 raise RuntimeError("mental-deal flush did not terminate")
             m = self._deal_outbox.pop(0)
             m["hand"] = self._hand_no           # tag for hand-scoped routing
-            self._transport.broadcast(m)        # to the other peers
+            self._send_hostless(m)              # to the other peers
             self._deal_driver.handle(m)         # self-deliver; may append more
         self._apply_deal_cards()
         self._pump_hand()                       # recovered cards may advance the hand
@@ -1016,7 +1296,7 @@ class Session:
                    "winner": winner})
         if announce and not self._session_end_announced:
             self._session_end_announced = True
-            self._transport.broadcast({
+            self._send_hostless({
                 "type": "session_end",
                 "hand": self._hand_no,
                 "seat": self.local_seat,
@@ -1050,7 +1330,7 @@ class Session:
             digest = self._replica.state_digest(),
             seat   = seat, action = action, amount = int(amount),
         )
-        self._transport.broadcast({
+        self._send_hostless({
             "type": "bet_action", "hand": self._hand_no, "seq": seq, "seat": seat,
             "action": action, "amount": int(amount),
             "digest": self._replica.state_digest(),
@@ -1172,7 +1452,7 @@ class Session:
                         reason=self.void_reason, outcome=outcome)
         self._notify_state_changed()
         if announce:
-            self._transport.broadcast({
+            self._send_hostless({
                 "type": "hand_void",
                 "hand": self._hand_no,
                 "seat": self.local_seat,
@@ -1854,6 +2134,14 @@ class Session:
             self._broadcast_timeout_proposal(token)
 
     def _broadcast_timeout_proposal(self, token: DeadlineToken) -> None:
+        # Sequence holes are read HERE and nowhere earlier. A hole is not a
+        # failure on its own -- delivery may reorder, and a late message
+        # closes it with no gameplay consequence -- so it is only evidence
+        # once an existing deadline has already decided that waiting has
+        # become failure. This adds no timer and shortens no deadline: the
+        # timeout fires on exactly the schedule it always did, and the holes
+        # ride along to say what was observed missing when it did.
+        holes = self.author_seq_hole_report()
         self._safe_emit(
             "timeout_proposed",
             hand        = self._hand_no,
@@ -1861,8 +2149,9 @@ class Session:
             phase       = self._replica.phase if self._replica else "unknown",
             actor       = token.actor,
             token_phase = token.phase,
+            author_seq_holes = holes,
         )
-        self._transport.broadcast({
+        self._send_hostless({
             "type":         "timeout_proposal",
             "hand":         self._hand_no,
             "token": {
@@ -1872,6 +2161,7 @@ class Session:
                 "action_seq": token.action_seq,
             },
             "missing_seat": None,
+            "author_seq_holes": holes,
         })
         # The broadcaster is the first peer to act on its own proposal.
         # InMemoryBus (and real transports) exclude the sender from their
@@ -1918,6 +2208,10 @@ class Session:
     def _apply_timeout(self, token: DeadlineToken) -> None:
         """Apply the phase-specific consequence of an accepted timeout."""
         self._clear_deadline()
+        # Forensics, not cause. The timeout remains the liveness reason; the
+        # holes only say what was already missing when it fired. When the
+        # suppressed message is the LAST one in a stream there is no hole to
+        # report and this is empty -- the timeout behaves exactly as before.
         self._safe_emit(
             "timeout_applied",
             hand        = self._hand_no,
@@ -1926,6 +2220,7 @@ class Session:
             digest      = self._replica.state_digest() if self._replica else "",
             actor       = token.actor,
             token_phase = token.phase,
+            author_seq_holes = self.author_seq_hole_report(),
         )
         if token.phase == "betting":
             self._apply_betting_timeout(token)

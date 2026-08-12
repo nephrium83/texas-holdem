@@ -711,6 +711,32 @@ def _drop_writer(conn_id: str) -> None:
     _deliver_event(_run_disc_callbacks, conn_id)
 
 
+def broadcast_except(exclude_conn_id: str, msg: dict) -> None:
+    """Send *msg* to every connected peer except one.
+
+    The seam the authenticated host relay needs. Deliberately a transport
+    primitive rather than Session reaching into ``_writers``: the exclusion
+    is a delivery concern, and leaking the writer table would put socket
+    bookkeeping back inside the protocol layer the author-identity work
+    just got it out of.
+
+    ``msg`` here is an already-signed envelope being forwarded. _send_to
+    passes it through _sign_frame, which leaves a message that already
+    carries ``sig`` alone -- so the author's signature, pubkey, ts, prev
+    and hash survive the hop unchanged. The frame is re-serialized, which
+    is fine: wire.unpack verifies over canonical field values, not over
+    the original JSON bytes.
+    """
+    if _loop is None or _loop.is_closed():
+        log.warning("transport.broadcast_except: transport is not running")
+        return
+    with _writers_lock:
+        conn_ids = [cid for cid in _writers.keys() if cid != exclude_conn_id]
+    for cid in conn_ids:
+        fut = asyncio.run_coroutine_threadsafe(_send_to(cid, msg), _loop)
+        fut.add_done_callback(_report_send_failure)
+
+
 def broadcast(msg: dict) -> None:
     """Send *msg* to every connected peer."""
     if _loop is None or _loop.is_closed():

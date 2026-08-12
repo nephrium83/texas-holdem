@@ -42,6 +42,17 @@ class InMemoryBus:
     def enqueue(self, from_conn: str, to_conn: Optional[str], msg: dict) -> None:
         self._queue.append((from_conn, to_conn, msg))
 
+    def enqueue_except(self, from_conn: str, exclude_conn: str,
+                       msg: dict) -> None:
+        """Deliver to every session but the sender and one exclusion.
+
+        The relay seam: a host forwards a joiner's envelope onward without
+        echoing it back to the joiner that sent it.
+        """
+        for c in list(self._sessions):
+            if c != from_conn and c != exclude_conn:
+                self._queue.append((from_conn, c, msg))
+
     def drain(self, max_steps: int = 100000) -> int:
         """Deliver queued messages until the queue is empty. Returns the
         number of messages delivered. Raises if it exceeds max_steps
@@ -75,6 +86,10 @@ class InMemoryTransport:
 
     def broadcast(self, msg: dict) -> None:
         self._bus.enqueue(self._conn_id, None, msg)
+
+    def broadcast_except(self, exclude_conn_id: str, msg: dict) -> None:
+        """Broadcast to everyone but one peer -- the relay seam."""
+        self._bus.enqueue_except(self._conn_id, exclude_conn_id, msg)
 
     def send(self, to_conn: str, msg: dict) -> None:
         self._bus.enqueue(self._conn_id, to_conn, msg)
