@@ -59,6 +59,10 @@ from typing import Optional
 
 import pytest
 
+# The worker is spawned as a subprocess, but its exit-code contract is shared
+# with this file and must not be restated here; see _IDLE_TIMEOUT_EXIT.
+import peer_worker
+
 WORKER = str(Path(__file__).parent / "peer_worker.py")
 
 # ── the timeout ladder ────────────────────────────────────────────────────────
@@ -458,7 +462,14 @@ def _death_report(col: "EventCollector") -> str:
 # Set by the fixture so single-sided reports can still reach class-level
 # timing context.  Module-level because EventCollector predates the class.
 _OWNER = None
-_IDLE_TIMEOUT_EXIT = 3          # must match peer_worker.IDLE_TIMEOUT_EXIT
+
+# Imported, not restated.  A local copy of this value would be a second
+# source of truth that nothing enforces: change it in peer_worker.py and the
+# death report would keep confidently attributing the old code to an idle
+# timeout, or stop recognising the new one -- a diagnostic that lies is worse
+# than one that says nothing.  Importing peer_worker is side-effect free; it
+# only defines things, and main() runs solely under __main__.
+_IDLE_TIMEOUT_EXIT = peer_worker.IDLE_TIMEOUT_EXIT
 
 
 # ── event collector ───────────────────────────────────────────────────────────
@@ -526,13 +537,20 @@ class EventCollector:
             # grace period first: the deciding event may already be in the
             # stdout pipe, and reporting a death that raced a success would
             # be its own kind of misleading failure.
+            remaining = deadline - time.monotonic()
             if self._proc.poll() is not None:
                 if grace_until is None:
                     grace_until = time.monotonic() + _DEATH_GRACE
-                elif time.monotonic() >= grace_until:
+                # Report the death once the grace window closes -- or at once
+                # if the budget runs out first.  Falling through to the
+                # `return None` below in that case would hand back "no
+                # matching event" for a process that is gone, which is the
+                # exact substitution this class exists to eliminate; a worker
+                # dying within _DEATH_GRACE of the deadline is precisely when
+                # the distinction matters most.
+                if time.monotonic() >= grace_until or remaining <= 0:
                     raise WorkerDied(_death_report(self))
 
-            remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             # Wait up to 0.5 s for the reader thread to notify us of new events.
