@@ -888,6 +888,9 @@ class Session:
                          "signed by that seat's bound key — dropping",
                          conn_id, claimed)
             return
+        if conn_id != self.local_conn_id and not self._author_seq_ok(
+                claimed, int(msg.get("hand", self._hand_no)), msg):
+            return
         self._deal_driver.handle(dict(msg))
         self._flush_deal()
 
