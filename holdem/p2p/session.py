@@ -954,7 +954,7 @@ class Session:
                 raise RuntimeError("mental-deal flush did not terminate")
             m = self._deal_outbox.pop(0)
             m["hand"] = self._hand_no           # tag for hand-scoped routing
-            self._transport.broadcast(m)        # to the other peers
+            self._send_hostless(m)              # to the other peers
             self._deal_driver.handle(m)         # self-deliver; may append more
         self._apply_deal_cards()
         self._pump_hand()                       # recovered cards may advance the hand
@@ -1142,7 +1142,7 @@ class Session:
                    "winner": winner})
         if announce and not self._session_end_announced:
             self._session_end_announced = True
-            self._transport.broadcast({
+            self._send_hostless({
                 "type": "session_end",
                 "hand": self._hand_no,
                 "seat": self.local_seat,
@@ -1176,7 +1176,7 @@ class Session:
             digest = self._replica.state_digest(),
             seat   = seat, action = action, amount = int(amount),
         )
-        self._transport.broadcast({
+        self._send_hostless({
             "type": "bet_action", "hand": self._hand_no, "seq": seq, "seat": seat,
             "action": action, "amount": int(amount),
             "digest": self._replica.state_digest(),
@@ -1298,7 +1298,7 @@ class Session:
                         reason=self.void_reason, outcome=outcome)
         self._notify_state_changed()
         if announce:
-            self._transport.broadcast({
+            self._send_hostless({
                 "type": "hand_void",
                 "hand": self._hand_no,
                 "seat": self.local_seat,
@@ -1988,7 +1988,7 @@ class Session:
             actor       = token.actor,
             token_phase = token.phase,
         )
-        self._transport.broadcast({
+        self._send_hostless({
             "type":         "timeout_proposal",
             "hand":         self._hand_no,
             "token": {
