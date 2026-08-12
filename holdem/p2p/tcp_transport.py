@@ -42,6 +42,12 @@ MAX_LINE = wire.MAX_JSON_BYTES
 class SimpleTcpTransport:
     """JSONL TCP transport for two-process tests.  One peer per instance."""
 
+    #: This transport does not sign (see the module docstring), so what it
+    #: delivers carries no verified author. Session reads this to choose
+    #: AUTHOR_MODE_COMPAT, where seat authority falls back to the delivering
+    #: connection because there is no author to check against.
+    delivers_verified_envelopes = False
+
     def __init__(self, local_conn_id: str) -> None:
         self._local_id = local_conn_id
         self._session  = None

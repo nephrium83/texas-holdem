@@ -80,6 +80,12 @@ class InMemoryTransport:
     Session calls on the real transport module. Forwards to the shared bus,
     tagging the sender's conn_id."""
 
+    #: Flat dicts, no envelopes, no signatures. Session reads this to choose
+    #: AUTHOR_MODE_COMPAT, where seat authority falls back to the delivering
+    #: conn_id -- correct here, because there is no author to check and the
+    #: bus is authoritative about who sent what.
+    delivers_verified_envelopes = False
+
     def __init__(self, bus: InMemoryBus, conn_id: str):
         self._bus = bus
         self._conn_id = conn_id

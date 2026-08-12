@@ -87,6 +87,21 @@ _log = logging.getLogger(__name__)
 # yet" means without guessing.
 AUTHOR_SEQ_START = 0
 
+# Authorization modes for the peer-authored, host-relayed path.
+#
+# The mode used to be implicit: _seat_author_ok fell back to "the delivering
+# connection owns the seat" whenever no seat keys were bound. That reads as a
+# harmless default and is not one -- it is the difference between a protocol
+# that authenticates authors and one that trusts whoever handed it the bytes,
+# chosen silently by whether an unrelated initialisation step had run. Control
+# N on PR #31 showed the consequence: with bindings absent the host relayed
+# a joiner's traffic permissively and only the recipient refused it.
+#
+# The mode is now decided once, at construction, from an explicit declaration
+# by the transport, and is readable as ``session.author_mode``.
+AUTHOR_MODE_WIRE   = "wire"     # verified envelopes; seat bindings REQUIRED
+AUTHOR_MODE_COMPAT = "compat"   # unsigned flat dicts; conn_id stands in
+
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
@@ -221,6 +236,53 @@ class HandRecord:
     sequence: int
 
 
+def _is_seat(value) -> bool:
+    """A usable seat index: a real int, never a bool.
+
+    One definition, because ingress and the handlers must agree exactly on
+    what counts. They did not before: ingress required isinstance(int) while
+    some handlers coerced with int(), so a seat of "1" was declined by the
+    authorizing path and then revived by the applying one. ``True == 1`` in
+    Python, so bool is excluded here rather than at four call sites.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+@dataclass(frozen=True)
+class HostlessInbound:
+    """One inbound peer-authored message, with its three identities separated.
+
+    The protocol keeps three different notions of "who sent this" and the
+    #30 defect came from letting them blur together inside a dict:
+
+      conn_id  -- the transport hop. Who handed us these bytes. Under the
+                  star relay this is the HOST for anything a joiner
+                  authored, so it is not an authorization input.
+      author   -- the Ed25519 public key that signed the envelope. The
+                  protocol author, and the only one of the three a peer
+                  cannot assert about itself.
+      seat     -- the gameplay identity the payload claims. Authorized by
+                  checking it against the key bound to that seat.
+
+    ``_hostless_body`` used to smuggle the author back into the payload
+    dict under "pubkey", which callers had to remember; forgetting it made
+    every remote message unauthorizable while the in-memory suite stayed
+    green. Here it is a named field, so dropping it is a type error's worth
+    of obvious rather than an invisible one.
+    """
+
+    mtype:       str
+    body:        dict            # normalized flat form the state machines use
+    conn_id:     str             # transport hop
+    author:      Optional[str]   # Ed25519 pubkey hex, or None if unsigned
+    seat:        Optional[int]   # claimed gameplay identity
+    hand:        Optional[int]
+    fingerprint: str             # identity of the signed thing
+    verified:    bool            # arrived inside a verified wire envelope
+    local:       bool            # self-delivery: no wire round-trip
+    envelope:    dict            # original, forwarded unchanged when relaying
+
+
 class Session:
     """Tracks lobby membership and drives the LOBBY -> PLAYING transition."""
 
@@ -250,7 +312,8 @@ class Session:
                  transport=None, clock: Optional[Clock] = None,
                  sink: Optional[EventSink] = None,
                  require_prevention: bool = False,
-                 master_secret: Optional[bytes] = None):
+                 master_secret: Optional[bytes] = None,
+                 author_mode: Optional[str] = None):
         # The one serialized execution context for this session's
         # protocol state. Created first: every field below is only ever
         # mutated while this is held.
@@ -269,6 +332,36 @@ class Session:
             from holdem.p2p import transport as _t_module
             transport = _t_module
         self._transport = transport
+
+        # Which authorization rule this session runs under, decided ONCE and
+        # readable afterwards. There is no default: a transport must declare
+        # whether what it delivers has been signature-verified, or the caller
+        # must state the mode outright.
+        #
+        # Silence is an ERROR rather than compatibility mode, and that is the
+        # point of the whole arrangement. Treating an undeclared transport as
+        # compat would be the same implicit downgrade this refactor removed
+        # from _seat_author_ok, merely relocated into capability detection:
+        # add a transport, forget one attribute, and the session quietly
+        # concludes "no declaration -> compat -> trust the delivering
+        # connection". A missing declaration is not evidence that conn_id
+        # trust is safe; it is evidence that nobody has said.
+        if author_mode is None:
+            declared = getattr(transport, "delivers_verified_envelopes", None)
+            if not isinstance(declared, bool):
+                raise TypeError(
+                    f"{getattr(transport, '__name__', type(transport).__name__)} "
+                    "does not declare delivers_verified_envelopes (bool). A "
+                    "transport must state whether what it delivers has been "
+                    "signature-verified, because that decides whether seat "
+                    "authority comes from the signing key or from the "
+                    "delivering connection. Set the attribute on the "
+                    "transport, or pass author_mode= explicitly.")
+            author_mode = (AUTHOR_MODE_WIRE if declared
+                           else AUTHOR_MODE_COMPAT)
+        if author_mode not in (AUTHOR_MODE_WIRE, AUTHOR_MODE_COMPAT):
+            raise ValueError(f"unknown author_mode {author_mode!r}")
+        self.author_mode = author_mode
 
         # --- structured event logging (Phase 4) ---
         self._log_sink: EventSink = sink if sink is not None else NullSink()
@@ -463,20 +556,24 @@ class Session:
             self._peer_last_hash[conn_id] = msg["hash"]
 
         t = msg.get("type")
-        body = self._hostless_body(msg) if t in _HOSTLESS_PAYLOAD_TYPES else msg
+        body = msg
         if t in _HOSTLESS_PAYLOAD_TYPES:
-            # Sequence is checked HERE, for all eight types together, because
-            # the counter that produces it is stamped in one place for all
-            # eight (_send_hostless). Validating a subset would be worse than
-            # validating none: the sender advances the counter on every
-            # hostless send, so a receiver watching only some types sees the
-            # others as gaps and voids a healthy hand. That is exactly what
-            # happened when this check was first wired into the deal path
-            # alone -- a bet_action between two deal messages looked like
-            # suppression.
-            if not self._hostless_seq_ok(conn_id, msg, body):
+            # The peer-authored, host-relayed ingress pipeline. Every step
+            # runs exactly once, in this order, for all eight types:
+            #
+            #   normalize -> author/seat -> authorize -> sequence -> relay
+            #
+            # then the typed handler below applies hand scope and gameplay.
+            # These responsibilities used to be spread across handle_message,
+            # _hostless_body, _hostless_seq_ok, _maybe_relay and each
+            # handler, with authorization repeated in three of them. That was
+            # correct by repetition rather than by structure: nothing stopped
+            # the copies drifting, and each copy had to re-derive the author
+            # from a dict that only conventionally still carried it.
+            ctx = self._normalize_hostless(conn_id, msg)
+            if not self._admit_hostless(ctx):
                 return
-            self._maybe_relay(conn_id, t, msg, body)
+            body = ctx.body
         if t == "player_info":
             self._on_player_info(conn_id, msg)
         elif t == "player_list":
@@ -517,28 +614,50 @@ class Session:
             self._on_timeout_proposal(conn_id, body)
 
     @staticmethod
-    def _hostless_body(msg: dict) -> dict:
-        """Unwrap a verified wire envelope for the hostless state machines.
+    def _hostless_projection(msg: dict):
+        """(body, author, enveloped) -- the pure representation rule.
 
-        The coordinator uses flat dictionaries internally. Real transport
-        carries those fields inside the signed ``payload`` envelope, while
-        the in-memory harness delivers the flat form directly.
+        The single definition of how the two shapes a hostless message can
+        arrive in map onto the flat form the state machines use. Session
+        state is not consulted, so both the instance path
+        (_normalize_hostless) and the static view (_hostless_body) share it
+        rather than each reimplementing the unwrap.
         """
         payload = msg.get("payload")
         if not isinstance(payload, dict):
-            return dict(msg)
+            body = dict(msg)
+            author = body.get("pubkey")
+            return body, (author if isinstance(author, str) else None), False
         body = dict(payload)
         body["type"] = msg.get("type")
-        # Carry the ENVELOPE's author through the unwrap. Seat authority is
-        # the signing key, and it lives on the envelope, not in the payload
-        # -- dropping it here would make every remote hostless message
-        # unauthorizable. A payload-supplied "pubkey" must never win: the
-        # envelope's is the one wire.unpack verified.
-        if "pubkey" in msg:
-            body["pubkey"] = msg["pubkey"]
+        # The author lives on the ENVELOPE. A payload-supplied "pubkey" must
+        # never win -- only the envelope's was verified by wire.unpack -- so
+        # the payload's copy is overwritten or removed, never merged.
+        author = msg.get("pubkey")
+        if isinstance(author, str):
+            body["pubkey"] = author
         else:
+            author = None
             body.pop("pubkey", None)
-        return body
+        return body, author, True
+
+    @staticmethod
+    def _hostless_body(msg: dict) -> dict:
+        """The flat projection of a hostless message, for the state machines.
+
+        A view over _hostless_projection, which is the representation rule.
+        Kept static and with this signature because the adversarial suites
+        call it directly (some unbound, on the class) to assert what
+        survives the unwrap -- notably that the ENVELOPE's author wins over
+        any pubkey the payload tries to supply.
+
+        On the ingress path nothing relies on the author riding inside this
+        dict any more: HostlessInbound carries it as a named field. That
+        implicit contract -- "remember this dict still has the pubkey on it"
+        -- is what the #30 defect broke, silently, while the in-memory suite
+        stayed green because it takes the compat rule and never looks.
+        """
+        return Session._hostless_projection(msg)[0]
 
     # ------------------------------------------------------------------
     # Mental-poker deal (L5) — hostless, peer-symmetric. Each peer drives
@@ -812,59 +931,90 @@ class Session:
                 out.append({"seat": seat, "missing": missing})
         return out
 
-    def _hostless_seq_ok(self, conn_id: str, envelope: dict,
-                         body: dict) -> bool:
-        """Gate for every inbound hostless message. False means drop.
+    def _normalize_hostless(self, conn_id: str, msg: dict) -> HostlessInbound:
+        """The representation boundary: wire envelope or flat dict -> record.
 
-        The mirror of _send_hostless: one stamping point on the way out, one
-        validating point on the way in, both covering the same eight types.
+        Exactly one place converts between the two shapes a hostless message
+        can arrive in, and it names every identity it extracts instead of
+        leaving them to be re-derived downstream.
 
-        Deliberately permissive in three cases, each of which must NOT
-        consume a sequence number:
-
-        * self-delivery -- the local driver feeds its own emissions back
-          without a wire round-trip, and the sender already counted them on
-          the way out;
-        * an unattributable message (no integer seat) -- there is no author
-          to sequence, and the type's own handler still drops it;
-        * a message whose authorship does not check out -- returning False
-          here would be indistinguishable to a caller from a sequence
-          failure, but far worse than that, advancing the counter would let
-          any stranger desynchronise a real seat's stream and void the hand
-          on the next legitimate message. Authorship must be settled before
-          a sequence number means anything, so an unauthorized message is
-          passed through untouched for the handler to reject with its own
-          diagnosis.
-
-        Ordering matters relative to _maybe_relay, which runs after this: a
-        replayed or out-of-sequence message is dropped BEFORE the host can
-        fan it out, so the relay cannot amplify a replay to the whole table.
+        ``verified`` records WHICH shape it was, rather than letting later
+        code infer it from the presence of a key. That inference is what made
+        the compat fallback invisible: a flat dict and a stripped envelope
+        look identical once unwrapped.
         """
-        if conn_id == self.local_conn_id:
-            return True
+        body, author, enveloped = self._hostless_projection(msg)
         seat = body.get("seat", body.get("seat_from"))
-        if not isinstance(seat, int) or isinstance(seat, bool):
-            return True
-        if not self._seat_author_ok(conn_id, body, seat):
-            return True
+        if not _is_seat(seat):
+            seat = None
+        raw_hand = body.get("hand", self._hand_no)
         try:
-            hand = int(body.get("hand", self._hand_no))
+            hand = None if isinstance(raw_hand, bool) else int(raw_hand)
         except (TypeError, ValueError):
+            hand = None
+
+        return HostlessInbound(
+            mtype       = msg.get("type"),
+            body        = body,
+            conn_id     = conn_id,
+            author      = author,
+            seat        = seat,
+            hand        = hand,
+            fingerprint = self._envelope_fingerprint(msg, body),
+            verified    = enveloped and author is not None,
+            local       = conn_id == self.local_conn_id,
+            envelope    = msg,
+        )
+
+    def _admit_hostless(self, ctx: HostlessInbound) -> bool:
+        """Authorize, sequence and relay -- once each. False means drop.
+
+        The single gate between the wire and the typed handlers. Everything
+        past this point may assume the message is from the seat it claims.
+        """
+        if not ctx.local and ctx.seat is not None:
+            if not self._author_owns_seat(ctx.conn_id, ctx.author, ctx.seat):
+                _log.warning(
+                    "session: %s via %s claims seat %s but is not signed by "
+                    "that seat's bound key -- dropping",
+                    ctx.mtype, ctx.conn_id, ctx.seat)
+                return False
+            if not self._sequence_ok(ctx):
+                return False
+        # Relayed only after authorization and the replay/equivocation gate,
+        # so the host neither amplifies a message its recipients would reject
+        # nor re-broadcasts a replay.
+        self._relay_if_host(ctx)
+        return True
+
+    def _sequence_ok(self, ctx: HostlessInbound) -> bool:
+        """Replay / equivocation gate for an ALREADY-AUTHORIZED message.
+
+        Authorship is settled by the caller. This must not re-decide it: a
+        number is only meaningful once it is known whose stream it belongs
+        to, and consuming one on an unauthorized message would let a stranger
+        desynchronise a real seat.
+
+        Checked for all eight types together, because the counter that
+        produces it is stamped for all eight in one place (_send_hostless).
+        Validating a subset is worse than validating none -- the sender
+        advances on every hostless send, so a receiver watching only some
+        types reads the others as gaps.
+        """
+        if ctx.hand is None:
             return True              # _hand_msg_ok owns malformed hand numbers
-        if hand != self._hand_no:
+        if ctx.hand != self._hand_no:
             # Not a stream we are tracking yet. A future-hand message is
             # buffered by _hand_msg_ok and fed back through handle_message by
             # _replay_buffer, so recording it here would mark it seen on the
             # first pass and drop it as a duplicate on the second -- losing
             # precisely the early key_announce the buffer exists to keep.
-            # Stale hands are dropped downstream.
             return True
         return self._author_seq_ok(
-            seat, hand, body, self._envelope_fingerprint(envelope, body))
+            ctx.seat, ctx.hand, ctx.body, ctx.fingerprint)
 
-    def _maybe_relay(self, conn_id: str, mtype: str, envelope: dict,
-                     body: dict) -> None:
-        """Host only: forward an authenticated hostless envelope onward.
+    def _relay_if_host(self, ctx: HostlessInbound) -> None:
+        """Host only: forward an ALREADY-AUTHORIZED envelope onward.
 
         The production topology is a star -- only the host listens, joiners
         only dial it -- while the hostless protocol is peer-symmetric. A
@@ -880,10 +1030,14 @@ class Session:
         verifies over canonical field values, not over the original bytes,
         and _sign_frame leaves an already-signed message alone.
 
-        Forwarded ONLY after the author check below has passed, so the host
-        does not amplify a message its own recipients would reject. A
-        hostile author is dropped at the host rather than fanned out to the
-        table.
+        Authorization is NOT repeated here. _admit_hostless has already
+        established that ctx.author owns ctx.seat and that the message is
+        neither a replay nor an equivocation, and it drops anything that
+        fails before calling this. A second lookup here would be a second
+        copy of the rule that could drift from the first -- and it did not
+        even agree with the first for free: reached through a different
+        argument it could reach a different answer, which is the whole
+        reason authorization moved to one place.
 
         Never echoed back to the connection it arrived on: the author has
         already applied it locally, and a returned copy would be a
@@ -891,22 +1045,16 @@ class Session:
         """
         if not self.is_host:
             return
-        if conn_id == self.local_conn_id:
+        if ctx.local:
             return                       # our own emission, already fanned out
-        seat = body.get("seat", body.get("seat_from"))
-        if not isinstance(seat, int):
-            return
-        if not self._seat_author_ok(conn_id, body, seat):
-            _log.warning("session: refusing to relay %s from %s claiming "
-                         "seat %s -- not signed by that seat's bound key",
-                         mtype, conn_id, seat)
-            return
+        if ctx.seat is None:
+            return                       # unattributable; nothing to forward for
         forward = getattr(self._transport, "broadcast_except", None)
         if forward is None:
             _log.warning("session: transport cannot relay (no "
-                         "broadcast_except); %s stays unforwarded", mtype)
+                         "broadcast_except); %s stays unforwarded", ctx.mtype)
             return
-        forward(conn_id, envelope)
+        forward(ctx.conn_id, ctx.envelope)
 
     def _bind_seat_keys(self) -> None:
         """Freeze seat -> signing key before the first hand.
@@ -953,22 +1101,46 @@ class Session:
         Self-delivery is exempt: the local driver feeds its own emissions
         back without a wire round-trip, so there is no envelope to check.
 
-        Fallback: with no binding established there is no author identity
-        to check against, and the pre-existing conn_id rule applies. That
-        is the in-memory harness, which carries no envelopes at all. On the
-        production path it is unreachable -- wire.unpack requires a pubkey
-        field on every message, and the host publishes signing keys for
-        every seat -- but it is a fallback rather than a hole and is
-        recorded as such.
+        Retained with this signature because the adversarial suites call it
+        directly. The ingress pipeline uses _author_owns_seat, which takes
+        the author explicitly instead of digging it back out of a dict.
+        """
+        return self._author_owns_seat(conn_id, msg.get("pubkey"), seat)
+
+    def _author_owns_seat(self, conn_id: str, author, seat: int) -> bool:
+        """Does ``author`` (an Ed25519 pubkey hex) speak for ``seat``?
+
+        The one implementation of the authorization rule. Takes the author
+        as an argument rather than re-deriving it, so no caller can lose it
+        on the way in -- which is exactly how the #30 defect worked.
+
+        With no bindings established at all the behaviour depends on the
+        session's author_mode, and that is now an explicit decision rather
+        than an accident of initialisation order:
+
+        * AUTHOR_MODE_WIRE (production) fails CLOSED. Bindings are frozen
+          before the first hand from verified envelopes; if they are absent
+          when a remote message arrives, the thing that would authorize it
+          does not exist, and standing in the delivering connection means
+          trusting the hop instead of the author.
+        * AUTHOR_MODE_COMPAT (in-memory and unsigned harnesses) uses the
+          conn_id rule, because those transports carry no envelopes and
+          there is no author to check.
         """
         if not (0 <= seat < len(self._seat_order)):
             return False
         if conn_id == self.local_conn_id:
             return True
         if self._seat_keys:
-            author = msg.get("pubkey")
             expected = self._seat_keys.get(seat)
-            return bool(expected) and isinstance(author, str) and author == expected
+            return (bool(expected) and isinstance(author, str)
+                    and author == expected)
+        if self.author_mode == AUTHOR_MODE_WIRE:
+            _log.warning(
+                "session: no seat keys bound; refusing seat %s from %s in "
+                "wire mode rather than trusting the delivering connection",
+                seat, conn_id)
+            return False
         return self._seat_order[seat] == conn_id
 
     def _hand_msg_ok(self, conn_id: str, msg: dict) -> bool:
@@ -1033,14 +1205,15 @@ class Session:
             return
         if self._deal_driver is None or self.hand_voided:
             return                              # no active hand yet
-        # Seat-spoofing defence: the seat a message claims must be the
-        # sender's own seat (the transport already authenticates conn_id).
+        # Author authorization is NOT repeated here: _admit_hostless settled
+        # it at ingress for all eight types. An unattributable message (no
+        # integer seat) still has to go, though -- ingress lets it through
+        # for its type's own handler to judge, and the deal driver routes by
+        # seat, so it cannot route this.
         claimed = msg.get("seat", msg.get("seat_from"))
-        if not (isinstance(claimed, int)
-                and self._seat_author_ok(conn_id, msg, claimed)):
-            _log.warning("session: deal msg via %s claims seat %s but is not "
-                         "signed by that seat's bound key — dropping",
-                         conn_id, claimed)
+        if not isinstance(claimed, int) or isinstance(claimed, bool):
+            _log.warning("session: deal msg via %s has no usable seat "
+                         "(%r) — dropping", conn_id, claimed)
             return
         self._deal_driver.handle(dict(msg))
         self._flush_deal()
@@ -1049,32 +1222,30 @@ class Session:
         """Fail the current hand closed when any authenticated seat voids it."""
         if not self._hand_msg_ok(conn_id, msg):
             return
-        try:
-            seat = int(msg["seat"])
-        except (KeyError, TypeError, ValueError):
-            return
-        if not self._seat_author_ok(conn_id, msg, seat):
-            _log.warning("session: hand_void via %s claims seat %s but is "
-                         "not signed by that seat's bound key -- dropping",
-                         conn_id, seat)
+        # Authorized at ingress; see _admit_hostless. What ingress could NOT
+        # authorize is a message whose seat is not an integer -- it extracts
+        # the claimed seat with an isinstance check and lets anything else
+        # through for the type's own handler to judge. So this must refuse
+        # it rather than coerce: int("1") would revive a seat ingress
+        # declined to authorize, and apply it unchecked.
+        if not _is_seat(msg.get("seat")):
             return
         reason = str(msg.get("reason", "peer voided the hand"))[:512]
         self._void_hand(reason, announce=False)
 
     def _on_session_end(self, conn_id: str, msg: dict) -> None:
         """Receive final match state, including on already-busted spectators."""
+        # Authorized at ingress; see _admit_hostless. The seat is checked for
+        # shape only, and NOT coerced -- ingress declines to authorize a
+        # non-integer seat, so int("1") here would apply one it refused.
+        if not _is_seat(msg.get("seat")):
+            return
         try:
-            seat = int(msg["seat"])
             hand = int(msg["hand"])
             stacks = [int(v) for v in msg["stacks"]]
             raw_winner = msg.get("winner")
             winner = None if raw_winner is None else int(raw_winner)
         except (KeyError, TypeError, ValueError):
-            return
-        if not self._seat_author_ok(conn_id, msg, seat):
-            _log.warning("session: session_end via %s claims seat %s but is "
-                         "not signed by that seat's bound key -- dropping",
-                         conn_id, seat)
             return
         if hand < self._hand_no or len(stacks) != len(self._seat_order):
             return
@@ -1344,18 +1515,16 @@ class Session:
             return
         if self._replica is None or self.hand_voided:
             return
+        # Authorized at ingress; see _admit_hostless. Seat shape is checked
+        # rather than coerced, for the same reason as session_end.
+        if not _is_seat(msg.get("seat")):
+            return
         try:
             seq = int(msg["seq"])
             seat = int(msg["seat"])
             action = str(msg["action"])
             amount = int(msg.get("amount", 0))
         except (KeyError, ValueError, TypeError):
-            return
-        # seat-spoofing defence, same rule as the deal messages
-        if not self._seat_author_ok(conn_id, msg, seat):
-            _log.warning("session: bet_action via %s claims seat %s but is not "
-                         "signed by that seat's bound key — dropping",
-                         conn_id, seat)
             return
         self._safe_emit(
             "action_received",

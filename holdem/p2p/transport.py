@@ -142,6 +142,14 @@ _worker_lock = threading.Lock()
 _task_error_callbacks: list[Callable] = []
 
 # C-3: Maximum allowed message size (1 MB) to prevent OOM DoS
+#: Everything this module hands to a Session has been through wire.unpack,
+#: so its "pubkey" is a VERIFIED author rather than a claim. Session reads
+#: this to choose AUTHOR_MODE_WIRE, under which a missing seat-key binding
+#: fails closed instead of falling back to trusting the delivering
+#: connection. Removing it silently downgrades production to conn_id trust,
+#: which is why a test asserts it is present and True.
+delivers_verified_envelopes = True
+
 MAX_MSG = 1 << 20  # 1 048 576 bytes
 
 # How long stop() waits for cancelled tasks to finish before reporting them
