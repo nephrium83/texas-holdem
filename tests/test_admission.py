@@ -141,18 +141,42 @@ def test_a_replayed_response_from_an_earlier_connection_fails():
 
 
 def test_a_response_signed_by_a_different_joiner_key_fails():
-    """K2 cannot answer the challenge K1 asked for.
-
-    Without this an attacker could let a legitimate joiner start a
-    handshake and then answer it under its own identity, inheriting the
-    admission the other peer's hello set up.
-    """
+    """K2 cannot answer the challenge K1 asked for."""
     h = _host_adm()
     cn = adm.new_nonce()
     sn = bytes.fromhex(h.on_hello("c1", K1, cn)["server_nonce"])
     assert h.on_response("c1", K2, cn, sn,
                          _mac_for(cn, sn, joiner=K2)) is False
     assert not h.is_admitted("c1")
+
+
+def test_a_capability_holder_cannot_hijack_another_peers_handshake():
+    """The attack the sender check actually exists for.
+
+    The weak version of this test signs as K2 AND macs as K2, which fails
+    on the MAC alone -- so it passes with the sender check removed, and a
+    control proved exactly that.
+
+    The real adversary is an INSIDER: someone who holds the invite (so can
+    compute any MAC) and wants to answer a handshake a different peer
+    started. It signs as K2 but macs over K1's transcript, which is the
+    transcript the host will check against. Only the sender comparison
+    stops it -- and without that stop the connection is admitted as K1
+    while K2 is the peer actually holding it, which is precisely the
+    identity confusion the binding exists to prevent.
+    """
+    h = _host_adm()
+    cn = adm.new_nonce()
+    sn = bytes.fromhex(h.on_hello("c1", K1, cn)["server_nonce"])
+
+    hijack_mac = _mac_for(cn, sn, joiner=K1)     # valid for K1's transcript
+    assert h.on_response("c1", K2, cn, sn, hijack_mac) is False, (
+        "K2 answered a handshake K1 started, using a MAC over K1's "
+        "transcript -- an invite holder can always compute that MAC")
+    assert not h.is_admitted("c1")
+    assert h.admitted_key("c1") is None, (
+        "the connection was admitted under an identity that is not the "
+        "peer holding it")
 
 
 @pytest.mark.parametrize("field", ["client_nonce", "server_nonce"])
@@ -286,6 +310,39 @@ def test_a_challenge_from_the_wrong_host_key_yields_no_mac():
     cn = bytes.fromhex(j.hello_payload()["client_nonce"])
     assert j.on_challenge(K2, cn, adm.new_nonce()) is None
     assert j.verified_host is False
+
+
+def test_a_key_sharing_the_old_eight_byte_prefix_is_still_refused():
+    """The reason V2 pins 32 bytes instead of V1's 8.
+
+    V1 verified the host with startswith() on a truncated hex prefix, i.e.
+    a 64-bit target -- findable, and the exact thing an impostor would aim
+    at. A test whose "wrong key" differs in byte 0 cannot tell a 32-byte
+    comparison from an 8-byte one, and a control that truncated the check
+    fired nothing until this existed.
+
+    This key agrees with the pinned host for the whole of V1's window and
+    disagrees immediately after.
+    """
+    near_miss = HOST_KEY[:8] + bytes([0xFF]) * 24
+    assert near_miss[:8] == HOST_KEY[:8], "precondition: prefixes collide"
+    assert near_miss != HOST_KEY
+
+    j = _joiner_adm()
+    cn = bytes.fromhex(j.hello_payload()["client_nonce"])
+    assert j.on_challenge(near_miss, cn, adm.new_nonce()) is None, (
+        "a key matching only the first 8 bytes was accepted as the host")
+    assert j.verified_host is False
+
+
+def test_a_near_miss_key_cannot_complete_the_accept_either():
+    """Same collision, checked on the second host-authenticity gate."""
+    near_miss = HOST_KEY[:8] + bytes([0xFF]) * 24
+    j = _joiner_adm()
+    cn = bytes.fromhex(j.hello_payload()["client_nonce"])
+    sn = adm.new_nonce()
+    assert j.on_challenge(HOST_KEY, cn, sn) is not None
+    assert j.on_accept(near_miss, cn, sn) is False
 
 
 def test_a_challenge_echoing_the_wrong_client_nonce_is_refused():
