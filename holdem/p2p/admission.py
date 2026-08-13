@@ -33,10 +33,16 @@ transcript of values both sides already know.
 from __future__ import annotations
 
 import hmac
+import logging
 import secrets
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Dict, Optional
+
+# Logs record DECISIONS and identities, never the admission secret and
+# never a MAC. Public keys and conn_ids are fine -- they are already on the
+# wire; the secret is the one value that never appears anywhere but memory.
+_log = logging.getLogger(__name__)
 
 # Domain separation, per cryptographic STATEMENT rather than per protocol.
 # There is one MAC in this handshake and it says exactly one thing: "the
@@ -181,6 +187,14 @@ class HostAdmission:
             clock = _time.monotonic
         self._now = clock
 
+    def __repr__(self) -> str:
+        # Explicit, so the secret cannot reach a log line, a traceback, or a
+        # debugger transcript through an incidental repr of a container that
+        # happens to hold this object.
+        return (f"<HostAdmission host={self._host_pubkey.hex()[:16]} "
+                f"admitted={len(self._admitted)} pending={len(self._pending)} "
+                f"secret=<redacted>>")
+
     # -- queries -------------------------------------------------------
     def is_admitted(self, conn_id: str) -> bool:
         return conn_id in self._admitted
@@ -210,7 +224,21 @@ class HostAdmission:
         challenge rather than adding one. Otherwise a peer could hold open
         an unbounded number of live challenges on one socket, and each
         would remain independently answerable.
+
+        An ALREADY-ADMITTED connection is refused outright. Connection
+        identity is immutable once established: admitting K1 and then
+        letting K2 re-handshake on the same socket would be a
+        protocol-supported key-change hatch sitting next to the binding
+        that exists to prevent exactly that. Authenticating again is
+        legitimate -- on a new connection, with a fresh transcript, after a
+        disconnect has cleared this one.
         """
+        if conn_id in self._admitted:
+            _log.warning(
+                "admission: refusing a second hello on %s -- already "
+                "admitted as %s; reconnect to authenticate again",
+                conn_id, self._admitted[conn_id].hex()[:16])
+            return None
         self._expire()
         if (not isinstance(client_nonce, (bytes, bytearray))
                 or len(client_nonce) != NONCE_LEN):
@@ -293,6 +321,10 @@ class JoinerAdmission:
         self._client_nonce: Optional[bytes] = None
         self._server_nonce: Optional[bytes] = None
         self.verified_host = False
+
+    def __repr__(self) -> str:
+        return (f"<JoinerAdmission host={self._host_pubkey.hex()[:16]} "
+                f"verified={self.verified_host} secret=<redacted>>")
 
     @property
     def host_pubkey(self) -> bytes:
