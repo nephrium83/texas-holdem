@@ -332,6 +332,78 @@ def test_lan_and_relay_use_only_public_routing_data():
         "multicast announce is no longer publishing only the public token")
 
 
+# ── the UI-marshalling seam ───────────────────────────────────────────────
+
+_WIDGET_MUTATORS = (".config(", ".destroy()", ".grid(", ".pack(",
+                    ".insert(", ".delete(", ".configure(")
+
+
+def _join_worker_region() -> list:
+    """Source lines of the Join dialog from the seam to the end of _do_connect.
+
+    Everything in this span runs on the connection worker thread or on a
+    transport callback -- never on Tk's thread.
+    """
+    src = inspect.getsource(_onboarding).split("\n")
+    start = next(i for i, ln in enumerate(src) if "def _ui_post(fn):" in ln)
+    dial = next(i for i in range(start, len(src))
+                if src[i].strip().startswith("def _do_connect():"))
+    end = next(i for i in range(dial + 1, len(src))
+               if src[i].strip().startswith("threading.Thread(target=_do_connect"))
+    return src[start:end]
+
+
+def test_the_connection_worker_cannot_touch_widgets_directly():
+    """Every UI effect off the Tk thread goes through the one seam.
+
+    Not a style rule. This worker is the thread running admission, and
+    Tkinter is not thread-safe: a direct widget call from here is not
+    reliably a visible error, it is undefined behaviour that usually looks
+    fine. When it does raise, it abandons the handshake midway and leaves
+    transport and Session state half-established -- an unrelated-looking
+    failure sitting directly on the authentication path.
+
+    Checked by paren depth rather than by line matching, so a mutation
+    inside a multi-line _ui_post(lambda: ...) still reads as marshalled and
+    a bare one does not.
+    """
+    depth = 0
+    offenders = []
+    for line in _join_worker_region():
+        code = line.split("#", 1)[0]
+        if not code.strip():
+            continue
+        marshalled = depth > 0
+        if "_ui_post(" in code:
+            marshalled = True
+        if not marshalled and any(m in code for m in _WIDGET_MUTATORS):
+            offenders.append(code.strip())
+        # Track how many _ui_post( calls are still open across lines.
+        for idx, ch in enumerate(code):
+            if code.startswith("_ui_post(", idx) or (
+                    ch == "(" and code[max(0, idx - 8):idx] == "_ui_post"):
+                depth += 1
+            elif ch == "(" and depth > 0:
+                depth += 1
+            elif ch == ")" and depth > 0:
+                depth -= 1
+
+    assert offenders == [], (
+        "the connection worker mutates Tk widgets directly instead of going "
+        f"through _ui_post: {offenders}")
+
+
+def test_the_worker_region_does_not_bypass_the_seam():
+    """win.after is the seam's implementation, not an alternative to it."""
+    region = "\n".join(ln.split("#", 1)[0] for ln in _join_worker_region())
+    body_start = region.index("def _ui_post(fn):")
+    after_seam = region[region.index("win.after(0, fn)", body_start)
+                        + len("win.after(0, fn)"):]
+    assert "win.after(" not in after_seam, (
+        "the worker calls win.after directly; there must be exactly one "
+        "marshalling seam so it cannot be partially adopted")
+
+
 @pytest.mark.parametrize("mtype", sorted(adm.ADMISSION_TYPES))
 def test_admission_traffic_never_reaches_the_session(mtype):
     """The driver consumes the handshake; Session sees ordinary traffic only."""

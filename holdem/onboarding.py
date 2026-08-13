@@ -927,6 +927,28 @@ class OnboardingFlow:
             _sess_ref            = [None]   # C-2: share Session across nested fns
             _auth_ref            = [None]   # the JoinAuthenticator
 
+            def _ui_post(fn):
+                """The ONE way work off the Tk thread touches the UI.
+
+                _do_connect runs on a worker thread and the transport
+                delivers messages on its own, so every UI effect from either
+                has to be marshalled. Tkinter is not thread-safe: a direct
+                widget call from here is not reliably a visible error, it is
+                undefined behaviour that usually looks fine.
+
+                That matters beyond tidiness. This worker is the thread
+                running admission; an exception raised inside a stray widget
+                call would abandon the handshake midway, leaving transport
+                and Session state half-established -- the kind of
+                unrelated-looking failure that turns into a security-path
+                bug later. Routing every effect through one seam keeps the
+                authentication flow the only thing that can interrupt it.
+
+                Pinned structurally by tests/test_join_auth.py.
+                """
+                win.after(0, fn)
+
+
             # ---- authentication is armed BEFORE anything is dialed ----
             #
             # Ordering is the whole point. The transport's reader thread
@@ -951,10 +973,10 @@ class OnboardingFlow:
             _sess_ref[0] = sess              # C-2: expose to _handle_start
 
             def _on_game_start(payload):
-                win.after(0, lambda: _handle_start(payload))
+                _ui_post(lambda: _handle_start(payload))
 
             def _on_players(players):
-                win.after(0, lambda: _update_joined_ui(players))
+                _ui_post(lambda: _update_joined_ui(players))
 
             sess.on_player_list_changed = _on_players
             sess.on_game_start          = _on_game_start
@@ -964,13 +986,13 @@ class OnboardingFlow:
             # lobby that authenticates correctly while corrupting the widget
             # tree is not an improvement.
             def _authenticated(conn_id):
-                win.after(0, lambda m=_conn_method_ref[0]: status_lbl.config(
+                _ui_post(lambda m=_conn_method_ref[0]: status_lbl.config(
                     text=f"Authenticated ({m}) — waiting for host to start…",
                     fg=_ACCENT))
-                win.after(0, _show_ready_btn)
+                _ui_post(_show_ready_btn)
 
             def _auth_failed(reason):
-                win.after(0, lambda r=reason: _on_error(
+                _ui_post(lambda r=reason: _on_error(
                     "Host verification failed",
                     "The host did not authenticate against this room code.\n"
                     f"{r}\n\nPossible man-in-the-middle — connection aborted."))
@@ -1015,7 +1037,7 @@ class OnboardingFlow:
                                 "Direct connect failed (%s); trying relay",
                                 direct_exc,
                             )
-                            win.after(0, lambda: status_lbl.config(
+                            _ui_post(lambda: status_lbl.config(
                                 text="Direct failed — trying relay…",
                                 fg=_DIM,
                             ))
@@ -1040,7 +1062,7 @@ class OnboardingFlow:
                                         discovery_token, timeout=5
                                     )
                                     if not host_addr:
-                                        win.after(0, lambda e=relay_exc: _on_error(
+                                        _ui_post(lambda e=relay_exc: _on_error(
                                             "Connection failed",
                                             f"Direct and relay both failed:\n{e}",
                                         ))
@@ -1052,7 +1074,7 @@ class OnboardingFlow:
                                     discovery_token, timeout=5
                                 )
                                 if not host_addr:
-                                    win.after(0, lambda e=direct_exc: _on_error(
+                                    _ui_post(lambda e=direct_exc: _on_error(
                                         "Connection failed",
                                         f"Direct connect failed and no relay available:\n{e}",
                                     ))
@@ -1063,7 +1085,7 @@ class OnboardingFlow:
                         # No STUN address in code → fall back to LAN multicast
                         host_addr = _transport.find_peer(discovery_token, timeout=15)
                         if not host_addr:
-                            win.after(0, lambda: _on_error(
+                            _ui_post(lambda: _on_error(
                                 "Host not found",
                                 "Could not locate the host on the local network.\n\n"
                                 "If the host is on a different network, ask them for "
@@ -1086,13 +1108,13 @@ class OnboardingFlow:
                     _conn_method_ref[0] = conn_method[0]
                     _auth_ref[0].begin(conn_id)
 
-                    win.after(0, lambda m=conn_method[0]: status_lbl.config(
+                    _ui_post(lambda m=conn_method[0]: status_lbl.config(
                         text=f"Connected ({m}) — authenticating host…",
                         fg=_DIM,
                     ))
 
                 except Exception as exc:
-                    win.after(0, lambda e=exc: _on_error("Connection failed", str(e)))
+                    _ui_post(lambda e=exc: _on_error("Connection failed", str(e)))
 
 
             def _on_error(title, msg):
@@ -1138,7 +1160,7 @@ class OnboardingFlow:
 
                 sess = _sess_ref[0]
                 if sess is None:
-                    win.after(0, lambda: _on_error(
+                    _ui_post(lambda: _on_error(
                         "Connection error",
                         "Session was lost before the game started.",
                     ))
@@ -1156,7 +1178,7 @@ class OnboardingFlow:
                 # Asserted rather than assumed: reaching a game start on an
                 # unauthenticated session would mean the gate leaked.
                 if not getattr(sess, "_host_authenticated", True):
-                    win.after(0, lambda: _on_error(
+                    _ui_post(lambda: _on_error(
                         "Host verification failed",
                         "The game started on a connection that never "
                         "authenticated against this room code.",
