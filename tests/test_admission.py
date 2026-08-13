@@ -40,7 +40,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p import admission as adm
 from holdem.p2p import invite as inv
-from holdem.p2p.session import Session
+from holdem.p2p.session import (
+    AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Session,
+)
 from holdem.p2p.timeout import FakeClock
 
 HOST_KEY   = bytes(range(32))
@@ -653,3 +655,204 @@ def test_stun_regeneration_keeps_the_same_lobby_authenticable():
         adm.transcript(bytes.fromhex(first["discovery_token"]), HOST_KEY, K1,
                        cn, sn))
     assert live.on_response("c1", K1, cn, sn, mac) is True
+
+
+# ═══════════════════════ THE SHIPPED HOST PATH (review finding 1)
+
+def test_a_real_host_session_answers_a_hello_with_a_challenge():
+    """The defect an independent review found that 1249 green tests did not.
+
+    HostAdmission.on_hello/on_response/accept_payload had ZERO callers in
+    holdem/. The only implementation lived in tests/prod_peer.py, so a real
+    host received admission_hello and replied with nothing: no challenge,
+    no admission, nobody could join a hosted game. The perimeter's claim
+    held only vacuously, because no connection could ever be admitted.
+
+    Every host-side test called HostAdmission directly or drove the
+    harness. This one drives a real Session, which is what the application
+    actually runs.
+    """
+    h = _host_adm()
+    t = _Spy()
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=t, admission=h)
+    s.local_conn_id = "host"
+
+    s.handle_message("c1", {
+        "type": "admission_hello", "pubkey": K1.hex(), "ts": 1,
+        "prev": "0" * 64, "sig": "ff" * 64, "hash": "ab" * 32,
+        "payload": {"client_nonce": adm.new_nonce().hex()}})
+
+    challenges = [m for m in t.sent if m.get("type") == "admission_challenge"]
+    assert challenges, (
+        "a real host Session answered a signed admission_hello with silence; "
+        f"it sent {[m.get('type') for m in t.sent]}")
+    assert "server_nonce" in challenges[0]
+
+
+def test_a_real_host_session_completes_the_whole_handshake():
+    """hello -> challenge -> response -> accept, entirely through Session."""
+    h = _host_adm()
+    t = _Spy()
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=t, admission=h)
+    s.local_conn_id = "host"
+
+    cn = adm.new_nonce()
+    s.handle_message("c1", {"type": "admission_hello", "pubkey": K1.hex(),
+                            "payload": {"client_nonce": cn.hex()}})
+    sn = bytes.fromhex(t.sent[-1]["server_nonce"])
+
+    s.handle_message("c1", {"type": "admission_response", "pubkey": K1.hex(),
+                            "payload": {"client_nonce": cn.hex(),
+                                        "server_nonce": sn.hex(),
+                                        "mac": _mac_for(cn, sn).hex()}})
+
+    assert [m.get("type") for m in t.sent] == [
+        "admission_challenge", "admission_accept"]
+    assert h.is_admitted("c1"), "the Session did not admit a correct response"
+    assert h.admitted_key("c1") == K1
+
+
+def test_a_real_host_session_refuses_a_wrong_secret_and_sends_no_accept():
+    h = _host_adm()
+    t = _Spy()
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=t, admission=h)
+    s.local_conn_id = "host"
+
+    cn = adm.new_nonce()
+    s.handle_message("c1", {"type": "admission_hello", "pubkey": K1.hex(),
+                            "payload": {"client_nonce": cn.hex()}})
+    sn = bytes.fromhex(t.sent[-1]["server_nonce"])
+    s.handle_message("c1", {"type": "admission_response", "pubkey": K1.hex(),
+                            "payload": {"client_nonce": cn.hex(),
+                                        "server_nonce": sn.hex(),
+                                        "mac": _mac_for(
+                                            cn, sn, secret=OTHER_SEC).hex()}})
+    assert "admission_accept" not in [m.get("type") for m in t.sent]
+    assert not h.is_admitted("c1")
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"client_nonce": "zz"}, {"client_nonce": "00" * 4},
+    {"client_nonce": None},
+])
+def test_malformed_handshake_input_is_dropped_not_raised(body):
+    """The only surface an UNADMITTED peer can reach, so it must be inert."""
+    h = _host_adm()
+    t = _Spy()
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=t, admission=h)
+    s.local_conn_id = "host"
+    s.handle_message("c1", {"type": "admission_hello", "pubkey": K1.hex(),
+                            "payload": body})
+    assert not h.is_admitted("c1")
+
+
+# ═══════════════════════ HOST LOSS DOES NOT MIGRATE (review finding 2)
+
+def test_wire_mode_refuses_to_elect_a_replacement_host():
+    """Promotion is incompatible with pinning one exact host key.
+
+    _elect_new_host set is_host = True on a Session built with
+    admission=None, and _admission_ok short-circuits on a missing policy --
+    so a promoted peer admitted anyone. The constructor invariant only ever
+    covered construction.
+
+    Migration is not repaired here, it is refused: the invite every joiner
+    holds names ONE host key, so a promoted peer cannot be authenticated by
+    it. Authenticated authority transfer is a separate protocol.
+    """
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy())
+    s.local_conn_id = "me"
+    s._host_conn_id = "hostconn"
+    s._join_order = ["me", "other"]
+    assert s.author_mode == AUTHOR_MODE_WIRE
+
+    s.handle_disconnect("hostconn")
+
+    assert s.is_host is False, "a wire-mode joiner promoted itself to host"
+    assert s.terminal_state is not None, (
+        "the session survived losing the only host its invite can name")
+    # Asserted through handle_message rather than on _admission_ok: the
+    # session is terminal, so the terminal check upstream is what refuses
+    # traffic here, and probing the gate directly would report an open gate
+    # that nothing can actually reach.
+    s.handle_message("stranger", {
+        "type": "player_info", "pubkey": K2.hex(),
+        "payload": {"nickname": "mallory"}})
+    assert "stranger" not in s.players, (
+        "a terminated session still admitted a stranger to the roster")
+
+
+def test_compat_mode_still_migrates():
+    """The inverse: the old behaviour lives on where it is harmless."""
+    class _Compat(_Spy):
+        delivers_verified_envelopes = False
+
+    s = Session(is_host=False, nickname="J", avatar_b64="",
+                transport=_Compat())
+    s.local_conn_id = "me"
+    s._host_conn_id = "hostconn"
+    s._join_order = ["me", "other"]
+    assert s.author_mode == AUTHOR_MODE_COMPAT
+    s.handle_disconnect("hostconn")
+    assert s.is_host is True, "compat harnesses still rely on migration"
+
+
+# ═══════════════════════ CHAIN AND FAIL-CLOSED (findings 4, 7)
+
+def test_a_roster_naming_a_different_host_key_is_refused():
+    """Closes invite key -> the host's own frozen seat key.
+
+    The roster is host-authoritative, so without this a joiner's seat keys
+    are whatever the host asserted -- including for the one identity the
+    invite already pinned.
+    """
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("host", HOST_KEY)
+
+    near_miss = (HOST_KEY[:8] + bytes([0xFF]) * 24).hex()
+    s.handle_message("host", {
+        "type": "player_list", "pubkey": HOST_KEY.hex(),
+        "payload": {"players": [
+            {"conn_id": "host", "nickname": "H", "is_host": True,
+             "ed25519_pubkey_hex": near_miss}]}})
+    assert "host" not in s.players, (
+        "a roster naming a host key that differs only after byte 8 was "
+        "accepted; the chain would be an 8-byte claim")
+
+
+def test_a_roster_naming_the_pinned_host_key_is_accepted():
+    """The inverse, so the refusal above is not vacuous."""
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("host", HOST_KEY)
+    s.handle_message("host", {
+        "type": "player_list", "pubkey": HOST_KEY.hex(),
+        "payload": {"players": [
+            {"conn_id": "host", "nickname": "H", "is_host": True,
+             "ed25519_pubkey_hex": HOST_KEY.hex()}]}})
+    assert "host" in s.players
+
+
+def test_an_admitted_wire_connection_rejects_a_message_with_no_author():
+    """Missing pubkey is invalid, not exempt.
+
+    The transport hands up unsigned relay-control frames; treating those as
+    "nothing to compare" let them past the identity check and into the
+    hash-chain bookkeeping, seeding per-peer state from unsigned bytes.
+    """
+    h = _host_adm()
+    s = _host_session(h)
+    assert _full_exchange(h, conn_id="c1", joiner=K1)[0] is True
+    before = _perimeter(s)
+    s.handle_message("c1", {"type": "chat", "hash": "cc" * 32,
+                            "prev": "0" * 64,
+                            "payload": {"nickname": "x", "text": "x"}})
+    assert "c1" not in s._peer_last_hash
+    assert _perimeter(s) == before

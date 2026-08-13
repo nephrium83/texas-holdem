@@ -92,12 +92,15 @@ def _status(sess: Session, host_admission=None) -> dict:
         "host_conn_id":  getattr(sess, "_host_conn_id", None),
         "local_seat":    local_seat,
         "seat_order":    list(getattr(sess, "_seat_order", [])),
-        "seat_keys":     {str(k): v[:16] for k, v in
+        # FULL keys, not prefixes. These feed the continuity assertion, and
+        # comparing 8 bytes there would re-create the 64-bit target V2 was
+        # built to eliminate -- in the very test that claims the chain holds.
+        "seat_keys":     {str(k): v for k, v in
                           getattr(sess, "_seat_keys", {}).items()},
         # Host only: which Ed25519 key each connection was ADMITTED under.
         # Reported so a test can join the admission layer to the seat
         # freeze rather than trusting the handoff between them.
-        "admitted_keys": ({cid: key.hex()[:16]
+        "admitted_keys": ({cid: key.hex()
                            for cid, key in host_admission._admitted.items()}
                           if host_admission is not None else {}),
         "hand_no":       getattr(sess, "_hand_no", None),
@@ -165,30 +168,6 @@ def main() -> None:
         except ValueError:
             return b""
 
-    def _host_admission_step(conn_id, mtype, body, author_hex):
-        """Answer the handshake. True means the message was consumed."""
-        if mtype == "admission_hello":
-            challenge = host_admission.on_hello(
-                conn_id, _hex(author_hex), _hex(body.get("client_nonce")))
-            if challenge is None:
-                _emit({"type": "error", "msg": "bad admission_hello"})
-                return True
-            transport.send(conn_id,
-                           {"type": "admission_challenge", **challenge})
-            return True
-        if mtype == "admission_response":
-            ok = host_admission.on_response(
-                conn_id, _hex(author_hex),
-                _hex(body.get("client_nonce")),
-                _hex(body.get("server_nonce")),
-                _hex(body.get("mac")))
-            _emit({"type": "admission", "conn_id": conn_id, "admitted": ok})
-            if ok:
-                transport.send(conn_id, {"type": "admission_accept",
-                                         **host_admission.accept_payload(conn_id)})
-            return True
-        return False
-
     def _joiner_admission_step(conn_id, mtype, body, author_hex):
         adm = joiner_adm["a"]
         if adm is None:
@@ -232,12 +211,15 @@ def main() -> None:
                "author_seq": body.get("author_seq")})
         author_hex = msg.get("pubkey", "")
         try:
+            # The HOST half is Session's, not this harness's. It used to be
+            # reimplemented here, which is how the shipped host path came to
+            # have no handshake at all while these tests stayed green: the
+            # harness answered on production's behalf. The joiner half is
+            # still driven here because in the application it belongs to
+            # onboarding's JoinAuthenticator, not to Session.
             if mtype in _adm.ADMISSION_TYPES:
-                handled = (
-                    _host_admission_step(conn_id, mtype, body, author_hex)
-                    if is_host else
-                    _joiner_admission_step(conn_id, mtype, body, author_hex))
-                if handled:
+                if not is_host and _joiner_admission_step(
+                        conn_id, mtype, body, author_hex):
                     return
             sess.handle_message(conn_id, msg)
         except Exception as exc:                       # noqa: BLE001

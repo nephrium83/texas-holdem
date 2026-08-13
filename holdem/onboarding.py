@@ -597,8 +597,56 @@ class OnboardingFlow:
     # ---- create-table dialog
 
     def _create_game_dialog(self) -> None:
-        """Start hosting: bind transport, run STUN, generate invite code, open lobby."""
-        # Start transport host (fires STUN in background)
+        """Start hosting: arm authentication, bind, generate invite, open lobby.
+
+        Ordering mirrors the Join path, for the same reason. The listener
+        accepts connections the moment start_host() returns, so a Session
+        and its callbacks must already exist -- otherwise frames from an
+        early peer reach _dispatch_handler with no callbacks registered and
+        are dropped, with nothing on either side to retry them.
+
+        The authentication material is therefore minted FIRST, before any
+        socket exists, and the displayed invite is rendered from it
+        afterwards. Nothing about the credential depends on the listen
+        address.
+        """
+        # ---- 1. the capability, before anything can connect ----
+        import secrets as _secrets
+        discovery_token  = _secrets.token_bytes(_invite.DISCOVERY_TOKEN_LEN).hex()
+        admission_secret = _secrets.token_bytes(_invite.ADMISSION_SECRET_LEN).hex()
+
+        # The check that stands between a stranger with a socket and a seat
+        # at the table. Built before the Session, which refuses to be a host
+        # on this transport without one.
+        host_admission = _admission.HostAdmission(
+            admission_secret=bytes.fromhex(admission_secret),
+            host_pubkey=_identity.public_key_bytes(),
+            discovery_token=bytes.fromhex(discovery_token),
+        )
+
+        # ---- 2. the Session, which owns the handshake and the perimeter --
+        sess = _session_mod.Session(
+            is_host    = True,
+            nickname   = self.nickname,
+            avatar_b64 = getattr(self, "avatar_b64", ""),
+            admission  = host_admission,
+        )
+        _p2p_pkg._session = sess
+
+        # H-12: register the host under a stable local ID derived from the
+        # Ed25519 public key — NOT inside an on_connect callback (which fires
+        # for the first *remote* peer, not for the host itself).
+        host_local_id = _identity.peer_id()
+        sess.local_conn_id = host_local_id
+        sess.add_local_player(host_local_id)
+
+        # ---- 3. callbacks, still before the listener ----
+        # Cleared first so repeated dialog opens do not accumulate handlers.
+        _transport.reset_callbacks()
+        _transport.on_message(sess.handle_message)
+        _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
+
+        # ---- 4. only now open the door ----
         try:
             listen_addr = _transport.start_host()
         except Exception as exc:
@@ -615,51 +663,20 @@ class OnboardingFlow:
         # None until the background query completes (~1–3 s).
         pub_addr = _transport.get_public_address()
 
-        # Generate the V2 invite. The discovery token AND the admission
-        # secret are both held stable across regeneration: the token so LAN
-        # multicast keeps working, the secret so a guest who already copied
-        # the code can still prove admission after STUN resolves. Rotating
-        # the secret on regeneration would silently lock out everyone
-        # holding the earlier code.
+        # ---- 5. render the invite from the material minted in step 1 ----
+        # Both fields are held stable across regeneration: the token so LAN
+        # multicast keeps resolving, the secret so a guest who already copied
+        # the code can still prove admission after STUN lands. Rotating the
+        # secret on refresh would silently lock out everyone holding the
+        # earlier code.
         _code_ref = [generate_room_code(
             public_address=pub_addr,
             relay_address=relay_addr,
+            discovery_token=discovery_token,
+            admission_secret=admission_secret,
         )]
-        parsed = parse_room_code(_code_ref[0])
-        discovery_token  = parsed["discovery_token"]
-        admission_secret = parsed["admission_secret"]
 
-        # The capability check that stands between a stranger with a socket
-        # and a seat at the table. Built before the Session, because the
-        # Session refuses to be a host on this transport without one.
-        host_admission = _admission.HostAdmission(
-            admission_secret=bytes.fromhex(admission_secret),
-            host_pubkey=_identity.public_key_bytes(),
-        )
-
-        # Build a session and register it globally
-        sess = _session_mod.Session(
-            is_host    = True,
-            nickname   = self.nickname,
-            avatar_b64 = getattr(self, "avatar_b64", ""),
-            admission  = host_admission,
-        )
-        _p2p_pkg._session = sess
-
-        # H-12: register the host under a stable local ID derived from the
-        # Ed25519 public key — NOT inside an on_connect callback (which fires
-        # for the first *remote* peer, not for the host itself).
-        host_local_id = _identity.peer_id()
-        sess.local_conn_id = host_local_id
-        sess.add_local_player(host_local_id)
-
-        # Wire transport callbacks — stale-callback fix: clear before registering
-        # so repeated dialog opens don't accumulate duplicate handlers.
-        _transport.reset_callbacks()
-        _transport.on_message(sess.handle_message)
-        _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
-
-        # Announce on LAN multicast in background
+        # Announce on LAN multicast in background -- public token only.
         threading.Thread(
             target=_transport.announce,
             args=(discovery_token, listen_addr),
@@ -843,8 +860,9 @@ class OnboardingFlow:
 
     def _join_game_dialog(self) -> None:
         """Show a dialog to paste a room invite code and connect to a host."""
-        stored = cfg.load()
-        last_code = stored["client"].get("last_room_code", "")
+        # Deliberately not prefilled: a V2 invite carries a live admission
+        # secret and is not persisted. See the note at the save site below.
+        last_code = ""
 
         win = tk.Toplevel(self.root)
         win.title("Join Game")
@@ -911,10 +929,23 @@ class OnboardingFlow:
 
             discovery_token = parsed["discovery_token"]
 
-            # Persist the code for next time
-            stored2 = cfg.load()
-            stored2["client"]["last_room_code"] = code
-            cfg.save(stored2["client"], stored2["last_table"])
+            # The V2 code is NOT persisted, and that is deliberate.
+            #
+            # It carries an ephemeral admission secret. Writing it to
+            # settings.json would put a live capability on disk in
+            # cleartext and extend an invitation's lifetime well past the
+            # table it was minted for -- a convenience feature quietly
+            # becoming a credential store.
+            #
+            # It was previously saved and silently truncated to 64 chars by
+            # the settings validator (a V2 code is 139), which cut the
+            # payload at byte 32 and therefore happened to stop short of
+            # the secret at bytes 41-56. That accident is the only reason
+            # the secret was not already at rest. Widening the field to
+            # "fix" the truncation would have written the whole capability.
+            #
+            # A reopened dialog starts blank. If prefill is wanted later it
+            # should be designed around non-secret discovery metadata.
 
             addr_override = v_addr.get().strip()
             connect_btn.config(state="disabled")
