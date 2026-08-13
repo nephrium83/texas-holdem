@@ -450,3 +450,65 @@ def test_admission_traffic_never_reaches_the_session(mtype):
                           "payload": {"client_nonce": "00" * 16,
                                       "server_nonce": "11" * 16}})
     assert seen == [], f"{mtype} was passed through to the Session"
+
+
+# ── the HOST side of the shipped path ─────────────────────────────────────
+
+def test_the_host_arms_its_session_before_it_opens_the_listener():
+    """The host has the same race class the joiner path was restructured
+    to remove, and until a review found it, only the joiner had a test.
+
+    start_host() begins accepting connections the moment it returns. If the
+    Session and its callbacks are installed afterwards, frames from an
+    early peer reach _dispatch_handler with no callbacks registered and are
+    dropped, with nothing on either side to retry them.
+    """
+    code = _code_only(_onboarding)
+    host = code.index("def _create_game_dialog")
+    body = code[host:code.index("def ", host + 10)]
+
+    install = body.index("_transport.on_message(sess.handle_message)")
+    listen = body.index("_transport.start_host()")
+    assert install < listen, (
+        "the host registers its message callback AFTER start_host(); the "
+        "listener accepts connections in that window")
+
+    policy = body.index("HostAdmission(")
+    assert policy < listen, (
+        "the admission policy is built after the listener is open")
+
+
+def test_the_join_path_does_not_persist_the_invite():
+    """A V2 code carries a live capability, so it must not reach disk.
+
+    It was previously saved and silently truncated to 64 chars by the
+    settings validator (a V2 code is 139). That cut the payload at byte 32
+    and so happened to stop short of the secret at bytes 41-56 -- the only
+    reason the capability was not already at rest. Widening the field to
+    fix the truncation would have written the whole thing.
+    """
+    code = _code_only(_onboarding)
+    assert "last_room_code" not in code, (
+        "onboarding reads or writes last_room_code again; a V2 invite is a "
+        "credential, not a convenience string")
+
+
+def test_a_v2_secret_does_not_survive_a_settings_round_trip(tmp_path,
+                                                            monkeypatch):
+    """Functional backstop: check what actually lands on disk.
+
+    Scans the SERIALIZED settings for the admission secret of a real
+    invite, rather than trusting that no call site writes one.
+    """
+    from holdem import settings as cfg
+
+    monkeypatch.setenv("HOLDEM_CONFIG_DIR", str(tmp_path))
+    parsed = inv.parse_room_code(inv.generate_room_code(host_pubkey=HOST_KEY))
+    cfg.save(cfg.defaults(cfg.CLIENT), cfg.defaults(cfg.TABLE_RULE))
+
+    written = "".join(
+        f.read_text(encoding="utf-8", errors="replace")
+        for f in tmp_path.rglob("*") if f.is_file())
+    assert parsed["admission_secret"] not in written, (
+        "the admission secret was written to settings")
+    assert parsed["host_pubkey"] not in written
