@@ -59,7 +59,9 @@ import time
 
 sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), ".."))
 
+from holdem.p2p import admission as _adm                # noqa: E402
 from holdem.p2p import identity as _identity            # noqa: E402
+from holdem.p2p import invite as _invite                # noqa: E402
 from holdem.p2p import transport                        # noqa: E402
 from holdem.p2p import wire as _wire                    # noqa: E402
 from holdem.p2p.session import Session                  # noqa: E402
@@ -115,17 +117,108 @@ def main() -> None:
     args = ap.parse_args()
 
     is_host = (args.role == "host")
-    sess = Session(is_host=is_host, nickname=args.label, avatar_b64="")
+
+    # The host mints a real V2 invite and stands its admission policy on the
+    # secret inside it, exactly as onboarding does. The invite is emitted on
+    # stdout so the test can hand it to the joiners -- the harness standing in
+    # for a human pasting a code, not a shortcut around the capability: the
+    # joiners still have to prove possession of it.
+    host_admission = None
+    invite_code = ""
+    if is_host:
+        invite_code = _invite.generate_room_code(
+            host_pubkey=_identity.public_key_bytes())
+        _parsed = _invite.parse_room_code(invite_code)
+        host_admission = _adm.HostAdmission(
+            admission_secret=bytes.fromhex(_parsed["admission_secret"]),
+            host_pubkey=_identity.public_key_bytes())
+
+    sess = Session(is_host=is_host, nickname=args.label, avatar_b64="",
+                   admission=host_admission)
+
+    # Joiner-side admission state; created when the invite arrives.
+    joiner_adm = {"a": None, "done": False}
+
+    def _hex(value):
+        try:
+            return bytes.fromhex(value or "")
+        except ValueError:
+            return b""
+
+    def _host_admission_step(conn_id, mtype, body, author_hex):
+        """Answer the handshake. True means the message was consumed."""
+        if mtype == "admission_hello":
+            challenge = host_admission.on_hello(
+                conn_id, _hex(author_hex), _hex(body.get("client_nonce")))
+            if challenge is None:
+                _emit({"type": "error", "msg": "bad admission_hello"})
+                return True
+            transport.send(conn_id,
+                           {"type": "admission_challenge", **challenge})
+            return True
+        if mtype == "admission_response":
+            ok = host_admission.on_response(
+                conn_id, _hex(author_hex),
+                _hex(body.get("client_nonce")),
+                _hex(body.get("server_nonce")),
+                _hex(body.get("mac")))
+            _emit({"type": "admission", "conn_id": conn_id, "admitted": ok})
+            if ok:
+                transport.send(conn_id, {"type": "admission_accept",
+                                         **host_admission.accept_payload(conn_id)})
+            return True
+        return False
+
+    def _joiner_admission_step(conn_id, mtype, body, author_hex):
+        adm = joiner_adm["a"]
+        if adm is None:
+            return False
+        if mtype == "admission_challenge":
+            resp = adm.on_challenge(_hex(author_hex),
+                                    _hex(body.get("client_nonce")),
+                                    _hex(body.get("server_nonce")))
+            if resp is None:
+                _emit({"type": "error",
+                       "msg": "admission_challenge failed the host pin"})
+                return True
+            # Only NOW is this connection the host hop -- not because it
+            # answered first, but because it proved possession of the exact
+            # key the invite pinned.
+            sess._host_conn_id = conn_id
+            transport.send(conn_id, {"type": "admission_response", **resp})
+            return True
+        if mtype == "admission_accept":
+            ok = adm.on_accept(_hex(author_hex),
+                               _hex(body.get("client_nonce")),
+                               _hex(body.get("server_nonce")))
+            joiner_adm["done"] = bool(ok)
+            _emit({"type": "admission", "conn_id": conn_id, "admitted": ok})
+            if ok:
+                # Identity is revealed only after mutual authentication.
+                info = _wire.pack("player_info",
+                                  {"nickname": args.label, "avatar_b64": ""})
+                transport.send(conn_id, json.loads(info))
+            return True
+        return False
 
     def _on_msg(conn_id: str, msg: dict) -> None:
         # Report BEFORE handing to the Session, so a message that makes the
         # Session throw is still visible to the test as having arrived.
         payload = msg.get("payload", msg)
         body = payload if isinstance(payload, dict) else {}
-        _emit({"type": "recv", "from": conn_id, "mtype": msg.get("type"),
+        mtype = msg.get("type")
+        _emit({"type": "recv", "from": conn_id, "mtype": mtype,
                "seat": body.get("seat", body.get("seat_from")),
                "author_seq": body.get("author_seq")})
+        author_hex = msg.get("pubkey", "")
         try:
+            if mtype in _adm.ADMISSION_TYPES:
+                handled = (
+                    _host_admission_step(conn_id, mtype, body, author_hex)
+                    if is_host else
+                    _joiner_admission_step(conn_id, mtype, body, author_hex))
+                if handled:
+                    return
             sess.handle_message(conn_id, msg)
         except Exception as exc:                       # noqa: BLE001
             _emit({"type": "error", "msg": f"handle_message: {exc!r}"})
@@ -150,7 +243,9 @@ def main() -> None:
         # named by. Joiners get UUIDs and learn theirs via player_ack.
         sess.local_conn_id = _identity.peer_id()
         sess.add_local_player(sess.local_conn_id)
-        _emit({"type": "ready", "addr": addr, "peer_id": _identity.peer_id()})
+        _emit({"type": "ready", "addr": addr,
+               "peer_id": _identity.peer_id(),
+               "invite": invite_code})
     else:
         _emit({"type": "ready", "addr": "", "peer_id": _identity.peer_id()})
 
@@ -166,12 +261,17 @@ def main() -> None:
         try:
             if op == "connect":
                 cid = transport.connect(cmd["addr"])
-                # Exactly what onboarding.py sends: a SIGNED player_info.
-                # The host binds this envelope's pubkey to the seat, so an
-                # unsigned shortcut here would not exercise binding at all.
-                info = _wire.pack("player_info", {
-                    "nickname": args.label, "avatar_b64": ""})
-                transport.send(cid, json.loads(info))
+                inv = _invite.parse_room_code(cmd["invite"])
+                joiner_adm["a"] = _adm.JoinerAdmission(
+                    admission_secret=bytes.fromhex(inv["admission_secret"]),
+                    host_pubkey=bytes.fromhex(inv["host_pubkey"]),
+                    joiner_pubkey=_identity.public_key_bytes())
+                # player_info is NOT sent here any more. Identity goes out
+                # only after admission_accept verifies against the pinned
+                # host key; this connection previously announced who we are
+                # to whoever happened to answer the socket.
+                transport.send(cid, {"type": "admission_hello",
+                                     **joiner_adm["a"].hello_payload()})
                 _emit({"type": "connected", "conn_id": cid,
                        "addr": cmd["addr"], "outbound": True})
                 _emit({"type": "ack", "op": "connect"})

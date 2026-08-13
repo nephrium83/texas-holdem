@@ -23,7 +23,9 @@ import threading
 log = logging.getLogger(__name__)
 
 from . import settings as cfg
+from .p2p import invite as _invite
 from .p2p.invite import generate_room_code, parse_room_code
+from .p2p import admission as _admission
 from .p2p import identity as _identity
 from .p2p import transport as _transport
 from .p2p import wire as _wire
@@ -612,20 +614,34 @@ class OnboardingFlow:
         # None until the background query completes (~1–3 s).
         pub_addr = _transport.get_public_address()
 
-        # Generate invite code; use a stable rendezvous_key so we can update
-        # the code when STUN resolves without breaking LAN multicast.
+        # Generate the V2 invite. The discovery token AND the admission
+        # secret are both held stable across regeneration: the token so LAN
+        # multicast keeps working, the secret so a guest who already copied
+        # the code can still prove admission after STUN resolves. Rotating
+        # the secret on regeneration would silently lock out everyone
+        # holding the earlier code.
         _code_ref = [generate_room_code(
             public_address=pub_addr,
             relay_address=relay_addr,
         )]
         parsed = parse_room_code(_code_ref[0])
-        rendezvous_key = parsed["rendezvous_key"]
+        discovery_token  = parsed["discovery_token"]
+        admission_secret = parsed["admission_secret"]
+
+        # The capability check that stands between a stranger with a socket
+        # and a seat at the table. Built before the Session, because the
+        # Session refuses to be a host on this transport without one.
+        host_admission = _admission.HostAdmission(
+            admission_secret=bytes.fromhex(admission_secret),
+            host_pubkey=_identity.public_key_bytes(),
+        )
 
         # Build a session and register it globally
         sess = _session_mod.Session(
             is_host    = True,
             nickname   = self.nickname,
             avatar_b64 = getattr(self, "avatar_b64", ""),
+            admission  = host_admission,
         )
         _p2p_pkg._session = sess
 
@@ -645,7 +661,7 @@ class OnboardingFlow:
         # Announce on LAN multicast in background
         threading.Thread(
             target=_transport.announce,
-            args=(rendezvous_key, listen_addr),
+            args=(discovery_token, listen_addr),
             daemon=True,
         ).start()
 
@@ -711,12 +727,14 @@ class OnboardingFlow:
             addr = _transport.get_public_address()
             _stun_polls[0] += 1
             if addr is not None:
-                # Regenerate code with the same rendezvous_key so LAN
-                # multicast stays consistent, but now includes public IP.
+                # Regenerate with the SAME discovery token and admission
+                # secret, so neither LAN multicast nor an already-shared
+                # invite is invalidated by STUN completing.
                 _code_ref[0] = generate_room_code(
                     public_address=addr,
                     relay_address=relay_addr,
-                    rendezvous_key=rendezvous_key,
+                    discovery_token=discovery_token,
+                    admission_secret=admission_secret,
                 )
                 code_lbl.config(text=_code_ref[0])
                 conn_info_lbl.config(
@@ -890,7 +908,7 @@ class OnboardingFlow:
                 messagebox.showerror("Invalid code", str(exc), parent=win)
                 return
 
-            rendezvous_key = parsed["rendezvous_key"]
+            discovery_token = parsed["discovery_token"]
 
             # Persist the code for next time
             stored2 = cfg.load()
@@ -932,17 +950,23 @@ class OnboardingFlow:
                             ))
                             if relay_host and relay_port:
                                 try:
-                                    from holdem.p2p.invite import strip_code
+                                    # The relay gets the PUBLIC routing
+                                    # token only. It used to be handed
+                                    # strip_code(code) -- the entire invite
+                                    # -- which under V2 is the admission
+                                    # secret and the host key pin together,
+                                    # i.e. everything needed to impersonate
+                                    # the host or join uninvited.
                                     conn_id = _transport.connect_via_relay(
                                         relay_host,
                                         relay_port,
-                                        strip_code(code),
+                                        _invite.public_room_id(parsed),
                                     )
                                     conn_method[0] = "Relay (via errantsaints.space)"
                                 except ConnectionError as relay_exc:
                                     # Last resort: try LAN multicast
                                     host_addr = _transport.find_peer(
-                                        rendezvous_key, timeout=5
+                                        discovery_token, timeout=5
                                     )
                                     if not host_addr:
                                         win.after(0, lambda e=relay_exc: _on_error(
@@ -954,7 +978,7 @@ class OnboardingFlow:
                             else:
                                 # No relay in code — try LAN multicast as fallback
                                 host_addr = _transport.find_peer(
-                                    rendezvous_key, timeout=5
+                                    discovery_token, timeout=5
                                 )
                                 if not host_addr:
                                     win.after(0, lambda e=direct_exc: _on_error(
@@ -966,7 +990,7 @@ class OnboardingFlow:
 
                     else:
                         # No STUN address in code → fall back to LAN multicast
-                        host_addr = _transport.find_peer(rendezvous_key, timeout=15)
+                        host_addr = _transport.find_peer(discovery_token, timeout=15)
                         if not host_addr:
                             win.after(0, lambda: _on_error(
                                 "Host not found",

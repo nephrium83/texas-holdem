@@ -15,11 +15,13 @@ start_host(port=0) -> str
 
 connect(address: str) -> str
     Connect to "host:port" with a 3-second timeout.  If *address* starts
-    with ``relay://host:port/room_code``, routes through the relay instead.
+    with ``relay://host:port/room_id``, routes through the relay instead.
     Returns a conn_id string.
 
-connect_via_relay(relay_host, relay_port, room_code) -> str
+connect_via_relay(relay_host, relay_port, room_id) -> str
     Open a relayed connection through the room-based proxy server.
+    ``room_id`` is the PUBLIC discovery token, never the room code -- the
+    relay operator must not be handed the admission secret.
     Returns a conn_id string (transparent after the join handshake).
 
 get_public_address() -> tuple[str, int] | None
@@ -49,11 +51,13 @@ stop()
 
 Rendezvous (LAN multicast)
 --------------------------
-announce(rendezvous_key: str, address: str)
+announce(discovery_token: str, address: str)
     Broadcast "I'm hosting at <address>" on the LAN multicast group
-    239.255.77.77:7777, tagged by rendezvous_key.  Repeats every 2 s.
+    239.255.77.77:7777, tagged by the PUBLIC discovery token.  Repeats
+    every 2 s, in cleartext, to the whole segment -- so it carries a
+    routing label and never a capability.
 
-find_peer(rendezvous_key: str, timeout: float = 5.0) -> str | None
+find_peer(discovery_token: str, timeout: float = 5.0) -> str | None
     Listen on the multicast group for up to *timeout* seconds.
     Returns the first matching address or None.
 
@@ -576,18 +580,18 @@ def connect(address: str) -> str:
 
     *address* forms:
     - ``"host:port"``     — direct TCP, 3-second asyncio timeout.
-    - ``"relay://host:port/room_code"`` — connect through relay server.
+    - ``"relay://host:port/room_id"`` — connect through relay server.
 
     Raises ``ConnectionError`` on failure so callers can implement their
     own fallback (e.g. ``connect_via_relay``).
     """
     _ensure_loop()
     if address.startswith("relay://"):
-        # relay://host:port/room_code
+        # relay://host:port/room_id
         rest = address[len("relay://"):]
-        host_port, _, room_code = rest.partition("/")
+        host_port, _, room_id = rest.partition("/")
         relay_host, relay_port_s = host_port.rsplit(":", 1)
-        return connect_via_relay(relay_host, int(relay_port_s), room_code)
+        return connect_via_relay(relay_host, int(relay_port_s), room_id)
 
     host, port_s = address.rsplit(":", 1)
     fut = asyncio.run_coroutine_threadsafe(
@@ -619,24 +623,31 @@ _connect_to = _connect_direct
 
 
 def connect_via_relay(relay_host: str, relay_port: int,
-                      room_code: str) -> str:
+                      room_id: str) -> str:
     """Connect through the room-based relay server.
 
-    Sends ``{"type": "relay_join", "room": room_code, "peer_id": ...}``
-    and then treats the TCP stream as a normal peer connection (same
+    Sends ``{"type": "relay_join", "room": room_id, "peer_id": ...}`` and
+    then treats the TCP stream as a normal peer connection (same
     length-prefixed JSON framing).
+
+    ``room_id`` must be the PUBLIC discovery token
+    (invite.public_room_id()), never the room code. The join path used to
+    pass strip_code(code) -- the entire invite -- which under V2 would hand
+    the relay operator the admission secret and the host key pin in one
+    frame, i.e. everything needed to impersonate the host to a joiner or to
+    join the table uninvited. The relay only ever needed a routing label.
 
     Raises ``ConnectionError`` when the relay is unreachable.
     """
     _ensure_loop()
     fut = asyncio.run_coroutine_threadsafe(
-        _connect_via_relay(relay_host, relay_port, room_code), _loop
+        _connect_via_relay(relay_host, relay_port, room_id), _loop
     )
     return fut.result(timeout=15)
 
 
 async def _connect_via_relay(relay_host: str, relay_port: int,
-                              room_code: str) -> str:
+                              room_id: str) -> str:
     """Async implementation of ``connect_via_relay``."""
     from holdem.p2p import identity as _identity
 
@@ -653,7 +664,7 @@ async def _connect_via_relay(relay_host: str, relay_port: int,
     # Send the relay join handshake
     join_msg = {
         "type":    "relay_join",
-        "room":    room_code,
+        "room":    room_id,
         "peer_id": _identity.peer_id(),
     }
     try:
@@ -668,7 +679,7 @@ async def _connect_via_relay(relay_host: str, relay_port: int,
                              f"relay:{relay_host}:{relay_port}"),
           name=f"conn-{cid[:8]}")
     log.info("transport: relay connection established (%s) room=%s",
-             cid, room_code)
+             cid, room_id)
     return cid
 
 
@@ -941,11 +952,19 @@ def _reset_state() -> None:
 # Rendezvous: LAN multicast
 # ---------------------------------------------------------------------------
 
-def announce(rendezvous_key: str, address: str) -> None:
+def announce(discovery_token: str, address: str) -> None:
     """Broadcast our address on the LAN multicast group every 2 seconds.
 
-    The packet is a JSON object: {"key": rendezvous_key, "addr": address}.
+    The packet is a JSON object: {"key": discovery_token, "addr": address}.
     Runs until stop() is called or the process exits.
+
+    The argument is the PUBLIC discovery token and nothing else. This packet
+    goes out in cleartext to the whole network segment every two seconds, so
+    anything placed in it is published, not shared. It was previously called
+    ``rendezvous_key``, which invited the assumption that it was a secret and
+    therefore that it could be reused as an admission capability -- it is a
+    routing label, and it authorizes nothing. The admission secret from the
+    invite must never appear here; see holdem/p2p/invite.py.
     """
     _ensure_loop()
     global _announce_task
@@ -953,7 +972,7 @@ def announce(rendezvous_key: str, address: str) -> None:
     async def _loop_announce():
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, _MC_TTL)
-        payload = json.dumps({"key": rendezvous_key, "addr": address}).encode()
+        payload = json.dumps({"key": discovery_token, "addr": address}).encode()
         try:
             while True:
                 try:
@@ -975,10 +994,16 @@ def announce(rendezvous_key: str, address: str) -> None:
     _announce_task = fut.result(timeout=5)  # now a real asyncio.Task
 
 
-def find_peer(rendezvous_key: str, timeout: float = 5.0) -> Optional[str]:
+def find_peer(discovery_token: str, timeout: float = 5.0) -> Optional[str]:
     """Listen on the LAN multicast group for up to *timeout* seconds.
 
-    Returns the first address announced for *rendezvous_key*, or None.
+    Returns the first address announced for *discovery_token*, or None.
+
+    Matching on the public token is all this can do, and all it should:
+    locating an address is not authenticating a host. Whoever answers is
+    then pinned by the admission handshake against the exact key in the
+    invite (holdem/p2p/admission.py), so a hostile peer that heard the
+    multicast and replied first gets no further than that check.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -997,7 +1022,7 @@ def find_peer(rendezvous_key: str, timeout: float = 5.0) -> Optional[str]:
             try:
                 data, _ = sock.recvfrom(1024)
                 msg = json.loads(data)
-                if msg.get("key") == rendezvous_key:
+                if msg.get("key") == discovery_token:
                     return msg["addr"]
             except socket.timeout:
                 pass

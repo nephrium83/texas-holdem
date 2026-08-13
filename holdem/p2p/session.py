@@ -78,6 +78,7 @@ from typing import Callable, List, Optional
 from holdem.p2p.timeout import (
     Clock, DeadlineToken, RealClock, DEFAULT_PHASE_TIMEOUTS,
 )
+from holdem.p2p.admission import ADMISSION_TYPES as _ADMISSION_TYPES
 from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
 
 _log = logging.getLogger(__name__)
@@ -313,7 +314,8 @@ class Session:
                  sink: Optional[EventSink] = None,
                  require_prevention: bool = False,
                  master_secret: Optional[bytes] = None,
-                 author_mode: Optional[str] = None):
+                 author_mode: Optional[str] = None,
+                 admission=None):
         # The one serialized execution context for this session's
         # protocol state. Created first: every field below is only ever
         # mutated while this is held.
@@ -362,6 +364,24 @@ class Session:
         if author_mode not in (AUTHOR_MODE_WIRE, AUTHOR_MODE_COMPAT):
             raise ValueError(f"unknown author_mode {author_mode!r}")
         self.author_mode = author_mode
+
+        # Admission policy (M-8). A host on the production transport MUST
+        # have one: without it the lobby gate is open and any process that
+        # can sign an envelope becomes a Player. Requiring it here rather
+        # than trusting call sites means the insecure configuration cannot
+        # be reached by omission -- the same discipline as author_mode.
+        #
+        # Compat harnesses may omit it. That is not a production bypass:
+        # AUTHOR_MODE_COMPAT is only selected by a transport that declares
+        # it delivers no verified envelopes, and the production transport
+        # declares the opposite.
+        if admission is None and is_host and author_mode == AUTHOR_MODE_WIRE:
+            raise ValueError(
+                "a host on a verified-envelope transport must be given an "
+                "admission policy (holdem.p2p.admission.HostAdmission); "
+                "without one, any connection that can sign an envelope "
+                "would be able to join the lobby")
+        self._admission = admission
 
         # --- structured event logging (Phase 4) ---
         self._log_sink: EventSink = sink if sink is not None else NullSink()
@@ -535,6 +555,23 @@ class Session:
             _log.debug("session: dropping %s from %s — session is %s",
                        msg.get("type"), conn_id, self.terminal_state)
             return
+
+        # ---- admission gate (M-8) ------------------------------------
+        # The host answers NOTHING but the admission handshake until a
+        # connection has proved it holds the invite. Before this existed,
+        # _on_player_info created a Player from any correctly-signed
+        # connection -- and "correctly signed" only means the sender owns
+        # some Ed25519 key, which anyone can generate. Possession of the
+        # room code was never demonstrated to the host at all.
+        #
+        # Placed ahead of the hash-chain bookkeeping deliberately. That
+        # code writes _peer_last_hash[conn_id] for every message it sees,
+        # so gating after it would let an unadmitted connection seed
+        # per-peer chain state -- small, but it is state, written on behalf
+        # of a peer that has not yet earned the right to any.
+        if not self._admission_ok(conn_id, msg.get("type")):
+            return
+
         # M-11 / H-3: per-message integrity is enforced at the transport
         # layer (C-1: every envelope is signature-verified in wire.unpack).
         # The hash *chain* linking successive messages is not yet threaded —
@@ -930,6 +967,40 @@ class Session:
             if missing:
                 out.append({"seat": seat, "missing": missing})
         return out
+
+    def _admission_ok(self, conn_id: str, mtype) -> bool:
+        """May this connection say this yet? Host-side capability gate.
+
+        Three cases, and only the first is a gate:
+
+        * a host WITH an admission policy -- an unadmitted connection may
+          send admission handshake messages and nothing else. Everything
+          that could mutate lobby or game state is inert until it has
+          proved possession of the invite.
+        * self-delivery -- the local session's own emissions never crossed
+          a wire and are not a connection to admit.
+        * no admission policy configured -- compat harnesses, which cannot
+          be constructed this way on the production transport (see
+          __init__: a wire-mode host must be given one).
+
+        Note what this does NOT decide: WHO the peer is. Admission proves
+        the peer holds the invite, which everyone invited holds. Seat
+        authority is still the Ed25519 binding, checked separately. A
+        holder of the room code can still present several identities --
+        that is a policy problem this layer does not pretend to solve.
+        """
+        if self._admission is None or not self.is_host:
+            return True
+        if conn_id == self.local_conn_id:
+            return True
+        if self._admission.is_admitted(conn_id):
+            return True
+        if mtype in _ADMISSION_TYPES:
+            return True
+        _log.warning(
+            "session: refusing %r from unadmitted connection %s -- the "
+            "admission handshake has not completed", mtype, conn_id)
+        return False
 
     def _normalize_hostless(self, conn_id: str, msg: dict) -> HostlessInbound:
         """The representation boundary: wire envelope or flat dict -> record.
@@ -1981,6 +2052,15 @@ class Session:
         to a peer that inherited none of its state, with no authenticated
         transfer of that authority. So it terminates instead.
         """
+        # Admission is connection-scoped, so it dies with the connection --
+        # cleared even on a terminal session, because conn_ids can be reused
+        # and stale admission is the one piece of state that must never
+        # outlive its socket. A reconnecting peer redoes the whole exchange
+        # against a fresh nonce, which is what makes a captured response
+        # from an earlier connection worthless.
+        if self._admission is not None:
+            self._admission.forget(conn_id)
+
         if self.terminal_state is not None:
             return                          # already terminal; late event
 

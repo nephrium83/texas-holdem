@@ -17,8 +17,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p import admission as _adm_mod
+from holdem.p2p import identity as _ident
 from holdem.p2p import transport as t, wire
 from holdem.p2p.session import Session
+from tests.admission_helpers import admit
 
 
 def _framed(d: dict) -> bytes:
@@ -119,7 +122,13 @@ def test_presigned_dict_not_double_wrapped():
 
 def test_action_rejects_wrong_seat_owner():
     """A peer on conn 'B' cannot submit an action claiming seat 0 (owned by 'A')."""
-    s = Session(is_host=True, nickname="H", avatar_b64="")
+    # A host on the production transport must carry an admission policy;
+    # this suite is about frame signing, so it supplies a real one rather
+    # than dodging the requirement.
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                admission=_adm_mod.HostAdmission(
+                    admission_secret=bytes(16),
+                    host_pubkey=_ident.public_key_bytes()))
 
     class _Eng:
         actor = 0
@@ -146,8 +155,17 @@ def test_action_rejects_wrong_seat_owner():
 def test_consecutive_signed_messages_deliver():
     """Enforcing signatures must not trip the chain guard for messages that
     carry the genesis prev (senders do not yet thread prev)."""
-    s = Session(is_host=True, nickname="H", avatar_b64="")
+    # A host on the production transport must carry an admission policy;
+    # this suite is about frame signing, so it supplies a real one rather
+    # than dodging the requirement.
+    secret, host_key = bytes(16), _ident.public_key_bytes()
+    adm = _adm_mod.HostAdmission(admission_secret=secret, host_pubkey=host_key)
+    s = Session(is_host=True, nickname="H", avatar_b64="", admission=adm)
     s._host_conn_id = "peerA"
+    # peerA has to get through the admission gate first -- chat from an
+    # unadmitted connection is now inert, which is the point of the gate.
+    # Admitted by running the real handshake, not by bypassing it.
+    admit(adm, "peerA", host_key, secret, host_key)
     got = []
     s._on_chat = lambda cid, msg: got.append(msg["payload"]["text"])
     s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "one"})))

@@ -128,16 +128,25 @@ def three_peers():
         assert ready is not None, f"host never became ready; stderr={a.stderr}"
         addr = ready["addr"]
         assert addr, "host reported no listen address"
-        # Joiners dial the HOST, which is the only thing onboarding does.
+        invite = ready.get("invite")
+        assert invite, "host did not publish a V2 invite"
+        # Joiners dial the HOST and immediately begin the admission
+        # handshake. They no longer send player_info on connect: identity
+        # is revealed only after the host proves it holds the pinned key.
         for p in (b, c):
             p.wait_for(lambda e: e.get("type") == "ready")
-            p.send({"op": "connect", "addr": addr})
+            p.send({"op": "connect", "addr": addr, "invite": invite})
             assert p.wait_for(
                 lambda e: e.get("type") == "ack" and e.get("op") == "connect"
             ) is not None, f"{p.label} could not reach the host; stderr={p.stderr}"
-        # Let the host finish accepting both.
+        # Let the host finish accepting both, and wait for admission to
+        # complete rather than sleeping and hoping.
         a.wait_for(lambda e: e.get("type") == "connected")
-        time.sleep(0.5)
+        for p in (b, c):
+            got = p.wait_for(lambda e: e.get("type") == "admission",
+                             timeout=BOOT_TIMEOUT)
+            assert got is not None and got.get("admitted"), (
+                f"{p.label} was not admitted; stderr={p.stderr[-8:]}")
         yield a, b, c
     finally:
         for p in (c, b, a):
