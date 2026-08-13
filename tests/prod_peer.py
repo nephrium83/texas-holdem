@@ -114,6 +114,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--role", required=True, choices=["host", "joiner"])
     ap.add_argument("--label", required=True)
+    ap.add_argument("--invite", default="",
+                    help="joiner: the V2 room code to pin the host with")
     args = ap.parse_args()
 
     is_host = (args.role == "host")
@@ -131,13 +133,25 @@ def main() -> None:
         _parsed = _invite.parse_room_code(invite_code)
         host_admission = _adm.HostAdmission(
             admission_secret=bytes.fromhex(_parsed["admission_secret"]),
-            host_pubkey=_identity.public_key_bytes())
+            host_pubkey=_identity.public_key_bytes(),
+            discovery_token=bytes.fromhex(_parsed["discovery_token"]))
+
+    # The joiner's pin is built up front from the invite so the Session can
+    # be constructed already refusing non-handshake traffic. Building it
+    # after connect() would leave a window in which a hostile endpoint could
+    # speak first and be believed.
+    joiner_adm = {"a": None, "done": False}
+    if not is_host and args.invite:
+        _inv = _invite.parse_room_code(args.invite)
+        joiner_adm["a"] = _adm.JoinerAdmission(
+            admission_secret=bytes.fromhex(_inv["admission_secret"]),
+            host_pubkey=bytes.fromhex(_inv["host_pubkey"]),
+            joiner_pubkey=_identity.public_key_bytes(),
+            discovery_token=bytes.fromhex(_inv["discovery_token"]))
 
     sess = Session(is_host=is_host, nickname=args.label, avatar_b64="",
-                   admission=host_admission)
-
-    # Joiner-side admission state; created when the invite arrives.
-    joiner_adm = {"a": None, "done": False}
+                   admission=host_admission,
+                   joiner_admission=joiner_adm["a"])
 
     def _hex(value):
         try:
@@ -181,10 +195,6 @@ def main() -> None:
                 _emit({"type": "error",
                        "msg": "admission_challenge failed the host pin"})
                 return True
-            # Only NOW is this connection the host hop -- not because it
-            # answered first, but because it proved possession of the exact
-            # key the invite pinned.
-            sess._host_conn_id = conn_id
             transport.send(conn_id, {"type": "admission_response", **resp})
             return True
         if mtype == "admission_accept":
@@ -194,6 +204,10 @@ def main() -> None:
             joiner_adm["done"] = bool(ok)
             _emit({"type": "admission", "conn_id": conn_id, "admitted": ok})
             if ok:
+                # Only NOW is this connection the host hop -- not because it
+                # answered first, but because a signed accept verified
+                # against the exact key the invite pinned.
+                sess.mark_host_authenticated(conn_id)
                 # Identity is revealed only after mutual authentication.
                 info = _wire.pack("player_info",
                                   {"nickname": args.label, "avatar_b64": ""})
@@ -261,11 +275,6 @@ def main() -> None:
         try:
             if op == "connect":
                 cid = transport.connect(cmd["addr"])
-                inv = _invite.parse_room_code(cmd["invite"])
-                joiner_adm["a"] = _adm.JoinerAdmission(
-                    admission_secret=bytes.fromhex(inv["admission_secret"]),
-                    host_pubkey=bytes.fromhex(inv["host_pubkey"]),
-                    joiner_pubkey=_identity.public_key_bytes())
                 # player_info is NOT sent here any more. Identity goes out
                 # only after admission_accept verifies against the pinned
                 # host key; this connection previously announced who we are

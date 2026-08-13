@@ -38,13 +38,24 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Dict, Optional
 
-# Domain separation. Bump the suffix if the transcript layout ever changes,
-# so a MAC computed under the old layout cannot be replayed under the new.
-DOMAIN = b"poker.admission.v1"
+# Domain separation, per cryptographic STATEMENT rather than per protocol.
+# There is one MAC in this handshake and it says exactly one thing: "the
+# holder of the admission secret asserts this response, for this lobby,
+# between these two keys, over these two nonces". If a second MACed
+# statement is ever added it gets its own label -- a shared generic
+# "admission transcript" is what makes reflection and cross-statement
+# substitution possible, because two different claims would then be
+# indistinguishable byte strings under the same key.
+DOMAIN_RESPONSE = b"poker.admission.v1.response"
+
+# Bumped with the transcript LAYOUT, not with the product. A MAC computed
+# under an older layout must not verify under a newer one.
+TRANSCRIPT_VERSION = 1
 
 NONCE_LEN  = 16
 SECRET_LEN = 16
 MAC_LEN    = 32
+TOKEN_LEN  = 8
 
 #: How long a pending challenge stays answerable. Long enough for a human
 #: on a slow link, short enough that a captured challenge is not a standing
@@ -64,8 +75,9 @@ def new_nonce() -> bytes:
     return secrets.token_bytes(NONCE_LEN)
 
 
-def transcript(client_nonce: bytes, server_nonce: bytes,
-               host_pubkey: bytes, joiner_pubkey: bytes) -> bytes:
+def transcript(discovery_token: bytes, host_pubkey: bytes,
+               joiner_pubkey: bytes, client_nonce: bytes,
+               server_nonce: bytes) -> bytes:
     """The bytes both sides MAC.
 
     Every field is fixed width, and the only variable-length element -- the
@@ -76,6 +88,17 @@ def transcript(client_nonce: bytes, server_nonce: bytes,
 
     What each field is doing:
 
+    * the LABEL names the statement being made, so a MAC over this can
+      never be mistaken for a MAC over some future, different assertion.
+    * ``TRANSCRIPT_VERSION`` pins the layout, so a MAC produced under an
+      older field order cannot verify under a newer one.
+    * ``discovery_token`` binds the MAC to one LOBBY. Strictly redundant
+      today, because the admission secret is freshly generated per invite
+      and therefore already lobby-unique -- but that is a property of how
+      the secret happens to be minted, not of this transcript. If a secret
+      is ever reused, derived, or rotated across lobbies, this is the field
+      that keeps a response from one table from being valid at another.
+      Context binding is a byte-cheap hedge against a future refactor.
     * ``client_nonce`` and ``server_nonce`` make the transcript fresh in
       BOTH directions, so neither side can be made to accept a value it did
       not contribute entropy to.
@@ -87,18 +110,21 @@ def transcript(client_nonce: bytes, server_nonce: bytes,
       response cannot be replayed under a different identity.
     """
     for name, value, size in (
-        ("client_nonce", client_nonce, NONCE_LEN),
-        ("server_nonce", server_nonce, NONCE_LEN),
+        ("discovery_token", discovery_token, TOKEN_LEN),
         ("host_pubkey", host_pubkey, 32),
         ("joiner_pubkey", joiner_pubkey, 32),
+        ("client_nonce", client_nonce, NONCE_LEN),
+        ("server_nonce", server_nonce, NONCE_LEN),
     ):
         if not isinstance(value, (bytes, bytearray)) or len(value) != size:
             raise ValueError(
                 f"{name} must be exactly {size} bytes, got "
                 f"{len(value) if isinstance(value, (bytes, bytearray)) else type(value)}")
-    return (bytes([len(DOMAIN)]) + DOMAIN
-            + bytes(client_nonce) + bytes(server_nonce)
-            + bytes(host_pubkey) + bytes(joiner_pubkey))
+    return (bytes([len(DOMAIN_RESPONSE)]) + DOMAIN_RESPONSE
+            + bytes([TRANSCRIPT_VERSION])
+            + bytes(discovery_token)
+            + bytes(host_pubkey) + bytes(joiner_pubkey)
+            + bytes(client_nonce) + bytes(server_nonce))
 
 
 def compute_mac(secret: bytes, tr: bytes) -> bytes:
@@ -132,14 +158,18 @@ class HostAdmission:
     """
 
     def __init__(self, admission_secret: bytes, host_pubkey: bytes,
+                 discovery_token: bytes = b"\x00" * TOKEN_LEN,
                  clock=None, ttl: float = CHALLENGE_TTL_SECONDS) -> None:
         secret = bytes(admission_secret)
         if len(secret) != SECRET_LEN:
             raise ValueError(f"admission_secret must be {SECRET_LEN} bytes")
         if len(bytes(host_pubkey)) != 32:
             raise ValueError("host_pubkey must be 32 bytes")
+        if len(bytes(discovery_token)) != TOKEN_LEN:
+            raise ValueError(f"discovery_token must be {TOKEN_LEN} bytes")
         self._secret = secret
         self._host_pubkey = bytes(host_pubkey)
+        self._token = bytes(discovery_token)
         self._pending: Dict[str, _Pending] = {}
         self._admitted: Dict[str, bytes] = {}     # conn_id -> joiner pubkey
         # Nonces of the exchange that admitted each connection, kept so the
@@ -214,8 +244,9 @@ class HostAdmission:
         if (bytes(client_nonce) != pending.client_nonce
                 or bytes(server_nonce) != pending.server_nonce):
             return False
-        tr = transcript(pending.client_nonce, pending.server_nonce,
-                        self._host_pubkey, pending.joiner_pubkey)
+        tr = transcript(self._token, self._host_pubkey,
+                        pending.joiner_pubkey,
+                        pending.client_nonce, pending.server_nonce)
         if not verify_mac(self._secret, tr, mac):
             return False
         self._admitted[conn_id] = pending.joiner_pubkey
@@ -247,14 +278,18 @@ class JoinerAdmission:
     """
 
     def __init__(self, admission_secret: bytes, host_pubkey: bytes,
-                 joiner_pubkey: bytes) -> None:
+                 joiner_pubkey: bytes,
+                 discovery_token: bytes = b"\x00" * TOKEN_LEN) -> None:
         self._secret = bytes(admission_secret)
         self._host_pubkey = bytes(host_pubkey)
         self._joiner_pubkey = bytes(joiner_pubkey)
+        self._token = bytes(discovery_token)
         if len(self._secret) != SECRET_LEN:
             raise ValueError(f"admission_secret must be {SECRET_LEN} bytes")
         if len(self._host_pubkey) != 32 or len(self._joiner_pubkey) != 32:
             raise ValueError("pubkeys must be 32 bytes")
+        if len(self._token) != TOKEN_LEN:
+            raise ValueError(f"discovery_token must be {TOKEN_LEN} bytes")
         self._client_nonce: Optional[bytes] = None
         self._server_nonce: Optional[bytes] = None
         self.verified_host = False
@@ -291,8 +326,8 @@ class JoinerAdmission:
             return None
         self._server_nonce = bytes(server_nonce)
         self.verified_host = True
-        tr = transcript(self._client_nonce, self._server_nonce,
-                        self._host_pubkey, self._joiner_pubkey)
+        tr = transcript(self._token, self._host_pubkey, self._joiner_pubkey,
+                        self._client_nonce, self._server_nonce)
         return {"client_nonce": self._client_nonce.hex(),
                 "server_nonce": self._server_nonce.hex(),
                 "mac": compute_mac(self._secret, tr).hex()}

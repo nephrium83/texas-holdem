@@ -315,7 +315,7 @@ class Session:
                  require_prevention: bool = False,
                  master_secret: Optional[bytes] = None,
                  author_mode: Optional[str] = None,
-                 admission=None):
+                 admission=None, joiner_admission=None):
         # The one serialized execution context for this session's
         # protocol state. Created first: every field below is only ever
         # mutated while this is held.
@@ -382,6 +382,12 @@ class Session:
                 "without one, any connection that can sign an envelope "
                 "would be able to join the lobby")
         self._admission = admission
+        # Joiner side. When set, this session refuses everything but the
+        # admission handshake until a peer has authenticated as the exact
+        # host key the invite pinned. _host_authenticated is the switch;
+        # nothing but a verified admission_accept may flip it.
+        self._joiner_admission = joiner_admission
+        self._host_authenticated = joiner_admission is None
 
         # --- structured event logging (Phase 4) ---
         self._log_sink: EventSink = sink if sink is not None else NullSink()
@@ -569,7 +575,8 @@ class Session:
         # so gating after it would let an unadmitted connection seed
         # per-peer chain state -- small, but it is state, written on behalf
         # of a peer that has not yet earned the right to any.
-        if not self._admission_ok(conn_id, msg.get("type")):
+        if not self._admission_ok(conn_id, msg.get("type"),
+                                  msg.get("pubkey")):
             return
 
         # M-11 / H-3: per-message integrity is enforced at the transport
@@ -968,7 +975,25 @@ class Session:
                 out.append({"seat": seat, "missing": missing})
         return out
 
-    def _admission_ok(self, conn_id: str, mtype) -> bool:
+    def mark_host_authenticated(self, conn_id: str) -> None:
+        """The joiner's host hop, established the only way it may be.
+
+        Called after a signed admission_accept has verified against the
+        exact 32-byte key the invite pinned. Until this runs, the session
+        drops everything but the handshake, so an endpoint that merely
+        answered the socket cannot pass itself off as the host by speaking
+        first.
+
+        Deliberately explicit rather than inferred from message flow: the
+        old inference -- "whoever sent the first player_ack" -- is the bug
+        this replaces, and an implicit rule is what let it hide.
+        """
+        if self._joiner_admission is None:
+            return
+        self._host_conn_id = conn_id
+        self._host_authenticated = True
+
+    def _admission_ok(self, conn_id: str, mtype, msg_pubkey=None) -> bool:
         """May this connection say this yet? Host-side capability gate.
 
         Three cases, and only the first is a gate:
@@ -989,11 +1014,45 @@ class Session:
         holder of the room code can still present several identities --
         that is a policy problem this layer does not pretend to solve.
         """
-        if self._admission is None or not self.is_host:
-            return True
         if conn_id == self.local_conn_id:
             return True
+
+        # --- joiner side: nothing but the handshake until the host is the
+        # host. _on_player_ack used to accept the first sender while
+        # _host_conn_id was unknown, because that message was historically
+        # how a joiner learned who the host was. Under the new handshake
+        # that assumption is a hole: wire.unpack proves only that a message
+        # was signed by SOME key, so a hostile endpoint could send
+        # player_ack, player_list and game_start before the real challenge
+        # completes and be believed. The invite-pinned key decides who the
+        # host is; nothing else may.
+        if self._joiner_admission is not None and not self._host_authenticated:
+            if mtype in _ADMISSION_TYPES:
+                return True
+            _log.warning(
+                "session: refusing %r from %s -- no peer has authenticated "
+                "as the host pinned by the invite", mtype, conn_id)
+            return False
+
+        if self._admission is None or not self.is_host:
+            return True
         if self._admission.is_admitted(conn_id):
+            # Admission binds the CONNECTION to the key that completed the
+            # transcript, so later traffic cannot switch identity. Without
+            # this a client could authenticate as K1 -- proving it holds the
+            # invite -- and then send player_info signed by K2, which
+            # _on_player_info would bind to the seat. It still holds the
+            # capability, so this is not catastrophic, but it would make
+            # binding joiner_pubkey into the transcript decorative.
+            admitted = self._admission.admitted_key(conn_id)
+            author = msg_pubkey
+            if admitted is not None and isinstance(author, str) and author:
+                if author != admitted.hex():
+                    _log.warning(
+                        "session: refusing %r on %s -- signed by %s but that "
+                        "connection was admitted as %s",
+                        mtype, conn_id, author[:16], admitted.hex()[:16])
+                    return False
             return True
         if mtype in _ADMISSION_TYPES:
             return True
@@ -1895,7 +1954,14 @@ class Session:
                          "conn_id — ignoring", conn_id)
             return
         self.local_conn_id = assigned
-        self._host_conn_id = conn_id   # conn_id of the connection to the host
+        # NOTE: this deliberately no longer sets _host_conn_id. Learning our
+        # own id from a message is fine; deciding WHO THE HOST IS from the
+        # first peer to speak is not. wire.unpack proves only that a message
+        # was signed by some key, so accepting the sender here handed host
+        # authority -- which gates pause, resume, kick, adjust_blinds,
+        # game_start and session_end -- to whoever transmitted first. The
+        # host hop is now established only where the invite-pinned key is
+        # verified: see mark_host_authenticated().
 
     @owned
     def _on_game_start(self, conn_id: str, msg: dict) -> None:

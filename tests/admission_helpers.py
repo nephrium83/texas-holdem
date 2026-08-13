@@ -16,15 +16,16 @@ from holdem.p2p import admission as _adm
 
 
 def admit(host_admission, conn_id: str, joiner_pubkey: bytes,
-          admission_secret: bytes, host_pubkey: bytes) -> None:
+          admission_secret: bytes, host_pubkey: bytes,
+          discovery_token: bytes = b"\x00" * _adm.TOKEN_LEN) -> None:
     """Run the full exchange so ``conn_id`` becomes admitted. Raises if not."""
     client_nonce = _adm.new_nonce()
     challenge = host_admission.on_hello(conn_id, joiner_pubkey, client_nonce)
     if challenge is None:
         raise AssertionError(f"host refused the hello from {conn_id}")
     server_nonce = bytes.fromhex(challenge["server_nonce"])
-    tr = _adm.transcript(client_nonce, server_nonce,
-                         bytes(host_pubkey), bytes(joiner_pubkey))
+    tr = _adm.transcript(bytes(discovery_token), bytes(host_pubkey),
+                         bytes(joiner_pubkey), client_nonce, server_nonce)
     mac = _adm.compute_mac(bytes(admission_secret), tr)
     if not host_admission.on_response(conn_id, joiner_pubkey,
                                       client_nonce, server_nonce, mac):

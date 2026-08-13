@@ -56,10 +56,13 @@ HAND_ARGS = {
 class Peer:
     """One prod_peer subprocess with a stdout collector."""
 
-    def __init__(self, role: str, label: str) -> None:
+    def __init__(self, role: str, label: str, invite: str = "") -> None:
         self.label = label
+        argv = [sys.executable, PEER, "--role", role, "--label", label]
+        if invite:
+            argv += ["--invite", invite]
         self.proc = subprocess.Popen(
-            [sys.executable, PEER, "--role", role, "--label", label],
+            argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1)
         self.events: list = []
@@ -121,8 +124,7 @@ class Peer:
 def three_peers():
     """Host A, joiners B and C -- wired exactly as onboarding.py wires them."""
     a = Peer("host", "A")
-    b = Peer("joiner", "B")
-    c = Peer("joiner", "C")
+    b = c = None
     try:
         ready = a.wait_for(lambda e: e.get("type") == "ready")
         assert ready is not None, f"host never became ready; stderr={a.stderr}"
@@ -130,9 +132,15 @@ def three_peers():
         assert addr, "host reported no listen address"
         invite = ready.get("invite")
         assert invite, "host did not publish a V2 invite"
-        # Joiners dial the HOST and immediately begin the admission
-        # handshake. They no longer send player_info on connect: identity
-        # is revealed only after the host proves it holds the pinned key.
+        # Joiners are started WITH the invite, as a human would paste it
+        # before joining. The pin has to exist before the socket does: a
+        # Session built after connect() would spend the gap accepting
+        # whatever the far end said, which is the window this closes.
+        b = Peer("joiner", "B", invite=invite)
+        c = Peer("joiner", "C", invite=invite)
+        # Joiners dial the HOST and begin the handshake. They no longer send
+        # player_info on connect: identity is revealed only after the host
+        # proves it holds the pinned key.
         for p in (b, c):
             p.wait_for(lambda e: e.get("type") == "ready")
             p.send({"op": "connect", "addr": addr, "invite": invite})
@@ -150,7 +158,8 @@ def three_peers():
         yield a, b, c
     finally:
         for p in (c, b, a):
-            p.close()
+            if p is not None:
+                p.close()
 
 
 def _graph(peer: Peer) -> list:
