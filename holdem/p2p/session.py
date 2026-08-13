@@ -375,6 +375,18 @@ class Session:
         # AUTHOR_MODE_COMPAT is only selected by a transport that declares
         # it delivers no verified envelopes, and the production transport
         # declares the opposite.
+        # KNOWN GAP, deliberately not closed here. A wire-mode JOINER built
+        # without a pin has _pinned_host_pubkey = None, so the roster check
+        # in _on_player_list silently no-ops and the session accepts
+        # whatever host key it is told. Independent review classed this as
+        # structural rather than live: onboarding always supplies a pin and
+        # sidecar_launcher runs in compat, so no shipped path reaches it.
+        #
+        # Requiring it here is the obvious fix and was tried; it fails 34
+        # existing tests whose doubles build wire-mode joiners for reasons
+        # unrelated to admission. That is a real change to the test estate,
+        # not a bug fix, and it does not belong in a correction pass. Left
+        # as a named gap rather than a silent one.
         if admission is None and is_host and author_mode == AUTHOR_MODE_WIRE:
             raise ValueError(
                 "a host on a verified-envelope transport must be given an "
@@ -2017,13 +2029,37 @@ class Session:
         # reintroduce exactly the 64-bit target V2 exists to remove.
         if self._pinned_host_pubkey is not None:
             for p in players_data:
-                if not p.get("is_host"):
+                cid = p.get("conn_id", "")
+                if not cid:
                     continue
-                claimed = p.get("ed25519_pubkey_hex", "")
+                # Evaluated on the EFFECTIVE post-merge values, not on what
+                # the payload claims.
+                #
+                # An earlier version tested p.get("is_host") and skipped
+                # anything falsy -- but is_host is a field the SENDER
+                # chooses, and the merge below preserves the existing flag
+                # while unconditionally rewriting the key. So omitting
+                # is_host from an update walked straight past the check and
+                # still repointed the host's key, which then froze into the
+                # host's seat: exactly the substitution this exists to stop,
+                # reachable by leaving a field out.
+                #
+                # Anchor on what WE already believe about the entry, merged
+                # with what the payload asks to change, so there is no form
+                # of the message that is checked differently from how it is
+                # applied.
+                existing = self.players.get(cid)
+                is_host = p.get("is_host",
+                                existing.is_host if existing else False)
+                if not is_host:
+                    continue
+                claimed = p.get(
+                    "ed25519_pubkey_hex",
+                    existing.ed25519_pubkey_hex if existing else "")
                 if claimed and claimed != self._pinned_host_pubkey:
                     _log.warning(
-                        "session: roster names host key %s but the invite "
-                        "pinned %s -- refusing the roster",
+                        "session: roster would seat host key %s but the "
+                        "invite pinned %s -- refusing the roster",
                         str(claimed)[:16], self._pinned_host_pubkey[:16])
                     return
 
@@ -2051,8 +2087,29 @@ class Session:
                     existing.avatar_b64        = p.get("avatar_b64",        existing.avatar_b64)
                     existing.is_host           = p.get("is_host",           existing.is_host)
                     existing.x25519_pubkey_hex = p.get("x25519_pubkey_hex", existing.x25519_pubkey_hex)
-                    existing.ed25519_pubkey_hex = p.get(
-                        "ed25519_pubkey_hex", existing.ed25519_pubkey_hex)
+                    # A SIGNING key is write-once. Every other field here is
+                    # presentation or lobby state and may be updated; this
+                    # one decides who may author for a seat, and a roster
+                    # broadcast must not be able to move it.
+                    #
+                    # Gating this on the is_host flag was tried and is not
+                    # enough: the flag is chosen by the sender, and
+                    # _bind_seat_keys binds by seat POSITION rather than by
+                    # flag, so an update that dropped is_host still poisoned
+                    # the key that froze into that seat. The property has
+                    # nothing to do with host-ness -- no roster may rewrite
+                    # any established signing identity.
+                    if not existing.ed25519_pubkey_hex:
+                        existing.ed25519_pubkey_hex = p.get(
+                            "ed25519_pubkey_hex", "")
+                    elif (p.get("ed25519_pubkey_hex")
+                          and p["ed25519_pubkey_hex"]
+                              != existing.ed25519_pubkey_hex):
+                        _log.warning(
+                            "session: roster tried to move %s from signing "
+                            "key %s to %s -- keeping the established one",
+                            cid, existing.ed25519_pubkey_hex[:16],
+                            str(p["ed25519_pubkey_hex"])[:16])
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data

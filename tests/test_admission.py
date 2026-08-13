@@ -856,3 +856,73 @@ def test_an_admitted_wire_connection_rejects_a_message_with_no_author():
                             "payload": {"nickname": "x", "text": "x"}})
     assert "c1" not in s._peer_last_hash
     assert _perimeter(s) == before
+
+
+def test_a_roster_cannot_repoint_the_host_key_by_omitting_is_host():
+    """The bypass a second review round found in the first version.
+
+    The check tested p.get("is_host") and skipped anything falsy -- but
+    is_host is chosen by the SENDER, and the merge preserves the existing
+    flag while unconditionally rewriting the key. So an update that simply
+    left is_host out walked past the check and still repointed the host's
+    key, which then froze into the host's seat.
+
+    Downstream that hands seat-0 authoring authority, for every hostless
+    type, to a key the invite never pinned and the joiner never
+    authenticated. The attacker is the authenticated host, which is exactly
+    the party this check exists to constrain.
+    """
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("hostc", HOST_KEY)
+    evil = (bytes([0xAB]) * 32).hex()
+
+    def roster(entry):
+        s.handle_message("hostc", {"type": "player_list",
+                                   "pubkey": HOST_KEY.hex(),
+                                   "payload": {"players": [entry]}})
+
+    # Establish the honest entry first, so the attack is an UPDATE.
+    roster({"conn_id": "hostc", "nickname": "H", "is_host": True,
+            "ed25519_pubkey_hex": HOST_KEY.hex()})
+    assert s.players["hostc"].ed25519_pubkey_hex == HOST_KEY.hex()
+
+    # is_host OMITTED -- the merge keeps it True and rewrites the key.
+    roster({"conn_id": "hostc", "nickname": "H",
+            "ed25519_pubkey_hex": evil})
+    assert s.players["hostc"].ed25519_pubkey_hex == HOST_KEY.hex(), (
+        "a roster repointed the host key by leaving is_host out")
+
+    # And explicitly false, which merges the same way.
+    roster({"conn_id": "hostc", "nickname": "H", "is_host": False,
+            "ed25519_pubkey_hex": evil})
+    assert s.players["hostc"].ed25519_pubkey_hex == HOST_KEY.hex()
+
+    s._seat_order = ["hostc"]
+    s._bind_seat_keys()
+    assert s._seat_keys.get(0) == HOST_KEY.hex(), (
+        "the frozen host seat key is not the key the invite pinned")
+
+
+def test_an_ordinary_roster_update_still_applies():
+    """The inverse: refusing must not break normal roster traffic."""
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("hostc", HOST_KEY)
+    s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
+                               "payload": {"players": [
+                                   {"conn_id": "hostc", "nickname": "H",
+                                    "is_host": True,
+                                    "ed25519_pubkey_hex": HOST_KEY.hex()},
+                                   {"conn_id": "p1", "nickname": "P1",
+                                    "ed25519_pubkey_hex": K1.hex()}]}})
+    assert "p1" in s.players
+    s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
+                               "payload": {"players": [
+                                   {"conn_id": "hostc", "nickname": "H",
+                                    "is_host": True,
+                                    "ed25519_pubkey_hex": HOST_KEY.hex()},
+                                   {"conn_id": "p1", "ready": True}]}})
+    assert s.players["p1"].ready is True, "an honest update was refused"
