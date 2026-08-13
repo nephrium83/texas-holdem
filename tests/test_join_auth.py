@@ -493,22 +493,14 @@ def test_the_join_path_does_not_persist_the_invite():
         "credential, not a convenience string")
 
 
-def test_a_v2_secret_does_not_survive_a_settings_round_trip(tmp_path,
-                                                            monkeypatch):
-    """Functional backstop: check what actually lands on disk.
-
-    Scans the SERIALIZED settings for the admission secret of a real
-    invite, rather than trusting that no call site writes one.
-    """
-    from holdem import settings as cfg
-
-    monkeypatch.setenv("HOLDEM_CONFIG_DIR", str(tmp_path))
-    parsed = inv.parse_room_code(inv.generate_room_code(host_pubkey=HOST_KEY))
-    cfg.save(cfg.defaults(cfg.CLIENT), cfg.defaults(cfg.TABLE_RULE))
-
-    written = "".join(
-        f.read_text(encoding="utf-8", errors="replace")
-        for f in tmp_path.rglob("*") if f.is_file())
-    assert parsed["admission_secret"] not in written, (
-        "the admission secret was written to settings")
-    assert parsed["host_pubkey"] not in written
+# The functional "secret at rest" test that used to sit here was removed.
+# It generated an invite, called cfg.save(defaults, defaults) and asserted
+# the secret was absent -- invoking no call site at all, so it passed
+# identically with the persistence write reinstated. Its own docstring
+# claimed it scanned settings "rather than trusting that no call site
+# writes one", which was the opposite of what it did.
+#
+# test_the_join_path_does_not_persist_the_invite above is the real
+# protection: it greps the shipped source for last_room_code and fires
+# when the write returns. Narrower than the deleted test pretended to be,
+# and unlike it, capable of failing.

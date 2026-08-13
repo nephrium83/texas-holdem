@@ -926,3 +926,114 @@ def test_an_ordinary_roster_update_still_applies():
                                     "ed25519_pubkey_hex": HOST_KEY.hex()},
                                    {"conn_id": "p1", "ready": True}]}})
     assert s.players["p1"].ready is True, "an honest update was refused"
+
+
+# ═══════════════ ROSTER -> SEAT AUTHORITY (round-3 review findings)
+
+def test_player_info_cannot_move_an_established_signing_key():
+    """Round-3 finding 1: the write-once rule lived in the wrong place.
+
+    Three repairs failed in the same spot for one reason -- the invariant
+    was implemented in a HANDLER, so it was only true for messages that
+    went through that handler. A one-line player_info walked around a
+    write-once rule enforced in player_list and repointed the host's key,
+    which then froze into the host's seat. Worse, the poisoned entry could
+    not be repaired: an honest roster afterwards was refused BY the
+    write-once rule, locking the pinned host out of its own seat.
+
+    Two fixes, both needed. player_info is host-only, because it travels
+    joiner -> host and a joiner receiving one is being told an identity by
+    a peer with no authority to assert it. And every writer of the field
+    now goes through _adopt_signing_key.
+    """
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("hostc", HOST_KEY)
+    s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
+                               "payload": {"players": [
+                                   {"conn_id": "hostc", "nickname": "H",
+                                    "is_host": True,
+                                    "ed25519_pubkey_hex": HOST_KEY.hex()}]}})
+    assert s.players["hostc"].ed25519_pubkey_hex == HOST_KEY.hex()
+
+    evil = (bytes([0xAB]) * 32).hex()
+    s.handle_message("hostc", {"type": "player_info", "pubkey": evil,
+                               "payload": {"nickname": "H"}})
+    assert s.players["hostc"].ed25519_pubkey_hex == HOST_KEY.hex(), (
+        "player_info moved an established signing key")
+
+    s._seat_order = ["hostc"]
+    s._bind_seat_keys()
+    assert s._seat_keys.get(0) == HOST_KEY.hex()
+
+
+def test_a_host_never_adopts_a_roster_from_a_peer():
+    """Round-3 finding 2: the host-gate failed open on the host.
+
+    The guard was `if self._host_conn_id and conn_id != self._host_conn_id`,
+    and a host's _host_conn_id is always "" -- so it never fired there. Any
+    single ADMITTED invitee could inject roster entries, which start_game
+    turns into seats and _bind_seat_keys freezes onto attacker-supplied
+    keys. Not a Sybil attack: one legitimate holder of the invite.
+    """
+    h = _host_adm()
+    s = _host_session(h)
+    s.add_local_player("hostlocal")
+    assert _full_exchange(h, conn_id="c1", joiner=K1)[0] is True
+
+    s.handle_message("c1", {"type": "player_list", "pubkey": K1.hex(),
+                            "payload": {"players": [
+                                {"conn_id": "ghost", "nickname": "G",
+                                 "ed25519_pubkey_hex": (bytes([0xAB]) * 32).hex()}]}})
+    assert "ghost" not in s.players, (
+        "an admitted peer injected a roster entry into the host, which "
+        "start_game would seat and _bind_seat_keys would freeze")
+
+
+def test_a_refused_host_entry_does_not_discard_the_rest_of_the_roster():
+    """The denial of service the previous repair introduced.
+
+    Refusing the WHOLE message on a pin mismatch meant one bad entry froze
+    every joiner's lobby permanently -- a check whose failure mode was
+    "discard everything". Only the offending entry is dropped now.
+    """
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("hostc", HOST_KEY)
+    s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
+                               "payload": {"players": [
+                                   {"conn_id": "p1", "nickname": "P1",
+                                    "ed25519_pubkey_hex": K1.hex()}]}})
+    assert "p1" in s.players
+
+    s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
+                               "payload": {"players": [
+                                   {"conn_id": "ghost", "nickname": "G",
+                                    "is_host": True,
+                                    "ed25519_pubkey_hex":
+                                        (bytes([0xAB]) * 32).hex()},
+                                   {"conn_id": "p1", "ready": True}]}})
+    assert "ghost" not in s.players, "the offending entry was seated"
+    assert s.players["p1"].ready is True, (
+        "a valid entry in the same roster was discarded with the bad one")
+
+
+def test_the_pin_check_still_catches_a_first_write():
+    """Write-once cannot catch this, so the pin check is not dead code.
+
+    A roster that CREATES the host entry with a non-pinned key writes into
+    an empty field, which write-once permits. Only the pin refuses it.
+    """
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+                joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+    s.mark_host_authenticated("hostc", HOST_KEY)
+    s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
+                               "payload": {"players": [
+                                   {"conn_id": "hostc", "nickname": "H",
+                                    "is_host": True,
+                                    "ed25519_pubkey_hex":
+                                        (bytes([0xAB]) * 32).hex()}]}})
+    assert "hostc" not in s.players

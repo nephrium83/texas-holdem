@@ -1972,8 +1972,53 @@ class Session:
             return False               # settled: terminal state
         return False
 
+    def _adopt_signing_key(self, conn_id: str, claimed) -> str:
+        """The ONE place a peer's signing identity is decided. Write-once.
+
+        Three handlers write this field -- _on_player_info, _on_player_list
+        and add_local_player -- and the invariant was previously enforced in
+        one of them. That is how three repair attempts in a row failed in
+        the same place: the property belongs to the FIELD, and a rule that
+        lives in a handler is only true for the messages that happen to go
+        through it. A one-line player_info walked around a write-once rule
+        implemented in player_list.
+
+        Write-once because this key decides who may author for a seat.
+        Everything else in a roster entry is presentation or lobby state and
+        may be updated freely; this one, once established, is the identity
+        that later freezes into a seat. Rotation is not supported and no
+        shipped path rotates.
+
+        Returns the key to store. A refused change is logged and the
+        established value kept, so a hostile update is inert rather than
+        fatal.
+        """
+        existing = self.players.get(conn_id)
+        current = getattr(existing, "ed25519_pubkey_hex", "") if existing else ""
+        claimed = claimed if isinstance(claimed, str) else ""
+        if not current:
+            return claimed
+        if claimed and claimed != current:
+            _log.warning(
+                "session: refusing to move %s from signing key %s to %s -- "
+                "a signing identity is write-once", conn_id,
+                current[:16], claimed[:16])
+        return current
+
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
-        """Host receives identity from a newly connected peer."""
+        """Host receives identity from a newly connected peer.
+
+        HOST ONLY. This message travels joiner -> host; a joiner receiving
+        one is being told about an identity by a peer that has no authority
+        to assert it. Processing it let the authenticated host overwrite an
+        established signing key on a joiner -- including the host's own,
+        which then froze into its seat -- with a message that never went
+        near the roster path where write-once was enforced.
+        """
+        if not self.is_host:
+            _log.warning("session: ignoring player_info from %s -- only a "
+                         "host receives identity announcements", conn_id)
+            return
         payload = msg.get("payload", {})
         nickname = payload.get("nickname", "Player")
         with self._lock:
@@ -1986,7 +2031,8 @@ class Session:
                 # From the ENVELOPE, not the payload: wire.unpack has already
                 # verified the signature against this key, so it is the one
                 # fact about a joiner nobody can assert on its behalf.
-                ed25519_pubkey_hex = msg.get("pubkey", ""),
+                ed25519_pubkey_hex = self._adopt_signing_key(
+                    conn_id, msg.get("pubkey", "")),
                 is_host           = False,
             )
             if conn_id not in self._join_order:
@@ -2015,6 +2061,19 @@ class Session:
             _log.warning("session: player_list from non-host %s — ignoring",
                          conn_id)
             return
+        # JOINER ONLY. A host is the roster's author and must never adopt
+        # one. The existing guard was `if self._host_conn_id and conn_id !=
+        # self._host_conn_id`, and a host's _host_conn_id is always "" --
+        # written only by mark_host_authenticated (joiner-side) and
+        # _elect_new_host (dead in wire mode) -- so it failed open exactly
+        # on the host. Any single admitted invitee could inject roster
+        # entries, which start_game turns into seats and _bind_seat_keys
+        # freezes onto attacker-supplied keys.
+        if self.is_host:
+            _log.warning("session: ignoring player_list from %s -- the host "
+                         "is the roster's author, not a recipient", conn_id)
+            return
+
         payload = msg.get("payload", {})
         players_data = payload.get("players", [])
 
@@ -2027,6 +2086,7 @@ class Session:
         #
         # Compared over all 32 bytes. An 8-byte comparison here would
         # reintroduce exactly the 64-bit target V2 exists to remove.
+        refused: set = set()
         if self._pinned_host_pubkey is not None:
             for p in players_data:
                 cid = p.get("conn_id", "")
@@ -2057,16 +2117,25 @@ class Session:
                     "ed25519_pubkey_hex",
                     existing.ed25519_pubkey_hex if existing else "")
                 if claimed and claimed != self._pinned_host_pubkey:
+                    # Drop the OFFENDING ENTRY, not the whole message.
+                    #
+                    # This used to `return`, discarding every other player in
+                    # the same roster. A peer that got a bad host entry into
+                    # the host's broadcast could therefore freeze every
+                    # joiner's lobby permanently -- a denial of service
+                    # created by the check itself. The injection route is
+                    # closed above, but a check whose failure mode is
+                    # "discard everything" should not be relied on for that.
                     _log.warning(
-                        "session: roster would seat host key %s but the "
-                        "invite pinned %s -- refusing the roster",
-                        str(claimed)[:16], self._pinned_host_pubkey[:16])
-                    return
+                        "session: dropping roster entry %s -- it would seat "
+                        "host key %s but the invite pinned %s",
+                        cid, str(claimed)[:16], self._pinned_host_pubkey[:16])
+                    refused.add(cid)
 
         with self._lock:
             for p in players_data:
                 cid = p.get("conn_id", "")
-                if not cid:
+                if not cid or cid in refused:
                     continue
                 if cid not in self.players:
                     self.players[cid] = Player(
@@ -2075,7 +2144,8 @@ class Session:
                         nickname          = p.get("nickname",          "Player"),
                         avatar_b64        = p.get("avatar_b64",        ""),
                         x25519_pubkey_hex = p.get("x25519_pubkey_hex", ""),
-                        ed25519_pubkey_hex = p.get("ed25519_pubkey_hex", ""),
+                        ed25519_pubkey_hex = self._adopt_signing_key(
+                            cid, p.get("ed25519_pubkey_hex", "")),
                         is_host           = p.get("is_host",           False),
                         ready             = p.get("ready",             False),
                     )
@@ -2099,17 +2169,9 @@ class Session:
                     # the key that froze into that seat. The property has
                     # nothing to do with host-ness -- no roster may rewrite
                     # any established signing identity.
-                    if not existing.ed25519_pubkey_hex:
-                        existing.ed25519_pubkey_hex = p.get(
-                            "ed25519_pubkey_hex", "")
-                    elif (p.get("ed25519_pubkey_hex")
-                          and p["ed25519_pubkey_hex"]
-                              != existing.ed25519_pubkey_hex):
-                        _log.warning(
-                            "session: roster tried to move %s from signing "
-                            "key %s to %s -- keeping the established one",
-                            cid, existing.ed25519_pubkey_hex[:16],
-                            str(p["ed25519_pubkey_hex"])[:16])
+                    existing.ed25519_pubkey_hex = self._adopt_signing_key(
+                        cid, p.get("ed25519_pubkey_hex",
+                                   existing.ed25519_pubkey_hex))
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data
