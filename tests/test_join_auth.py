@@ -11,6 +11,7 @@ asserted here is asserted against the code onboarding.py calls.
 """
 from __future__ import annotations
 
+import ast
 import inspect
 import sys
 from pathlib import Path
@@ -274,19 +275,28 @@ def test_admission_state_never_transfers_between_connections():
     """
     _parsed, host, t, ja, sess, auth, _ev = _wire_up()
     auth.begin("conn-direct")
-    cn_dead = bytes.fromhex(t.sent[-1][1]["client_nonce"])
-    dead_msg, _sn = _challenge_from(host, "conn-direct",
-                                    _identity.public_key_bytes(), cn_dead)
 
     # Routing falls back; a NEW connection becomes the real one.
     auth.begin("conn-relay")
     assert t.types() == ["admission_hello", "admission_hello"]
 
-    # The old socket's challenge is now inert.
-    auth.route("conn-direct", dead_msg)
+    # The challenge below is built with the CURRENT client nonce, so it is
+    # valid in every respect EXCEPT which connection it arrived on. A
+    # weaker version of this test reused the abandoned socket's nonce,
+    # which on_challenge rejects on its own -- so the connection binding
+    # was never actually exercised and a control that removed it fired
+    # nothing. The only thing wrong here is the conn_id.
+    live_cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    stray, _sn = _challenge_from(host, "conn-direct",
+                                 _identity.public_key_bytes(), live_cn)
+
+    auth.route("conn-direct", stray)
     assert t.types() == ["admission_hello", "admission_hello"], (
-        "a challenge for the abandoned connection produced a response")
+        "an otherwise-valid challenge delivered on the abandoned connection "
+        "produced a response; admission is not bound to one socket")
     assert sess._host_authenticated is False
+    assert ja.verified_host is False, (
+        "the abandoned socket advanced the live handshake's state")
 
 
 def test_the_pin_comes_from_the_invite_not_from_routing():
@@ -334,8 +344,20 @@ def test_lan_and_relay_use_only_public_routing_data():
 
 # ── the UI-marshalling seam ───────────────────────────────────────────────
 
-_WIDGET_MUTATORS = (".config(", ".destroy()", ".grid(", ".pack(",
-                    ".insert(", ".delete(", ".configure(")
+#: Methods that change what is on screen. Calling any of these from a
+#: non-Tk thread is the undefined behaviour this seam exists to prevent.
+_WIDGET_METHODS = frozenset({
+    "config", "configure", "destroy", "grid", "pack", "place",
+    "insert", "delete", "focus_set", "state",
+})
+
+#: Widget-bearing names in the Join dialog's scope. Kept explicit rather
+#: than "anything with .config", so an unrelated object that happens to
+#: expose config() does not produce a false accusation.
+_WIDGET_NAMES = frozenset({
+    "win", "status_lbl", "connect_btn", "code_entry", "addr_entry",
+    "joined_lbl", "conn_info_lbl", "code_lbl", "btn",
+})
 
 
 def _join_worker_region() -> list:
@@ -363,30 +385,43 @@ def test_the_connection_worker_cannot_touch_widgets_directly():
     transport and Session state half-established -- an unrelated-looking
     failure sitting directly on the authentication path.
 
-    Checked by paren depth rather than by line matching, so a mutation
-    inside a multi-line _ui_post(lambda: ...) still reads as marshalled and
-    a bare one does not.
+    Done on the AST rather than on text. The first version tracked
+    parenthesis depth by hand, double-counted every ``_ui_post(`` -- once
+    for the name, once for the bracket -- and so never returned to depth
+    zero, which made everything after the first call read as marshalled.
+    A control that inserted a bare widget call fired nothing. Structure is
+    what this test is about, so it reads structure.
     """
-    depth = 0
+    tree = ast.parse(inspect.getsource(_onboarding))
+
+    worker_fns = {"_do_connect", "_authenticated", "_auth_failed"}
     offenders = []
-    for line in _join_worker_region():
-        code = line.split("#", 1)[0]
-        if not code.strip():
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name in worker_fns):
             continue
-        marshalled = depth > 0
-        if "_ui_post(" in code:
-            marshalled = True
-        if not marshalled and any(m in code for m in _WIDGET_MUTATORS):
-            offenders.append(code.strip())
-        # Track how many _ui_post( calls are still open across lines.
-        for idx, ch in enumerate(code):
-            if code.startswith("_ui_post(", idx) or (
-                    ch == "(" and code[max(0, idx - 8):idx] == "_ui_post"):
-                depth += 1
-            elif ch == "(" and depth > 0:
-                depth += 1
-            elif ch == ")" and depth > 0:
-                depth -= 1
+
+        # Everything lexically inside a _ui_post(...) call is marshalled.
+        marshalled = set()
+        for call in ast.walk(node):
+            if (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "_ui_post"):
+                marshalled.update(id(n) for n in ast.walk(call))
+
+        for call in ast.walk(node):
+            if not (isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)):
+                continue
+            if call.func.attr not in _WIDGET_METHODS:
+                continue
+            target = call.func.value
+            name = getattr(target, "id", None)
+            if name is None or name not in _WIDGET_NAMES:
+                continue
+            if id(call) not in marshalled:
+                offenders.append(
+                    f"{node.name}: {name}.{call.func.attr}() at line "
+                    f"{call.lineno}")
 
     assert offenders == [], (
         "the connection worker mutates Tk widgets directly instead of going "
