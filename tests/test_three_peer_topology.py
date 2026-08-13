@@ -410,3 +410,39 @@ def test_every_seats_deal_traffic_reaches_the_far_joiner(three_sessions):
         assert mtype in from_b, (
             f"C never received a relayed {mtype} authored by seat {b_seat}; "
             f"got {sorted(from_b)}")
+
+
+def test_the_admitted_keys_are_the_keys_that_freeze_into_seats(three_sessions):
+    """Joins the admission layer to the seat freeze.
+
+    Every layer of this chain has its own tests, and each has been correct
+    in isolation while the handoff between two of them was not -- that is
+    exactly what the #30 _hostless_body defect was. So this asserts the
+    join itself:
+
+      key that completed admission on a connection
+        == key the host bound to that connection's Player
+        == key frozen into that connection's seat
+
+    If those three ever diverge, a peer authenticates as one identity and
+    plays as another, and every individual layer still passes.
+    """
+    a, b, c = three_sessions
+    for p in (a, b, c):
+        p.send({"op": "start_hand", "args": dict(HAND_ARGS)})
+    _await(a, lambda s: len(s["seat_keys"]) == 3, "bound seat keys",
+           timeout=DEAL_WAIT)
+
+    host = _status(a)
+    admitted = host["admitted_keys"]
+    seat_order = host["seat_order"]
+    seat_keys = host["seat_keys"]
+
+    assert admitted, "the host admitted nobody, so this proves nothing"
+    for conn_id, admitted_key in admitted.items():
+        assert conn_id in seat_order, (
+            f"{conn_id} completed admission but holds no seat")
+        seat = seat_order.index(conn_id)
+        assert seat_keys[str(seat)] == admitted_key, (
+            f"seat {seat} froze onto {seat_keys[str(seat)]} but its "
+            f"connection was admitted as {admitted_key}")

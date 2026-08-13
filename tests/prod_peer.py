@@ -76,7 +76,7 @@ def _emit(obj: dict) -> None:
         sys.stdout.flush()
 
 
-def _status(sess: Session) -> dict:
+def _status(sess: Session, host_admission=None) -> dict:
     """Everything a three-process assertion might need to see."""
     driver = getattr(sess, "_deal_driver", None)
     deal = getattr(driver, "deal", None)
@@ -94,6 +94,12 @@ def _status(sess: Session) -> dict:
         "seat_order":    list(getattr(sess, "_seat_order", [])),
         "seat_keys":     {str(k): v[:16] for k, v in
                           getattr(sess, "_seat_keys", {}).items()},
+        # Host only: which Ed25519 key each connection was ADMITTED under.
+        # Reported so a test can join the admission layer to the seat
+        # freeze rather than trusting the handoff between them.
+        "admitted_keys": ({cid: key.hex()[:16]
+                           for cid, key in host_admission._admitted.items()}
+                          if host_admission is not None else {}),
         "hand_no":       getattr(sess, "_hand_no", None),
         "players":       sorted(getattr(sess, "players", {})),
         # .value where the phase is an enum, so assertions compare against a
@@ -295,7 +301,7 @@ def main() -> None:
                     peers = sorted(transport._writers.keys())
                 _emit({"type": "graph", "peers": peers})
             elif op == "status":
-                _emit(_status(sess))
+                _emit(_status(sess, host_admission))
             elif op == "broadcast":
                 transport.broadcast(cmd["msg"])
                 _emit({"type": "ack", "op": "broadcast"})
