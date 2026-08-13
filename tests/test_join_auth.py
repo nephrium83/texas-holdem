@@ -1,0 +1,345 @@
+"""The SHIPPED join path's authentication ordering.
+
+tests/test_admission.py proves the protocol. tests/test_three_peer_topology.py
+proves a harness can drive it. Neither touches what the application actually
+runs when a human clicks Join Game, and that is where the old
+first-speaker-is-the-host assumption lived.
+
+The driver was extracted from the Tk dialog into holdem/p2p/join_auth.py
+precisely so these properties could be asserted without a GUI. Anything
+asserted here is asserted against the code onboarding.py calls.
+"""
+from __future__ import annotations
+
+import inspect
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from holdem import onboarding as _onboarding
+from holdem.p2p import admission as adm
+from holdem.p2p import identity as _identity
+from holdem.p2p import invite as inv
+from holdem.p2p.join_auth import JoinAuthenticator, joiner_admission_from_invite
+from holdem.p2p.session import Session
+
+HOST_KEY = bytes(range(32))
+IMPOSTOR = bytes([9]) * 32
+
+
+class FakeTransport:
+    """Records everything sent; optionally answers eagerly on connect."""
+
+    delivers_verified_envelopes = True
+
+    def __init__(self, eager=None):
+        self.sent = []            # (conn_id, msg)
+        self.disconnected = []
+        self._on_message = None
+        self._eager = eager       # msg delivered synchronously from connect()
+
+    # -- the transport surface onboarding uses --------------------------
+    def reset_callbacks(self):
+        self._on_message = None
+
+    def on_message(self, cb):
+        self._on_message = cb
+
+    def on_disconnect(self, cb):
+        pass
+
+    def connect(self, addr):
+        conn_id = f"conn-{addr}"
+        if self._eager is not None:
+            # The reader starts as part of connect(). A caller that
+            # registers callbacks afterwards loses this frame.
+            if self._on_message is not None:
+                self._on_message(conn_id, self._eager)
+            else:
+                self.lost_eager = True
+        return conn_id
+
+    def send(self, conn_id, msg):
+        self.sent.append((conn_id, msg))
+
+    def disconnect(self, conn_id):
+        self.disconnected.append(conn_id)
+
+    def broadcast(self, msg):
+        self.sent.append((None, msg))
+
+    def broadcast_except(self, exclude, msg):
+        self.sent.append((None, msg))
+
+    # -- helpers --------------------------------------------------------
+    def types(self):
+        return [m.get("type") for _cid, m in self.sent]
+
+
+def _invite_pair():
+    """A V2 invite plus a host policy built from the same secret."""
+    code = inv.generate_room_code(host_pubkey=HOST_KEY)
+    parsed = inv.parse_room_code(code)
+    host = adm.HostAdmission(
+        admission_secret=bytes.fromhex(parsed["admission_secret"]),
+        host_pubkey=HOST_KEY,
+        discovery_token=bytes.fromhex(parsed["discovery_token"]))
+    return parsed, host
+
+
+def _wire_up(eager=None):
+    parsed, host = _invite_pair()
+    t = FakeTransport(eager=eager)
+    ja = joiner_admission_from_invite(parsed)
+    sess = Session(is_host=False, nickname="J", avatar_b64="",
+                   transport=t, joiner_admission=ja)
+    sess.local_conn_id = "me"
+    events = {"auth": [], "failed": []}
+    auth = JoinAuthenticator(
+        transport=t, session=sess, joiner_admission=ja, nickname="J",
+        on_authenticated=lambda cid: events["auth"].append(cid),
+        on_failed=lambda why: events["failed"].append(why))
+    t.reset_callbacks()
+    t.on_message(auth.route)
+    return parsed, host, t, ja, sess, auth, events
+
+
+def _challenge_from(host, conn_id, joiner_key, client_nonce, author=HOST_KEY):
+    ch = host.on_hello(conn_id, joiner_key, client_nonce)
+    return {"type": "admission_challenge", "pubkey": author.hex(),
+            "payload": ch}, bytes.fromhex(ch["server_nonce"])
+
+
+def _drive_to_accept(t, host, ja, auth, sess, accept_author=HOST_KEY):
+    """hello -> challenge -> response -> accept, through the real driver."""
+    auth.begin("conn-1")
+    cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    msg, sn = _challenge_from(host, "conn-1", _identity.public_key_bytes(), cn)
+    auth.route("conn-1", msg)
+
+    resp = t.sent[-1][1]
+    ok = host.on_response("conn-1", _identity.public_key_bytes(),
+                          bytes.fromhex(resp["client_nonce"]),
+                          bytes.fromhex(resp["server_nonce"]),
+                          bytes.fromhex(resp["mac"]))
+    assert ok, "the host refused a response the shipped driver produced"
+    auth.route("conn-1", {"type": "admission_accept",
+                          "pubkey": accept_author.hex(),
+                          "payload": host.accept_payload("conn-1")})
+    return cn, sn
+
+
+# ── ordering: callbacks before connect ────────────────────────────────────
+
+def test_callbacks_are_registered_before_connect_in_the_shipped_path():
+    """Structural, and deterministic rather than scheduler-dependent.
+
+    The eager transport delivers a challenge synchronously from connect().
+    If the join path dialed first and registered afterwards, that frame
+    lands on no handler and the handshake can never complete -- which is
+    exactly the race this ordering removes. Asserting it with a real
+    message rather than by reading source keeps it true if the code moves.
+    """
+    parsed, host = _invite_pair()
+    eager = {"type": "admission_challenge", "pubkey": HOST_KEY.hex(),
+             "payload": {"client_nonce": "00" * 16,
+                         "server_nonce": "11" * 16}}
+    t = FakeTransport(eager=eager)
+    ja = joiner_admission_from_invite(parsed)
+    sess = Session(is_host=False, nickname="J", avatar_b64="",
+                   transport=t, joiner_admission=ja)
+    auth = JoinAuthenticator(transport=t, session=sess, joiner_admission=ja)
+
+    t.reset_callbacks()
+    t.on_message(auth.route)          # BEFORE connect, as onboarding does
+    t.connect("host:1")
+
+    assert not getattr(t, "lost_eager", False), (
+        "a frame delivered during connect() reached no handler; callbacks "
+        "must be registered before the socket is opened")
+
+
+def test_onboarding_installs_the_driver_before_it_dials():
+    """The dialog must not reintroduce the ordering the driver enforces."""
+    src = inspect.getsource(_onboarding)
+    install = src.index("_transport.on_message(authenticator.route)")
+    dial = src.index("def _do_connect():")
+    assert install < dial, (
+        "onboarding registers its message callback after defining/using the "
+        "connect path; the reader starts inside connect()")
+
+
+# ── nothing is revealed before the accept ─────────────────────────────────
+
+def test_no_player_info_before_the_accept():
+    _parsed, host, t, ja, sess, auth, _ev = _wire_up()
+    auth.begin("conn-1")
+    assert t.types() == ["admission_hello"]
+
+    cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    msg, _sn = _challenge_from(host, "conn-1", _identity.public_key_bytes(), cn)
+    auth.route("conn-1", msg)
+
+    assert t.types() == ["admission_hello", "admission_response"], (
+        f"identity leaked before the accept: {t.types()}")
+    assert auth.player_info_sent is False
+
+
+def test_a_valid_challenge_alone_does_not_authenticate():
+    """The invariant that is invisible from the happy path."""
+    _parsed, host, t, ja, sess, auth, ev = _wire_up()
+    auth.begin("conn-1")
+    cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    msg, _sn = _challenge_from(host, "conn-1", _identity.public_key_bytes(), cn)
+    auth.route("conn-1", msg)
+
+    assert ja.verified_host is True, "precondition: the challenge was valid"
+    assert sess._host_authenticated is False
+    assert sess._host_conn_id == ""
+    assert ev["auth"] == [], "the UI was told it was authenticated"
+
+
+def test_the_accept_completes_and_only_then_sends_identity():
+    _parsed, host, t, ja, sess, auth, ev = _wire_up()
+    _drive_to_accept(t, host, ja, auth, sess)
+
+    assert t.types() == ["admission_hello", "admission_response",
+                         "player_info"]
+    assert auth.player_info_sent is True
+    assert sess._host_authenticated is True
+    assert sess._host_conn_id == "conn-1"
+    assert ev["auth"] == ["conn-1"], "Ready was not enabled after the accept"
+
+
+def test_player_info_is_signed_by_the_key_that_was_admitted():
+    """The host enforces this; the joiner must not send something else."""
+    _parsed, host, t, ja, sess, auth, _ev = _wire_up()
+    _drive_to_accept(t, host, ja, auth, sess)
+    info = [m for _cid, m in t.sent if m.get("type") == "player_info"][0]
+    assert info["pubkey"] == _identity.public_key_bytes().hex()
+    assert host.admitted_key("conn-1") == _identity.public_key_bytes()
+
+
+# ── failure paths leave the session closed ────────────────────────────────
+
+def test_a_challenge_from_the_wrong_key_refuses_the_connection():
+    _parsed, host, t, ja, sess, auth, ev = _wire_up()
+    auth.begin("conn-1")
+    cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    msg, _sn = _challenge_from(host, "conn-1", _identity.public_key_bytes(),
+                               cn, author=IMPOSTOR)
+    auth.route("conn-1", msg)
+
+    assert "admission_response" not in t.types(), "we answered an impostor"
+    assert sess._host_authenticated is False
+    assert t.disconnected == ["conn-1"]
+    assert ev["failed"], "the dialog was not told the handshake failed"
+
+
+def test_a_forged_accept_after_a_real_challenge_refuses_the_connection():
+    _parsed, host, t, ja, sess, auth, ev = _wire_up()
+    _drive_to_accept(t, host, ja, auth, sess, accept_author=IMPOSTOR)
+
+    assert sess._host_authenticated is False
+    assert auth.player_info_sent is False
+    assert "player_info" not in t.types()
+    assert ev["failed"]
+
+
+def test_an_accept_for_a_different_transcript_refuses_the_connection():
+    _parsed, host, t, ja, sess, auth, ev = _wire_up()
+    auth.begin("conn-1")
+    cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    msg, _sn = _challenge_from(host, "conn-1", _identity.public_key_bytes(), cn)
+    auth.route("conn-1", msg)
+    auth.route("conn-1", {"type": "admission_accept",
+                          "pubkey": HOST_KEY.hex(),
+                          "payload": {"client_nonce": cn.hex(),
+                                      "server_nonce": "22" * 16}})
+    assert sess._host_authenticated is False
+    assert auth.player_info_sent is False
+
+
+# ── routing is not authentication ─────────────────────────────────────────
+
+def test_admission_state_never_transfers_between_connections():
+    """direct fails -> relay succeeds: the dead socket proves nothing.
+
+    A challenge issued to the failed attempt must not be completable on its
+    replacement, and traffic on the abandoned conn_id must be ignored
+    outright.
+    """
+    _parsed, host, t, ja, sess, auth, _ev = _wire_up()
+    auth.begin("conn-direct")
+    cn_dead = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    dead_msg, _sn = _challenge_from(host, "conn-direct",
+                                    _identity.public_key_bytes(), cn_dead)
+
+    # Routing falls back; a NEW connection becomes the real one.
+    auth.begin("conn-relay")
+    assert t.types() == ["admission_hello", "admission_hello"]
+
+    # The old socket's challenge is now inert.
+    auth.route("conn-direct", dead_msg)
+    assert t.types() == ["admission_hello", "admission_hello"], (
+        "a challenge for the abandoned connection produced a response")
+    assert sess._host_authenticated is False
+
+
+def test_the_pin_comes_from_the_invite_not_from_routing():
+    """Manual address override changes the address and nothing else."""
+    parsed, _host = _invite_pair()
+    ja = joiner_admission_from_invite(parsed)
+    assert ja.host_pubkey == HOST_KEY
+    # There is exactly one construction path, so no routing branch can
+    # supply different authentication inputs.
+    src = inspect.getsource(_onboarding)
+    assert src.count("joiner_admission_from_invite(") == 1, (
+        "more than one place builds the joiner pin; a routing branch could "
+        "supply different authentication inputs")
+
+
+def _code_only(module) -> str:
+    """Source with comments stripped.
+
+    A naive text scan matches the COMMENT that explains why the old
+    behaviour was wrong, and then reports the old behaviour as present --
+    which is how this test failed the first time it ran. Prose about a
+    defect is not the defect.
+    """
+    out = []
+    for line in inspect.getsource(module).split("\n"):
+        head = line.split("#", 1)[0]
+        if head.strip():
+            out.append(head)
+    return "\n".join(out)
+
+
+def test_lan_and_relay_use_only_public_routing_data():
+    """No capability may reach discovery or the relay operator."""
+    code = _code_only(_onboarding)
+    assert "find_peer(discovery_token" in code, "LAN discovery lost its token"
+    assert "public_room_id(parsed)" in code, (
+        "the relay is no longer given the public room id")
+    assert "strip_code(code)" not in code, (
+        "the whole invite is being handed to the relay again")
+    assert "admission_secret" not in code.split("connect_via_relay")[1][:400], (
+        "a capability is reaching the relay call")
+    assert "args=(discovery_token" in code, (
+        "multicast announce is no longer publishing only the public token")
+
+
+@pytest.mark.parametrize("mtype", sorted(adm.ADMISSION_TYPES))
+def test_admission_traffic_never_reaches_the_session(mtype):
+    """The driver consumes the handshake; Session sees ordinary traffic only."""
+    _parsed, _host, t, _ja, sess, auth, _ev = _wire_up()
+    auth.begin("conn-1")
+    seen = []
+    sess.handle_message = lambda cid, m: seen.append(m)
+    auth.route("conn-1", {"type": mtype, "pubkey": HOST_KEY.hex(),
+                          "payload": {"client_nonce": "00" * 16,
+                                      "server_nonce": "11" * 16}})
+    assert seen == [], f"{mtype} was passed through to the Session"

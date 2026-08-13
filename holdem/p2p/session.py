@@ -975,7 +975,8 @@ class Session:
                 out.append({"seat": seat, "missing": missing})
         return out
 
-    def mark_host_authenticated(self, conn_id: str) -> None:
+    def mark_host_authenticated(self, conn_id: str,
+                                host_pubkey=None) -> bool:
         """The joiner's host hop, established the only way it may be.
 
         Called after a signed admission_accept has verified against the
@@ -987,11 +988,27 @@ class Session:
         Deliberately explicit rather than inferred from message flow: the
         old inference -- "whoever sent the first player_ack" -- is the bug
         this replaces, and an implicit rule is what let it hide.
+
+        ``host_pubkey`` is the key the CALLER believes it authenticated. It
+        is checked against the pin rather than trusted, so a call site that
+        drifts -- passing the envelope's author instead of the invite's, say
+        -- fails closed here instead of quietly opening the session to
+        whatever it just verified against itself. Returns whether the hop
+        was established.
         """
         if self._joiner_admission is None:
-            return
+            return False
+        if host_pubkey is not None:
+            pinned = self._joiner_admission.host_pubkey
+            if bytes(host_pubkey) != bytes(pinned):
+                _log.warning(
+                    "session: refusing to authenticate %s -- caller offered "
+                    "%s but the invite pinned %s", conn_id,
+                    bytes(host_pubkey).hex()[:16], bytes(pinned).hex()[:16])
+                return False
         self._host_conn_id = conn_id
         self._host_authenticated = True
+        return True
 
     def _admission_ok(self, conn_id: str, mtype, msg_pubkey=None) -> bool:
         """May this connection say this yet? Host-side capability gate.

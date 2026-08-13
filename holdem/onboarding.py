@@ -24,6 +24,7 @@ log = logging.getLogger(__name__)
 
 from . import settings as cfg
 from .p2p import invite as _invite
+from .p2p import join_auth as _join_auth
 from .p2p.invite import generate_room_code, parse_room_code
 from .p2p import admission as _admission
 from .p2p import identity as _identity
@@ -920,6 +921,76 @@ class OnboardingFlow:
             status_lbl.config(text="Searching for host…", fg=_DIM)
             win.update_idletasks()
 
+            _ready_btn_ref       = [None]
+            _conn_id_ref         = [None]
+            _conn_method_ref     = ["Direct connection"]
+            _sess_ref            = [None]   # C-2: share Session across nested fns
+            _auth_ref            = [None]   # the JoinAuthenticator
+
+            # ---- authentication is armed BEFORE anything is dialed ----
+            #
+            # Ordering is the whole point. The transport's reader thread
+            # starts as part of connect(), so registering callbacks
+            # afterwards leaves a window in which the first frames from the
+            # far end reach either nothing or a Session that has not yet
+            # been told to distrust them. Construct the pin, construct the
+            # Session already refusing non-handshake traffic, install the
+            # callbacks, and only then open a socket.
+            #
+            # The driver itself lives in holdem/p2p/join_auth.py so the
+            # shipped ordering is the ordering under test; as closures in a
+            # Tk callback it could only be exercised by driving the GUI.
+            joiner_admission = _join_auth.joiner_admission_from_invite(parsed)
+            sess = _session_mod.Session(
+                is_host    = False,
+                nickname   = self.nickname,
+                avatar_b64 = getattr(self, "avatar_b64", ""),
+                joiner_admission = joiner_admission,
+            )
+            _p2p_pkg._session = sess
+            _sess_ref[0] = sess              # C-2: expose to _handle_start
+
+            def _on_game_start(payload):
+                win.after(0, lambda: _handle_start(payload))
+
+            def _on_players(players):
+                win.after(0, lambda: _update_joined_ui(players))
+
+            sess.on_player_list_changed = _on_players
+            sess.on_game_start          = _on_game_start
+
+            # Both callbacks run on the TRANSPORT thread. Every UI effect
+            # goes through win.after -- Tkinter is not thread-safe, and a
+            # lobby that authenticates correctly while corrupting the widget
+            # tree is not an improvement.
+            def _authenticated(conn_id):
+                win.after(0, lambda m=_conn_method_ref[0]: status_lbl.config(
+                    text=f"Authenticated ({m}) — waiting for host to start…",
+                    fg=_ACCENT))
+                win.after(0, _show_ready_btn)
+
+            def _auth_failed(reason):
+                win.after(0, lambda r=reason: _on_error(
+                    "Host verification failed",
+                    "The host did not authenticate against this room code.\n"
+                    f"{r}\n\nPossible man-in-the-middle — connection aborted."))
+
+            authenticator = _join_auth.JoinAuthenticator(
+                transport=_transport,
+                session=sess,
+                joiner_admission=joiner_admission,
+                nickname=self.nickname,
+                avatar_b64=getattr(self, "avatar_b64", ""),
+                on_authenticated=_authenticated,
+                on_failed=_auth_failed,
+            )
+            _auth_ref[0] = authenticator
+
+            _transport.reset_callbacks()
+            _transport.on_message(authenticator.route)
+            _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
+
+
             def _do_connect():
                 public_ip   = parsed.get("public_ip")
                 public_port = parsed.get("public_port")
@@ -1002,56 +1073,27 @@ class OnboardingFlow:
                             return
                         conn_id = _transport.connect(host_addr)
 
-                    _conn_id_ref[0]        = conn_id
-                    _conn_method_ref[0]    = conn_method[0]
-
-                    # M-7: verify the host's pubkey prefix matches the room code
-                    # (done via the first signed player_ack which carries pubkey)
-                    _peer_id_prefix_ref[0] = parsed.get("peer_id_prefix", "")
-
-                    # Build our session; clear stale callbacks from any previous dialog
-                    sess = _session_mod.Session(
-                        is_host    = False,
-                        nickname   = self.nickname,
-                        avatar_b64 = getattr(self, "avatar_b64", ""),
-                    )
-                    _p2p_pkg._session = sess
-                    _sess_ref[0] = sess          # C-2: expose to _handle_start
-                    _transport.reset_callbacks()
-                    _transport.on_message(sess.handle_message)
-                    _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
-
-                    # Send our identity to the host
-                    import json as _json
-                    info_msg = _wire.pack("player_info", {
-                        "nickname":   self.nickname,
-                        "avatar_b64": getattr(self, "avatar_b64", ""),
-                    })
-                    _transport.send(conn_id, _json.loads(info_msg))
-
-                    def _on_game_start(payload):
-                        win.after(0, lambda: _handle_start(payload))
-
-                    def _on_players(players):
-                        win.after(0, lambda: _update_joined_ui(players))
-
-                    sess.on_player_list_changed = _on_players
-                    sess.on_game_start          = _on_game_start
+                    # The connection that actually survived routing. Every
+                    # step below belongs to THIS conn_id and no other: a
+                    # direct attempt that failed and a relay attempt that
+                    # succeeded are different sockets, and admission state
+                    # must never be inherited across them.
+                    # Routing has settled. Only now does a handshake exist:
+                    # begin() draws a fresh client_nonce and binds admission
+                    # to THIS conn_id, so a challenge answered on a socket
+                    # that failed cannot be completed on its replacement.
+                    _conn_id_ref[0]     = conn_id
+                    _conn_method_ref[0] = conn_method[0]
+                    _auth_ref[0].begin(conn_id)
 
                     win.after(0, lambda m=conn_method[0]: status_lbl.config(
-                        text=f"Connected ({m}) — waiting for host to start…",
-                        fg=_ACCENT,
+                        text=f"Connected ({m}) — authenticating host…",
+                        fg=_DIM,
                     ))
-                    win.after(0, _show_ready_btn)
 
                 except Exception as exc:
                     win.after(0, lambda e=exc: _on_error("Connection failed", str(e)))
 
-            _ready_btn_ref       = [None]
-            _conn_id_ref         = [None]
-            _peer_id_prefix_ref  = [None]
-            _conn_method_ref     = ["Direct connection"]
-            _sess_ref            = [None]   # C-2: share Session across nested fns
 
             def _on_error(title, msg):
                 connect_btn.config(state="normal")
@@ -1102,19 +1144,24 @@ class OnboardingFlow:
                     ))
                     return
 
-                # M-7: verify host pubkey matches the peer_id_prefix from the room code.
-                # The host's conn_id in the seat_order is its local ID (peer_id hex).
-                expected_prefix = _peer_id_prefix_ref[0] or ""
-                if expected_prefix:
-                    host_cid = next(
-                        (p.conn_id for p in sess.players.values() if p.is_host), "")
-                    if not host_cid or not host_cid.startswith(expected_prefix):
-                        win.after(0, lambda: _on_error(
-                            "Host verification failed",
-                            "The host's identity does not match the room code.\n"
-                            "Possible man-in-the-middle — connection aborted.",
-                        ))
-                        return
+                # M-7 is no longer checked here, because it can no longer
+                # be reached unverified. The old check ran at THIS point --
+                # after player_info, after the roster, after Ready -- and
+                # compared only the first 8 bytes of the host key with
+                # startswith(). Both problems are gone: the exact 32-byte key
+                # is authenticated by the admission handshake before any
+                # identity is sent, and a session that has not completed it
+                # never leaves pre-auth, so no game_start can arrive.
+                #
+                # Asserted rather than assumed: reaching a game start on an
+                # unauthenticated session would mean the gate leaked.
+                if not getattr(sess, "_host_authenticated", True):
+                    win.after(0, lambda: _on_error(
+                        "Host verification failed",
+                        "The game started on a connection that never "
+                        "authenticated against this room code.",
+                    ))
+                    return
 
                 win.destroy()
                 self._launch_mp_game(sess, is_host=False,
