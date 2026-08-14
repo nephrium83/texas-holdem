@@ -18,6 +18,13 @@ CONNECTION IDENTITY CONTINUITY
     host-side connection. Admitting K1 and then accepting traffic authored
     by K2 would make the transcript's joiner binding decorative.
 
+SCOPE OF THE SEAT GUARANTEE
+    On the HOST, every seat holds a key that completed the handshake on its
+    connection (or the host's own). On a JOINER, only the HOST's seat is
+    pinned -- the rest is the host's assertion, since a joiner never
+    witnessed those admissions. A malicious host can seat a key that never
+    handshaked. Named here so no test below is read as covering it.
+
 Explicitly NOT a guarantee here: Sybil resistance. Everyone invited holds
 the same admission secret, so it proves "has the invitation", never "is
 entitled to exactly one seat". A holder can mint any number of Ed25519

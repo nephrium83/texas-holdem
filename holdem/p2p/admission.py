@@ -19,8 +19,24 @@ Provides: mutual authentication of the two Ed25519 identities, and proof
 that the joiner holds the admission secret from the invite, completed
 BEFORE any lobby state can be mutated.
 
-Does NOT provide: any defence against someone who legitimately holds the
-room code. The admission secret is shared by everyone invited, so it proves
+Does NOT provide, part 1 -- the scope of the seat guarantee. A joiner
+verifies exactly ONE identity: the host key its invite named. Seat 0 is
+pinned to that key and cannot be moved. Every OTHER seat is the host's
+assertion, because a joiner was not party to those peers' admissions and
+holds no attestation for them. So the chain
+
+    invite -> admission -> connection identity -> roster -> seat
+
+is enforced end to end ON THE HOST, where every roster entry either is the
+host's own key or completed the handshake on that connection; and on a
+joiner it is enforced for the host's seat, and for all seats against every
+attacker EXCEPT the host itself. A malicious host can still seat a key that
+never handshaked. That is not a defeated check -- it is a guarantee this
+design cannot offer, and stating it as though it held would mislead whoever
+relies on this next.
+
+Does NOT provide, part 2: any defence against someone who legitimately
+holds the room code. The admission secret is shared by everyone invited, so it proves
 "has the invitation", not "is entitled to exactly one seat". A holder can
 generate any number of Ed25519 identities and complete this handshake once
 per identity. That is a policy problem -- host approval, or one-time
