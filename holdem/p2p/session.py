@@ -2548,7 +2548,16 @@ class Session:
                 nickname          = self.local_nickname,
                 avatar_b64        = self.local_avatar,
                 x25519_pubkey_hex = _id.x25519_public_key_bytes().hex(),
-                ed25519_pubkey_hex = _id.public_key_bytes().hex(),
+                # Through the chokepoint like every other writer, even
+                # though this one supplies OUR OWN key rather than anything
+                # a peer sent. An unconditional write here re-opens
+                # write-once for that conn_id, and "this caller is
+                # trustworthy so it may skip the rule" is precisely the
+                # exemption that produced the last two findings. Idempotent
+                # in practice: the first call establishes the key and later
+                # calls present the same value.
+                ed25519_pubkey_hex = self._adopt_signing_key(
+                    conn_id, _id.public_key_bytes().hex()),
                 is_host           = self.is_host,
                 ready             = True,
             )
