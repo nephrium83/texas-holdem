@@ -19,8 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.invite import (
     PAYLOAD_LEN,
+    LegacyInviteError,
     generate_room_code,
     parse_room_code,
+    public_room_id,
     strip_code,
 )
 from holdem.p2p.stun import MAGIC_COOKIE, _build_request, _parse_response, STUNError
@@ -94,46 +96,62 @@ def test_stun_error_on_short_response():
 
 
 # ---------------------------------------------------------------------------
-# Invite code encode / decode — new 29-byte format
+# Invite code encode / decode — V2 (70-byte) format
 # ---------------------------------------------------------------------------
 
+_HOST_KEY = bytes(range(32))
+
+
 def test_invite_payload_length():
-    """generate_room_code must produce exactly PAYLOAD_LEN (29) raw bytes."""
+    """generate_room_code must produce exactly PAYLOAD_LEN (70) raw bytes."""
     code = generate_room_code(
-        peer_id=b'\x01\x02\x03\x04\x05\x06\x07\x08',
+        host_pubkey=_HOST_KEY,
         public_address=("203.0.113.42", 54321),
         relay_address=("192.168.1.10", 7878),
         flags=0,
     )
     import base64
-    raw = base64.b32decode(strip_code(code).upper() + "=")
+    stripped = strip_code(code).upper()
+    raw = base64.b32decode(stripped + "=" * ((8 - len(stripped) % 8) % 8))
     assert len(raw) == PAYLOAD_LEN, f"Expected {PAYLOAD_LEN} bytes, got {len(raw)}"
 
 
 def test_invite_encode_decode_with_all_fields():
-    """Full round-trip: public_address and relay_address survive encode/decode."""
-    peer_id   = b'\xde\xad\xbe\xef\xca\xfe\xba\xbe'
+    """Full round-trip, including the whole host key rather than a prefix."""
     pub_addr  = ("1.2.3.4",       12345)
     relay     = ("192.168.1.10",  7878)
 
-    code   = generate_room_code(peer_id=peer_id, public_address=pub_addr,
+    code   = generate_room_code(host_pubkey=_HOST_KEY, public_address=pub_addr,
                                 relay_address=relay, flags=0x42)
     parsed = parse_room_code(code)
 
-    assert parsed["peer_id_prefix"] == peer_id.hex()
-    assert parsed["public_ip"]      == "1.2.3.4"
-    assert parsed["public_port"]    == 12345
-    assert parsed["relay_host"]     == "192.168.1.10"
-    assert parsed["relay_port"]     == 7878
-    assert parsed["flags"]          == 0x42
-    # rendezvous_key must be 8 bytes encoded as 16 hex chars
-    assert len(parsed["rendezvous_key"]) == 16
+    assert parsed["version"]     == 2
+    assert parsed["host_pubkey"] == _HOST_KEY.hex(), (
+        "V2 must carry the EXACT 32-byte key; a prefix is a 64-bit identity "
+        "target and cannot be pinned against")
+    assert parsed["public_ip"]   == "1.2.3.4"
+    assert parsed["public_port"] == 12345
+    assert parsed["relay_host"]  == "192.168.1.10"
+    assert parsed["relay_port"]  == 7878
+    assert parsed["flags"]       == 0x42
+    assert len(parsed["discovery_token"])  == 16     # 8 bytes
+    assert len(parsed["admission_secret"]) == 32     # 16 bytes
+
+
+def test_the_discovery_token_and_admission_secret_are_different_values():
+    """They are not two names for one field.
+
+    The whole point of V2 is that one of these is multicast in cleartext
+    and the other is a capability. If a refactor ever collapsed them, every
+    other test here would still pass.
+    """
+    parsed = parse_room_code(generate_room_code(host_pubkey=_HOST_KEY))
+    assert parsed["discovery_token"] != parsed["admission_secret"][:16]
 
 
 def test_invite_null_addresses_return_none():
     """When no public_address or relay_address is given, parsed fields are None."""
-    code   = generate_room_code(peer_id=bytes(8), flags=0)
-    parsed = parse_room_code(code)
+    parsed = parse_room_code(generate_room_code(host_pubkey=_HOST_KEY, flags=0))
 
     assert parsed["public_ip"]   is None
     assert parsed["public_port"] is None
@@ -141,46 +159,95 @@ def test_invite_null_addresses_return_none():
     assert parsed["relay_port"]  is None
 
 
-def test_invite_rendezvous_key_stable_on_stun_update():
-    """Regenerating a code after STUN resolves must preserve the rendezvous_key."""
-    # Step 1: initial code without STUN (null public address)
-    code1   = generate_room_code(peer_id=bytes(8))
-    parsed1 = parse_room_code(code1)
-    rk      = parsed1["rendezvous_key"]
+def test_invite_routing_and_capability_survive_stun_update():
+    """Regenerating after STUN must preserve BOTH the token and the secret.
 
-    # Step 2: regenerate with STUN result, reusing same rendezvous_key
-    code2   = generate_room_code(
-        peer_id=bytes(8),
+    The token so LAN multicast keeps resolving; the secret because anyone
+    who already copied the code would otherwise be locked out by a refresh
+    they never saw.
+    """
+    parsed1 = parse_room_code(generate_room_code(host_pubkey=_HOST_KEY))
+    token, secret = parsed1["discovery_token"], parsed1["admission_secret"]
+
+    parsed2 = parse_room_code(generate_room_code(
+        host_pubkey=_HOST_KEY,
         public_address=("5.6.7.8", 9999),
         relay_address=("192.168.1.10", 7878),
-        rendezvous_key=rk,
-    )
-    parsed2 = parse_room_code(code2)
+        discovery_token=token,
+        admission_secret=secret,
+    ))
 
-    assert parsed2["rendezvous_key"] == rk,        "rendezvous_key must not change"
-    assert parsed2["public_ip"]      == "5.6.7.8", "STUN address must be updated"
-    assert parsed2["relay_host"]     == "192.168.1.10"
+    assert parsed2["discovery_token"]  == token,  "routing token must not change"
+    assert parsed2["admission_secret"] == secret, "capability must not change"
+    assert parsed2["public_ip"]        == "5.6.7.8"
+    assert parsed2["relay_host"]       == "192.168.1.10"
+
+
+def test_public_room_id_is_the_token_and_not_the_secret():
+    """What the relay is allowed to see."""
+    code   = generate_room_code(host_pubkey=_HOST_KEY)
+    parsed = parse_room_code(code)
+    room   = public_room_id(parsed)
+
+    assert room == parsed["discovery_token"]
+    assert parsed["admission_secret"] not in room
+    assert parsed["host_pubkey"] not in room
+    assert public_room_id(code) == room, "must accept a raw code too"
 
 
 def test_invite_hyphen_formatting():
     """Room code must be formatted as groups of 4 chars separated by hyphens."""
-    code = generate_room_code(peer_id=bytes(8))
-    groups = code.split("-")
-    # All groups except possibly the last must be exactly 4 chars
+    groups = generate_room_code(host_pubkey=_HOST_KEY).split("-")
     for g in groups[:-1]:
         assert len(g) == 4, f"Expected 4-char group, got '{g}'"
-    # Last group may be 1-4 chars
     assert 1 <= len(groups[-1]) <= 4
 
 
-def test_invite_rejects_short_code():
-    """Codes with fewer than 29 decoded bytes must raise ValueError."""
+def test_a_v1_room_code_is_refused_and_says_why():
+    """No silent downgrade to unauthenticated joining.
+
+    A V1 code has no admission secret to prove and only a truncated host
+    key to pin, so accepting one means joining unauthenticated. It gets its
+    own exception type so no caller can handle it as "malformed" and fall
+    back.
+    """
     import base64
-    # Build an 18-byte payload (old Sprint 2 format)
-    short_raw = b'\x01' + bytes(17)          # 18 bytes
+    v1_raw = bytes(29)
+    b32 = base64.b32encode(v1_raw).decode().rstrip("=")
+    v1_code = "-".join(b32[i:i+4] for i in range(0, len(b32), 4))
+
+    with pytest.raises(LegacyInviteError, match="regenerate"):
+        parse_room_code(v1_code)
+
+
+def test_a_v1_code_whose_first_byte_is_two_is_still_refused():
+    """Version detection must not be a first-byte sniff.
+
+    A V1 payload has no version byte -- byte 0 is public-key material and
+    can legitimately be 0x02. Sniffing the version before the length would
+    read such a code as V2 and parse a "host key" out of unrelated bytes.
+    """
+    import base64
+    v1_raw = bytes([0x02]) + bytes(28)
+    b32 = base64.b32encode(v1_raw).decode().rstrip("=")
+    code = "-".join(b32[i:i+4] for i in range(0, len(b32), 4))
+
+    with pytest.raises(LegacyInviteError):
+        parse_room_code(code)
+
+
+def test_invite_rejects_short_code():
+    """Anything that is neither V1 nor V2 is malformed."""
+    import base64
+    short_raw = b'' + bytes(17)          # 18 bytes
     short_b32 = base64.b32encode(short_raw).decode().rstrip("=")
-    # Format it like a real code
     short_code = "-".join(short_b32[i:i+4] for i in range(0, len(short_b32), 4))
 
-    with pytest.raises(ValueError, match="too short|older-format"):
+    with pytest.raises(ValueError, match="expected"):
         parse_room_code(short_code)
+
+
+def test_generate_refuses_a_truncated_host_key():
+    """V1's 8-byte prefix must not be passable as a V2 key."""
+    with pytest.raises(ValueError, match="32 bytes"):
+        generate_room_code(host_pubkey=b"" * 8)

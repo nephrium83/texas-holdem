@@ -56,10 +56,13 @@ HAND_ARGS = {
 class Peer:
     """One prod_peer subprocess with a stdout collector."""
 
-    def __init__(self, role: str, label: str) -> None:
+    def __init__(self, role: str, label: str, invite: str = "") -> None:
         self.label = label
+        argv = [sys.executable, PEER, "--role", role, "--label", label]
+        if invite:
+            argv += ["--invite", invite]
         self.proc = subprocess.Popen(
-            [sys.executable, PEER, "--role", role, "--label", label],
+            argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, bufsize=1)
         self.events: list = []
@@ -121,37 +124,62 @@ class Peer:
 def three_peers():
     """Host A, joiners B and C -- wired exactly as onboarding.py wires them."""
     a = Peer("host", "A")
-    b = Peer("joiner", "B")
-    c = Peer("joiner", "C")
+    b = c = None
     try:
         ready = a.wait_for(lambda e: e.get("type") == "ready")
         assert ready is not None, f"host never became ready; stderr={a.stderr}"
         addr = ready["addr"]
         assert addr, "host reported no listen address"
-        # Joiners dial the HOST, which is the only thing onboarding does.
+        invite = ready.get("invite")
+        assert invite, "host did not publish a V2 invite"
+        # Joiners are started WITH the invite, as a human would paste it
+        # before joining. The pin has to exist before the socket does: a
+        # Session built after connect() would spend the gap accepting
+        # whatever the far end said, which is the window this closes.
+        b = Peer("joiner", "B", invite=invite)
+        c = Peer("joiner", "C", invite=invite)
+        # Joiners dial the HOST and begin the handshake. They no longer send
+        # player_info on connect: identity is revealed only after the host
+        # proves it holds the pinned key.
         for p in (b, c):
             p.wait_for(lambda e: e.get("type") == "ready")
-            p.send({"op": "connect", "addr": addr})
+            p.send({"op": "connect", "addr": addr, "invite": invite})
             assert p.wait_for(
                 lambda e: e.get("type") == "ack" and e.get("op") == "connect"
             ) is not None, f"{p.label} could not reach the host; stderr={p.stderr}"
-        # Let the host finish accepting both.
+        # Let the host finish accepting both, and wait for admission to
+        # complete rather than sleeping and hoping.
         a.wait_for(lambda e: e.get("type") == "connected")
-        time.sleep(0.5)
+        for p in (b, c):
+            got = p.wait_for(lambda e: e.get("type") == "admission",
+                             timeout=BOOT_TIMEOUT)
+            assert got is not None and got.get("admitted"), (
+                f"{p.label} was not admitted; stderr={p.stderr[-8:]}")
         yield a, b, c
     finally:
         for p in (c, b, a):
-            p.close()
+            if p is not None:
+                p.close()
 
 
 def _graph(peer: Peer) -> list:
+    """Ask for a fresh graph and return THAT one.
+
+    Same correction as _status, and the same bug it had: wait_for scans
+    history from the beginning and returns the FIRST match, while the count
+    guard is independent of the event it is handed. So once any new graph
+    arrived, the scan restarted at index 0 and returned the OLDEST one.
+    Harmless while each peer's graph is read once per fixture, and exactly
+    the kind of latent staleness that has now been found three times in
+    this file's helpers.
+    """
     before = len(peer.all_of("graph"))
     peer.send({"op": "graph"})
     got = peer.wait_for(
         lambda e: e.get("type") == "graph"
         and len(peer.all_of("graph")) > before, timeout=10.0)
     assert got is not None, f"{peer.label} never reported its graph"
-    return got["peers"]
+    return peer.all_of("graph")[-1]["peers"]
 
 
 def test_production_topology_is_a_star(three_peers):
@@ -392,3 +420,71 @@ def test_every_seats_deal_traffic_reaches_the_far_joiner(three_sessions):
         assert mtype in from_b, (
             f"C never received a relayed {mtype} authored by seat {b_seat}; "
             f"got {sorted(from_b)}")
+
+
+def test_the_admitted_keys_are_the_keys_that_freeze_into_seats(three_sessions):
+    """Joins the admission layer to the seat freeze.
+
+    Every layer of this chain has its own tests, and each has been correct
+    in isolation while the handoff between two of them was not -- that is
+    exactly what the #30 _hostless_body defect was. So this asserts the
+    join itself:
+
+      key that completed admission on a connection
+        == key the host bound to that connection's Player
+        == key frozen into that connection's seat
+
+    If those three ever diverge, a peer authenticates as one identity and
+    plays as another, and every individual layer still passes.
+    """
+    a, b, c = three_sessions
+    for p in (a, b, c):
+        p.send({"op": "start_hand", "args": dict(HAND_ARGS)})
+    _await(a, lambda s: len(s["seat_keys"]) == 3, "bound seat keys",
+           timeout=DEAL_WAIT)
+
+    host = _status(a)
+    admitted = host["admitted_keys"]
+    seat_order = host["seat_order"]
+    seat_keys = host["seat_keys"]
+
+    assert admitted, "the host admitted nobody, so this proves nothing"
+    for conn_id, admitted_key in admitted.items():
+        assert conn_id in seat_order, (
+            f"{conn_id} completed admission but holds no seat")
+        seat = seat_order.index(conn_id)
+        assert seat_keys[str(seat)] == admitted_key, (
+            f"seat {seat} froze onto {seat_keys[str(seat)]} but its "
+            f"connection was admitted as {admitted_key}")
+
+
+
+def test_the_graph_helper_reports_current_state_not_history():
+    """Regression for the stale-first-match helper bug, third sighting.
+
+    Given a history that CONFLICTS with the present -- an old graph and a
+    new one -- the helper must return the new one. A helper that reports
+    something other than what it claims to measure has already sent one
+    investigation in this repo after a product defect that did not exist.
+    """
+    class _FakePeer:
+        label = "A"
+
+        def __init__(self):
+            self.events = [{"type": "graph", "peers": ["stale"]}]
+
+        def all_of(self, t):
+            return [e for e in self.events if e.get("type") == t]
+
+        def send(self, cmd):
+            if cmd.get("op") == "graph":
+                self.events.append({"type": "graph", "peers": ["current"]})
+
+        def wait_for(self, pred, timeout=None):
+            for e in self.events:          # first match, as the real one does
+                if pred(e):
+                    return e
+            return None
+
+    assert _graph(_FakePeer()) == ["current"], (
+        "the graph helper returned a stale historical observation")

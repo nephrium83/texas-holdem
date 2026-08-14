@@ -23,7 +23,10 @@ import threading
 log = logging.getLogger(__name__)
 
 from . import settings as cfg
+from .p2p import invite as _invite
+from .p2p import join_auth as _join_auth
 from .p2p.invite import generate_room_code, parse_room_code
+from .p2p import admission as _admission
 from .p2p import identity as _identity
 from .p2p import transport as _transport
 from .p2p import wire as _wire
@@ -594,8 +597,56 @@ class OnboardingFlow:
     # ---- create-table dialog
 
     def _create_game_dialog(self) -> None:
-        """Start hosting: bind transport, run STUN, generate invite code, open lobby."""
-        # Start transport host (fires STUN in background)
+        """Start hosting: arm authentication, bind, generate invite, open lobby.
+
+        Ordering mirrors the Join path, for the same reason. The listener
+        accepts connections the moment start_host() returns, so a Session
+        and its callbacks must already exist -- otherwise frames from an
+        early peer reach _dispatch_handler with no callbacks registered and
+        are dropped, with nothing on either side to retry them.
+
+        The authentication material is therefore minted FIRST, before any
+        socket exists, and the displayed invite is rendered from it
+        afterwards. Nothing about the credential depends on the listen
+        address.
+        """
+        # ---- 1. the capability, before anything can connect ----
+        import secrets as _secrets
+        discovery_token  = _secrets.token_bytes(_invite.DISCOVERY_TOKEN_LEN).hex()
+        admission_secret = _secrets.token_bytes(_invite.ADMISSION_SECRET_LEN).hex()
+
+        # The check that stands between a stranger with a socket and a seat
+        # at the table. Built before the Session, which refuses to be a host
+        # on this transport without one.
+        host_admission = _admission.HostAdmission(
+            admission_secret=bytes.fromhex(admission_secret),
+            host_pubkey=_identity.public_key_bytes(),
+            discovery_token=bytes.fromhex(discovery_token),
+        )
+
+        # ---- 2. the Session, which owns the handshake and the perimeter --
+        sess = _session_mod.Session(
+            is_host    = True,
+            nickname   = self.nickname,
+            avatar_b64 = getattr(self, "avatar_b64", ""),
+            admission  = host_admission,
+        )
+        _p2p_pkg._session = sess
+
+        # H-12: register the host under a stable local ID derived from the
+        # Ed25519 public key — NOT inside an on_connect callback (which fires
+        # for the first *remote* peer, not for the host itself).
+        host_local_id = _identity.peer_id()
+        sess.local_conn_id = host_local_id
+        sess.add_local_player(host_local_id)
+
+        # ---- 3. callbacks, still before the listener ----
+        # Cleared first so repeated dialog opens do not accumulate handlers.
+        _transport.reset_callbacks()
+        _transport.on_message(sess.handle_message)
+        _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
+
+        # ---- 4. only now open the door ----
         try:
             listen_addr = _transport.start_host()
         except Exception as exc:
@@ -612,40 +663,23 @@ class OnboardingFlow:
         # None until the background query completes (~1–3 s).
         pub_addr = _transport.get_public_address()
 
-        # Generate invite code; use a stable rendezvous_key so we can update
-        # the code when STUN resolves without breaking LAN multicast.
+        # ---- 5. render the invite from the material minted in step 1 ----
+        # Both fields are held stable across regeneration: the token so LAN
+        # multicast keeps resolving, the secret so a guest who already copied
+        # the code can still prove admission after STUN lands. Rotating the
+        # secret on refresh would silently lock out everyone holding the
+        # earlier code.
         _code_ref = [generate_room_code(
             public_address=pub_addr,
             relay_address=relay_addr,
+            discovery_token=discovery_token,
+            admission_secret=admission_secret,
         )]
-        parsed = parse_room_code(_code_ref[0])
-        rendezvous_key = parsed["rendezvous_key"]
 
-        # Build a session and register it globally
-        sess = _session_mod.Session(
-            is_host    = True,
-            nickname   = self.nickname,
-            avatar_b64 = getattr(self, "avatar_b64", ""),
-        )
-        _p2p_pkg._session = sess
-
-        # H-12: register the host under a stable local ID derived from the
-        # Ed25519 public key — NOT inside an on_connect callback (which fires
-        # for the first *remote* peer, not for the host itself).
-        host_local_id = _identity.peer_id()
-        sess.local_conn_id = host_local_id
-        sess.add_local_player(host_local_id)
-
-        # Wire transport callbacks — stale-callback fix: clear before registering
-        # so repeated dialog opens don't accumulate duplicate handlers.
-        _transport.reset_callbacks()
-        _transport.on_message(sess.handle_message)
-        _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
-
-        # Announce on LAN multicast in background
+        # Announce on LAN multicast in background -- public token only.
         threading.Thread(
             target=_transport.announce,
-            args=(rendezvous_key, listen_addr),
+            args=(discovery_token, listen_addr),
             daemon=True,
         ).start()
 
@@ -711,12 +745,14 @@ class OnboardingFlow:
             addr = _transport.get_public_address()
             _stun_polls[0] += 1
             if addr is not None:
-                # Regenerate code with the same rendezvous_key so LAN
-                # multicast stays consistent, but now includes public IP.
+                # Regenerate with the SAME discovery token and admission
+                # secret, so neither LAN multicast nor an already-shared
+                # invite is invalidated by STUN completing.
                 _code_ref[0] = generate_room_code(
                     public_address=addr,
                     relay_address=relay_addr,
-                    rendezvous_key=rendezvous_key,
+                    discovery_token=discovery_token,
+                    admission_secret=admission_secret,
                 )
                 code_lbl.config(text=_code_ref[0])
                 conn_info_lbl.config(
@@ -824,8 +860,9 @@ class OnboardingFlow:
 
     def _join_game_dialog(self) -> None:
         """Show a dialog to paste a room invite code and connect to a host."""
-        stored = cfg.load()
-        last_code = stored["client"].get("last_room_code", "")
+        # Deliberately not prefilled: a V2 invite carries a live admission
+        # secret and is not persisted. See the note at the save site below.
+        last_code = ""
 
         win = tk.Toplevel(self.root)
         win.title("Join Game")
@@ -890,17 +927,122 @@ class OnboardingFlow:
                 messagebox.showerror("Invalid code", str(exc), parent=win)
                 return
 
-            rendezvous_key = parsed["rendezvous_key"]
+            discovery_token = parsed["discovery_token"]
 
-            # Persist the code for next time
-            stored2 = cfg.load()
-            stored2["client"]["last_room_code"] = code
-            cfg.save(stored2["client"], stored2["last_table"])
+            # The V2 code is NOT persisted, and that is deliberate.
+            #
+            # It carries an ephemeral admission secret. Writing it to
+            # settings.json would put a live capability on disk in
+            # cleartext and extend an invitation's lifetime well past the
+            # table it was minted for -- a convenience feature quietly
+            # becoming a credential store.
+            #
+            # It was previously saved and silently truncated to 64 chars by
+            # the settings validator (a V2 code is 139), which cut the
+            # payload at byte 32 and therefore happened to stop short of
+            # the secret at bytes 41-56. That accident is the only reason
+            # the secret was not already at rest. Widening the field to
+            # "fix" the truncation would have written the whole capability.
+            #
+            # A reopened dialog starts blank. If prefill is wanted later it
+            # should be designed around non-secret discovery metadata.
 
             addr_override = v_addr.get().strip()
             connect_btn.config(state="disabled")
             status_lbl.config(text="Searching for host…", fg=_DIM)
             win.update_idletasks()
+
+            _ready_btn_ref       = [None]
+            _conn_id_ref         = [None]
+            _conn_method_ref     = ["Direct connection"]
+            _sess_ref            = [None]   # C-2: share Session across nested fns
+            _auth_ref            = [None]   # the JoinAuthenticator
+
+            def _ui_post(fn):
+                """The ONE way work off the Tk thread touches the UI.
+
+                _do_connect runs on a worker thread and the transport
+                delivers messages on its own, so every UI effect from either
+                has to be marshalled. Tkinter is not thread-safe: a direct
+                widget call from here is not reliably a visible error, it is
+                undefined behaviour that usually looks fine.
+
+                That matters beyond tidiness. This worker is the thread
+                running admission; an exception raised inside a stray widget
+                call would abandon the handshake midway, leaving transport
+                and Session state half-established -- the kind of
+                unrelated-looking failure that turns into a security-path
+                bug later. Routing every effect through one seam keeps the
+                authentication flow the only thing that can interrupt it.
+
+                Pinned structurally by tests/test_join_auth.py.
+                """
+                win.after(0, fn)
+
+
+            # ---- authentication is armed BEFORE anything is dialed ----
+            #
+            # Ordering is the whole point. The transport's reader thread
+            # starts as part of connect(), so registering callbacks
+            # afterwards leaves a window in which the first frames from the
+            # far end reach either nothing or a Session that has not yet
+            # been told to distrust them. Construct the pin, construct the
+            # Session already refusing non-handshake traffic, install the
+            # callbacks, and only then open a socket.
+            #
+            # The driver itself lives in holdem/p2p/join_auth.py so the
+            # shipped ordering is the ordering under test; as closures in a
+            # Tk callback it could only be exercised by driving the GUI.
+            joiner_admission = _join_auth.joiner_admission_from_invite(parsed)
+            sess = _session_mod.Session(
+                is_host    = False,
+                nickname   = self.nickname,
+                avatar_b64 = getattr(self, "avatar_b64", ""),
+                joiner_admission = joiner_admission,
+            )
+            _p2p_pkg._session = sess
+            _sess_ref[0] = sess              # C-2: expose to _handle_start
+
+            def _on_game_start(payload):
+                _ui_post(lambda: _handle_start(payload))
+
+            def _on_players(players):
+                _ui_post(lambda: _update_joined_ui(players))
+
+            sess.on_player_list_changed = _on_players
+            sess.on_game_start          = _on_game_start
+
+            # Both callbacks run on the TRANSPORT thread. Every UI effect
+            # goes through win.after -- Tkinter is not thread-safe, and a
+            # lobby that authenticates correctly while corrupting the widget
+            # tree is not an improvement.
+            def _authenticated(conn_id):
+                _ui_post(lambda m=_conn_method_ref[0]: status_lbl.config(
+                    text=f"Authenticated ({m}) — waiting for host to start…",
+                    fg=_ACCENT))
+                _ui_post(_show_ready_btn)
+
+            def _auth_failed(reason):
+                _ui_post(lambda r=reason: _on_error(
+                    "Host verification failed",
+                    "The host did not authenticate against this room code.\n"
+                    f"{r}\n\nPossible man-in-the-middle — connection aborted."))
+
+            authenticator = _join_auth.JoinAuthenticator(
+                transport=_transport,
+                session=sess,
+                joiner_admission=joiner_admission,
+                nickname=self.nickname,
+                avatar_b64=getattr(self, "avatar_b64", ""),
+                on_authenticated=_authenticated,
+                on_failed=_auth_failed,
+            )
+            _auth_ref[0] = authenticator
+
+            _transport.reset_callbacks()
+            _transport.on_message(authenticator.route)
+            _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
+
 
             def _do_connect():
                 public_ip   = parsed.get("public_ip")
@@ -926,26 +1068,32 @@ class OnboardingFlow:
                                 "Direct connect failed (%s); trying relay",
                                 direct_exc,
                             )
-                            win.after(0, lambda: status_lbl.config(
+                            _ui_post(lambda: status_lbl.config(
                                 text="Direct failed — trying relay…",
                                 fg=_DIM,
                             ))
                             if relay_host and relay_port:
                                 try:
-                                    from holdem.p2p.invite import strip_code
+                                    # The relay gets the PUBLIC routing
+                                    # token only. It used to be handed
+                                    # strip_code(code) -- the entire invite
+                                    # -- which under V2 is the admission
+                                    # secret and the host key pin together,
+                                    # i.e. everything needed to impersonate
+                                    # the host or join uninvited.
                                     conn_id = _transport.connect_via_relay(
                                         relay_host,
                                         relay_port,
-                                        strip_code(code),
+                                        _invite.public_room_id(parsed),
                                     )
                                     conn_method[0] = "Relay (via errantsaints.space)"
                                 except ConnectionError as relay_exc:
                                     # Last resort: try LAN multicast
                                     host_addr = _transport.find_peer(
-                                        rendezvous_key, timeout=5
+                                        discovery_token, timeout=5
                                     )
                                     if not host_addr:
-                                        win.after(0, lambda e=relay_exc: _on_error(
+                                        _ui_post(lambda e=relay_exc: _on_error(
                                             "Connection failed",
                                             f"Direct and relay both failed:\n{e}",
                                         ))
@@ -954,10 +1102,10 @@ class OnboardingFlow:
                             else:
                                 # No relay in code — try LAN multicast as fallback
                                 host_addr = _transport.find_peer(
-                                    rendezvous_key, timeout=5
+                                    discovery_token, timeout=5
                                 )
                                 if not host_addr:
-                                    win.after(0, lambda e=direct_exc: _on_error(
+                                    _ui_post(lambda e=direct_exc: _on_error(
                                         "Connection failed",
                                         f"Direct connect failed and no relay available:\n{e}",
                                     ))
@@ -966,9 +1114,9 @@ class OnboardingFlow:
 
                     else:
                         # No STUN address in code → fall back to LAN multicast
-                        host_addr = _transport.find_peer(rendezvous_key, timeout=15)
+                        host_addr = _transport.find_peer(discovery_token, timeout=15)
                         if not host_addr:
-                            win.after(0, lambda: _on_error(
+                            _ui_post(lambda: _on_error(
                                 "Host not found",
                                 "Could not locate the host on the local network.\n\n"
                                 "If the host is on a different network, ask them for "
@@ -978,56 +1126,27 @@ class OnboardingFlow:
                             return
                         conn_id = _transport.connect(host_addr)
 
-                    _conn_id_ref[0]        = conn_id
-                    _conn_method_ref[0]    = conn_method[0]
+                    # The connection that actually survived routing. Every
+                    # step below belongs to THIS conn_id and no other: a
+                    # direct attempt that failed and a relay attempt that
+                    # succeeded are different sockets, and admission state
+                    # must never be inherited across them.
+                    # Routing has settled. Only now does a handshake exist:
+                    # begin() draws a fresh client_nonce and binds admission
+                    # to THIS conn_id, so a challenge answered on a socket
+                    # that failed cannot be completed on its replacement.
+                    _conn_id_ref[0]     = conn_id
+                    _conn_method_ref[0] = conn_method[0]
+                    _auth_ref[0].begin(conn_id)
 
-                    # M-7: verify the host's pubkey prefix matches the room code
-                    # (done via the first signed player_ack which carries pubkey)
-                    _peer_id_prefix_ref[0] = parsed.get("peer_id_prefix", "")
-
-                    # Build our session; clear stale callbacks from any previous dialog
-                    sess = _session_mod.Session(
-                        is_host    = False,
-                        nickname   = self.nickname,
-                        avatar_b64 = getattr(self, "avatar_b64", ""),
-                    )
-                    _p2p_pkg._session = sess
-                    _sess_ref[0] = sess          # C-2: expose to _handle_start
-                    _transport.reset_callbacks()
-                    _transport.on_message(sess.handle_message)
-                    _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
-
-                    # Send our identity to the host
-                    import json as _json
-                    info_msg = _wire.pack("player_info", {
-                        "nickname":   self.nickname,
-                        "avatar_b64": getattr(self, "avatar_b64", ""),
-                    })
-                    _transport.send(conn_id, _json.loads(info_msg))
-
-                    def _on_game_start(payload):
-                        win.after(0, lambda: _handle_start(payload))
-
-                    def _on_players(players):
-                        win.after(0, lambda: _update_joined_ui(players))
-
-                    sess.on_player_list_changed = _on_players
-                    sess.on_game_start          = _on_game_start
-
-                    win.after(0, lambda m=conn_method[0]: status_lbl.config(
-                        text=f"Connected ({m}) — waiting for host to start…",
-                        fg=_ACCENT,
+                    _ui_post(lambda m=conn_method[0]: status_lbl.config(
+                        text=f"Connected ({m}) — authenticating host…",
+                        fg=_DIM,
                     ))
-                    win.after(0, _show_ready_btn)
 
                 except Exception as exc:
-                    win.after(0, lambda e=exc: _on_error("Connection failed", str(e)))
+                    _ui_post(lambda e=exc: _on_error("Connection failed", str(e)))
 
-            _ready_btn_ref       = [None]
-            _conn_id_ref         = [None]
-            _peer_id_prefix_ref  = [None]
-            _conn_method_ref     = ["Direct connection"]
-            _sess_ref            = [None]   # C-2: share Session across nested fns
 
             def _on_error(title, msg):
                 connect_btn.config(state="normal")
@@ -1072,25 +1191,30 @@ class OnboardingFlow:
 
                 sess = _sess_ref[0]
                 if sess is None:
-                    win.after(0, lambda: _on_error(
+                    _ui_post(lambda: _on_error(
                         "Connection error",
                         "Session was lost before the game started.",
                     ))
                     return
 
-                # M-7: verify host pubkey matches the peer_id_prefix from the room code.
-                # The host's conn_id in the seat_order is its local ID (peer_id hex).
-                expected_prefix = _peer_id_prefix_ref[0] or ""
-                if expected_prefix:
-                    host_cid = next(
-                        (p.conn_id for p in sess.players.values() if p.is_host), "")
-                    if not host_cid or not host_cid.startswith(expected_prefix):
-                        win.after(0, lambda: _on_error(
-                            "Host verification failed",
-                            "The host's identity does not match the room code.\n"
-                            "Possible man-in-the-middle — connection aborted.",
-                        ))
-                        return
+                # M-7 is no longer checked here, because it can no longer
+                # be reached unverified. The old check ran at THIS point --
+                # after player_info, after the roster, after Ready -- and
+                # compared only the first 8 bytes of the host key with
+                # startswith(). Both problems are gone: the exact 32-byte key
+                # is authenticated by the admission handshake before any
+                # identity is sent, and a session that has not completed it
+                # never leaves pre-auth, so no game_start can arrive.
+                #
+                # Asserted rather than assumed: reaching a game start on an
+                # unauthenticated session would mean the gate leaked.
+                if not getattr(sess, "_host_authenticated", True):
+                    _ui_post(lambda: _on_error(
+                        "Host verification failed",
+                        "The game started on a connection that never "
+                        "authenticated against this room code.",
+                    ))
+                    return
 
                 win.destroy()
                 self._launch_mp_game(sess, is_host=False,

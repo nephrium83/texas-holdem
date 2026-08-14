@@ -27,8 +27,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from holdem.p2p import admission as _adm_mod
     from holdem.p2p.events import EventSink
     from holdem.p2p.session import Player, Session
+    from tests.admission_helpers import admit
 except RuntimeError as exc:                          # pragma: no cover
     pytest.skip(f"libsodium unavailable: {exc}", allow_module_level=True)
 
@@ -92,12 +94,25 @@ class StarTransport:
             self._bus.deliver(self._cid, to, msg)
 
 
+#: This suite's transport declares verified envelopes, so its host runs in
+#: wire mode and must have a real admission policy -- the Session refuses to
+#: be constructed as an unguarded host on such a transport. B and C are then
+#: admitted by completing the ACTUAL handshake (tests/admission_helpers.py),
+#: not by a back door: relay behaviour is what these tests are about, and
+#: satisfying the gate is cheaper than carving a hole through it.
+_SECRET   = bytes(range(16))
+_HOST_KEY = bytes.fromhex(KEY["A"])
+
+
 def _table():
     bus = StarBus()
     made = {}
+    host_admission = _adm_mod.HostAdmission(
+        admission_secret=_SECRET, host_pubkey=_HOST_KEY)
     for cid in ("A", "B", "C"):
         s = Session(is_host=(cid == "A"), nickname=cid, avatar_b64="",
-                    transport=StarTransport(bus, cid), sink=_Sink())
+                    transport=StarTransport(bus, cid), sink=_Sink(),
+                    admission=host_admission if cid == "A" else None)
         s.local_conn_id = cid
         s._host_conn_id = "A"
         s._seat_order = ["A", "B", "C"]
@@ -109,6 +124,9 @@ def _table():
         s._hand_no = 1
         made[cid] = s
         bus.link(cid, s)
+    for cid in ("B", "C"):
+        admit(host_admission, cid, bytes.fromhex(KEY[cid]),
+              _SECRET, _HOST_KEY)
     return bus, made
 
 

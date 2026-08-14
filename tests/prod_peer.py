@@ -59,7 +59,9 @@ import time
 
 sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), ".."))
 
+from holdem.p2p import admission as _adm                # noqa: E402
 from holdem.p2p import identity as _identity            # noqa: E402
+from holdem.p2p import invite as _invite                # noqa: E402
 from holdem.p2p import transport                        # noqa: E402
 from holdem.p2p import wire as _wire                    # noqa: E402
 from holdem.p2p.session import Session                  # noqa: E402
@@ -74,7 +76,7 @@ def _emit(obj: dict) -> None:
         sys.stdout.flush()
 
 
-def _status(sess: Session) -> dict:
+def _status(sess: Session, host_admission=None) -> dict:
     """Everything a three-process assertion might need to see."""
     driver = getattr(sess, "_deal_driver", None)
     deal = getattr(driver, "deal", None)
@@ -90,8 +92,17 @@ def _status(sess: Session) -> dict:
         "host_conn_id":  getattr(sess, "_host_conn_id", None),
         "local_seat":    local_seat,
         "seat_order":    list(getattr(sess, "_seat_order", [])),
-        "seat_keys":     {str(k): v[:16] for k, v in
+        # FULL keys, not prefixes. These feed the continuity assertion, and
+        # comparing 8 bytes there would re-create the 64-bit target V2 was
+        # built to eliminate -- in the very test that claims the chain holds.
+        "seat_keys":     {str(k): v for k, v in
                           getattr(sess, "_seat_keys", {}).items()},
+        # Host only: which Ed25519 key each connection was ADMITTED under.
+        # Reported so a test can join the admission layer to the seat
+        # freeze rather than trusting the handoff between them.
+        "admitted_keys": ({cid: key.hex()
+                           for cid, key in host_admission._admitted.items()}
+                          if host_admission is not None else {}),
         "hand_no":       getattr(sess, "_hand_no", None),
         "players":       sorted(getattr(sess, "players", {})),
         # .value where the phase is an enum, so assertions compare against a
@@ -112,20 +123,104 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--role", required=True, choices=["host", "joiner"])
     ap.add_argument("--label", required=True)
+    ap.add_argument("--invite", default="",
+                    help="joiner: the V2 room code to pin the host with")
     args = ap.parse_args()
 
     is_host = (args.role == "host")
-    sess = Session(is_host=is_host, nickname=args.label, avatar_b64="")
+
+    # The host mints a real V2 invite and stands its admission policy on the
+    # secret inside it, exactly as onboarding does. The invite is emitted on
+    # stdout so the test can hand it to the joiners -- the harness standing in
+    # for a human pasting a code, not a shortcut around the capability: the
+    # joiners still have to prove possession of it.
+    host_admission = None
+    invite_code = ""
+    if is_host:
+        invite_code = _invite.generate_room_code(
+            host_pubkey=_identity.public_key_bytes())
+        _parsed = _invite.parse_room_code(invite_code)
+        host_admission = _adm.HostAdmission(
+            admission_secret=bytes.fromhex(_parsed["admission_secret"]),
+            host_pubkey=_identity.public_key_bytes(),
+            discovery_token=bytes.fromhex(_parsed["discovery_token"]))
+
+    # The joiner's pin is built up front from the invite so the Session can
+    # be constructed already refusing non-handshake traffic. Building it
+    # after connect() would leave a window in which a hostile endpoint could
+    # speak first and be believed.
+    joiner_adm = {"a": None, "done": False}
+    if not is_host and args.invite:
+        _inv = _invite.parse_room_code(args.invite)
+        joiner_adm["a"] = _adm.JoinerAdmission(
+            admission_secret=bytes.fromhex(_inv["admission_secret"]),
+            host_pubkey=bytes.fromhex(_inv["host_pubkey"]),
+            joiner_pubkey=_identity.public_key_bytes(),
+            discovery_token=bytes.fromhex(_inv["discovery_token"]))
+
+    sess = Session(is_host=is_host, nickname=args.label, avatar_b64="",
+                   admission=host_admission,
+                   joiner_admission=joiner_adm["a"])
+
+    def _hex(value):
+        try:
+            return bytes.fromhex(value or "")
+        except ValueError:
+            return b""
+
+    def _joiner_admission_step(conn_id, mtype, body, author_hex):
+        adm = joiner_adm["a"]
+        if adm is None:
+            return False
+        if mtype == "admission_challenge":
+            resp = adm.on_challenge(_hex(author_hex),
+                                    _hex(body.get("client_nonce")),
+                                    _hex(body.get("server_nonce")))
+            if resp is None:
+                _emit({"type": "error",
+                       "msg": "admission_challenge failed the host pin"})
+                return True
+            transport.send(conn_id, {"type": "admission_response", **resp})
+            return True
+        if mtype == "admission_accept":
+            ok = adm.on_accept(_hex(author_hex),
+                               _hex(body.get("client_nonce")),
+                               _hex(body.get("server_nonce")))
+            joiner_adm["done"] = bool(ok)
+            _emit({"type": "admission", "conn_id": conn_id, "admitted": ok})
+            if ok:
+                # Only NOW is this connection the host hop -- not because it
+                # answered first, but because a signed accept verified
+                # against the exact key the invite pinned.
+                sess.mark_host_authenticated(conn_id)
+                # Identity is revealed only after mutual authentication.
+                info = _wire.pack("player_info",
+                                  {"nickname": args.label, "avatar_b64": ""})
+                transport.send(conn_id, json.loads(info))
+            return True
+        return False
 
     def _on_msg(conn_id: str, msg: dict) -> None:
         # Report BEFORE handing to the Session, so a message that makes the
         # Session throw is still visible to the test as having arrived.
         payload = msg.get("payload", msg)
         body = payload if isinstance(payload, dict) else {}
-        _emit({"type": "recv", "from": conn_id, "mtype": msg.get("type"),
+        mtype = msg.get("type")
+        _emit({"type": "recv", "from": conn_id, "mtype": mtype,
                "seat": body.get("seat", body.get("seat_from")),
                "author_seq": body.get("author_seq")})
+        author_hex = msg.get("pubkey", "")
         try:
+            # The HOST half is Session's, not this harness's. It used to be
+            # reimplemented here, which is how the shipped host path came to
+            # have no handshake at all while these tests stayed green: the
+            # harness answered on production's behalf. The joiner half is
+            # still driven here because in the application it belongs to
+            # onboarding's JoinAuthenticator, not to Session.
+            if mtype in _adm.ADMISSION_TYPES:
+                if not is_host and _joiner_admission_step(
+                        conn_id, mtype, body, author_hex):
+                    return
             sess.handle_message(conn_id, msg)
         except Exception as exc:                       # noqa: BLE001
             _emit({"type": "error", "msg": f"handle_message: {exc!r}"})
@@ -150,7 +245,9 @@ def main() -> None:
         # named by. Joiners get UUIDs and learn theirs via player_ack.
         sess.local_conn_id = _identity.peer_id()
         sess.add_local_player(sess.local_conn_id)
-        _emit({"type": "ready", "addr": addr, "peer_id": _identity.peer_id()})
+        _emit({"type": "ready", "addr": addr,
+               "peer_id": _identity.peer_id(),
+               "invite": invite_code})
     else:
         _emit({"type": "ready", "addr": "", "peer_id": _identity.peer_id()})
 
@@ -166,12 +263,12 @@ def main() -> None:
         try:
             if op == "connect":
                 cid = transport.connect(cmd["addr"])
-                # Exactly what onboarding.py sends: a SIGNED player_info.
-                # The host binds this envelope's pubkey to the seat, so an
-                # unsigned shortcut here would not exercise binding at all.
-                info = _wire.pack("player_info", {
-                    "nickname": args.label, "avatar_b64": ""})
-                transport.send(cid, json.loads(info))
+                # player_info is NOT sent here any more. Identity goes out
+                # only after admission_accept verifies against the pinned
+                # host key; this connection previously announced who we are
+                # to whoever happened to answer the socket.
+                transport.send(cid, {"type": "admission_hello",
+                                     **joiner_adm["a"].hello_payload()})
                 _emit({"type": "connected", "conn_id": cid,
                        "addr": cmd["addr"], "outbound": True})
                 _emit({"type": "ack", "op": "connect"})
@@ -186,7 +283,7 @@ def main() -> None:
                     peers = sorted(transport._writers.keys())
                 _emit({"type": "graph", "peers": peers})
             elif op == "status":
-                _emit(_status(sess))
+                _emit(_status(sess, host_admission))
             elif op == "broadcast":
                 transport.broadcast(cmd["msg"])
                 _emit({"type": "ack", "op": "broadcast"})

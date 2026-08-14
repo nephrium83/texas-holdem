@@ -90,15 +90,28 @@ def test_hijacked_host_cannot_gain_admin_authority():
     assert not paused, "attacker acquired host-gated admin authority"
 
 
-def test_player_ack_still_works_in_the_lobby_handshake():
-    """The legitimate use: a joining peer learns its own conn_id from the
-    host before play begins. Gating must not break it."""
+def test_player_ack_assigns_our_id_but_no_longer_elects_the_host():
+    """The legitimate use survives; the dangerous side effect does not.
+
+    player_ack used to ALSO set _host_conn_id when the host was unknown,
+    because it was historically how a joiner learned who the host was. That
+    made "first peer to speak" the election rule, and host identity gates
+    pause, resume, kick, adjust_blinds, game_start and session_end.
+    wire.unpack proves only that a message was signed by SOME key, so the
+    election was decided by transmission order.
+
+    Learning our own conn_id from it is still fine. Deciding who the host
+    is now happens in exactly one place -- mark_host_authenticated(), after
+    a signed admission_accept verifies against the exact key the invite
+    pinned. See tests/test_admission.py.
+    """
     s = peer("LOBBY")
     s._host_conn_id = ""                    # host not yet known
     s.handle_message("peer0", {"type": "player_ack",
                                "payload": {"your_conn_id": "peer1"}})
-    assert s.local_conn_id == "peer1"
-    assert s._host_conn_id == "peer0"
+    assert s.local_conn_id == "peer1", "the joiner must still learn its own id"
+    assert s._host_conn_id == "", (
+        "player_ack elected a host; only a verified admission_accept may")
 
 
 def test_player_ack_from_a_non_host_is_refused_in_the_lobby():

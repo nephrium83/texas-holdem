@@ -78,6 +78,7 @@ from typing import Callable, List, Optional
 from holdem.p2p.timeout import (
     Clock, DeadlineToken, RealClock, DEFAULT_PHASE_TIMEOUTS,
 )
+from holdem.p2p.admission import ADMISSION_TYPES as _ADMISSION_TYPES
 from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
 
 _log = logging.getLogger(__name__)
@@ -313,7 +314,8 @@ class Session:
                  sink: Optional[EventSink] = None,
                  require_prevention: bool = False,
                  master_secret: Optional[bytes] = None,
-                 author_mode: Optional[str] = None):
+                 author_mode: Optional[str] = None,
+                 admission=None, joiner_admission=None):
         # The one serialized execution context for this session's
         # protocol state. Created first: every field below is only ever
         # mutated while this is held.
@@ -362,6 +364,45 @@ class Session:
         if author_mode not in (AUTHOR_MODE_WIRE, AUTHOR_MODE_COMPAT):
             raise ValueError(f"unknown author_mode {author_mode!r}")
         self.author_mode = author_mode
+
+        # Admission policy (M-8). A host on the production transport MUST
+        # have one: without it the lobby gate is open and any process that
+        # can sign an envelope becomes a Player. Requiring it here rather
+        # than trusting call sites means the insecure configuration cannot
+        # be reached by omission -- the same discipline as author_mode.
+        #
+        # Compat harnesses may omit it. That is not a production bypass:
+        # AUTHOR_MODE_COMPAT is only selected by a transport that declares
+        # it delivers no verified envelopes, and the production transport
+        # declares the opposite.
+        # KNOWN GAP, deliberately not closed here. A wire-mode JOINER built
+        # without a pin has _pinned_host_pubkey = None, so the roster check
+        # in _on_player_list silently no-ops and the session accepts
+        # whatever host key it is told. Independent review classed this as
+        # structural rather than live: onboarding always supplies a pin and
+        # sidecar_launcher runs in compat, so no shipped path reaches it.
+        #
+        # Requiring it here is the obvious fix and was tried; it fails 34
+        # existing tests whose doubles build wire-mode joiners for reasons
+        # unrelated to admission. That is a real change to the test estate,
+        # not a bug fix, and it does not belong in a correction pass. Left
+        # as a named gap rather than a silent one.
+        if admission is None and is_host and author_mode == AUTHOR_MODE_WIRE:
+            raise ValueError(
+                "a host on a verified-envelope transport must be given an "
+                "admission policy (holdem.p2p.admission.HostAdmission); "
+                "without one, any connection that can sign an envelope "
+                "would be able to join the lobby")
+        self._admission = admission
+        # Joiner side. When set, this session refuses everything but the
+        # admission handshake until a peer has authenticated as the exact
+        # host key the invite pinned. _host_authenticated is the switch;
+        # nothing but a verified admission_accept may flip it.
+        self._joiner_admission = joiner_admission
+        self._host_authenticated = joiner_admission is None
+        #: Set on successful host authentication; the exact 32-byte key the
+        #: invite pinned, kept to close the chain when the roster arrives.
+        self._pinned_host_pubkey = None
 
         # --- structured event logging (Phase 4) ---
         self._log_sink: EventSink = sink if sink is not None else NullSink()
@@ -535,6 +576,47 @@ class Session:
             _log.debug("session: dropping %s from %s — session is %s",
                        msg.get("type"), conn_id, self.terminal_state)
             return
+
+        # ---- admission gate (M-8) ------------------------------------
+        # The host answers NOTHING but the admission handshake until a
+        # connection has proved it holds the invite. Before this existed,
+        # _on_player_info created a Player from any correctly-signed
+        # connection -- and "correctly signed" only means the sender owns
+        # some Ed25519 key, which anyone can generate. Possession of the
+        # room code was never demonstrated to the host at all.
+        #
+        # Placed ahead of the hash-chain bookkeeping deliberately. That
+        # code writes _peer_last_hash[conn_id] for every message it sees,
+        # so gating after it would let an unadmitted connection seed
+        # per-peer chain state -- small, but it is state, written on behalf
+        # of a peer that has not yet earned the right to any.
+        if not self._admission_ok(conn_id, msg.get("type"),
+                                  msg.get("pubkey")):
+            return
+
+        # The handshake itself is answered HERE, by the Session that owns
+        # the perimeter and the policy -- not by a caller.
+        #
+        # It was originally left to the application layer, and the joiner
+        # half was implemented in onboarding while the host half existed
+        # only in a test harness. The result passed every test and could
+        # not complete a single real handshake: a production host received
+        # admission_hello and replied with nothing, so no connection could
+        # ever be admitted and the perimeter held vacuously. An independent
+        # review found it; 1249 green tests did not.
+        #
+        # Ownership is the fix, not another branch. Session already holds
+        # the HostAdmission policy and already decides what an unadmitted
+        # connection may say, so it is the only place where "may you speak"
+        # and "here is how you earn that" cannot drift apart.
+        #
+        # Answered before the hash-chain bookkeeping for the same reason
+        # the gate precedes it: a peer mid-handshake has not yet earned any
+        # per-peer state.
+        if msg.get("type") in _ADMISSION_TYPES:
+            self._answer_admission(conn_id, msg)
+            return
+
         # M-11 / H-3: per-message integrity is enforced at the transport
         # layer (C-1: every envelope is signature-verified in wire.unpack).
         # The hash *chain* linking successive messages is not yet threaded —
@@ -930,6 +1012,189 @@ class Session:
             if missing:
                 out.append({"seat": seat, "missing": missing})
         return out
+
+    def mark_host_authenticated(self, conn_id: str,
+                                host_pubkey=None) -> bool:
+        """The joiner's host hop, established the only way it may be.
+
+        Called after a signed admission_accept has verified against the
+        exact 32-byte key the invite pinned. Until this runs, the session
+        drops everything but the handshake, so an endpoint that merely
+        answered the socket cannot pass itself off as the host by speaking
+        first.
+
+        Deliberately explicit rather than inferred from message flow: the
+        old inference -- "whoever sent the first player_ack" -- is the bug
+        this replaces, and an implicit rule is what let it hide.
+
+        ``host_pubkey`` is the key the CALLER believes it authenticated. It
+        is checked against the pin rather than trusted, so a call site that
+        drifts -- passing the envelope's author instead of the invite's, say
+        -- fails closed here instead of quietly opening the session to
+        whatever it just verified against itself. Returns whether the hop
+        was established.
+        """
+        if self._joiner_admission is None:
+            return False
+        pinned = self._joiner_admission.host_pubkey
+        if host_pubkey is not None:
+            if bytes(host_pubkey) != bytes(pinned):
+                _log.warning(
+                    "session: refusing to authenticate %s -- caller offered "
+                    "%s but the invite pinned %s", conn_id,
+                    bytes(host_pubkey).hex()[:16], bytes(pinned).hex()[:16])
+                return False
+        self._host_conn_id = conn_id
+        self._host_authenticated = True
+        # Retained so the chain can be closed later: the roster the host
+        # sends must name THIS key for the host's own seat. Without it the
+        # joiner's seat keys are simply whatever the host asserted, and
+        # "invite key == frozen seat key" is a claim nothing checks.
+        self._pinned_host_pubkey = bytes(pinned).hex()
+        return True
+
+    @staticmethod
+    def _adm_bytes(value):
+        """Hex -> bytes, or None. Never raises on attacker input."""
+        if not isinstance(value, str):
+            return None
+        try:
+            return bytes.fromhex(value)
+        except ValueError:
+            return None
+
+    def _answer_admission(self, conn_id: str, msg: dict) -> None:
+        """Host side of hello -> challenge -> response -> accept.
+
+        Non-hosts drop these: a joiner's handshake is driven by
+        JoinAuthenticator, which intercepts admission traffic before the
+        Session sees it, so anything reaching here on a joiner is a peer
+        trying to talk protocol at the wrong end.
+
+        Every field is parsed defensively. These are the only messages an
+        UNADMITTED connection can send, which makes them the one attacker-
+        reachable surface ahead of the perimeter; a malformed nonce must be
+        a dropped message, never an exception on the ingress path.
+        """
+        if not self.is_host or self._admission is None:
+            return
+        mtype = msg.get("type")
+        payload = msg.get("payload")
+        body = payload if isinstance(payload, dict) else msg
+        author = self._adm_bytes(msg.get("pubkey"))
+        if author is None or len(author) != 32:
+            return
+
+        if mtype == "admission_hello":
+            nonce = self._adm_bytes(body.get("client_nonce"))
+            if nonce is None:
+                return
+            challenge = self._admission.on_hello(conn_id, author, nonce)
+            if challenge is None:
+                return
+            self._transport.send(conn_id,
+                                 {"type": "admission_challenge", **challenge})
+
+        elif mtype == "admission_response":
+            client_nonce = self._adm_bytes(body.get("client_nonce"))
+            server_nonce = self._adm_bytes(body.get("server_nonce"))
+            mac = self._adm_bytes(body.get("mac"))
+            if client_nonce is None or server_nonce is None or mac is None:
+                return
+            if not self._admission.on_response(conn_id, author, client_nonce,
+                                               server_nonce, mac):
+                _log.warning("session: admission refused for %s", conn_id)
+                return
+            accept = self._admission.accept_payload(conn_id)
+            if accept is None:                  # cannot happen; fail closed
+                return
+            _log.info("session: admitted %s as %s", conn_id,
+                      author.hex()[:16])
+            self._transport.send(conn_id,
+                                 {"type": "admission_accept", **accept})
+
+    def _admission_ok(self, conn_id: str, mtype, msg_pubkey=None) -> bool:
+        """May this connection say this yet? Host-side capability gate.
+
+        Three cases, and only the first is a gate:
+
+        * a host WITH an admission policy -- an unadmitted connection may
+          send admission handshake messages and nothing else. Everything
+          that could mutate lobby or game state is inert until it has
+          proved possession of the invite.
+        * self-delivery -- the local session's own emissions never crossed
+          a wire and are not a connection to admit.
+        * no admission policy configured -- compat harnesses, which cannot
+          be constructed this way on the production transport (see
+          __init__: a wire-mode host must be given one).
+
+        Note what this does NOT decide: WHO the peer is. Admission proves
+        the peer holds the invite, which everyone invited holds. Seat
+        authority is still the Ed25519 binding, checked separately. A
+        holder of the room code can still present several identities --
+        that is a policy problem this layer does not pretend to solve.
+        """
+        if conn_id == self.local_conn_id:
+            return True
+
+        # --- joiner side: nothing but the handshake until the host is the
+        # host. _on_player_ack used to accept the first sender while
+        # _host_conn_id was unknown, because that message was historically
+        # how a joiner learned who the host was. Under the new handshake
+        # that assumption is a hole: wire.unpack proves only that a message
+        # was signed by SOME key, so a hostile endpoint could send
+        # player_ack, player_list and game_start before the real challenge
+        # completes and be believed. The invite-pinned key decides who the
+        # host is; nothing else may.
+        if self._joiner_admission is not None and not self._host_authenticated:
+            if mtype in _ADMISSION_TYPES:
+                return True
+            _log.warning(
+                "session: refusing %r from %s -- no peer has authenticated "
+                "as the host pinned by the invite", mtype, conn_id)
+            return False
+
+        if self._admission is None or not self.is_host:
+            return True
+        if self._admission.is_admitted(conn_id):
+            # Admission binds the CONNECTION to the key that completed the
+            # transcript, so later traffic cannot switch identity. Without
+            # this a client could authenticate as K1 -- proving it holds the
+            # invite -- and then send player_info signed by K2, which
+            # _on_player_info would bind to the seat. It still holds the
+            # capability, so this is not catastrophic, but it would make
+            # binding joiner_pubkey into the transcript decorative.
+            admitted = self._admission.admitted_key(conn_id)
+            if admitted is not None:
+                author = msg_pubkey
+                # A missing author is NOT "nothing to compare". Once
+                # conn_id -> K1 exists, a wire message with no usable
+                # envelope author is invalid: the transport hands up
+                # unsigned relay-control frames, and treating those as
+                # exempt let them reach the hash-chain bookkeeping and seed
+                # per-peer state from unsigned bytes. Compat harnesses keep
+                # the lenient behaviour they were built on; production does
+                # not.
+                if not isinstance(author, str) or not author:
+                    if self.author_mode == AUTHOR_MODE_WIRE:
+                        _log.warning(
+                            "session: refusing %r on %s -- no envelope "
+                            "author on a connection admitted as %s",
+                            mtype, conn_id, admitted.hex()[:16])
+                        return False
+                elif author != admitted.hex():
+                    _log.warning(
+                        "session: refusing %r on %s -- signed by %s but that "
+                        "connection was admitted as %s",
+                        mtype, conn_id, author[:16], admitted.hex()[:16])
+                    return False
+            return True
+        if mtype in _ADMISSION_TYPES:
+            return True
+        _log.warning(
+            "session: refusing %r from unadmitted connection %s -- the "
+            "admission handshake has not completed", mtype, conn_id)
+        return False
 
     def _normalize_hostless(self, conn_id: str, msg: dict) -> HostlessInbound:
         """The representation boundary: wire envelope or flat dict -> record.
@@ -1707,8 +1972,53 @@ class Session:
             return False               # settled: terminal state
         return False
 
+    def _adopt_signing_key(self, conn_id: str, claimed) -> str:
+        """The ONE place a peer's signing identity is decided. Write-once.
+
+        Three handlers write this field -- _on_player_info, _on_player_list
+        and add_local_player -- and the invariant was previously enforced in
+        one of them. That is how three repair attempts in a row failed in
+        the same place: the property belongs to the FIELD, and a rule that
+        lives in a handler is only true for the messages that happen to go
+        through it. A one-line player_info walked around a write-once rule
+        implemented in player_list.
+
+        Write-once because this key decides who may author for a seat.
+        Everything else in a roster entry is presentation or lobby state and
+        may be updated freely; this one, once established, is the identity
+        that later freezes into a seat. Rotation is not supported and no
+        shipped path rotates.
+
+        Returns the key to store. A refused change is logged and the
+        established value kept, so a hostile update is inert rather than
+        fatal.
+        """
+        existing = self.players.get(conn_id)
+        current = getattr(existing, "ed25519_pubkey_hex", "") if existing else ""
+        claimed = claimed if isinstance(claimed, str) else ""
+        if not current:
+            return claimed
+        if claimed and claimed != current:
+            _log.warning(
+                "session: refusing to move %s from signing key %s to %s -- "
+                "a signing identity is write-once", conn_id,
+                current[:16], claimed[:16])
+        return current
+
     def _on_player_info(self, conn_id: str, msg: dict) -> None:
-        """Host receives identity from a newly connected peer."""
+        """Host receives identity from a newly connected peer.
+
+        HOST ONLY. This message travels joiner -> host; a joiner receiving
+        one is being told about an identity by a peer that has no authority
+        to assert it. Processing it let the authenticated host overwrite an
+        established signing key on a joiner -- including the host's own,
+        which then froze into its seat -- with a message that never went
+        near the roster path where write-once was enforced.
+        """
+        if not self.is_host:
+            _log.warning("session: ignoring player_info from %s -- only a "
+                         "host receives identity announcements", conn_id)
+            return
         payload = msg.get("payload", {})
         nickname = payload.get("nickname", "Player")
         with self._lock:
@@ -1721,7 +2031,8 @@ class Session:
                 # From the ENVELOPE, not the payload: wire.unpack has already
                 # verified the signature against this key, so it is the one
                 # fact about a joiner nobody can assert on its behalf.
-                ed25519_pubkey_hex = msg.get("pubkey", ""),
+                ed25519_pubkey_hex = self._adopt_signing_key(
+                    conn_id, msg.get("pubkey", "")),
                 is_host           = False,
             )
             if conn_id not in self._join_order:
@@ -1750,12 +2061,81 @@ class Session:
             _log.warning("session: player_list from non-host %s — ignoring",
                          conn_id)
             return
+        # JOINER ONLY. A host is the roster's author and must never adopt
+        # one. The existing guard was `if self._host_conn_id and conn_id !=
+        # self._host_conn_id`, and a host's _host_conn_id is always "" --
+        # written only by mark_host_authenticated (joiner-side) and
+        # _elect_new_host (dead in wire mode) -- so it failed open exactly
+        # on the host. Any single admitted invitee could inject roster
+        # entries, which start_game turns into seats and _bind_seat_keys
+        # freezes onto attacker-supplied keys.
+        if self.is_host:
+            _log.warning("session: ignoring player_list from %s -- the host "
+                         "is the roster's author, not a recipient", conn_id)
+            return
+
         payload = msg.get("payload", {})
         players_data = payload.get("players", [])
-        with self._lock:
+
+        # Close the chain. The roster is host-authoritative, so without this
+        # a joiner's seat keys are whatever the host asserted -- including
+        # for the HOST'S OWN seat, which is the one identity the invite
+        # already pinned. The claim "invite key == frozen seat key" was
+        # therefore checked nowhere, and a host could seat itself under a
+        # different key than the one it authenticated with.
+        #
+        # Compared over all 32 bytes. An 8-byte comparison here would
+        # reintroduce exactly the 64-bit target V2 exists to remove.
+        refused: set = set()
+        if self._pinned_host_pubkey is not None:
             for p in players_data:
                 cid = p.get("conn_id", "")
                 if not cid:
+                    continue
+                # Evaluated on the EFFECTIVE post-merge values, not on what
+                # the payload claims.
+                #
+                # An earlier version tested p.get("is_host") and skipped
+                # anything falsy -- but is_host is a field the SENDER
+                # chooses, and the merge below preserves the existing flag
+                # while unconditionally rewriting the key. So omitting
+                # is_host from an update walked straight past the check and
+                # still repointed the host's key, which then froze into the
+                # host's seat: exactly the substitution this exists to stop,
+                # reachable by leaving a field out.
+                #
+                # Anchor on what WE already believe about the entry, merged
+                # with what the payload asks to change, so there is no form
+                # of the message that is checked differently from how it is
+                # applied.
+                existing = self.players.get(cid)
+                is_host = p.get("is_host",
+                                existing.is_host if existing else False)
+                if not is_host:
+                    continue
+                claimed = p.get(
+                    "ed25519_pubkey_hex",
+                    existing.ed25519_pubkey_hex if existing else "")
+                if claimed and claimed != self._pinned_host_pubkey:
+                    # Drop the OFFENDING ENTRY, not the whole message.
+                    #
+                    # This used to `return`, discarding every other player in
+                    # the same roster. A peer that got a bad host entry into
+                    # the host's broadcast could therefore freeze every
+                    # joiner's lobby permanently -- a denial of service
+                    # created by the check itself. The injection route is
+                    # closed above, but a check whose failure mode is
+                    # "discard everything" should not be relied on for that.
+                    _log.warning(
+                        "session: dropping roster entry %s -- it would seat "
+                        "host key %s but the invite pinned %s",
+                        cid, str(claimed)[:16], self._pinned_host_pubkey[:16])
+                    refused.add(cid)
+
+        with self._lock:
+            for p in players_data:
+                cid = p.get("conn_id", "")
+                if not cid or cid in refused:
                     continue
                 if cid not in self.players:
                     self.players[cid] = Player(
@@ -1764,7 +2144,8 @@ class Session:
                         nickname          = p.get("nickname",          "Player"),
                         avatar_b64        = p.get("avatar_b64",        ""),
                         x25519_pubkey_hex = p.get("x25519_pubkey_hex", ""),
-                        ed25519_pubkey_hex = p.get("ed25519_pubkey_hex", ""),
+                        ed25519_pubkey_hex = self._adopt_signing_key(
+                            cid, p.get("ed25519_pubkey_hex", "")),
                         is_host           = p.get("is_host",           False),
                         ready             = p.get("ready",             False),
                     )
@@ -1776,8 +2157,21 @@ class Session:
                     existing.avatar_b64        = p.get("avatar_b64",        existing.avatar_b64)
                     existing.is_host           = p.get("is_host",           existing.is_host)
                     existing.x25519_pubkey_hex = p.get("x25519_pubkey_hex", existing.x25519_pubkey_hex)
-                    existing.ed25519_pubkey_hex = p.get(
-                        "ed25519_pubkey_hex", existing.ed25519_pubkey_hex)
+                    # A SIGNING key is write-once. Every other field here is
+                    # presentation or lobby state and may be updated; this
+                    # one decides who may author for a seat, and a roster
+                    # broadcast must not be able to move it.
+                    #
+                    # Gating this on the is_host flag was tried and is not
+                    # enough: the flag is chosen by the sender, and
+                    # _bind_seat_keys binds by seat POSITION rather than by
+                    # flag, so an update that dropped is_host still poisoned
+                    # the key that froze into that seat. The property has
+                    # nothing to do with host-ness -- no roster may rewrite
+                    # any established signing identity.
+                    existing.ed25519_pubkey_hex = self._adopt_signing_key(
+                        cid, p.get("ed25519_pubkey_hex",
+                                   existing.ed25519_pubkey_hex))
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data
@@ -1824,7 +2218,14 @@ class Session:
                          "conn_id — ignoring", conn_id)
             return
         self.local_conn_id = assigned
-        self._host_conn_id = conn_id   # conn_id of the connection to the host
+        # NOTE: this deliberately no longer sets _host_conn_id. Learning our
+        # own id from a message is fine; deciding WHO THE HOST IS from the
+        # first peer to speak is not. wire.unpack proves only that a message
+        # was signed by some key, so accepting the sender here handed host
+        # authority -- which gates pause, resume, kick, adjust_blinds,
+        # game_start and session_end -- to whoever transmitted first. The
+        # host hop is now established only where the invite-pinned key is
+        # verified: see mark_host_authenticated().
 
     @owned
     def _on_game_start(self, conn_id: str, msg: dict) -> None:
@@ -1981,6 +2382,15 @@ class Session:
         to a peer that inherited none of its state, with no authenticated
         transfer of that authority. So it terminates instead.
         """
+        # Admission is connection-scoped, so it dies with the connection --
+        # cleared even on a terminal session, because conn_ids can be reused
+        # and stale admission is the one piece of state that must never
+        # outlive its socket. A reconnecting peer redoes the whole exchange
+        # against a fresh nonce, which is what makes a captured response
+        # from an earlier connection worthless.
+        if self._admission is not None:
+            self._admission.forget(conn_id)
+
         if self.terminal_state is not None:
             return                          # already terminal; late event
 
@@ -2020,6 +2430,34 @@ class Session:
                 "identity is frozen once play begins", self.state)
             return
         if self.terminal_state is not None:
+            return
+        # Wire mode does not migrate hosts, and this is a protocol
+        # statement rather than a missing feature.
+        #
+        # V2 authentication pins ONE exact 32-byte host key, carried in the
+        # invite every joiner holds. Promoting a different peer changes
+        # that identity, so the invite can no longer authenticate the host
+        # it names -- and every joiner's pin is now wrong. Migration would
+        # need authenticated authority transfer, reconnection, and in
+        # practice a new invite: a separate protocol, not a repair to this
+        # one.
+        #
+        # It is also how the M-8 gate was reopened at runtime. Election set
+        # is_host = True on a Session constructed with admission=None, and
+        # _admission_ok short-circuits on a missing policy, so a promoted
+        # peer admitted anyone. The constructor invariant only ever covered
+        # construction.
+        #
+        # Compat harnesses keep the old behaviour; that is what the mode is
+        # for. Production fails closed and a new host needs a new lobby.
+        if self.author_mode == AUTHOR_MODE_WIRE:
+            _log.warning(
+                "session: host lost in LOBBY; refusing to elect a "
+                "replacement because the invite pins one exact host key. "
+                "A new host requires a newly authenticated lobby.")
+            self.terminate(self.HOST_LOST,
+                           "host lost in lobby; wire mode does not migrate "
+                           "a pinned host identity")
             return
         if not self._join_order:
             return
@@ -2110,7 +2548,16 @@ class Session:
                 nickname          = self.local_nickname,
                 avatar_b64        = self.local_avatar,
                 x25519_pubkey_hex = _id.x25519_public_key_bytes().hex(),
-                ed25519_pubkey_hex = _id.public_key_bytes().hex(),
+                # Through the chokepoint like every other writer, even
+                # though this one supplies OUR OWN key rather than anything
+                # a peer sent. An unconditional write here re-opens
+                # write-once for that conn_id, and "this caller is
+                # trustworthy so it may skip the rule" is precisely the
+                # exemption that produced the last two findings. Idempotent
+                # in practice: the first call establishes the key and later
+                # calls present the same value.
+                ed25519_pubkey_hex = self._adopt_signing_key(
+                    conn_id, _id.public_key_bytes().hex()),
                 is_host           = self.is_host,
                 ready             = True,
             )
