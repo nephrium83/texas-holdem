@@ -197,3 +197,46 @@ def test_a_failure_shared_by_every_seat_still_returns_a_verdict():
     start_table = _make_start_table(sessions, order, bus, _SETTINGS)
 
     assert start_table() == "hand_failed"
+
+
+def test_delivery_continues_past_a_failing_message():
+    """The drain must reach quiescence, not stop at the first failure.
+
+    bus.drain() re-raises the first handler error, which unwinds its own
+    delivery loop and abandons everything still queued. A single
+    try/except around one drain() call therefore leaves the remainder
+    undelivered -- the same defect as leaving game_start queued, which is
+    what containing the drain was meant to prevent. Measured at 4 seats
+    with one broken seat: 3 messages abandoned, delivered late by whatever
+    command happened to drain next.
+    """
+    bus, sessions, order = _make_sessions(4)
+    _wire_hand_start(sessions, order)
+    sessions[order[1]].on_game_start = lambda _p: (_ for _ in ()).throw(
+        RuntimeError("seat 1 is broken"))
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    verdict = start_table()
+
+    assert bus.pending == 0, (
+        f"{bus.pending} message(s) abandoned after a handler failed; "
+        f"they would be delivered late by an unrelated later command")
+    assert verdict == "hand_failed"
+
+
+def test_a_seat_that_cannot_deal_downgrades_the_verdict():
+    """Pins the started -> hand_failed downgrade specifically.
+
+    The table IS live and its first hand cannot complete -- a seat is
+    missing from the deal, and check_deadlines has no production caller,
+    so nothing will ever void it. Reporting "started" would tell the
+    client a hand is underway that never will be.
+    """
+    bus, sessions, order = _make_sessions(3)
+    _wire_hand_start(sessions, order)
+    sessions[order[2]].on_game_start = lambda _p: (_ for _ in ()).throw(
+        RuntimeError("seat 2 is broken"))
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    assert start_table() == "hand_failed", \
+        "a seat that could not deal was reported as a clean start"

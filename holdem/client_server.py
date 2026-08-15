@@ -198,6 +198,14 @@ class _Conn:
             # surface as one, and letting it escape unwinds the read loop
             # and closes the client's socket. Dropping the connection is a
             # far worse answer to a bad command than reporting the error.
+            #
+            # Logged at exception level because this catch is broad enough
+            # to swallow the codebase's own loud guards -- the bus
+            # re-entrancy guard, SessionOwner._assert_owner -- which exist
+            # precisely to be noticed. The client is told "ok: false", and
+            # nothing in the client renders an error for a command it did
+            # not initiate, so without this the only trace would be gone.
+            _log.exception("client command %r failed", command)
             result = {"type": "command_result", "command": command,
                       "ok": False, "error": str(exc)}
         self._send(result)

@@ -22,7 +22,10 @@ test harnesses.
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional, Tuple
+
+_log = logging.getLogger(__name__)
 
 
 class InMemoryBus:
@@ -32,6 +35,12 @@ class InMemoryBus:
         self._sessions: Dict[str, object] = {}
         self._queue: List[Tuple[str, Optional[str], dict]] = []
         self._draining = False
+
+    @property
+    def pending(self) -> int:
+        """Messages still queued. Lets a caller that survives handler
+        failures tell whether delivery actually finished."""
+        return len(self._queue)
 
     def register(self, conn_id: str, session) -> None:
         self._sessions[conn_id] = session
@@ -106,6 +115,15 @@ class InMemoryBus:
                     except Exception as exc:       # noqa: BLE001 - re-raised
                         if first_error is None:
                             first_error = exc
+                        else:
+                            # Only the first propagates. Log the rest rather
+                            # than dropping them: a second failing peer is a
+                            # separate fact, and losing it silently is how a
+                            # multi-peer failure reads as a single-peer one.
+                            _log.exception(
+                                "InMemoryBus: additional handler failure "
+                                "delivering %s to %s", msg.get("type"), c,
+                                exc_info=exc)
                 if first_error is not None:
                     raise first_error
             return steps

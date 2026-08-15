@@ -46,6 +46,11 @@ HUMAN_SEAT = 0
 # States where next_p2p_hand() is meaningful.
 _ADVANCEABLE_STATES = ("hand_complete", "voided")
 
+# Ceiling on retries when delivery keeps failing. Each drain() consumes at
+# least one message before it can raise, so this bounds a pathological
+# handler that enqueues as fast as it fails; a healthy table settles in one.
+_MAX_DRAIN_ATTEMPTS = 64
+
 
 # ---------------------------------------------------------------------------
 # Session factory
@@ -165,20 +170,20 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
             _log.error("table started but its first hand failed: %s", exc)
             verdict = "hand_failed"
 
-        # Drained here rather than in a finally, and the drain's own errors
-        # are contained. A finally that raises DISCARDS the pending return:
-        # _wire_hand_start installs the same callback on every session, so
-        # the realistic failure is one every seat shares, which makes the
-        # drain raise too. The verdict then never returned at all and the
-        # RuntimeError escaped into client_server, whose handler catches
-        # only (KeyError, TypeError, ValueError) -- dropping the client's
-        # connection instead of answering the command.
-        try:
-            bus.drain()
-        except Exception:                          # noqa: BLE001
-            _log.exception("start_table: delivering game_start failed")
-            if verdict == "started":
-                verdict = "hand_failed"
+        # Drained here rather than in a finally, and to QUIESCENCE rather
+        # than to the first failure. A finally that raises DISCARDS the
+        # pending return: _wire_hand_start installs the same callback on
+        # every session, so the realistic failure is one every seat shares,
+        # which makes the drain raise too. The verdict then never returned
+        # and the RuntimeError escaped into client_server, whose handler
+        # would drop the client's connection rather than answer.
+        if not _drain_to_quiescence(bus) and verdict == "started":
+            # The table started and its game_start went out, but at least
+            # one seat could not act on it. Not a lie: the table IS live
+            # and its first hand cannot complete, which is exactly what
+            # hand_failed means. Nothing voids it -- check_deadlines has
+            # no production caller -- so saying "started" would be worse.
+            verdict = "hand_failed"
         return verdict
 
     return start_table
@@ -187,6 +192,39 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
 # ---------------------------------------------------------------------------
 # Drain wrapper
 # ---------------------------------------------------------------------------
+
+def _drain_to_quiescence(bus: InMemoryBus) -> bool:
+    """Deliver everything queued, surviving handler failures. True if clean.
+
+    bus.drain() re-raises the first handler error, which unwinds its own
+    delivery loop and leaves the REST of the queue undelivered. A single
+    try/except around one drain() call therefore stops at the first failing
+    message and abandons everything behind it -- the same defect as leaving
+    game_start queued, which is what the containment was added to prevent.
+
+    So it is called repeatedly until the queue is empty, bounded by an
+    attempt count rather than by queue length. Length is NOT a progress
+    signal here: drain() pops before delivering, so a failing message is
+    always consumed, but the handlers that ran before the failure enqueue
+    their own traffic -- a broken seat 1 leaves the queue LONGER than it
+    started while genuine progress was made. A first version compared
+    lengths and bailed with three messages still queued.
+    """
+    clean = True
+    for _ in range(_MAX_DRAIN_ATTEMPTS):
+        if not bus.pending:
+            return clean
+        try:
+            bus.drain()
+        except Exception:                          # noqa: BLE001
+            clean = False
+            _log.exception("sidecar: a handler failed during delivery")
+    if bus.pending:
+        _log.error("sidecar: delivery did not settle; %d message(s) queued "
+                   "after %d attempts", bus.pending, _MAX_DRAIN_ATTEMPTS)
+        return False
+    return clean
+
 
 def _wrap_with_drain(session, bus: InMemoryBus) -> None:
     """Wrap the human seat's action methods so every call drains the bus.
@@ -201,12 +239,12 @@ def _wrap_with_drain(session, bus: InMemoryBus) -> None:
 
     def send_bet_action(action: str, amount: int = 0) -> str:
         result = orig_send_bet_action(action, amount)
-        bus.drain()
+        _drain_to_quiescence(bus)
         return result
 
     def next_p2p_hand() -> str:
         result = orig_next_p2p_hand()
-        bus.drain()
+        _drain_to_quiescence(bus)
         return result
 
     session.send_bet_action = send_bet_action

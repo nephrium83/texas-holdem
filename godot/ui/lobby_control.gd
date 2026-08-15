@@ -34,21 +34,44 @@ func _ready() -> void:
 var _failure := ""
 
 
+## Turn states that prove the table is genuinely playing. Anything else
+## after a failed start means the table is not actually running, whatever
+## its phase says.
+const _LIVE_STATES := [
+	"your_turn", "waiting", "folded_waiting", "all_in_waiting",
+	"resolving", "hand_complete", "voided", "eliminated", "match_complete",
+]
+
+
 func apply_turn_state(state: String) -> void:
-	visible = (state == "lobby")
-	if not visible:
-		# A hand is running (or the session ended). Clear the latch so a
-		# later return to lobby offers a working button again.
-		_requested = false
-		_failure = ""
+	if state == "lobby":
+		visible = true
+		_button.visible = true
+		_button.disabled = _requested
+		if _requested:
+			_message_label.text = "Starting..."
+		elif _failure != "":
+			_message_label.text = _failure
+		else:
+			_message_label.text = "Ready to start"
 		return
-	_button.disabled = _requested
-	if _requested:
-		_message_label.text = "Starting..."
-	elif _failure != "":
+
+	if _failure != "" and state not in _LIVE_STATES:
+		# A start reported failure and the table left the lobby anyway:
+		# that is `hand_failed` -- the table is live, its hand is not, and
+		# nothing will ever void it. Keep saying so. Hiding here wiped the
+		# message on the very next snapshot and left the user staring at a
+		# table stuck on "Dealing" with no explanation anywhere in the UI.
+		visible = true
+		_button.visible = false
 		_message_label.text = _failure
-	else:
-		_message_label.text = "Ready to start"
+		return
+
+	# A hand is genuinely running (or the session ended). Clear the latch so
+	# a later return to the lobby offers a working button again.
+	visible = false
+	_requested = false
+	_failure = ""
 
 
 ## Release the latch after a start that did not take.

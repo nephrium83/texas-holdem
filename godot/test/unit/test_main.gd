@@ -249,3 +249,27 @@ func test_a_command_result_for_another_command_is_ignored():
 		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
 		"a fold result cleared the start latch"
 	)
+
+
+func test_losing_the_sidecar_mid_start_releases_the_lobby_control():
+	## The one failure that produces no command_result at all. The deal
+	## holds the round-trip open for ~1s at three seats; a sidecar that
+	## dies in that window means no reply is ever coming, and nothing else
+	## would clear the latch.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+	assert_true(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
+	)
+
+	main._on_sidecar_disconnected()
+
+	assert_false(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
+		"a dead sidecar left the start button wedged"
+	)

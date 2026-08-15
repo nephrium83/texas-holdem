@@ -129,3 +129,38 @@ func test_returning_to_lobby_after_a_hand_offers_a_working_button_again():
 	control.apply_turn_state("lobby")          # ...and we are back
 	assert_false(control.get_node("%StartGameButton").disabled)
 	assert_eq(control.get_node("%LobbyMessageLabel").text, "Ready to start")
+
+
+func test_a_failure_survives_a_snapshot_that_left_the_lobby():
+	## The hand_failed shape: the table went live and its hand did not, so
+	## the client leaves the lobby and never comes back. Hiding on the next
+	## snapshot wiped the only explanation the user gets and left them on a
+	## table stuck at "Dealing" with no controls and no reason.
+	var control := _control()
+	control.apply_turn_state("lobby")
+	control.get_node("%StartGameButton").pressed.emit()
+	control.start_failed("First hand failed")
+
+	control.apply_turn_state("dealing")
+
+	assert_true(control.visible, "the failure message was hidden away")
+	assert_eq(control.get_node("%LobbyMessageLabel").text, "First hand failed")
+	assert_false(control.get_node("%StartGameButton").visible,
+		"a dead table still offered a start button")
+
+
+func test_a_genuinely_live_hand_clears_a_failure():
+	## The other side of it: if the table really is playing, the panel must
+	## get out of the way regardless of what an earlier attempt reported.
+	var control := _control()
+	control.apply_turn_state("lobby")
+	control.get_node("%StartGameButton").pressed.emit()
+	control.start_failed("First hand failed")
+
+	for state in ["your_turn", "waiting", "hand_complete", "voided"]:
+		control.apply_turn_state("lobby")
+		control.get_node("%StartGameButton").pressed.emit()
+		control.start_failed("First hand failed")
+		control.apply_turn_state(state)
+		assert_false(control.visible,
+			"stayed visible over a live hand in state: %s" % state)

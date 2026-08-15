@@ -25,6 +25,7 @@ func _ready() -> void:
 	_sidecar = %SidecarClient
 	_sidecar.snapshot_received.connect(_on_snapshot_received)
 	_sidecar.command_result_received.connect(_on_command_result_received)
+	_sidecar.disconnected_from_sidecar.connect(_on_sidecar_disconnected)
 	_betting_controls.fold_pressed.connect(_on_fold_pressed)
 	_betting_controls.check_call_pressed.connect(_on_check_call_pressed)
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
@@ -73,6 +74,14 @@ func _on_command_result_received(result: Dictionary) -> void:
 		return
 	if not bool(result.get("ok", false)):
 		_lobby_control.start_failed(_start_failure_text(result))
+
+
+## The sidecar going away mid-start is the one failure that produces no
+## command_result at all: the deal holds the round-trip open for about a
+## second at three seats, and a crash in that window means no reply is
+## ever coming. Without this the panel waits on "Starting..." forever.
+func _on_sidecar_disconnected() -> void:
+	_lobby_control.start_failed("Sidecar disconnected")
 
 
 func _start_failure_text(result: Dictionary) -> String:
