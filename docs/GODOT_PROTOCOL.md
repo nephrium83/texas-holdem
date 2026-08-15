@@ -79,8 +79,9 @@ The board is an array of card strings, length 0 to 5.
 
 ## 4. Client → sidecar: commands
 
-The client sends a command object. Only the betting commands are defined in
-v1; lobby/seating commands are §8 (not yet finalised).
+The client sends a command object. The betting commands plus `start_game` are
+defined in v1; table **creation**, seating and joining remain §8 (not yet
+finalised).
 
 ```json
 { "type": "command", "command": "<name>", "payload": { ... } }
@@ -88,10 +89,17 @@ v1; lobby/seating commands are §8 (not yet finalised).
 
 | command      | payload            | meaning                                        |
 |--------------|--------------------|------------------------------------------------|
+| `start_game` | (none)             | start the already-configured table (see below) |
 | `fold`       | (none)             | fold the current hand                          |
 | `check_call` | (none)             | check if nothing is owed, otherwise call       |
 | `raise_to`   | `{"amount": <int>}`| raise so your total this street becomes amount |
 | `next_hand`  | (none)             | advance after a settled or voided hand         |
+
+`start_game` takes **no payload**, and that is deliberate. It starts the table
+the sidecar was already configured with at launch — seat count, blinds, stack,
+betting structure, and the deal policy (§4.1). The client does not propose
+table settings and cannot alter them; it only asks the configured table to
+begin. Sending it is what moves the session out of `lobby`.
 
 `amount` in `raise_to` is an **absolute target** (your total wagered on this
 street after the raise), not a delta. Legal bounds are given to you in the
@@ -115,6 +123,15 @@ For each command the sidecar replies with:
   `"buffered"` (accepted but queued behind an earlier action) |
   `"stale"` (a duplicate). On an unknown command, `ok` is `false` and an
   `"error"` string is present instead of `verdict`.
+
+For `start_game`, `verdict` is one of:
+
+- `"started"` — the table left the lobby and hand 1's deal is underway.
+- `"already_started"` — a hand is already in progress; the command is a no-op.
+- `"not_host"` — this sidecar's seat does not own the table start.
+- `"refused"` — the table's configuration was rejected (see §4.1).
+
+`ok` is true only for `started`.
 
 For `next_hand`, `verdict` is one of:
 
@@ -426,8 +443,12 @@ message types.
 
 ## 8. Not yet in this contract
 
-- Lobby / table creation / join / ready / seat selection (P2P lobby exists
-  in the sidecar; not yet exposed as client messages here).
+- Lobby / table **creation** / join / ready / seat selection (P2P lobby exists
+  in the sidecar; not yet exposed as client messages here). §4's `start_game`
+  is **not** this: it starts the table the sidecar was configured with at
+  launch, and carries no settings. Choosing seats, inviting or admitting
+  remote peers, and negotiating table settings from the client all remain
+  out of contract.
 - Chat.
 - Mid-hand dropout **timeout** (the void path exists; the timer for a peer
   that simply goes silent is not yet wired).

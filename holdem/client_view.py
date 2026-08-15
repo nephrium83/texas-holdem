@@ -200,15 +200,36 @@ def _lobby_snapshot(session) -> dict:
 
 
 def apply_command(session, command: str,
-                  payload: Optional[dict] = None) -> dict:
+                  payload: Optional[dict] = None, *,
+                  start_table=None) -> dict:
     """Apply a client command to the hostless session.
 
     Betting commands are broadcast to every replica via the session; the
     result echoes the engine's verdict so the client can surface 'not your
     turn' / 'illegal' without guessing. Legality is the replica's job, as
     for any peer action -- never trusted from the client.
+
+    ``start_table`` is the controller's zero-argument "start the already-
+    configured table" callable, supplied by whoever assembled the table (the
+    sidecar launcher). It is threaded in rather than read off the Session on
+    purpose: proposed table configuration belongs to the controller, and
+    accepted protocol state belongs to the Session. Parking pre-start
+    settings on the Session would create two competing truths -- a mutable
+    pre-start field and the settled _last_table_settings -- and the whole
+    reason this command exists is that a policy read from the wrong one of
+    those is how prevention silently defaulted off. A sidecar that cannot
+    start a table simply passes None.
     """
     payload = payload or {}
+    if command == "start_game":
+        # Starts the local table that is ALREADY configured (seats, blinds,
+        # deal policy). This is not table creation, and not a lobby: see
+        # GODOT_PROTOCOL.md section 8, which still owns that.
+        if start_table is None:
+            raise ValueError("this sidecar cannot start a table")
+        verdict = start_table()
+        return {"type": "command_result", "command": command,
+                "ok": verdict == "started", "verdict": verdict}
     if command == "fold":
         verdict = session.send_bet_action("fold")
     elif command == "check_call":

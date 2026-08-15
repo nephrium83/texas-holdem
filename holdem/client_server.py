@@ -35,10 +35,15 @@ class ClientServer:
     overlap the old socket); each gets its own hello + snapshot stream.
     """
 
-    def __init__(self, session, host: str = "127.0.0.1", port: int = 0):
+    def __init__(self, session, host: str = "127.0.0.1", port: int = 0,
+                 start_table=None):
         self._session = session
         self._host = host
         self._port = port
+        # Controller-owned "start the configured table" callable, forwarded
+        # verbatim to client_view.apply_command. This module stays transport
+        # only: it neither knows nor stores what the table is configured as.
+        self._start_table = start_table
         self._server: Optional[asyncio.AbstractServer] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._conns: set[_Conn] = set()
@@ -102,7 +107,7 @@ class ClientServer:
     # -- connections ---------------------------------------------------
 
     async def _accept(self, reader, writer) -> None:
-        conn = _Conn(self._session, reader, writer)
+        conn = _Conn(self._session, reader, writer, self._start_table)
         self._conns.add(conn)
         try:
             await conn.run()
@@ -114,10 +119,11 @@ class ClientServer:
 class _Conn:
     """One connected client: a reader loop plus a coalescing push task."""
 
-    def __init__(self, session, reader, writer):
+    def __init__(self, session, reader, writer, start_table=None):
         self._session = session
         self._reader = reader
         self._writer = writer
+        self._start_table = start_table
         self.dirty = asyncio.Event()
 
     def close(self) -> None:
@@ -185,7 +191,8 @@ class _Conn:
         payload = msg.get("payload") or {}
         try:
             result = client_view.apply_command(self._session, command,
-                                               payload)
+                                               payload,
+                                               start_table=self._start_table)
         except (KeyError, TypeError, ValueError) as exc:
             result = {"type": "command_result", "command": command,
                       "ok": False, "error": str(exc)}

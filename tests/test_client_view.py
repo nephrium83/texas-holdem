@@ -312,6 +312,48 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     assert snap["turn"]["headline"] == "P2 won the match"
 
 
+def test_start_game_command_invokes_the_controller_callable():
+    """start_game routes to the controller's callable and echoes its verdict.
+
+    The adapter must not synthesise table settings of its own: proposed
+    configuration belongs to the controller that assembled the table, and
+    accepted protocol state belongs to the Session.
+    """
+    _, sessions, order = make_table(3)
+    calls = []
+
+    res = client_view.apply_command(
+        sessions[order[0]], "start_game",
+        start_table=lambda: (calls.append(1), "started")[1])
+
+    assert calls == [1], "controller callable was not invoked"
+    assert res["verdict"] == "started"
+    assert res["ok"] is True
+
+
+def test_start_game_verdicts_other_than_started_are_not_ok():
+    """ok is true only for 'started'. A refused or duplicate start must not
+    read as success, or the client will leave the lobby on a table that
+    never began."""
+    _, sessions, order = make_table(3)
+    for verdict in ("already_started", "not_host", "refused"):
+        res = client_view.apply_command(
+            sessions[order[0]], "start_game",
+            start_table=lambda v=verdict: v)
+        assert res["verdict"] == verdict
+        assert res["ok"] is False, f"{verdict} wrongly reported ok"
+
+
+def test_start_game_without_a_controller_is_an_error_not_a_silent_noop():
+    """A sidecar wired without a start callable must say so. Returning a
+    polite failure verdict here would look identical to a table that
+    declined to start, and the client could not tell a misconfigured
+    sidecar from a refused one."""
+    _, sessions, order = make_table(3)
+    with pytest.raises(ValueError):
+        client_view.apply_command(sessions[order[0]], "start_game")
+
+
 if __name__ == "__main__":
     passed = total = 0
     for name, fn in sorted(globals().items()):
