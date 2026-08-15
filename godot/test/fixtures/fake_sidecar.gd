@@ -8,8 +8,14 @@ extends RefCounted
 var calls: Array = []
 
 
-func start_game() -> void:
+## Mirrors SidecarClient.start_game's bool return. Set send_succeeds to
+## false to stand in for a client whose socket is down.
+var send_succeeds := true
+
+
+func start_game() -> bool:
 	calls.append(["start_game"])
+	return send_succeeds
 
 
 func fold() -> void:

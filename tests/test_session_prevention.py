@@ -557,3 +557,59 @@ def test_the_deal_context_refuses_a_session_with_no_adopted_policy():
     assert s.deal_policy is None
     with pytest.raises(RuntimeError, match="before a policy is adopted"):
         s._deal_context_bytes()
+
+
+def test_a_hand_that_fails_after_the_replica_exists_rolls_it_back():
+    """Pins the ROLLBACK, which the hoist test cannot reach.
+
+    _begin_p2p_hand now checks policy preconditions before constructing
+    anything -- so test_a_refused_deal_leaves_no_bettable_table exercises
+    the hoist and never touches the rollback. Review deleted the entire
+    try/except and the whole suite stayed green.
+
+    begin_hand still has refusal paths that NEED the replica to evaluate
+    (is the local seat dealt into this hand?). This drives one of them: a
+    local conn_id absent from the seat order passes every precondition,
+    builds and starts the replica -- posting blinds -- and only then
+    raises. Without the rollback that leaves a bettable table with no deal
+    driver, which can never settle.
+    """
+    bus = InMemoryBus()
+    order = ["peer0", "peer1"]
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"))
+    s.local_conn_id = "peer0"
+    s.configure_seats(order)
+    assert s._adopt_deal_policy(DETECTION)
+    s.local_conn_id = "ghost"          # seated nowhere
+
+    with pytest.raises(RuntimeError, match="local seat not in seat order"):
+        s.start_p2p_hand(hand_no=1, names=["P0", "P1"], stacks=[500, 500],
+                         sb=5, bb=10, button=0)
+
+    assert s.replica is None, \
+        "a hand that failed after the replica existed left it live"
+    assert s._deal_driver is None
+    assert s.send_bet_action("call", 0) == "rejected"
+
+
+def test_reseating_clears_the_cached_deal_context():
+    """The cache must not outlive the state it describes.
+
+    _recorded_session_id() returns a cached digest so terminate() never has
+    to recompute. configure_seats changes the seat order the digest commits
+    to, so the cache has to go with it -- otherwise a terminal record can
+    name a context this session was never running under.
+    """
+    bus = InMemoryBus()
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"))
+    s.local_conn_id = "peer0"
+    s.configure_seats(["peer0", "peer1"])
+    assert s._adopt_deal_policy(BG)
+    first = s._deal_session_id()
+    assert s._recorded_session_id() == first
+
+    s.configure_seats(["peer0", "peer1", "peer2"])
+    assert s._recorded_session_id() != first, \
+        "the cached deal context survived a seat-order change"

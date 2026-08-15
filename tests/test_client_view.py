@@ -338,7 +338,7 @@ def test_start_game_verdicts_other_than_started_are_not_ok():
     read as success, or the client will leave the lobby on a table that
     never began."""
     _, sessions, order = make_table(3)
-    for verdict in ("already_started", "not_host", "refused"):
+    for verdict in ("already_started", "refused", "hand_failed"):
         res = client_view.apply_command(
             sessions[order[0]], "start_game",
             start_table=lambda v=verdict: v)

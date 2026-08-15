@@ -29,21 +29,49 @@ func _ready() -> void:
 	_button.pressed.connect(_on_button_pressed)
 
 
+## Set when a start attempt failed, so the panel can say so instead of
+## sitting on a stale "Starting..." that never resolves.
+var _failure := ""
+
+
 func apply_turn_state(state: String) -> void:
 	visible = (state == "lobby")
 	if not visible:
 		# A hand is running (or the session ended). Clear the latch so a
 		# later return to lobby offers a working button again.
 		_requested = false
+		_failure = ""
 		return
 	_button.disabled = _requested
-	_message_label.text = "Starting..." if _requested else "Ready to start"
+	if _requested:
+		_message_label.text = "Starting..."
+	elif _failure != "":
+		_message_label.text = _failure
+	else:
+		_message_label.text = "Ready to start"
+
+
+## Release the latch after a start that did not take.
+##
+## The latch used to clear ONLY on leaving the lobby -- but every failure
+## leaves the client IN the lobby, so any refused start wedged the panel on
+## a disabled button reading "Starting..." forever. Three ways in: the
+## sidecar answering `refused`, answering `hand_failed`, or the command
+## never leaving the client because the socket is down (SidecarClient
+## silently drops sends while disconnected).
+func start_failed(reason: String = "") -> void:
+	_requested = false
+	_failure = reason if reason != "" else "Could not start"
+	if visible:
+		_button.disabled = false
+		_message_label.text = _failure
 
 
 func _on_button_pressed() -> void:
 	if _requested:
 		return
 	_requested = true
+	_failure = ""
 	_button.disabled = true
 	_message_label.text = "Starting..."
 	start_game_pressed.emit()

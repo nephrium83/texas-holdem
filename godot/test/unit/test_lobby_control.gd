@@ -60,12 +60,65 @@ func test_a_second_press_is_ignored_while_the_first_is_in_flight():
 
 
 func test_a_lobby_snapshot_arriving_mid_start_does_not_re_enable_the_button():
+	## Narrow claim: snapshots alone must not clear the latch. Only an
+	## explicit start_failed() does -- see the wedge tests below, which
+	## exist because this assertion on its own cannot tell "hold the latch
+	## during a start" from "hold it forever after a failed one".
 	var control := _control()
 	control.apply_turn_state("lobby")
 	control.get_node("%StartGameButton").pressed.emit()
 	control.apply_turn_state("lobby")          # another lobby snapshot
 	assert_true(control.get_node("%StartGameButton").disabled)
 	assert_eq(control.get_node("%LobbyMessageLabel").text, "Starting...")
+
+
+func test_a_failed_start_releases_the_button_instead_of_wedging_it():
+	## Review found the panel wedged forever on any failed start, because
+	## the latch cleared only when turn.state LEFT the lobby -- and every
+	## failure (refused, hand_failed, socket down) leaves the client IN the
+	## lobby. The user saw a disabled button reading "Starting..." with no
+	## way back. The test above asserted that state as correct.
+	var control := _control()
+	control.apply_turn_state("lobby")
+	control.get_node("%StartGameButton").pressed.emit()
+
+	control.start_failed("Table refused")
+
+	assert_false(control.get_node("%StartGameButton").disabled,
+		"the start button stayed disabled after a failed start")
+	assert_eq(control.get_node("%LobbyMessageLabel").text, "Table refused")
+
+
+func test_the_button_works_again_after_a_failed_start():
+	var control := _control()
+	control.apply_turn_state("lobby")
+	control.get_node("%StartGameButton").pressed.emit()
+	control.start_failed("Table refused")
+	control.get_node("%StartGameButton").pressed.emit()
+	assert_signal_emit_count(control, "start_game_pressed", 2)
+
+
+func test_a_failure_message_survives_later_lobby_snapshots():
+	## Snapshots keep arriving after the failure. The panel must keep
+	## saying what went wrong rather than reverting to "Ready to start"
+	## and losing the only feedback the user gets.
+	var control := _control()
+	control.apply_turn_state("lobby")
+	control.get_node("%StartGameButton").pressed.emit()
+	control.start_failed("First hand failed")
+	control.apply_turn_state("lobby")
+	assert_eq(control.get_node("%LobbyMessageLabel").text, "First hand failed")
+	assert_false(control.get_node("%StartGameButton").disabled)
+
+
+func test_a_hand_actually_starting_clears_a_previous_failure():
+	var control := _control()
+	control.apply_turn_state("lobby")
+	control.get_node("%StartGameButton").pressed.emit()
+	control.start_failed("Table refused")
+	control.apply_turn_state("dealing")        # a later attempt worked
+	control.apply_turn_state("lobby")
+	assert_eq(control.get_node("%LobbyMessageLabel").text, "Ready to start")
 
 
 func test_returning_to_lobby_after_a_hand_offers_a_working_button_again():

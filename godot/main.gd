@@ -24,6 +24,7 @@ var _sidecar
 func _ready() -> void:
 	_sidecar = %SidecarClient
 	_sidecar.snapshot_received.connect(_on_snapshot_received)
+	_sidecar.command_result_received.connect(_on_command_result_received)
 	_betting_controls.fold_pressed.connect(_on_fold_pressed)
 	_betting_controls.check_call_pressed.connect(_on_check_call_pressed)
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
@@ -59,8 +60,31 @@ func _on_next_hand_pressed() -> void:
 	_sidecar.next_hand()
 
 
+## The lobby control latches on press so a second press cannot fire
+## during the deal. Anything that means "no reply is coming" has to
+## release it, or the panel sits on "Starting..." forever.
 func _on_start_game_pressed() -> void:
-	_sidecar.start_game()
+	if not _sidecar.start_game():
+		_lobby_control.start_failed("Not connected")
+
+
+func _on_command_result_received(result: Dictionary) -> void:
+	if str(result.get("command", "")) != "start_game":
+		return
+	if not bool(result.get("ok", false)):
+		_lobby_control.start_failed(_start_failure_text(result))
+
+
+func _start_failure_text(result: Dictionary) -> String:
+	match str(result.get("verdict", "")):
+		"refused":
+			return "Table refused"
+		"hand_failed":
+			return "First hand failed"
+		"already_started":
+			return "Already started"
+		_:
+			return "Could not start"
 
 
 ## The sidecar's listening port is OS-assigned (client_server.py binds

@@ -34,4 +34,5 @@ position = Vector2(750, 710)
 
 [node name="LobbyControl" parent="." instance=ExtResource("7_lobby")]
 unique_name_in_owner = true
-position = Vector2(750, 710)
+position = Vector2(750, 640)
+visible = false

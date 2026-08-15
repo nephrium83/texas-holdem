@@ -152,16 +152,48 @@ def test_a_first_hand_failure_is_not_reported_as_a_refused_table():
     assert sessions[order[0]].state == "PLAYING",         "the table did commit; only the hand failed"
 
 
-def test_the_game_start_broadcast_is_delivered_even_when_the_hand_fails():
-    """game_start is enqueued before the hand runs. With the drain outside
-    the try, a hand failure left the table start sitting in the queue until
-    some later command happened to drain it -- delivering it at an
-    arbitrary point, to peers that had already moved on."""
-    bus, sessions, order = _make_sessions(2)
+def test_every_peer_receives_game_start_even_when_the_hand_fails():
+    """Asserted on PEER STATE, not on an empty queue.
+
+    An empty queue is also what a half-delivered broadcast looks like: the
+    message is popped, the first recipient raises, and the rest never see
+    it -- strictly worse than being left queued, because it can never be
+    redelivered. The original version of this test asserted
+    `bus._queue == []` and passed in exactly that case.
+
+    Three seats, and the failure is installed on EVERY seat, which is the
+    realistic shape: _wire_hand_start puts the same callback on all of
+    them, so a broken deal breaks all of them.
+    """
+    bus, sessions, order = _make_sessions(3)
     _wire_hand_start(sessions, order)
-    sessions[order[0]].on_game_start = lambda _p: (_ for _ in ()).throw(
-        RuntimeError("the deal fell over"))
+    for cid in order:
+        sessions[cid].on_game_start = lambda _p: (_ for _ in ()).throw(
+            RuntimeError("the deal fell over"))
     start_table = _make_start_table(sessions, order, bus, _SETTINGS)
 
     start_table()
-    assert bus._queue == [], "game_start was left undelivered in the queue"
+
+    for cid in order:
+        assert sessions[cid].state == "PLAYING", (
+            f"{cid} never received game_start: a raising handler stopped "
+            f"the broadcast reaching the peers behind it")
+
+
+def test_a_failure_shared_by_every_seat_still_returns_a_verdict():
+    """The realistic failure, and the one that used to escape entirely.
+
+    bus.drain() sat in a finally. A finally that raises DISCARDS the
+    pending return, so when every seat's handler failed -- which is what
+    happens, since they all share one callback -- the verdict never
+    returned and the RuntimeError escaped start_table, unwound
+    client_view.apply_command, and dropped the client's socket.
+    """
+    bus, sessions, order = _make_sessions(3)
+    _wire_hand_start(sessions, order)
+    for cid in order:
+        sessions[cid].on_game_start = lambda _p: (_ for _ in ()).throw(
+            RuntimeError("the deal fell over"))
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    assert start_table() == "hand_failed"

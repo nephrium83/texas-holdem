@@ -193,7 +193,11 @@ class _Conn:
             result = client_view.apply_command(self._session, command,
                                                payload,
                                                start_table=self._start_table)
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            # RuntimeError included deliberately: session-level refusals
+            # surface as one, and letting it escape unwinds the read loop
+            # and closes the client's socket. Dropping the connection is a
+            # far worse answer to a bad command than reporting the error.
             result = {"type": "command_result", "command": command,
                       "ok": False, "error": str(exc)}
         self._send(result)

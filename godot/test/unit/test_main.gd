@@ -166,3 +166,76 @@ func test_pressing_the_real_button_reaches_the_sidecar():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
 	assert_eq(fake.calls, [["start_game"]])
+
+
+func test_a_failed_start_result_releases_the_lobby_control():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	main._on_command_result_received({
+		"type": "command_result", "command": "start_game",
+		"ok": false, "verdict": "refused",
+	})
+
+	assert_false(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
+		"a refused start left the button wedged"
+	)
+
+
+func test_a_successful_start_result_does_not_release_the_latch():
+	## The hand is starting; the control should stay latched until the
+	## snapshot moves it out of the lobby.
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	main._on_command_result_received({
+		"type": "command_result", "command": "start_game",
+		"ok": true, "verdict": "started",
+	})
+
+	assert_true(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
+	)
+
+
+func test_a_send_that_never_left_the_client_releases_the_lobby_control():
+	## No reply can arrive for a command the socket dropped, so nothing
+	## else would ever clear the latch.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	fake.send_succeeds = false
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	assert_false(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
+	)
+
+
+func test_a_command_result_for_another_command_is_ignored():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	main._on_command_result_received({
+		"type": "command_result", "command": "fold",
+		"ok": false, "verdict": "rejected",
+	})
+
+	assert_true(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
+		"a fold result cleared the start latch"
+	)

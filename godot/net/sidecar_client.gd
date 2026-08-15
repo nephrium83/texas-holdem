@@ -117,8 +117,8 @@ func _route_message(msg: Dictionary) -> void:
 ## Starts the table the sidecar was launched with. Takes no payload:
 ## the client does not propose table settings and cannot alter them
 ## (GODOT_PROTOCOL.md section 4).
-func start_game() -> void:
-	send_command("start_game")
+func start_game() -> bool:
+	return send_command("start_game")
 
 
 func fold() -> void:
@@ -137,8 +137,11 @@ func next_hand() -> void:
 	send_command("next_hand")
 
 
-func send_command(command: String, payload: Dictionary = {}) -> void:
-	_send_raw(_build_command_message(command, payload))
+## Returns whether the command actually left this process. A caller that
+## latches UI state on send needs to know that sends are dropped while
+## disconnected, or it waits forever for a reply that cannot arrive.
+func send_command(command: String, payload: Dictionary = {}) -> bool:
+	return _send_raw(_build_command_message(command, payload))
 
 
 ## Pure message construction, split out for testing without a socket.
@@ -149,8 +152,9 @@ func _build_command_message(command: String, payload: Dictionary) -> Dictionary:
 	return msg
 
 
-func _send_raw(msg: Dictionary) -> void:
+func _send_raw(msg: Dictionary) -> bool:
 	if not _connected:
 		push_warning("SidecarClient: send_command called while not connected to a sidecar")
-		return
+		return false
 	_stream.put_data((JSON.stringify(msg) + "\n").to_utf8_buffer())
+	return true

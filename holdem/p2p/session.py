@@ -908,8 +908,13 @@ class Session:
         it -- so a malicious host could send seat_order ["host", 7, "me"]
         and split the terminal transition in half.
 
-        Returns None when no deal context was ever built, which is the
-        honest answer for a session that died in the lobby.
+        Returns None when no deal context was ever built. That covers a
+        session that died in the lobby, and also one that reached PLAYING
+        but was terminated before its first hand began -- accepting a
+        table adopts a policy, but the context is not built until a hand
+        constructs one. deal_policy is recorded separately and is set in
+        both cases, so a record with a policy and no session_id says
+        precisely that: the table was accepted, no hand started.
         """
         return self._deal_context_id
 
@@ -3036,6 +3041,10 @@ class Session:
             raise ValueError(
                 f"local conn_id {self.local_conn_id!r} not in seat order")
         self._seat_order = list(order)
+        # The cached deal context commits to the seat order; changing the
+        # order invalidates it. Leaving a stale digest behind would let a
+        # terminal record name a context this session never ran under.
+        self._deal_context_id = None
 
     @owned
     def seat_local_table(self, order: list[str],

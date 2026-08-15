@@ -546,6 +546,14 @@ class MentalDeal:
                             round_no: int, seat: int) -> Optional[str]:
         """Check a round's prevention proof; None if it is acceptable.
 
+        NOT a pure predicate: on success it increments _proofs_verified.
+        The counter has to sit immediately past a true return from
+        bg_shuffle.verify -- one level further out and it counts "the
+        prevention branch ran" rather than "a proof verified", which is
+        the exact overclaim it was moved here to fix. The consequence is
+        that this method must keep exactly ONE call site; a second caller
+        would double-count silently.
+
         Missing, undecodable, and invalid proofs are all unacceptable and
         all reach the same abort, attributed to ``seat`` -- but each
         returns its own reason so logs and tests can tell them apart.

@@ -143,6 +143,7 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
             # Covers a live table AND a terminated one: terminate() sets
             # state to ENDED, and a dead session cannot start either.
             return "already_started"
+        verdict = "started"
         try:
             host.start_game(dict(table_settings))
         except (RuntimeError, ValueError) as exc:
@@ -157,17 +158,28 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
             # The session's own state is the discriminator: start_game
             # commits PLAYING before it can reach the hand.
             if host.state == "LOBBY":
+                # Refused before anything was broadcast, so there is nothing
+                # to deliver and the session is still startable.
                 _log.warning("start_table refused: %s", exc)
                 return "refused"
             _log.error("table started but its first hand failed: %s", exc)
-            return "hand_failed"
-        finally:
-            # Always drain, on every path. game_start is enqueued before the
-            # hand runs, so a failure after the broadcast used to leave it
-            # sitting in the queue until some later command happened to
-            # drain it -- delivering a table start at an arbitrary point.
+            verdict = "hand_failed"
+
+        # Drained here rather than in a finally, and the drain's own errors
+        # are contained. A finally that raises DISCARDS the pending return:
+        # _wire_hand_start installs the same callback on every session, so
+        # the realistic failure is one every seat shares, which makes the
+        # drain raise too. The verdict then never returned at all and the
+        # RuntimeError escaped into client_server, whose handler catches
+        # only (KeyError, TypeError, ValueError) -- dropping the client's
+        # connection instead of answering the command.
+        try:
             bus.drain()
-        return "started"
+        except Exception:                          # noqa: BLE001
+            _log.exception("start_table: delivering game_start failed")
+            if verdict == "started":
+                verdict = "hand_failed"
+        return verdict
 
     return start_table
 

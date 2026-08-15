@@ -87,10 +87,27 @@ class InMemoryBus:
                     targets = [to_conn] if to_conn in self._sessions else []
                 else:
                     targets = [c for c in self._sessions if c != from_conn]
+                # Per-target isolation: one raising handler must not stop
+                # the other targets from receiving a broadcast that has
+                # ALREADY been dequeued. Without this, a game_start whose
+                # first recipient throws is popped and only partially
+                # delivered -- strictly worse than never being sent, since
+                # it can never be redelivered, and the remaining peers sit
+                # in LOBBY forever. Every target is attempted; the first
+                # exception is re-raised afterwards so nothing is silently
+                # swallowed.
+                first_error = None
                 for c in targets:
                     sess = self._sessions.get(c)
-                    if sess is not None:
+                    if sess is None:
+                        continue
+                    try:
                         sess.handle_message(from_conn, dict(msg))
+                    except Exception as exc:       # noqa: BLE001 - re-raised
+                        if first_error is None:
+                            first_error = exc
+                if first_error is not None:
+                    raise first_error
             return steps
         finally:
             self._draining = False
