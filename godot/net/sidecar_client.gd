@@ -114,13 +114,6 @@ func _route_message(msg: Dictionary) -> void:
 
 ## Section 4 commands. amount in raise_to is an absolute per-street
 ## target, not a delta -- see GODOT_PROTOCOL.md section 4.
-## Starts the table the sidecar was launched with. Takes no payload:
-## the client does not propose table settings and cannot alter them
-## (GODOT_PROTOCOL.md section 4).
-func start_game() -> void:
-	send_command("start_game")
-
-
 func fold() -> void:
 	send_command("fold")
 

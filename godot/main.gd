@@ -28,7 +28,6 @@ func _ready() -> void:
 	_betting_controls.check_call_pressed.connect(_on_check_call_pressed)
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
 	_next_hand_control.next_hand_pressed.connect(_on_next_hand_pressed)
-	_lobby_control.start_game_pressed.connect(_on_start_game_pressed)
 	_connect_to_sidecar_from_cmdline()
 
 
@@ -58,9 +57,6 @@ func _on_raise_pressed(amount: int) -> void:
 func _on_next_hand_pressed() -> void:
 	_sidecar.next_hand()
 
-
-func _on_start_game_pressed() -> void:
-	_sidecar.start_game()
 
 
 ## The sidecar's listening port is OS-assigned (client_server.py binds
