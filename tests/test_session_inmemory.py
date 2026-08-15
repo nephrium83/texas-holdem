@@ -97,6 +97,65 @@ def test_unregister_simulates_disconnect():
     assert ("P1", "gone?") not in got["peer2"]     # no longer receiving
 
 
+def test_nested_drain_from_a_handler_is_refused():
+    """A handler that calls drain() while one is running is refused loudly.
+
+    The rule already existed -- BotDriver's docstring records that a nested
+    drain reorders the shared queue and cost a ~20 % hand-desync rate -- but
+    it lived only in prose, so every future callback author had to know it.
+    Now the bus enforces its own invariant. This matters specifically for
+    the on_game_start -> start_p2p_hand wiring, which runs INSIDE the drain
+    that delivered game_start: it must enqueue and let the outer drain
+    consume, never drain again itself.
+
+    Asserted on the raised error, not on a game outcome: the underlying
+    corruption is reordering, which is probabilistic and would make a
+    flaky control.
+    """
+    bus, sessions = make_sessions(2)
+    caught = []
+
+    class Reentrant:
+        def handle_message(self, from_conn, msg):
+            try:
+                bus.drain()                    # forbidden: already draining
+            except RuntimeError as exc:
+                caught.append(exc)
+
+    bus.register("peer1", Reentrant())
+    bus.enqueue("peer0", "peer1", {"type": "chat"})
+    bus.drain()
+
+    assert len(caught) == 1, "nested drain() was allowed"
+    assert "re-entered" in str(caught[0])
+
+
+def test_bus_is_usable_after_a_refused_nested_drain():
+    """The guard releases on the way out: one bad handler must not wedge
+    the bus for every later drain. A bare flag without try/finally would
+    leave _draining set forever once a handler raised through it."""
+    bus, sessions = make_sessions(2)
+    got = _capture_chat(sessions)
+
+    class Reentrant:
+        def handle_message(self, from_conn, msg):
+            try:
+                bus.drain()
+            except RuntimeError:
+                pass
+
+    bus.register("peer1", Reentrant())
+    bus.enqueue("peer0", "peer1", {"type": "chat"})
+    bus.drain()
+
+    # A normal exchange still works afterwards.
+    bus.register("peer1", sessions["peer1"])
+    sessions["peer0"]._transport.broadcast(
+        {"type": "chat", "payload": {"nickname": "Host", "text": "still here"}})
+    bus.drain()
+    assert ("Host", "still here") in got["peer1"]
+
+
 if __name__ == "__main__":
     passed = total = 0
     for name, fn in sorted(globals().items()):

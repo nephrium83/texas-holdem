@@ -31,6 +31,7 @@ class InMemoryBus:
     def __init__(self):
         self._sessions: Dict[str, object] = {}
         self._queue: List[Tuple[str, Optional[str], dict]] = []
+        self._draining = False
 
     def register(self, conn_id: str, session) -> None:
         self._sessions[conn_id] = session
@@ -56,23 +57,43 @@ class InMemoryBus:
     def drain(self, max_steps: int = 100000) -> int:
         """Deliver queued messages until the queue is empty. Returns the
         number of messages delivered. Raises if it exceeds max_steps
-        (a runaway message loop)."""
-        steps = 0
-        while self._queue:
-            if steps >= max_steps:
-                raise RuntimeError(
-                    "InMemoryBus.drain exceeded max_steps (message loop?)")
-            from_conn, to_conn, msg = self._queue.pop(0)
-            steps += 1
-            if to_conn is not None:
-                targets = [to_conn] if to_conn in self._sessions else []
-            else:
-                targets = [c for c in self._sessions if c != from_conn]
-            for c in targets:
-                sess = self._sessions.get(c)
-                if sess is not None:
-                    sess.handle_message(from_conn, dict(msg))
-        return steps
+        (a runaway message loop), or if re-entered from inside a handler.
+
+        Not re-entrant, and enforced rather than documented. A handler that
+        calls drain() while one is already running consumes the SHARED queue
+        from underneath the outer loop: every message enqueued so far is
+        delivered before the outer loop resumes, so ordering stops being
+        FIFO. Nothing is lost and nothing recurses forever, which is exactly
+        what made this expensive -- it surfaced as a ~20 % hand-desync rate
+        rather than as a crash. The rule for callbacks is: enqueue, and let
+        the active drain consume. The guard turns a probabilistic desync
+        into a deterministic, immediate failure at the offending call.
+        """
+        if self._draining:
+            raise RuntimeError(
+                "InMemoryBus.drain() re-entered from inside a message "
+                "handler. Handlers must enqueue and let the already-active "
+                "drain consume; a nested drain reorders the shared queue.")
+        self._draining = True
+        try:
+            steps = 0
+            while self._queue:
+                if steps >= max_steps:
+                    raise RuntimeError(
+                        "InMemoryBus.drain exceeded max_steps (message loop?)")
+                from_conn, to_conn, msg = self._queue.pop(0)
+                steps += 1
+                if to_conn is not None:
+                    targets = [to_conn] if to_conn in self._sessions else []
+                else:
+                    targets = [c for c in self._sessions if c != from_conn]
+                for c in targets:
+                    sess = self._sessions.get(c)
+                    if sess is not None:
+                        sess.handle_message(from_conn, dict(msg))
+            return steps
+        finally:
+            self._draining = False
 
 
 class InMemoryTransport:
