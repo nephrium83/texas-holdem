@@ -538,3 +538,22 @@ def test_the_chokepoint_refuses_a_policy_it_does_not_recognise():
     with pytest.raises(ValueError, match="not a deal policy"):
         s._adopt_deal_policy("banana")
     assert s.deal_policy is None
+
+
+def test_the_deal_context_refuses_a_session_with_no_adopted_policy():
+    """The encoding has no representation for an invalid lifecycle state.
+
+    An earlier version used `self._deal_policy or ""`, which folded None
+    and "" onto the same pre-image -- an injectivity hole in the one
+    function whose entire purpose is injectivity. Refusing instead of
+    substituting is what makes the collision unrepresentable rather than
+    merely unlikely, and it is why forensic callers use
+    _recorded_session_id() rather than routing through here.
+    """
+    bus = InMemoryBus()
+    s = Session(is_host=True, nickname="P", avatar_b64="",
+                transport=InMemoryTransport(bus, "x"))
+    s._seat_order = ["a", "b"]
+    assert s.deal_policy is None
+    with pytest.raises(RuntimeError, match="before a policy is adopted"):
+        s._deal_context_bytes()

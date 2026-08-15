@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem import client_view
 from holdem.sidecar_launcher import (
-    BotDriver, _deal_first_hand, _make_sessions, _wrap_with_drain,
+    BotDriver, _deal_first_hand, _make_sessions, _make_start_table,
+    _wire_hand_start, _wrap_with_drain,
 )
 
 import importlib
@@ -97,3 +98,70 @@ def test_bot_driver_is_a_no_op_for_a_session_with_nothing_to_do():
     driver = BotDriver(bot_sessions, random.Random(1))
     for session in bot_sessions.values():
         driver._react(session)  # no hand started yet: must not raise
+
+
+# ------------------------------------------------------- start_table verdicts
+
+_SETTINGS = {"sb": 5, "bb": 10, "stack": 500, "structure": "No-Limit",
+             "deal_policy": "bayer-groth-v1"}
+
+
+def test_start_table_starts_the_table_and_drains():
+    bus, sessions, order = _make_sessions(2)
+    _wire_hand_start(sessions, order)
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    assert start_table() == "started"
+    assert sessions[order[0]].state == "PLAYING"
+    assert sessions[order[0]].replica is not None
+    assert bus._queue == [], "start_table left messages undelivered"
+
+
+def test_start_table_reports_refused_when_nothing_started():
+    """A refusal that happens BEFORE the table commits leaves the session in
+    the lobby, and the client can act on that."""
+    bus, sessions, order = _make_sessions(2)
+    _wire_hand_start(sessions, order)
+    start_table = _make_start_table(
+        sessions, order, bus, dict(_SETTINGS, deal_policy="nonsense-v9"))
+
+    assert start_table() == "refused"
+    assert sessions[order[0]].state == "LOBBY"
+    assert sessions[order[0]].deal_policy is None
+
+
+def test_a_first_hand_failure_is_not_reported_as_a_refused_table():
+    """The two failures are very different states to recover from.
+
+    start_game validates the policy, THEN broadcasts game_start and commits
+    PLAYING, and only then runs on_game_start -- which deals the whole first
+    hand. One except clause around all of it reported "refused" for a table
+    that was already irreversibly live, telling the client the table never
+    began when it had. Session state is the discriminator.
+    """
+    bus, sessions, order = _make_sessions(2)
+    _wire_hand_start(sessions, order)
+
+    def explode(_payload):
+        raise RuntimeError("the deal fell over")
+
+    sessions[order[0]].on_game_start = explode
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    assert start_table() == "hand_failed"
+    assert sessions[order[0]].state == "PLAYING",         "the table did commit; only the hand failed"
+
+
+def test_the_game_start_broadcast_is_delivered_even_when_the_hand_fails():
+    """game_start is enqueued before the hand runs. With the drain outside
+    the try, a hand failure left the table start sitting in the queue until
+    some later command happened to drain it -- delivering it at an
+    arbitrary point, to peers that had already moved on."""
+    bus, sessions, order = _make_sessions(2)
+    _wire_hand_start(sessions, order)
+    sessions[order[0]].on_game_start = lambda _p: (_ for _ in ()).throw(
+        RuntimeError("the deal fell over"))
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    start_table()
+    assert bus._queue == [], "game_start was left undelivered in the queue"
