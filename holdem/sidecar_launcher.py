@@ -139,18 +139,34 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
     host = sessions[order[0]]
 
     def start_table() -> str:
-        if not host.is_host:
-            return "not_host"
         if host.state != "LOBBY":
+            # Covers a live table AND a terminated one: terminate() sets
+            # state to ENDED, and a dead session cannot start either.
             return "already_started"
         try:
             host.start_game(dict(table_settings))
         except (RuntimeError, ValueError) as exc:
-            # A refused table must not look like a started one: the client
-            # would leave the lobby for a hand that never begins.
-            _log.warning("start_table refused: %s", exc)
-            return "refused"
-        bus.drain()
+            # Two very different failures arrive down this one path, and
+            # collapsing them lies to the client. start_game validates the
+            # policy, THEN broadcasts game_start and sets PLAYING, and only
+            # then runs on_game_start -- which in this launcher deals the
+            # host seat's entire first hand. So an exception may mean the
+            # table was refused before anything happened, or that the table
+            # is irreversibly live and its first hand died.
+            #
+            # The session's own state is the discriminator: start_game
+            # commits PLAYING before it can reach the hand.
+            if host.state == "LOBBY":
+                _log.warning("start_table refused: %s", exc)
+                return "refused"
+            _log.error("table started but its first hand failed: %s", exc)
+            return "hand_failed"
+        finally:
+            # Always drain, on every path. game_start is enqueued before the
+            # hand runs, so a failure after the broadcast used to leave it
+            # sitting in the queue until some later command happened to
+            # drain it -- delivering a table start at an arbitrary point.
+            bus.drain()
         return "started"
 
     return start_table

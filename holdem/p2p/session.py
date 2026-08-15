@@ -142,7 +142,9 @@ class TerminalRecord:
     Deliberately carries no private cards, secret shares, secret scalars,
     or proof randomness.
     """
-    session_id: str
+    #: The deal context this session was running under, or None if it
+    #: died before one existed (e.g. terminated from the lobby).
+    session_id: Optional[str]
     hand_no: int
     previous_state: str
     terminal_state: str
@@ -501,6 +503,10 @@ class Session:
         # overwritten when non-empty, which would let a stale policy survive
         # into a table running under a different one.
         self._deal_policy: Optional[str] = None
+        # Last successfully-built deal context id. Terminal recording
+        # reads this instead of recomputing, so a session can always
+        # produce a record even when the context no longer encodes.
+        self._deal_context_id: Optional[str] = None
 
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
@@ -828,12 +834,25 @@ class Session:
         Non-str seat ids raise, matching the old behaviour where '|'.join
         raised on them. Coercing with str() would trade a loud failure for
         an injectivity hole, which is the opposite of the point.
+
+        Refuses to encode a session with no adopted policy, rather than
+        substituting a placeholder. An earlier version used
+        `self._deal_policy or ""`, which folded None and "" onto the same
+        pre-image and quietly broke the injectivity this whole function
+        exists for. The encoding has no representation for an invalid
+        lifecycle state because it should never be asked to describe one:
+        a deal context is meaningful only once a table is accepted, and
+        forensic callers must not route through here at all.
         """
+        if self._deal_policy is None:
+            raise RuntimeError(
+                "cannot build a deal context before a policy is adopted; "
+                "forensic callers want _recorded_session_id()")
         out = bytearray()
         out += len(self._DEAL_CTX_LABEL).to_bytes(4, "big")
         out += self._DEAL_CTX_LABEL
         out += self._DEAL_CTX_VERSION.to_bytes(4, "big")
-        policy = (self._deal_policy or "").encode("utf-8")
+        policy = self._deal_policy.encode("utf-8")
         out += len(policy).to_bytes(4, "big") + policy
         out += len(self._seat_order).to_bytes(4, "big")
         for cid in self._seat_order:
@@ -864,9 +883,35 @@ class Session:
         from the same message -- so the trade is a legible-but-misattributed
         failure in exchange for making the commitment real. The terminal
         record carries the policy so the cause is recoverable.
+
+        Caches on success so that terminal recording never has to recompute
+        it. See _recorded_session_id.
         """
-        return (f"poker.deal.v{self._DEAL_CTX_VERSION}:"
-                + hashlib.sha256(self._deal_context_bytes()).hexdigest())
+        session_id = (f"poker.deal.v{self._DEAL_CTX_VERSION}:"
+                      + hashlib.sha256(self._deal_context_bytes()).hexdigest())
+        self._deal_context_id = session_id
+        return session_id
+
+    def _recorded_session_id(self) -> Optional[str]:
+        """The deal context for forensics. NEVER raises, never computes.
+
+        terminate() must be atomic: it sets the terminal flags and then
+        builds the record, so anything fallible between those two points
+        leaves a session that is terminal but never produced a record,
+        never invalidated its pending work, and never told its callbacks.
+        Terminal state is the strongest lifecycle invariant here, and it
+        cannot depend on encoding something that may not exist.
+
+        It very nearly did. _deal_context_bytes raises on a non-str seat
+        id, _on_game_start adopts whatever seat_order a host sends without
+        validating its shape, and terminate() called straight through to
+        it -- so a malicious host could send seat_order ["host", 7, "me"]
+        and split the terminal transition in half.
+
+        Returns None when no deal context was ever built, which is the
+        honest answer for a session that died in the lobby.
+        """
+        return self._deal_context_id
 
     @property
     def _deal_master_secret(self) -> bytes:
@@ -908,6 +953,13 @@ class Session:
         actually happened, so a downgrade that leaves the policy string
         intact -- the whole failure mode this mandate exists to prevent --
         shows up here as zero.
+
+        Scope, stated precisely because an earlier version of this
+        docstring overclaimed: it counts verifications that ran and
+        returned true. It does not attest that the verifier is sound, and
+        a bg_shuffle.verify hardwired to return true would increment it
+        normally. That is the BG soundness suites' property, not this
+        counter's.
         """
         driver = self._deal_driver
         if driver is None or driver.deal is None:
@@ -948,12 +1000,47 @@ class Session:
         grounds that it is the one proposing the table -- but a field whose
         invariant holds only for callers who remembered it is the defect
         pattern this codebase has now paid for repeatedly. One writer.
+
+        It validates its own input rather than trusting callers to have
+        parsed first. A single writer that accepts anything is only half a
+        chokepoint: it centralises WHEN the field changes while leaving WHAT
+        it may hold to whoever calls it. Review found `_adopt_deal_policy
+        ("banana")` succeeded, reachable from _deal_first_hand, which takes
+        a caller-supplied policy. An unknown value is a programming error,
+        not a protocol event, so it raises rather than returning False --
+        the False channel means "refused a legitimate change".
         """
+        if policy not in self.DEAL_POLICIES:
+            raise ValueError(
+                f"not a deal policy: {policy!r}; "
+                f"expected one of {sorted(self.DEAL_POLICIES)}")
         current = self._deal_policy
         if current is None:
             self._deal_policy = policy
             return True
         return current == policy
+
+    def _assert_deal_preconditions(self) -> None:
+        """Everything that must hold before a hand may exist at all.
+
+        Shared by _begin_p2p_hand (which calls it before constructing any
+        gameplay state) and begin_hand (which re-checks at the last moment
+        before the driver exists). Two callers, one rule: a check duplicated
+        by hand is a check that can drift.
+        """
+        if self.terminal_state is not None:
+            raise RuntimeError(
+                f"cannot begin a hand: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
+        if self._deal_policy is None:
+            raise RuntimeError(
+                "cannot begin hand: no deal policy has been adopted; a hand "
+                "must follow an accepted table")
+        if self.author_mode == AUTHOR_MODE_WIRE and not self.prevention:
+            raise RuntimeError(
+                f"cannot begin hand: wire mode requires "
+                f"{self.DEAL_POLICY_BG!r}, but the adopted policy is "
+                f"{self._deal_policy!r}")
 
     @owned
     def begin_hand(self, hand_no: int, button: int = 0,
@@ -967,13 +1054,12 @@ class Session:
         set of seat indices dealt into the hand (default: every seat); busted
         seats are excluded by the caller and take no part in the deal.
         """
-        if self.terminal_state is not None:
-            # A terminated session must not acquire a live deal driver: it
-            # would run a hand no peer agreed to, under a session id derived
-            # from state the table has already abandoned.
-            raise RuntimeError(
-                f"cannot begin a hand: session terminated "
-                f"({self.terminal_state}: {self.terminal_reason})")
+        # Terminality, policy adoption and the wire-mode mandate. Checked
+        # here as well as in _begin_p2p_hand, at the last point before a
+        # driver exists: everything above this line is policy, everything
+        # below deals cards. begin_hand is also called directly by tests and
+        # harnesses that never go through _begin_p2p_hand.
+        self._assert_deal_preconditions()
         from holdem.p2p.mental_deal_driver import MentalDealDriver
         order = list(self._seat_order)
         if self.local_conn_id not in order:
@@ -984,25 +1070,7 @@ class Session:
         if local not in seats_in:
             raise RuntimeError("cannot begin hand: local seat is not dealt in "
                                "(busted seats spectate via next_p2p_hand)")
-        if self._deal_policy is None:
-            # Belt to _on_game_start's braces. Reaching a deal with no
-            # adopted policy means something started a hand without going
-            # through a table, and the deal context would be derived from a
-            # policy that does not exist.
-            raise RuntimeError(
-                "cannot begin hand: no deal policy has been adopted; a hand "
-                "must follow an accepted table")
         prevention = self.prevention
-        if self.author_mode == AUTHOR_MODE_WIRE and not prevention:
-            # Unreachable if parse_deal_policy is doing its job -- wire mode
-            # admits only Bayer-Groth. Asserted anyway, at the last point
-            # before the driver exists, because this is the exact boundary
-            # where the mandate becomes real: everything above is policy,
-            # and everything below deals cards.
-            raise RuntimeError(
-                f"cannot begin hand: wire mode requires "
-                f"{self.DEAL_POLICY_BG!r}, but the adopted policy is "
-                f"{self._deal_policy!r}")
         self._deal_hole = [None, None]
         self._deal_board = [None] * 5
         self._deal_outbox = []
@@ -1791,6 +1859,21 @@ class Session:
         or None for the first hand (and a first-hand redeal)."""
         from holdem.p2p.replica_table import ReplicaTable
         cfg = self._table_cfg
+        # Everything that can refuse this hand runs BEFORE any gameplay
+        # state exists. Validating after the replica is live produces the
+        # worst outcome available: a table that has posted blinds, accepts
+        # bets (send_bet_action gates on _replica alone) and can never
+        # settle, because settlement needs a deal that was refused. The
+        # policy checks below are the ones this mandate added, so they are
+        # the ones that turned a theoretical ordering flaw into a reachable
+        # one; hoisting them keeps the transition transactional.
+        #
+        # session_id is built here for the same reason -- it encodes the
+        # policy, so it is fallible, and a failure must land before the
+        # replica rather than between the replica and the driver.
+        self._assert_deal_preconditions()
+        session_id = self._deal_session_id()
+
         self._hand_record = None
         self.void_reason = None
         self.hand_result = None
@@ -1798,7 +1881,7 @@ class Session:
         self._hand_stacks = list(stacks)
         self._hand_positions = positions
         self._replica = ReplicaTable(
-            session_id=self._deal_session_id(), hand_no=hand_no,
+            session_id=session_id, hand_no=hand_no,
             names=list(cfg["names"]), stacks=list(stacks),
             sb=cfg["sb"], bb=cfg["bb"], structure=cfg["structure"])
         if positions is None:
@@ -1811,8 +1894,17 @@ class Session:
             self._replica = None
             self._finish_session(stacks, announce=False)
             return False
-        self.begin_hand(hand_no, button=self._replica.button,
-                        seats_in=self._replica.seats_dealt)
+        try:
+            self.begin_hand(hand_no, button=self._replica.button,
+                            seats_in=self._replica.seats_dealt)
+        except Exception:
+            # begin_hand still has refusal paths that need the replica to
+            # evaluate (is the local seat dealt in?). If one fires, roll the
+            # replica back rather than leaving a bettable table with no deal.
+            self._replica = None
+            self._hand_stacks = []
+            self._hand_positions = None
+            raise
         self._last_digest = self._replica.state_digest()
         self._safe_emit(
             "hand_started",
@@ -2539,7 +2631,7 @@ class Session:
         self.terminal_reason = reason
         self._terminal_seq += 1
         self.terminal_record = TerminalRecord(
-            session_id=self._deal_session_id(),
+            session_id=self._recorded_session_id(),
             hand_no=self._hand_no,
             previous_state=previous,
             terminal_state=state,

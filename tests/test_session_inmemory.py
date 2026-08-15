@@ -7,6 +7,8 @@ anything is wired into session.py.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.session import Session
@@ -130,25 +132,35 @@ def test_nested_drain_from_a_handler_is_refused():
     assert "re-entered" in str(caught[0])
 
 
-def test_bus_is_usable_after_a_refused_nested_drain():
-    """The guard releases on the way out: one bad handler must not wedge
-    the bus for every later drain. A bare flag without try/finally would
-    leave _draining set forever once a handler raised through it."""
+def test_bus_is_usable_after_an_exception_escapes_a_handler():
+    """The guard releases on the EXCEPTIONAL path, not just the normal one.
+
+    This test previously swallowed the RuntimeError inside its own handler,
+    so nothing ever propagated through the outer drain -- the exact path
+    its own docstring claimed to cover. Review proved it: replacing
+    try/finally with a plain trailing assignment (which still releases on
+    the normal path) left the whole suite green.
+
+    So the handler now lets an exception escape. Without try/finally,
+    _draining stays set forever and every later drain on this bus raises,
+    turning one misbehaving handler into a permanently wedged fixture.
+    """
     bus, sessions = make_sessions(2)
     got = _capture_chat(sessions)
 
-    class Reentrant:
+    class Exploding:
         def handle_message(self, from_conn, msg):
-            try:
-                bus.drain()
-            except RuntimeError:
-                pass
+            raise ValueError("handler blew up")
 
-    bus.register("peer1", Reentrant())
+    bus.register("peer1", Exploding())
     bus.enqueue("peer0", "peer1", {"type": "chat"})
-    bus.drain()
+    with pytest.raises(ValueError, match="handler blew up"):
+        bus.drain()
 
-    # A normal exchange still works afterwards.
+    assert bus._draining is False, \
+        "the drain guard survived an exception and wedged the bus"
+
+    # And prove it behaviourally, not only by reading the flag.
     bus.register("peer1", sessions["peer1"])
     sessions["peer0"]._transport.broadcast(
         {"type": "chat", "payload": {"nickname": "Host", "text": "still here"}})

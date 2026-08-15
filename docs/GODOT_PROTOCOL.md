@@ -132,8 +132,9 @@ coerced.
 The client does not choose the policy and cannot change it — it is fixed
 when the sidecar is launched. The client is *told* it: every snapshot (§5)
 carries a top-level `deal_policy`, so the front end can state the table's
-security level rather than implying it. It is `null` in the lobby, before a
-table has been accepted.
+security level rather than implying it. It is `null` until a table has been
+accepted — which is normally the whole time the client is in the lobby, but
+the two are not the same thing: acceptance is what sets it, not phase.
 
 > Do not use §5's `deal_progress` field for this. It reports lifecycle
 > position only and is derived purely from `phase`. It was called
@@ -157,9 +158,15 @@ For each command the sidecar replies with:
 For `start_game`, `verdict` is one of:
 
 - `"started"` — the table left the lobby and hand 1's deal is underway.
-- `"already_started"` — a hand is already in progress; the command is a no-op.
-- `"not_host"` — this sidecar's seat does not own the table start.
-- `"refused"` — the table's configuration was rejected (see §4.1).
+- `"already_started"` — a hand is already in progress, or the session has
+  ended; the command is a no-op.
+- `"refused"` — the table's configuration was rejected (see §4.1) and
+  **nothing was started**. The session is still in the lobby.
+- `"hand_failed"` — the table was accepted and started, but its first hand
+  did not complete. The table is live; the hand is not. Distinct from
+  `refused` on purpose: those are very different states to recover from,
+  and reporting the second as the first tells the client the table never
+  began when it in fact did.
 
 `ok` is true only for `started`.
 
@@ -274,7 +281,7 @@ the latest snapshot; it never advances state on its own.
 | `action_on`   | int             | seat index to act, or `-1` if nobody is to act               |
 | `turn`        | object          | authoritative player-facing state and decision facts          |
 | `deal_progress`| object         | where the hand is in the deal/play/settle lifecycle           |
-| `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` in the lobby           |
+| `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` until a table is accepted |
 | `proofs_verified`| int         | shuffle proofs THIS seat has verified in the current hand      |
 | `events`      | array           | sequenced, append-only events for the current hand              |
 | `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
@@ -406,7 +413,10 @@ The security evidence is separate, and deliberately raw:
 
 - **`deal_policy`** — what the table committed to (§4.1).
 - **`proofs_verified`** — how many shuffle proofs *this seat* actually
-  verified, counted only past a successful `bg_shuffle.verify`.
+  verified, incremented at exactly one site, immediately after
+  `bg_shuffle.verify` returns true. It answers "did verification run and
+  pass", not "is the verifier correct" — a broken verifier would increment
+  it normally.
 
 Do **not** render "cryptographically verified" from `proofs_verified > 0`.
 The correct expected count depends on the seat and shuffle-round structure;

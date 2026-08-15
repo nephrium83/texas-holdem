@@ -62,6 +62,12 @@ func test_blank_line_is_silently_skipped():
 	assert_signal_not_emitted(client, "snapshot_received")
 
 
+func test_start_game_builds_command_with_no_payload():
+	var client := _client()
+	var msg := client._build_command_message("start_game", {})
+	assert_eq(msg, {"type": "command", "command": "start_game"})
+
+
 func test_fold_builds_command_with_no_payload():
 	var client := _client()
 	var msg := client._build_command_message("fold", {})

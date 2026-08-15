@@ -441,3 +441,100 @@ def test_detection_only_hand_still_converges():
         assert deal.prevention is False
         assert deal.abort_reason is None
         assert deal.hole_complete()
+
+
+# ------------------------------------------- terminal atomicity & forensics
+
+def test_the_terminal_record_carries_the_deal_policy():
+    """Pins the field, not a string that happens to mention it.
+
+    session_id is a digest now, so a POLICY_REFUSED record is unreadable
+    without this. Review deleted the field and the entire suite stayed
+    green: the only test that looked at it asserted on terminal_reason,
+    which interpolates the value incidentally.
+    """
+    sessions, _ = make_table(2, settings={KEY: BG})
+    peer = sessions["peer1"]
+    peer.terminate(Session.HOST_LOST, "host dropped")
+    assert peer.terminal_record is not None
+    assert peer.terminal_record.deal_policy == BG
+
+
+def test_a_malformed_seat_order_cannot_split_the_terminal_transition():
+    """Terminal state is absorbing AND atomic: flags, record, teardown.
+
+    terminate() used to build the record by recomputing the deal context,
+    which raises on a non-str seat id -- and _on_game_start adopts whatever
+    seat_order a host sends without validating its shape. So a host sending
+    ["host", 7, "me"] could set terminal_state and then have the record
+    construction raise out of the message handler, leaving a session that
+    was terminal but had never produced a record, never invalidated its
+    pending work, and never notified its callbacks.
+    """
+    sessions, _ = make_table(2, settings={KEY: BG})
+    peer = sessions["peer1"]
+    notified = []
+    peer.on_session_terminated = notified.append
+
+    peer._seat_order = ["peer0", 7, "peer1"]        # a host said so
+    peer.terminate(Session.HOST_LOST, "host dropped")   # must not raise
+
+    assert peer.terminal_state == Session.HOST_LOST
+    assert peer.terminal_record is not None, \
+        "terminal flags were set but no record was produced"
+    assert peer.terminal_record.deal_policy == BG
+    assert notified, "termination completed without notifying callbacks"
+
+
+def test_a_session_terminated_from_the_lobby_records_no_deal_context():
+    """None is the honest answer when no hand ever existed -- and building
+    one would mean inventing a context for a table that never started."""
+    bus = InMemoryBus()
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"))
+    s.local_conn_id = "peer0"
+    s.terminate(Session.LOCAL_SHUTDOWN, "user quit")
+    assert s.terminal_record is not None
+    assert s.terminal_record.session_id is None
+    assert s.terminal_record.deal_policy is None
+
+
+# ------------------------------------------------ hand-start transactionality
+
+def test_a_refused_deal_leaves_no_bettable_table():
+    """No live gameplay state before every precondition holds.
+
+    _begin_p2p_hand used to construct and START the replica -- posting
+    blinds, opening betting -- and only then call begin_hand, which this
+    mandate gave new refusal paths. A refusal there left a table that
+    accepted bets (send_bet_action gates on _replica alone) and could never
+    settle, because settling needs a deal that was refused. There is no
+    timeout to rescue it: check_deadlines has no production caller.
+    """
+    bus = InMemoryBus()
+    order = ["peer0", "peer1"]
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"))
+    s.local_conn_id = "peer0"
+    s.configure_seats(order)                     # no policy adopted
+
+    with pytest.raises(RuntimeError, match="no deal policy"):
+        s.start_p2p_hand(hand_no=1, names=["P0", "P1"], stacks=[500, 500],
+                         sb=5, bb=10, button=0)
+
+    assert s.replica is None, "a refused hand left a live replica"
+    assert s._deal_driver is None
+    assert s.send_bet_action("call", 0) == "rejected", \
+        "a refused hand left a table that accepts bets"
+
+
+def test_the_chokepoint_refuses_a_policy_it_does_not_recognise():
+    """A single writer that accepts anything is only half a chokepoint: it
+    centralises WHEN the field changes and leaves WHAT it may hold to the
+    caller. _deal_first_hand takes a caller-supplied policy."""
+    bus = InMemoryBus()
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"))
+    with pytest.raises(ValueError, match="not a deal policy"):
+        s._adopt_deal_policy("banana")
+    assert s.deal_policy is None

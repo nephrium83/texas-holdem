@@ -207,11 +207,18 @@ class MentalDeal:
     _joint_pk: Optional[Point] = None
     _deck: Optional[List[Ciphertext]] = None              # current accepted deck
     _shuffle_round: int = 0                               # rounds accepted so far
-    #: Shuffle proofs this instance has VERIFIED, incremented only where
-    #: bg_shuffle.verify actually returned true. Evidence, not a label: it
-    #: is the one value that distinguishes a table running Bayer-Groth from
-    #: one that merely says it is, and it stays zero in detection-only
+    #: Shuffle proofs this instance has verified: incremented at exactly one
+    #: site, immediately after bg_shuffle.verify returns true. Evidence
+    #: rather than a label -- it distinguishes a table running Bayer-Groth
+    #: from one that merely says it is, and stays zero in detection-only
     #: because nothing verifies anything there.
+    #:
+    #: What it does NOT prove: that bg_shuffle.verify is itself sound. A
+    #: verifier hardwired to return true increments this exactly as a
+    #: correct one does. That property belongs to the BG soundness suites
+    #: (tests/test_bg_shuffle_soundness.py and friends), which do catch it;
+    #: this counter answers "did verification run and pass", not "is the
+    #: verifier correct".
     _proofs_verified: int = 0
     # Phase C (deal) state
     _deal_map: Optional[List[dmap.Destination]] = None
@@ -557,6 +564,13 @@ class MentalDeal:
                 BG_M, BG_N, self._bg_ctx(round_no, seat), proof):
             return (f"seat {seat} sent an invalid shuffle proof "
                     f"for round {round_no}")
+        # Counted HERE, immediately past a true return from
+        # bg_shuffle.verify, and nowhere else. It previously incremented in
+        # the caller, past `_prevention_failure(...) is None` -- one level
+        # of indirection away -- so neutering this method left the counter
+        # reporting full marks on a table that verified nothing, while
+        # every doc and test described it as counting verifications.
+        self._proofs_verified += 1
         return None
 
     def _on_deck_round(self, msg: dict) -> List[dict]:
@@ -603,9 +617,6 @@ class MentalDeal:
             failure = self._prevention_failure(msg, deck, round_no, seat)
             if failure is not None:
                 return self._abort(failure, seat)
-            # Counted only past the failure check, so this records proofs
-            # that verified rather than proofs that arrived.
-            self._proofs_verified += 1
 
         # accept
         self._deck = deck

@@ -121,3 +121,48 @@ func test_next_hand_pressed_calls_sidecar_next_hand():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%NextHandControl").next_hand_pressed.emit()
 	assert_eq(fake.calls, [["next_hand"]])
+
+
+# ---------------------------------------------------------------- lobby start
+# The edge that was missing entirely: Main must route the lobby control's
+# press to the sidecar. Everything below the socket was already proven by
+# the Python suite; nothing proved the client could invoke it.
+
+func test_lobby_state_shows_the_lobby_control():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	assert_true(main.get_node("%LobbyControl").visible)
+	assert_true(main.get_node("%LobbyControl/Margin/Content/StartGameButton").visible)
+
+
+func test_mid_hand_state_hides_the_lobby_control():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())  # turn.state == "your_turn"
+	assert_false(main.get_node("%LobbyControl").visible)
+
+
+func test_start_game_pressed_calls_sidecar_start_game():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl").start_game_pressed.emit()
+	assert_eq(fake.calls, [["start_game"]])
+
+
+func test_pressing_the_real_button_reaches_the_sidecar():
+	## The whole client-side chain in one assertion, driven by an actual
+	## button press rather than a synthesised signal: real scene ->
+	## real control -> real Button.pressed -> Main -> sidecar command.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+	assert_eq(fake.calls, [["start_game"]])

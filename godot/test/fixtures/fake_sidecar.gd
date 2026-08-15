@@ -8,6 +8,10 @@ extends RefCounted
 var calls: Array = []
 
 
+func start_game() -> void:
+	calls.append(["start_game"])
+
+
 func fold() -> void:
 	calls.append(["fold"])
 

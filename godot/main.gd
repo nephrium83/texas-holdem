@@ -12,6 +12,7 @@ extends Control
 @onready var _betting_controls: BettingControls = %BettingControls
 @onready var _player_info_panel: PlayerInfoPanel = %PlayerInfoPanel
 @onready var _next_hand_control: NextHandControl = %NextHandControl
+@onready var _lobby_control: LobbyControl = %LobbyControl
 
 ## Untyped on purpose: production wiring points this at the real
 ## %SidecarClient child, but tests substitute a lightweight fake --
@@ -27,6 +28,7 @@ func _ready() -> void:
 	_betting_controls.check_call_pressed.connect(_on_check_call_pressed)
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
 	_next_hand_control.next_hand_pressed.connect(_on_next_hand_pressed)
+	_lobby_control.start_game_pressed.connect(_on_start_game_pressed)
 	_connect_to_sidecar_from_cmdline()
 
 
@@ -36,7 +38,9 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 	var you: Dictionary = snapshot.get("you", {})
 	_betting_controls.apply_legal(you.get("legal", {}))
 	var turn: Dictionary = snapshot.get("turn", {})
-	_next_hand_control.apply_turn_state(str(turn.get("state", "lobby")))
+	var turn_state := str(turn.get("state", "lobby"))
+	_next_hand_control.apply_turn_state(turn_state)
+	_lobby_control.apply_turn_state(turn_state)
 
 
 func _on_fold_pressed() -> void:
@@ -53,6 +57,10 @@ func _on_raise_pressed(amount: int) -> void:
 
 func _on_next_hand_pressed() -> void:
 	_sidecar.next_hand()
+
+
+func _on_start_game_pressed() -> void:
+	_sidecar.start_game()
 
 
 ## The sidecar's listening port is OS-assigned (client_server.py binds
