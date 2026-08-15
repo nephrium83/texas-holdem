@@ -14,7 +14,7 @@ extends PanelContainer
 @onready var effective_value: Label = %EffectiveValue
 @onready var raise_value: Label = %RaiseValue
 @onready var hand_label: Label = %HandLabel
-@onready var verification_label: Label = %VerificationLabel
+@onready var deal_progress_label: Label = %DealProgressLabel
 @onready var event_log: RichTextLabel = %EventLog
 @onready var result_card: PanelContainer = %ResultCard
 @onready var result_text: Label = %ResultText
@@ -29,7 +29,7 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 	_apply_state_color(state)
 	_apply_decision(turn)
 	_apply_hand(snapshot)
-	_apply_verification(snapshot)
+	_apply_deal_progress(snapshot)
 	_apply_events(snapshot.get("events", []))
 	_apply_result(snapshot, state)
 
@@ -85,10 +85,14 @@ func _apply_hand(snapshot: Dictionary) -> void:
 	hand_label.text = "%s%s" % [str(made.get("description", "")), suffix]
 
 
-func _apply_verification(snapshot: Dictionary) -> void:
-	var verification: Dictionary = snapshot.get("verification", {})
-	verification_label.text = str(
-		verification.get("label", "Verification state unavailable")
+## Renders deal PROGRESS, not a verification verdict. The label this
+## reads is derived from the hand's phase and says nothing about whether
+## proofs checked out; snapshot.deal_policy and snapshot.proofs_verified
+## carry that, and are deliberately not collapsed into a claim here.
+func _apply_deal_progress(snapshot: Dictionary) -> void:
+	var progress: Dictionary = snapshot.get("deal_progress", {})
+	deal_progress_label.text = str(
+		progress.get("label", "Deal state unavailable")
 	)
 
 

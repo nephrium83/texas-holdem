@@ -257,14 +257,14 @@ class TestClientCanReachTheMentalDeal:
         hole cards, so this asserts the seat is actually in the hand: either
         it is this seat's turn, or the hand already progressed past it.
 
-        Deliberately NOT asserting verification.state == "verified". That
-        field looks like a crypto attestation and is not one --
-        player_info.verification_view is a pure function of phase, mapping
-        settled -> "verified". Asserting on it would be a phase check
-        dressed as a proof check, and it would also be a race: with three
-        seats the hand often stops at this seat's decision and never
-        reaches settled at all. The real Bayer-Groth assertion belongs on
-        the proof bytes, not on a display label.
+        Deliberately NOT asserting on deal_progress. That field reports
+        lifecycle position and nothing else -- it is a pure function of
+        phase, which is exactly why its old name (`verification`, with a
+        "verified" state) was removed. Asserting on it would be a phase
+        check dressed as a proof check, and it would also be a race: with
+        three seats the hand often stops at this seat's decision and never
+        reaches settled. The Bayer-Groth assertion belongs on proof
+        evidence, not on a display label.
         """
         proc = _start_sidecar("--seats", "3")
         try:

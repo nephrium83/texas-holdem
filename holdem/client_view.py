@@ -54,11 +54,11 @@ def snapshot(session) -> dict:
     engine = replica.engine
     snap = contract.build_snapshot(engine, seat)
     snap["hand_num"] = session._hand_no
-    # The table's security level, stated rather than implied. Before this,
-    # nothing reaching the client distinguished a Bayer-Groth table from a
-    # detection-only one -- `verification` looks like it does, but it is a
-    # pure function of phase -- so a player had no way to know which
-    # guarantee they were playing under.
+    # The table's security level, stated rather than implied. Nothing
+    # reaching the client used to distinguish a Bayer-Groth table from a
+    # detection-only one: the field that looked like it did (`verification`,
+    # now `deal_progress`) was a pure function of phase, so a player had no
+    # way to know which guarantee they were playing under.
     snap["deal_policy"] = session.deal_policy
     # Evidence to go with the claim. deal_policy is what the table says;
     # this is what this seat actually verified, so a client can tell a
@@ -112,7 +112,7 @@ def snapshot(session) -> dict:
         eliminated=snap["eliminated"],
         void_reason=snap["void_reason"],
     )
-    snap["verification"] = player_info.verification_view(
+    snap["deal_progress"] = player_info.deal_progress_view(
         phase, snap["void_reason"]
     )
     snap["settlement"] = (
@@ -204,7 +204,7 @@ def _lobby_snapshot(session) -> dict:
             "effective_stack": 0,
             "void_reason": None,
         },
-        "verification": player_info.verification_view("lobby"),
+        "deal_progress": player_info.deal_progress_view("lobby"),
         "events": [],
         "settlement": None,
     }

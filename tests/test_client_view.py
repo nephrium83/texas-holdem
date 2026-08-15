@@ -83,7 +83,7 @@ def test_snapshot_is_json_and_well_formed():
         assert snap["phase"] == "betting"
         assert len(snap["seats"]) == 3
         assert snap["hand_num"] == 1
-        assert snap["verification"]["state"] == "audit_pending"
+        assert snap["deal_progress"]["state"] == "in_hand"
         assert snap["events"][0]["event"] == "hand_started"
         assert snap["settlement"] is None
 
@@ -171,7 +171,7 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
     snap = json_safe(client_view.snapshot(sessions[order[0]]))
     assert snap["phase"] == "settled"
     assert snap["result"] is not None
-    assert snap["verification"]["state"] == "verified"
+    assert snap["deal_progress"]["state"] == "settled"
     assert snap["turn"]["state"] == "hand_complete"
     assert snap["settlement"]["pots"]
     assert snap["settlement"]["showdown"]

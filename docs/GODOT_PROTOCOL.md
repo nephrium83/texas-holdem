@@ -135,10 +135,10 @@ carries a top-level `deal_policy`, so the front end can state the table's
 security level rather than implying it. It is `null` in the lobby, before a
 table has been accepted.
 
-> Do not use §5's `verification` field for this. It reports deal *progress*
-> (`not_started` → `in_progress` → `audit_pending` → `verified`) and is
-> derived purely from `phase`; `"verified"` there means "the hand settled",
-> not "shuffle proofs checked out".
+> Do not use §5's `deal_progress` field for this. It reports lifecycle
+> position only and is derived purely from `phase`. It was called
+> `verification` and had a `"verified"` state, which meant "the hand
+> settled", never "shuffle proofs checked out".
 
 ### Command result
 
@@ -222,10 +222,12 @@ the latest snapshot; it never advances state on its own.
       "call_is_all_in": false
     }
   },
-  "verification": {
-    "state": "audit_pending",
-    "label": "Deal active | final audit pending"
+  "deal_progress": {
+    "state": "in_hand",
+    "label": "Hand in progress"
   },
+  "deal_policy": "bayer-groth-v1",
+  "proofs_verified": 2,
   "events": [
     { "seq": 1, "event": "hand_started", "kind": "hand",
       "text": "--- Hand #7 (5/10) ---", "hand_num": 7, "street": "preflop" }
@@ -271,7 +273,9 @@ the latest snapshot; it never advances state on its own.
 | `bb_seat`     | int             | big-blind seat index                                         |
 | `action_on`   | int             | seat index to act, or `-1` if nobody is to act               |
 | `turn`        | object          | authoritative player-facing state and decision facts          |
-| `verification`| object          | truthful deal/audit status for the current phase               |
+| `deal_progress`| object         | where the hand is in the deal/play/settle lifecycle           |
+| `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` in the lobby           |
+| `proofs_verified`| int         | shuffle proofs THIS seat has verified in the current hand      |
 | `events`      | array           | sequenced, append-only events for the current hand              |
 | `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
@@ -365,7 +369,7 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 
 | state | client treatment |
 |-------|------------------|
-| `lobby` / `dealing` | waiting or verification presentation; no betting controls |
+| `lobby` / `dealing` | waiting or deal-progress presentation; no betting controls |
 | `your_turn` | show `turn.decision` and enable only snapshot-legal actions |
 | `waiting` | name `actor_name`; hide all local decision facts |
 | `folded_waiting` | show that the local seat folded while the hand continues |
@@ -380,15 +384,34 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 pot odds, pot after calling, stack after calling, effective stack, and the
 legal raise-to range. Godot must not recalculate these poker facts.
 
-### `verification`
+### `deal_progress`, and why it is not a verification verdict
 
-The labels deliberately avoid claiming more than the protocol has proven:
+`deal_progress` reports **only** where the hand is:
 
-- `in_progress` while peer deal contributions are being verified.
-- `audit_pending` during betting: the hand is active, but the mandatory
-  post-hand audit has not completed.
-- `verified` only after the audit and settlement complete.
+- `not_started` in the lobby.
+- `dealing` while the mental-poker deal runs.
+- `in_hand` during betting.
+- `settled` once the hand completes.
 - `voided` when a proof, replica, or peer failure closed the hand.
+
+This field was previously called `verification`, with states named
+`audit_pending` and `verified` and labels like "Deal and settlement
+verified". Those were cryptographic claims, and the function producing them
+is a **pure function of `phase`** — it reads no proof, no audit result, and
+no verification outcome. It cannot report that verification *failed*: a
+hand whose proofs were never checked still reaches `settled`, and would
+have been labelled "verified". Do not reintroduce that reading.
+
+The security evidence is separate, and deliberately raw:
+
+- **`deal_policy`** — what the table committed to (§4.1).
+- **`proofs_verified`** — how many shuffle proofs *this seat* actually
+  verified, counted only past a successful `bg_shuffle.verify`.
+
+Do **not** render "cryptographically verified" from `proofs_verified > 0`.
+The correct expected count depends on the seat and shuffle-round structure;
+until an explicit attestation predicate exists, show the policy and the
+count, not a conclusion drawn from them.
 
 ### `events`: current-hand action ledger
 
