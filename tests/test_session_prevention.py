@@ -128,6 +128,28 @@ def test_an_unrecognised_policy_string_is_refused(value):
         make_table(2, settings={KEY: value})
 
 
+def test_a_value_that_merely_stringifies_to_a_policy_is_refused():
+    """Pins the isinstance(str) check specifically.
+
+    Controls showed why this test is needed and what it must look like.
+    Replacing `isinstance(value, str)` with `value = str(value)` fires
+    nothing against ordinary inputs, because strict membership already
+    refuses "True", "1", "['bayer-groth-v1']" and friends -- the coercion
+    break is benign for anything JSON can carry. The isinstance check
+    earns its place only against a value whose str() IS a valid policy, so
+    that is what this asserts. Not reachable from the wire, where settings
+    arrive as JSON; reachable from any Python caller of start_game.
+    """
+    class Sneaky:
+        def __str__(self):
+            return Session.DEAL_POLICY_BG
+
+    assert Session.parse_deal_policy(
+        {KEY: Sneaky()}, AUTHOR_MODE_COMPAT) is None
+    with pytest.raises(ValueError, match="deal_policy"):
+        make_table(2, settings={KEY: Sneaky()})
+
+
 # --------------------------------------------------- wire mode mandates BG
 
 def test_wire_mode_refuses_detection_only():
@@ -152,13 +174,36 @@ def test_compat_mode_accepts_detection_only_explicitly():
 def test_a_wire_joiner_refuses_a_detection_only_table_before_playing():
     """Refusal lands BEFORE the peer accepts the table, which is the whole
     reason the check moved out of begin_hand. A peer that discovers the
-    disagreement at deal time has already announced itself as playing."""
+    disagreement at deal time has already announced itself as playing.
+
+    Asserted on terminal_record.previous_state, NOT on s.state. That is the
+    only field that can tell the difference: terminate() overwrites state
+    with "ENDED", so `s.state != "PLAYING"` holds whether the refusal ran
+    before or after the transition, and a control that moved the refusal
+    after it fired nothing.
+    """
     s = _wire_joiner()
     s.handle_message("host", {"type": "game_start", "payload": {
         "seat_order": ["host", "me"], "table_settings": {KEY: DETECTION}}})
-    assert s.state != "PLAYING", "peer entered PLAYING on a refused table"
     assert s.terminal_state == Session.POLICY_REFUSED
     assert s.deal_policy is None
+    assert s.terminal_record is not None
+    assert s.terminal_record.previous_state != "PLAYING", (
+        "the peer entered PLAYING and was only then refused; refusal must "
+        "precede accepting the table")
+    assert s.terminal_record.previous_state == "LOBBY"
+
+
+def test_a_refused_table_never_reaches_the_game_start_callback():
+    """The observable consequence of the ordering, from the outside: a
+    refused table must not notify anything that a game began. The Tk lobby
+    tears down its dialog and launches a table in this callback."""
+    s = _wire_joiner()
+    fired = []
+    s.on_game_start = fired.append
+    s.handle_message("host", {"type": "game_start", "payload": {
+        "seat_order": ["host", "me"], "table_settings": {KEY: DETECTION}}})
+    assert fired == [], "a refused table still announced a game start"
 
 
 def test_a_refused_table_records_what_it_refused():
