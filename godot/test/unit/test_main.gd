@@ -170,6 +170,12 @@ func test_pressing_the_real_button_reaches_the_sidecar():
 
 func test_a_failed_start_result_releases_the_lobby_control():
 	var main := _main()
+	# A sidecar whose send SUCCEEDS. Against the real %SidecarClient the
+	# send fails (nothing is connected in a unit test), which clears the
+	# latch by the dropped-send path -- and this test would then pass
+	# without the verdict routing it exists to check ever running.
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
 	var snapshot := _heads_up_snapshot()
 	snapshot["turn"]["state"] = "lobby"
 	main._on_snapshot_received(snapshot)
@@ -190,6 +196,8 @@ func test_a_successful_start_result_does_not_release_the_latch():
 	## The hand is starting; the control should stay latched until the
 	## snapshot moves it out of the lobby.
 	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
 	var snapshot := _heads_up_snapshot()
 	snapshot["turn"]["state"] = "lobby"
 	main._on_snapshot_received(snapshot)
@@ -225,6 +233,8 @@ func test_a_send_that_never_left_the_client_releases_the_lobby_control():
 
 func test_a_command_result_for_another_command_is_ignored():
 	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
 	var snapshot := _heads_up_snapshot()
 	snapshot["turn"]["state"] = "lobby"
 	main._on_snapshot_received(snapshot)
