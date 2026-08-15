@@ -184,6 +184,127 @@ class TestSidecarCommands:
             proc.wait(timeout=5)
 
 
+def _command(sock, reader, command: str, payload: dict | None = None):
+    """Send a command; return (command_result, the snapshot that follows it).
+
+    Deliberately matched by identity, not by position. Starting a table runs
+    a whole hand inside one round-trip, and every state change along the way
+    queues an unprompted snapshot (section 5). Reading a fixed two lines
+    would hand back whichever message happened to be next -- a stale
+    snapshot read as a command_result -- so this skips to the result for
+    THIS command and then takes the next snapshot after it.
+    """
+    sock.sendall(json.dumps({"type": "command", "command": command,
+                             "payload": payload or {}}).encode() + b"\n")
+    while True:
+        msg = _readline(reader)
+        if msg.get("type") == "command_result" and msg.get("command") == command:
+            result = msg
+            break
+    while True:
+        msg = _readline(reader)
+        if msg.get("type") == "snapshot":
+            return result, msg
+
+
+class TestClientCanReachTheMentalDeal:
+    """The load-bearing reachability test.
+
+    Everything here runs through the shipped surface: a real sidecar
+    subprocess, a real localhost socket, and the real protocol. No harness
+    shortcut, no direct call into Session.
+
+    This exists because the mental-poker deal had NO reachable production
+    caller. MentalDealDriver is constructed only in Session.begin_hand,
+    reached only from _begin_p2p_hand, reached only from start_p2p_hand and
+    next_p2p_hand -- and start_p2p_hand's only caller in holdem/ was
+    _deal_first_hand, which run() never called and only tests used. The
+    crypto was built, tested, and unreachable. If this test ever goes red by
+    landing back in the lobby, that regression has returned.
+    """
+
+    def test_start_game_leaves_the_lobby_and_deals_real_cards(self):
+        proc = _start_sidecar("--seats", "3")
+        try:
+            port = _read_port(proc)
+            with _connect(port) as (sock, reader):
+                _readline(reader)                       # hello
+                lobby = _readline(reader)
+                assert lobby["phase"] == "lobby", "did not start in lobby"
+
+                # A real deal runs inside this round-trip; makefile() reads
+                # share the socket timeout, so raising it here covers both.
+                sock.settimeout(60.0)
+                result, snap = _command(sock, reader, "start_game")
+
+                assert result["ok"] is True, result
+                assert result["verdict"] == "started", result
+                assert snap["phase"] != "lobby", \
+                    "start_game returned started but the table stayed in lobby"
+
+                # A real deal ran: this seat holds two real cards.
+                hole = snap["you"].get("hole")
+                assert hole and len(hole) == 2, \
+                    f"no hole cards dealt -- deal did not run: {hole!r}"
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_the_local_replica_reaches_live_play(self):
+        """The deal does not merely run -- it hands off to real betting.
+
+        A deal that completed but left the replica inert would still show
+        hole cards, so this asserts the seat is actually in the hand: either
+        it is this seat's turn, or the hand already progressed past it.
+
+        Deliberately NOT asserting verification.state == "verified". That
+        field looks like a crypto attestation and is not one --
+        player_info.verification_view is a pure function of phase, mapping
+        settled -> "verified". Asserting on it would be a phase check
+        dressed as a proof check, and it would also be a race: with three
+        seats the hand often stops at this seat's decision and never
+        reaches settled at all. The real Bayer-Groth assertion belongs on
+        the proof bytes, not on a display label.
+        """
+        proc = _start_sidecar("--seats", "3")
+        try:
+            port = _read_port(proc)
+            with _connect(port) as (sock, reader):
+                _readline(reader)
+                _readline(reader)
+                sock.settimeout(60.0)
+                _result, snap = _command(sock, reader, "start_game")
+
+                assert snap["phase"] in ("betting", "settled"), \
+                    f"replica never reached live play: phase={snap['phase']!r}"
+                turn_state = snap.get("turn", {}).get("state")
+                assert turn_state != "lobby", \
+                    f"turn state stayed in lobby: {turn_state!r}"
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_second_start_game_does_not_restart_the_table(self):
+        """start_game is not idempotent-by-accident: a duplicate must report
+        already_started rather than silently re-dealing a live table."""
+        proc = _start_sidecar("--seats", "2")
+        try:
+            port = _read_port(proc)
+            with _connect(port) as (sock, reader):
+                _readline(reader)
+                _readline(reader)
+                sock.settimeout(60.0)
+                first, _ = _command(sock, reader, "start_game")
+                assert first["verdict"] == "started"
+
+                second, _ = _command(sock, reader, "start_game")
+                assert second["verdict"] == "already_started", second
+                assert second["ok"] is False
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+
 class TestSidecarArgValidation:
     """Bad arguments cause a non-zero exit with a message on stderr."""
 

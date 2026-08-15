@@ -14,9 +14,17 @@ and then one human-readable line::
     Sidecar ready on 127.0.0.1:<n>
 
 The sidecar starts in lobby phase (no hand in progress).  The Godot
-client connects, reads the lobby snapshot, and triggers game start via
-the protocol command defined in GODOT_PROTOCOL.md.  BotDriver wires
-all non-human seats and auto-advances them once a hand is in progress.
+client connects, reads the lobby snapshot, and sends the ``start_game``
+command (GODOT_PROTOCOL.md section 4) to start the table this process was
+launched with.  That drives the real hostless path: the host broadcasts
+game_start, every seat calls start_p2p_hand, and MentalDealDriver runs the
+mental-poker deal.  BotDriver wires all non-human seats and auto-advances
+them once a hand is in progress.
+
+This docstring previously claimed the client triggered game start "via the
+protocol command defined in GODOT_PROTOCOL.md" while no such command
+existed, which is how the entire hostless deal path came to have no
+reachable production caller.
 """
 from __future__ import annotations
 
@@ -43,28 +51,109 @@ _ADVANCEABLE_STATES = ("hand_complete", "voided")
 # Session factory
 # ---------------------------------------------------------------------------
 
-def _make_sessions(seats: int):
+def _make_sessions(seats: int, nickname: str = "You"):
     """Create *seats* real Sessions on one in-memory bus.
 
     Seat HUMAN_SEAT is reserved for the Godot client; the rest become bots.
-    Mirrors tests/test_client_server.py's make_sessions() helper.
+
+    Every session seats the same local table, which populates each roster.
+    That matters because Session.start_game() derives the seat order from
+    its roster: with only configure_seats() called, players stayed empty and
+    the host would broadcast an EMPTY seat order. The roster is built through
+    seat_local_table rather than the player_info handshake because these
+    seats are local AI, not peers -- see that method for why impersonating
+    joiners here produces a table that deals nothing.
     """
     bus = InMemoryBus()
     order = [f"seat{i}" for i in range(seats)]
     sessions = {}
     for i, conn_id in enumerate(order):
-        nickname = "You" if i == HUMAN_SEAT else f"Bot {i}"
+        seat_nick = nickname if i == HUMAN_SEAT else f"Bot {i}"
         session = Session(
             is_host=(i == 0),
-            nickname=nickname,
+            nickname=seat_nick,
             avatar_b64="",
             transport=InMemoryTransport(bus, conn_id),
         )
         session.local_conn_id = conn_id
-        session.configure_seats(order)
         bus.register(conn_id, session)
         sessions[conn_id] = session
+    nicknames = {cid: sessions[cid].local_nickname for cid in order}
+    for conn_id in order:
+        sessions[conn_id].seat_local_table(order, nicknames)
     return bus, sessions, order
+
+
+# ---------------------------------------------------------------------------
+# Hand start
+# ---------------------------------------------------------------------------
+
+def _wire_hand_start(sessions: dict, order: list) -> None:
+    """Make every seat begin its own deal when game_start arrives.
+
+    This is the join between the table starting and the mental-poker deal
+    running, and it is the piece that was missing: MentalDealDriver had no
+    reachable production caller because nothing ever called start_p2p_hand
+    outside tests.
+
+    These callbacks MUST NOT drain the bus. The host's fires synchronously
+    inside start_game; every other seat's fires while the bus is delivering
+    game_start, so a drain here would re-enter the one already running and
+    consume the shared queue out of order. They enqueue, and the outer drain
+    in the start_table controller carries the deal to quiescence.
+    InMemoryBus.drain() now refuses re-entry outright, so a regression here
+    raises rather than desyncing one hand in five.
+    """
+    for conn_id, session in sessions.items():
+        def _on_game_start(payload, _s=session) -> None:
+            ts = payload.get("table_settings", {})
+            seat_order = list(payload.get("seat_order", [])) or list(order)
+            names = [(_s.players[cid].nickname if cid in _s.players else cid)
+                     for cid in seat_order]
+            stack = int(ts.get("stack", 1000))
+            _s.start_p2p_hand(
+                hand_no=1,
+                names=names,
+                stacks=[stack] * len(seat_order),
+                sb=int(ts.get("sb", 25)),
+                bb=int(ts.get("bb", 50)),
+                structure=ts.get("structure", "No-Limit"),
+                button=0,
+            )
+        session.on_game_start = _on_game_start
+
+
+def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
+                      table_settings: dict):
+    """Build the controller callable behind the client's start_game command.
+
+    The controller owns proposed table configuration; the Session owns
+    accepted protocol state. So the settings live here, in the process that
+    was launched with them, and are handed to start_game rather than parked
+    on the Session where they would compete with _last_table_settings.
+
+    This is also the one place that drains. It runs on the socket read loop,
+    outside any active delivery, so its drain is the OUTER one that every
+    on_game_start callback relies on.
+    """
+    host = sessions[order[0]]
+
+    def start_table() -> str:
+        if not host.is_host:
+            return "not_host"
+        if host.state != "LOBBY":
+            return "already_started"
+        try:
+            host.start_game(dict(table_settings))
+        except (RuntimeError, ValueError) as exc:
+            # A refused table must not look like a started one: the client
+            # would leave the lobby for a hand that never begins.
+            _log.warning("start_table refused: %s", exc)
+            return "refused"
+        bus.drain()
+        return "started"
+
+    return start_table
 
 
 # ---------------------------------------------------------------------------
@@ -176,27 +265,34 @@ class BotDriver:
 
 async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
               port: int, seed: int | None, nickname: str) -> None:
-    bus, sessions, order = _make_sessions(seats)
+    bus, sessions, order = _make_sessions(seats, nickname=nickname)
     human_conn_id = order[HUMAN_SEAT]
     human_session = sessions[human_conn_id]
-    human_session.local_nickname = nickname
     bot_sessions  = {cid: s for cid, s in sessions.items()
                      if cid != human_conn_id}
 
     _wrap_with_drain(human_session, bus)
     BotDriver(bot_sessions, random.Random(seed))
 
-    server = ClientServer(human_session, host="127.0.0.1", port=port)
+    table_settings = {
+        "sb": sb, "bb": bb, "stack": stack, "structure": structure,
+    }
+    _wire_hand_start(sessions, order)
+    start_table = _make_start_table(sessions, order, bus, table_settings)
+
+    server = ClientServer(human_session, host="127.0.0.1", port=port,
+                          start_table=start_table)
     await server.start()
 
     # Machine-readable port announcement (parsed by tests and by Godot launcher).
     print(f"SIDECAR_PORT:{server.port}", flush=True)
     _log.info("sidecar ready on 127.0.0.1:%d", server.port)
 
-    # The sidecar starts in lobby phase.  The Godot client triggers game
-    # start via the protocol; BotDriver takes over once a hand begins.
-    # _deal_first_hand is available for callers that want immediate play
-    # (e.g. the two-process test harness).
+    # The sidecar starts in lobby phase. The Godot client sends the
+    # start_game command (GODOT_PROTOCOL.md section 4), which runs the
+    # controller above: the host's Session broadcasts game_start, every
+    # seat begins its mental-poker deal, and one drain carries it to
+    # quiescence. BotDriver takes over from there.
 
     try:
         await asyncio.Event().wait()

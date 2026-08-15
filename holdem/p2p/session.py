@@ -2726,6 +2726,61 @@ class Session:
         self._seat_order = list(order)
 
     @owned
+    def seat_local_table(self, order: list[str],
+                         nicknames: Optional[dict] = None) -> None:
+        """Seat a table whose every seat lives in this process.
+
+        The sidecar's non-human seats are AI players sharing one process and
+        one device identity -- not remote peers. They have no distinct
+        signing key and never will, because holdem.p2p.identity holds a
+        process-global private key. So the lobby handshake does not describe
+        them: routing them through player_info would make each seat dial the
+        host it already is, and _on_player_info hardcodes is_host=False, so
+        the resulting roster would claim the table has no host.
+
+        Rather than have local seats impersonate joiners, a local table says
+        what it is. Seats are keyless BY INTENT, not by omission: with no
+        ed25519 key on any Player, _bind_seat_keys leaves _seat_keys empty
+        and _author_owns_seat stays on the compat conn_id rule, which is the
+        correct authority when the bus itself is authoritative about who
+        sent what. A partially-keyed roster is the failure mode this avoids
+        -- one keyed seat makes _seat_keys truthy and every OTHER seat's
+        messages get refused, which presents as a table that deals nothing.
+
+        Refused outright in AUTHOR_MODE_WIRE. On a transport carrying real
+        envelopes, seats are earned through the admission handshake; this
+        seam must never become a way to seat a peer without one.
+        """
+        if self.author_mode == AUTHOR_MODE_WIRE:
+            raise RuntimeError(
+                "seat_local_table is for local tables only; a session on a "
+                "verified-envelope transport seats peers through admission")
+        if self.terminal_state is not None:
+            raise RuntimeError(
+                f"cannot seat a table: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
+        # configure_seats owns the structural rules (2-9 seats, unique ids,
+        # local seat present, no seating mid-hand). Run it FIRST so an
+        # invalid order is refused before any roster state is written.
+        self.configure_seats(order)
+        nicknames = nicknames or {}
+        with self._lock:
+            self.players.clear()
+            self._join_order.clear()
+            for cid in order:
+                self.players[cid] = Player(
+                    conn_id    = cid,
+                    peer_id    = "",
+                    nickname   = nicknames.get(cid, cid),
+                    avatar_b64 = "",
+                    is_host    = (cid == order[0]),
+                )
+                if cid != self.local_conn_id:
+                    self._join_order.append(cid)
+        if self.on_player_list_changed:
+            self.on_player_list_changed(list(self.players.values()))
+
+    @owned
     def set_host_engine(self, engine) -> None:
         """Register the host-side engine for action routing (host only)."""
         self._engine = engine
