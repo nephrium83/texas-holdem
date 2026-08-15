@@ -207,6 +207,12 @@ class MentalDeal:
     _joint_pk: Optional[Point] = None
     _deck: Optional[List[Ciphertext]] = None              # current accepted deck
     _shuffle_round: int = 0                               # rounds accepted so far
+    #: Shuffle proofs this instance has VERIFIED, incremented only where
+    #: bg_shuffle.verify actually returned true. Evidence, not a label: it
+    #: is the one value that distinguishes a table running Bayer-Groth from
+    #: one that merely says it is, and it stays zero in detection-only
+    #: because nothing verifies anything there.
+    _proofs_verified: int = 0
     # Phase C (deal) state
     _deal_map: Optional[List[dmap.Destination]] = None
     _hole_pos: Dict[int, List[int]] = field(default_factory=dict)   # seat -> [pos,pos]
@@ -470,13 +476,16 @@ class MentalDeal:
         (session, hand, round, seat, key) tuple and replaying it anywhere
         else yields a different statement hash and a clean verify-False.
 
-        Fields are length-prefixed rather than delimiter-joined. No
-        collision exists under a plain separator today -- session_id is
-        the only variable-shape field and it comes first, while hand,
-        round and seat are separator-free integers -- but session_id IS
-        itself a "|"-joined string (see session._deal_session_id), so the
-        scheme would become ambiguous the moment a second string field is
-        added. Length prefixes cost nothing and remove the footgun.
+        Fields are length-prefixed rather than delimiter-joined, which
+        costs nothing and removes a footgun that turned out to be real
+        one layer down. session_id was itself a "|"-joined string, and
+        THAT join was ambiguous: ["a|b","c"] and ["a","b|c"] produced the
+        same id, so two structurally different tables shared a DKG domain.
+        This layer was never the problem -- one variable-shape field
+        first, then separator-free integers -- but it is the discipline
+        session._deal_session_id now also follows, where the id is a
+        digest of a canonically-encoded context that binds the deal
+        policy.
 
         The commitment key is additionally bound inside the proof itself --
         bg_shuffle._statement_context hashes ck.H and every ck.Gs. Naming
@@ -594,6 +603,9 @@ class MentalDeal:
             failure = self._prevention_failure(msg, deck, round_no, seat)
             if failure is not None:
                 return self._abort(failure, seat)
+            # Counted only past the failure check, so this records proofs
+            # that verified rather than proofs that arrived.
+            self._proofs_verified += 1
 
         # accept
         self._deck = deck

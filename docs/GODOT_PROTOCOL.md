@@ -110,6 +110,36 @@ action — an out-of-turn or illegal command is **rejected, never trusted**.
 The client should only enable a control when the snapshot says it is legal,
 but must handle rejection gracefully regardless.
 
+### 4.1 Deal policy  *(locked — implemented)*
+
+Every table declares how it deals, as a named protocol rather than a flag:
+
+| `deal_policy`         | meaning                                                |
+|-----------------------|--------------------------------------------------------|
+| `"bayer-groth-v1"`    | shuffle proofs generated and verified every round      |
+| `"detection-only-v1"` | no proofs; a bad shuffle is caught by the post-hand audit and the hand is voided **after** it is played |
+
+**There is no default.** A table that does not declare a policy is refused
+before it starts. On a verified-envelope transport — i.e. real peer-to-peer
+play — `"bayer-groth-v1"` is the **only** admissible value; detection-only is
+restricted to in-process harnesses, tests and benchmarks, and must still be
+stated explicitly there.
+
+Parsing is strict: the value must be a string and match exactly. `true`,
+`"true"`, `1`, `"bayer-groth"`, and `"BAYER-GROTH-V1"` are all refused, not
+coerced.
+
+The client does not choose the policy and cannot change it — it is fixed
+when the sidecar is launched. The client is *told* it: every snapshot (§5)
+carries a top-level `deal_policy`, so the front end can state the table's
+security level rather than implying it. It is `null` in the lobby, before a
+table has been accepted.
+
+> Do not use §5's `verification` field for this. It reports deal *progress*
+> (`not_started` → `in_progress` → `audit_pending` → `verified`) and is
+> derived purely from `phase`; `"verified"` there means "the hand settled",
+> not "shuffle proofs checked out".
+
 ### Command result
 
 For each command the sidecar replies with:

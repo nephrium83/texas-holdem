@@ -60,6 +60,10 @@ def snapshot(session) -> dict:
     # pure function of phase -- so a player had no way to know which
     # guarantee they were playing under.
     snap["deal_policy"] = session.deal_policy
+    # Evidence to go with the claim. deal_policy is what the table says;
+    # this is what this seat actually verified, so a client can tell a
+    # Bayer-Groth table from one that only declares itself as one.
+    snap["proofs_verified"] = session.proofs_verified
 
     dealt = _holes_recovered(session)
     phase = _phase(session, dealt)

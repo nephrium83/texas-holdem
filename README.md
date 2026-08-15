@@ -126,7 +126,8 @@ libp2p/relay path and physical-machine playtest remain v1.x gate work.
 
 **Prevention mode.** The Bayer–Groth verifiable shuffle is integrated into the
 mental-deal coordinator as an explicit opt-in, set table-wide by the host
-(`bg_prevention` in the table settings). Every shuffler attaches a proof and
+(`deal_policy: "bayer-groth-v1"` in the table settings, and the only
+policy real peer-to-peer play accepts). Every shuffler attaches a proof and
 every peer verifies it before accepting the deck; a missing, undecodable, or
 invalid proof voids the hand fail-closed and names the shuffler. Detection-only
 remains the default, and a table that does not set the flag behaves exactly as

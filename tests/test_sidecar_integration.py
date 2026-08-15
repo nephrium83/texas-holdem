@@ -284,6 +284,50 @@ class TestClientCanReachTheMentalDeal:
             proc.terminate()
             proc.wait(timeout=5)
 
+    def test_the_shipped_table_declares_and_runs_bayer_groth(self):
+        """The mandate, asserted on the shipped socket.
+
+        Two halves, and both are needed. deal_policy proves the policy
+        reached the client, which is what lets a front end state the
+        table's security level instead of implying it. proofs_verified
+        proves the engine OBEYED it: it counts only proofs that came back
+        valid from bg_shuffle.verify, so a table that declares Bayer-Groth
+        while dealing without proofs reports zero.
+
+        The second half exists because the first is not enough, and I
+        established that the expensive way. This test originally used
+        elapsed wall-clock as the obedience check -- a proofless deal being
+        ~15x cheaper -- and deleting `prevention=prevention` from the
+        driver, which silently downgrades the deal while leaving every
+        policy string byte-identical, did not fire it: socket and
+        full-hand overhead alone clear any floor loose enough to be
+        stable. A timing proxy could not tell "ran no proofs" from "ran on
+        a fast machine". This counts the thing itself.
+        """
+        proc = _start_sidecar("--seats", "3")
+        try:
+            port = _read_port(proc)
+            with _connect(port) as (sock, reader):
+                _readline(reader)
+                lobby = _readline(reader)
+                assert lobby["deal_policy"] is None, \
+                    "lobby claimed a policy before a table was accepted"
+
+                sock.settimeout(60.0)
+                _result, snap = _command(sock, reader, "start_game")
+
+                assert snap["deal_policy"] == "bayer-groth-v1", \
+                    f"table did not declare Bayer-Groth: {snap['deal_policy']!r}"
+                # Three seats shuffle in turn, and this seat verifies every
+                # round it did not author.
+                assert snap["proofs_verified"] >= 2, (
+                    f"table declared bayer-groth-v1 but this seat verified "
+                    f"{snap['proofs_verified']} shuffle proofs -- the policy "
+                    f"string arrived without the proofs behind it")
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
     def test_second_start_game_does_not_restart_the_table(self):
         """start_game is not idempotent-by-accident: a duplicate must report
         already_started rather than silently re-dealing a live table."""

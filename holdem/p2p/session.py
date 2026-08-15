@@ -900,6 +900,21 @@ class Session:
         return self._deal_policy
 
     @property
+    def proofs_verified(self) -> int:
+        """Shuffle proofs this seat has verified in the current hand.
+
+        The difference between a table that declares Bayer-Groth and one
+        that runs it. deal_policy is what the table SAYS; this is what
+        actually happened, so a downgrade that leaves the policy string
+        intact -- the whole failure mode this mandate exists to prevent --
+        shows up here as zero.
+        """
+        driver = self._deal_driver
+        if driver is None or driver.deal is None:
+            return 0
+        return driver.deal._proofs_verified
+
+    @property
     def prevention(self) -> bool:
         """Whether this table runs Bayer-Groth shuffle proofs.
 
