@@ -49,6 +49,7 @@ def table(n=3, stacks=None, hand_no=1):
             s.players[c] = Player(conn_id=c, peer_id=c, nickname=c,
                                   avatar_b64="")
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         s.state = "PLAYING"          # a table dealing a hand is PLAYING
         bus.register(cid, s)
         sessions[cid] = s
@@ -69,7 +70,7 @@ def snapshot(s):
         "terminal_record": s.terminal_record,
         "seat_order": list(s._seat_order),
         "hand_no": s._hand_no,
-        "prevention": s._prevention,
+        "deal_policy": s._deal_policy,
         "host_conn_id": s._host_conn_id,
         "local_conn_id": s.local_conn_id,
         "replica_digest": (s._replica.state_digest()
@@ -91,7 +92,8 @@ MUTATORS = [
     ("send_bet_action/negative", lambda s: s.send_bet_action("raise", -5)),
     ("begin_hand", lambda s: s.begin_hand(hand_no=99, button=0)),
     ("next_p2p_hand", lambda s: s.next_p2p_hand()),
-    ("start_game", lambda s: s.start_game({"bg_prevention": False})),
+    ("start_game", lambda s: s.start_game(
+        {Session.DEAL_POLICY_SETTING: Session.DEAL_POLICY_DETECTION})),
     ("start_p2p_hand", lambda s: s.start_p2p_hand(
         hand_no=42, names=["A", "B", "C"], stacks=[9, 9, 9], sb=1, bb=2,
         button=0)),

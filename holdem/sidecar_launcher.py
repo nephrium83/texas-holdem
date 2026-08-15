@@ -191,7 +191,8 @@ def _wrap_with_drain(session, bus: InMemoryBus) -> None:
 
 def _deal_first_hand(sessions: dict, order: list, bus: InMemoryBus, *,
                      sb: int, bb: int, stack: int,
-                     structure: str = "No-Limit") -> None:
+                     structure: str = "No-Limit",
+                     deal_policy: str = Session.DEAL_POLICY_BG) -> None:
     """Start hand 1 on every seat and drive the bus to quiescence.
 
     Every seat calls ``start_p2p_hand`` with the same shared parameters
@@ -199,9 +200,20 @@ def _deal_first_hand(sessions: dict, order: list, bus: InMemoryBus, *,
     for a multi-seat table), then ``bus.drain()`` delivers the mental-poker
     deal messages until the queue is empty.
 
-    NOT called by the production ``run()`` path -- the Godot client
-    triggers the first hand.  Used by tests and the two-process harness.
+    NOT called by the production ``run()`` path, which starts tables through
+    the client's start_game command and the real host broadcast.  Used by
+    tests and the two-process harness, which want a hand without a socket.
+
+    Adopts the policy directly rather than going through start_game,
+    because that is the whole point of this helper: it skips the table.
+    Defaults to Bayer-Groth so a harness that says nothing still exercises
+    the same deal the product runs.
     """
+    for cid in order:
+        if not sessions[cid]._adopt_deal_policy(deal_policy):
+            raise RuntimeError(
+                f"{cid} already holds a different deal policy "
+                f"({sessions[cid].deal_policy!r})")
     names  = [sessions[cid].local_nickname for cid in order]
     stacks = [stack] * len(order)
     for cid in order:
@@ -276,6 +288,12 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
 
     table_settings = {
         "sb": sb, "bb": bb, "stack": stack, "structure": structure,
+        # Stated, never defaulted. The sidecar runs in compat (its bus
+        # carries no envelopes), so detection-only would be legal here --
+        # and that is exactly why it has to say Bayer-Groth out loud. This
+        # is the product's active client path; it should exercise the same
+        # deal the wire mandate requires, not the weaker one compat permits.
+        "deal_policy": Session.DEAL_POLICY_BG,
     }
     _wire_hand_start(sessions, order)
     start_table = _make_start_table(sessions, order, bus, table_settings)

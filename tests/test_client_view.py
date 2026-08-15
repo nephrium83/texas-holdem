@@ -33,6 +33,7 @@ def make_table(n, stacks=None):
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         s._deal_master_secret = bytes([100 + i]) * 32   # deterministic deal
         bus.register(cid, s)
         sessions[cid] = s
@@ -215,6 +216,7 @@ def test_lobby_snapshot_before_hand():
                 transport=InMemoryTransport(bus, "peer0"))
     s.local_conn_id = "peer0"
     s.configure_seats(list(order))
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     snap = client_view.snapshot(s)
     assert snap["phase"] == "lobby"
     assert snap["you"]["seat"] == 0

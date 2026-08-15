@@ -146,6 +146,7 @@ def test_start_game_is_refused_after_termination():
 def test_begin_hand_is_refused_after_termination():
     s = peer("PLAYING")
     s.configure_seats(["peer0", "peer1", "peer2"])
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     s.terminate(Session.HOST_LOST, "host dropped")
     with pytest.raises(RuntimeError, match="terminated"):
         s.begin_hand(hand_no=5, button=0)
@@ -156,6 +157,7 @@ def test_begin_hand_is_refused_after_termination():
 def test_next_hand_is_refused_after_termination():
     s = peer("PLAYING")
     s.configure_seats(["peer0", "peer1", "peer2"])
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     s.terminate(Session.HOST_LOST, "host dropped")
     assert s.next_p2p_hand() == "session_over"
 
@@ -184,10 +186,15 @@ def test_capability_freeze_does_not_lapse_after_termination():
     terminate() sets state to ENDED -- so the freeze silently stopped
     applying, masked only by the handle_message guard."""
     s = peer("PLAYING")
-    s._prevention = True
+    # Installed through the single writer, not by assigning the field. A
+    # direct write would set up state the chokepoint could never produce,
+    # leaving this test proving only that the freeze branch returns early.
+    assert s._adopt_deal_policy(Session.DEAL_POLICY_BG)
     s.terminate(Session.HOST_LOST, "host dropped")
     s._on_game_start("peer0", {"payload": {
         "seat_order": ["attacker", "peer1"],
-        "table_settings": {Session.PREVENTION_SETTING: False}}})
+        "table_settings": {
+            Session.DEAL_POLICY_SETTING: Session.DEAL_POLICY_DETECTION}}})
     assert s.prevention is True, "prevention downgraded after termination"
+    assert s.deal_policy == Session.DEAL_POLICY_BG
     assert s.state == "ENDED"
