@@ -24,15 +24,9 @@ signal start_game_pressed
 ## snapshot arriving during that window would otherwise re-enable the button.
 var _requested := false
 
-
-func _ready() -> void:
-	_button.pressed.connect(_on_button_pressed)
-
-
 ## Set when a start attempt failed, so the panel can say so instead of
 ## sitting on a stale "Starting..." that never resolves.
 var _failure := ""
-
 
 ## Turn states that prove the table is genuinely playing. Anything else
 ## after a failed start means the table is not actually running, whatever
@@ -41,6 +35,10 @@ const _LIVE_STATES := [
 	"your_turn", "waiting", "folded_waiting", "all_in_waiting",
 	"resolving", "hand_complete", "voided", "eliminated", "match_complete",
 ]
+
+
+func _ready() -> void:
+	_button.pressed.connect(_on_button_pressed)
 
 
 func apply_turn_state(state: String) -> void:

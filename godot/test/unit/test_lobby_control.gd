@@ -111,12 +111,23 @@ func test_a_failure_message_survives_later_lobby_snapshots():
 	assert_false(control.get_node("%StartGameButton").disabled)
 
 
-func test_a_hand_actually_starting_clears_a_previous_failure():
+func test_a_retry_clears_the_previous_failure():
+	## A real retry always goes through the button, and pressing clears the
+	## failure itself. This test used to jump straight from start_failed()
+	## to "dealing" with no second press -- a sequence the client cannot
+	## actually produce, and one that collides with the hand_failed case,
+	## where "dealing" with a failure still latched is precisely the state
+	## that must keep showing it. Failing that way is what surfaced this.
 	var control := _control()
 	control.apply_turn_state("lobby")
 	control.get_node("%StartGameButton").pressed.emit()
 	control.start_failed("Table refused")
-	control.apply_turn_state("dealing")        # a later attempt worked
+
+	control.get_node("%StartGameButton").pressed.emit()   # try again
+	control.apply_turn_state("dealing")                   # and it took
+	control.apply_turn_state("your_turn")
+
+	assert_false(control.visible)
 	control.apply_turn_state("lobby")
 	assert_eq(control.get_node("%LobbyMessageLabel").text, "Ready to start")
 
