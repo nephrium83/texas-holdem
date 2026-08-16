@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem import client_view
+from holdem.p2p.inmemory_transport import InMemoryBus
 from holdem.sidecar_launcher import (
     BotDriver, _deal_first_hand, _make_sessions, _make_start_table,
     _wire_hand_start, _wrap_with_drain,
@@ -240,3 +241,92 @@ def test_a_seat_that_cannot_deal_downgrades_the_verdict():
 
     assert start_table() == "hand_failed", \
         "a seat that could not deal was reported as a clean start"
+
+
+def test_a_healthy_table_is_not_branded_hand_failed_by_a_transient_error():
+    """The verdict measures the hand, not the absence of exceptions.
+
+    A first version set hand_failed whenever ANY drain attempt had raised,
+    so one hiccup in a bot's state hook branded a table that dealt
+    perfectly -- every seat with a driver and three verified proofs -- as
+    failed. section 4 defines hand_failed as "its first hand did not
+    complete", and it had.
+    """
+    bus, sessions, order = _make_sessions(3)
+    _wire_hand_start(sessions, order)
+
+    fired = {"n": 0}
+    victim = sessions[order[1]]
+    previous = victim.on_state_changed
+
+    def flaky():
+        # Chain first, then raise ONCE the seat is demonstrably healthy.
+        # Raising earlier is not "incidental": on_state_changed fires from
+        # inside begin_hand, so an early throw aborts that seat's own deal
+        # and the verdict is then correct to report hand_failed. My first
+        # version did exactly that and the test failed for the right reason.
+        if previous is not None:
+            previous()
+        if not fired["n"] and victim.replica is not None                 and victim.proofs_verified > 0:
+            fired["n"] = 1
+            raise RuntimeError("one transient hiccup")
+
+    victim.on_state_changed = flaky
+    start_table = _make_start_table(sessions, order, bus, _SETTINGS)
+
+    verdict = start_table()
+
+    assert fired["n"] == 1, "the transient error never fired"
+    assert all(s.replica is not None for s in sessions.values())
+    assert all(s.proofs_verified > 0 for s in sessions.values()),         "premise broken: the table did not actually deal"
+    assert bus.pending == 0
+    assert verdict == "started", (
+        "a table where every seat dealt was reported as hand_failed "
+        "because one incidental hook raised")
+
+
+def test_a_runaway_message_loop_is_not_retried():
+    """The step limit is a conclusion, not a per-message failure.
+
+    Retrying it repeats the whole exchange: 64 attempts at the default
+    100k-step limit is 6.4 million deliveries while the client blocks on a
+    socket. DrainLoopError exists to separate "this handler failed" from
+    "this exchange will never end".
+    """
+    from holdem.p2p.inmemory_transport import DrainLoopError
+    from holdem.sidecar_launcher import _drain_to_quiescence
+
+    calls = {"n": 0}
+    bus = InMemoryBus()
+
+    def explode(**_kw):
+        calls["n"] += 1
+        raise DrainLoopError("message loop")
+
+    bus.drain = explode
+    bus._queue.append(("a", "b", {"type": "chat"}))
+
+    assert _drain_to_quiescence(bus) is False
+    assert calls["n"] == 1, \
+        f"the runaway-loop guard was retried {calls['n']} times"
+
+
+def test_an_undeliverable_action_is_not_reported_as_applied():
+    """Routing the action paths through the shared drain helper made them
+    SWALLOW delivery failures: the bool was discarded and the client was
+    told its bet applied while peers may never have seen it. That also
+    silenced the logging at client_server._handle_command, because the
+    error stopped arriving there at all."""
+    bus, sessions, order = _make_sessions(2)
+    human = sessions[order[0]]
+    _wrap_with_drain(human, bus)
+
+    class Exploding:
+        def handle_message(self, from_conn, msg):
+            raise RuntimeError("peer is broken")
+
+    bus.register(order[1], Exploding())
+    human._transport.broadcast({"type": "chat", "payload": {}})
+
+    with pytest.raises(RuntimeError, match="could not be delivered"):
+        human.send_bet_action("call", 0)

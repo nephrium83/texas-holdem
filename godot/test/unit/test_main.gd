@@ -181,7 +181,7 @@ func test_a_failed_start_result_releases_the_lobby_control():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
 
-	main._on_command_result_received({
+	main.get_node("%SidecarClient").command_result_received.emit({
 		"type": "command_result", "command": "start_game",
 		"ok": false, "verdict": "refused",
 	})
@@ -203,7 +203,7 @@ func test_a_successful_start_result_does_not_release_the_latch():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
 
-	main._on_command_result_received({
+	main.get_node("%SidecarClient").command_result_received.emit({
 		"type": "command_result", "command": "start_game",
 		"ok": true, "verdict": "started",
 	})
@@ -240,7 +240,7 @@ func test_a_command_result_for_another_command_is_ignored():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
 
-	main._on_command_result_received({
+	main.get_node("%SidecarClient").command_result_received.emit({
 		"type": "command_result", "command": "fold",
 		"ok": false, "verdict": "rejected",
 	})
@@ -267,7 +267,7 @@ func test_losing_the_sidecar_mid_start_releases_the_lobby_control():
 		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
 	)
 
-	main._on_sidecar_disconnected()
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
 
 	assert_false(
 		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,

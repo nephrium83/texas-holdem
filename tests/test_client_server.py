@@ -414,3 +414,44 @@ def test_a_session_error_answers_the_command_instead_of_dropping_the_client():
     result = next(m for m in sent if m.get("type") == "command_result")
     assert result["ok"] is False
     assert "session guard fired" in result["error"]
+
+
+def test_a_swallowed_command_error_is_logged(caplog):
+    """The other half of the RuntimeError catch, and the half that makes it
+    defensible. The catch is broad enough to swallow this codebase's own
+    loud guards -- the bus re-entrancy guard, SessionOwner._assert_owner --
+    and the client is only told "ok: false", which nothing in the Godot
+    client renders for a command it did not initiate. Without the log the
+    only trace of a real invariant breach would be gone."""
+    import logging
+
+    class _W:
+        def __init__(self):
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            pass
+
+    from holdem.client_server import _Conn
+    import holdem.client_view as cv
+
+    conn = _Conn(session=None, reader=None, writer=_W(),
+                 start_table=lambda: (_ for _ in ()).throw(
+                     RuntimeError("owner assertion fired")))
+    original = cv.snapshot
+    cv.snapshot = lambda _s: {"type": "snapshot"}
+    try:
+        with caplog.at_level(logging.ERROR, logger="holdem.client_server"):
+            conn._handle_command({"type": "command", "command": "start_game"})
+    finally:
+        cv.snapshot = original
+
+    assert any("owner assertion fired" in r.getMessage()
+               or (r.exc_info and "owner assertion fired" in str(r.exc_info[1]))
+               for r in caplog.records),         "a swallowed command error left no trace in the log"

@@ -28,6 +28,18 @@ from typing import Dict, List, Optional, Tuple
 _log = logging.getLogger(__name__)
 
 
+class DrainLoopError(RuntimeError):
+    """The queue never emptied: a runaway message loop.
+
+    Distinct from a handler raising, because the two want opposite
+    responses. A failed handler is per-message and worth retrying past --
+    the rest of the queue is still deliverable. A step-limit breach is a
+    conclusion about the whole exchange, already reached by counting, and
+    retrying it just repeats the work: 64 retries of a 100k-step limit is
+    6.4 million deliveries on a socket the client is waiting on.
+    """
+
+
 class InMemoryBus:
     """Shared delivery fabric for a set of in-process sessions."""
 
@@ -88,7 +100,7 @@ class InMemoryBus:
             steps = 0
             while self._queue:
                 if steps >= max_steps:
-                    raise RuntimeError(
+                    raise DrainLoopError(
                         "InMemoryBus.drain exceeded max_steps (message loop?)")
                 from_conn, to_conn, msg = self._queue.pop(0)
                 steps += 1

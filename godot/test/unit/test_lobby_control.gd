@@ -124,9 +124,17 @@ func test_a_retry_clears_the_previous_failure():
 	control.start_failed("Table refused")
 
 	control.get_node("%StartGameButton").pressed.emit()   # try again
-	control.apply_turn_state("dealing")                   # and it took
-	control.apply_turn_state("your_turn")
 
+	control.apply_turn_state("dealing")                   # and it took
+	# Asserted HERE, on the one transition that tells the two cases apart.
+	# Stepping straight on to your_turn hides it: that state clears the
+	# failure regardless, so the test passed even with the press's own
+	# clear removed -- a healthy retry would have shown a stale failure
+	# with the button hidden for the whole dealing window.
+	assert_false(control.visible,
+		"a healthy retry showed a stale failure while dealing")
+
+	control.apply_turn_state("your_turn")
 	assert_false(control.visible)
 	control.apply_turn_state("lobby")
 	assert_eq(control.get_node("%LobbyMessageLabel").text, "Ready to start")
@@ -164,11 +172,12 @@ func test_a_genuinely_live_hand_clears_a_failure():
 	## The other side of it: if the table really is playing, the panel must
 	## get out of the way regardless of what an earlier attempt reported.
 	var control := _control()
-	control.apply_turn_state("lobby")
-	control.get_node("%StartGameButton").pressed.emit()
-	control.start_failed("First hand failed")
 
-	for state in ["your_turn", "waiting", "hand_complete", "voided"]:
+	for state in [
+		"your_turn", "waiting", "folded_waiting", "all_in_waiting",
+		"resolving", "hand_complete", "voided", "eliminated",
+		"match_complete",
+	]:
 		control.apply_turn_state("lobby")
 		control.get_node("%StartGameButton").pressed.emit()
 		control.start_failed("First hand failed")

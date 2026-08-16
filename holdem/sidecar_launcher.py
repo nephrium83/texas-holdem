@@ -36,7 +36,9 @@ import random
 from holdem import client_view
 from holdem.client_server import ClientServer
 from holdem.engine import Brain
-from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
+from holdem.p2p.inmemory_transport import (
+    DrainLoopError, InMemoryBus, InMemoryTransport,
+)
 from holdem.p2p.session import Session
 
 _log = logging.getLogger(__name__)
@@ -177,13 +179,26 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
         # which makes the drain raise too. The verdict then never returned
         # and the RuntimeError escaped into client_server, whose handler
         # would drop the client's connection rather than answer.
-        if not _drain_to_quiescence(bus) and verdict == "started":
-            # The table started and its game_start went out, but at least
-            # one seat could not act on it. Not a lie: the table IS live
-            # and its first hand cannot complete, which is exactly what
-            # hand_failed means. Nothing voids it -- check_deadlines has
-            # no production caller -- so saying "started" would be worse.
-            verdict = "hand_failed"
+        delivered = _drain_to_quiescence(bus)
+        if verdict == "started":
+            # Measured, not inferred. A first version reported hand_failed
+            # whenever ANY drain attempt had raised -- so one transient
+            # hiccup in a bot's state hook branded a table that dealt
+            # perfectly, three verified proofs a seat, as failed. What the
+            # verdict is actually about is whether every seat began the
+            # hand, so ask that.
+            missing = [cid for cid, sess in sessions.items()
+                       if sess.replica is None]
+            if bus.pending or missing:
+                _log.error("table started but seats %s never began the hand "
+                           "(%d message(s) undelivered, clean=%s)",
+                           missing or "-", bus.pending, delivered)
+                verdict = "hand_failed"
+            elif not delivered:
+                # Something raised and a retry covered for it. Worth a line,
+                # not a verdict: every seat dealt and nothing is queued.
+                _log.warning("start_table: delivery hit an error but "
+                             "recovered; the table is playing")
         return verdict
 
     return start_table
@@ -216,6 +231,13 @@ def _drain_to_quiescence(bus: InMemoryBus) -> bool:
             return clean
         try:
             bus.drain()
+        except DrainLoopError:
+            # Not retried. The step limit is a conclusion about the whole
+            # exchange, already reached by counting; running it again just
+            # repeats the work. Retrying this 64 times at the default limit
+            # is 6.4 million deliveries while the client blocks on a socket.
+            _log.exception("sidecar: runaway message loop; abandoning delivery")
+            return False
         except Exception:                          # noqa: BLE001
             clean = False
             _log.exception("sidecar: a handler failed during delivery")
@@ -224,6 +246,27 @@ def _drain_to_quiescence(bus: InMemoryBus) -> bool:
                    "after %d attempts", bus.pending, _MAX_DRAIN_ATTEMPTS)
         return False
     return clean
+
+
+def _require_delivered(bus: InMemoryBus, what: str) -> None:
+    """Deliver, and refuse to pretend an action propagated when it did not.
+
+    The action paths originally called bus.drain() bare, so a delivery
+    failure raised. Routing them through _drain_to_quiescence for policy
+    consistency accidentally made them SWALLOW it: the bool was discarded
+    and the client was told its bet "applied" while the peers may never
+    have seen it. That also defeated the logging added at
+    client_server._handle_command, because the error stopped arriving.
+
+    Raising is right here, and safe now in a way it was not before:
+    _handle_command catches RuntimeError, so this reports an error to the
+    client instead of dropping the socket. The local action really did
+    apply -- what failed is its propagation, and that is worth saying.
+    """
+    if not _drain_to_quiescence(bus):
+        raise RuntimeError(
+            f"{what}: the action applied locally but could not be "
+            f"delivered to every seat")
 
 
 def _wrap_with_drain(session, bus: InMemoryBus) -> None:
@@ -239,12 +282,12 @@ def _wrap_with_drain(session, bus: InMemoryBus) -> None:
 
     def send_bet_action(action: str, amount: int = 0) -> str:
         result = orig_send_bet_action(action, amount)
-        _drain_to_quiescence(bus)
+        _require_delivered(bus, "send_bet_action")
         return result
 
     def next_p2p_hand() -> str:
         result = orig_next_p2p_hand()
-        _drain_to_quiescence(bus)
+        _require_delivered(bus, "next_p2p_hand")
         return result
 
     session.send_bet_action = send_bet_action
