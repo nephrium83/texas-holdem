@@ -71,6 +71,7 @@ def make_table(n, bus=None):
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order

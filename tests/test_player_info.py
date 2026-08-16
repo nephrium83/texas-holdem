@@ -123,11 +123,11 @@ def test_settlement_summary_accounts_for_every_awarded_chip():
     json.dumps(summary)
 
 
-def test_verification_labels_do_not_claim_audit_early():
-    assert player_info.verification_view("dealing")["state"] == "in_progress"
-    assert player_info.verification_view("betting")["state"] == "audit_pending"
-    assert player_info.verification_view("settled")["state"] == "verified"
-    voided = player_info.verification_view("void", "seat 2 sent a bad proof")
+def test_deal_progress_labels_make_no_cryptographic_claim():
+    assert player_info.deal_progress_view("dealing")["state"] == "dealing"
+    assert player_info.deal_progress_view("betting")["state"] == "in_hand"
+    assert player_info.deal_progress_view("settled")["state"] == "settled"
+    voided = player_info.deal_progress_view("void", "seat 2 sent a bad proof")
     assert voided["state"] == "voided"
     assert "seat 2" in voided["label"]
 

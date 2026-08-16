@@ -1044,3 +1044,44 @@ def test_the_pin_check_still_catches_a_first_write():
                                     "ed25519_pubkey_hex":
                                         (bytes([0xAB]) * 32).hex()}]}})
     assert "hostc" not in s.players
+
+
+# ════════════════════════════════ LOCAL-TABLE SEATING IS NOT A BACK DOOR
+
+def test_seat_local_table_is_refused_on_a_verified_envelope_transport():
+    """The sidecar's local-table seam must never seat a real peer.
+
+    seat_local_table populates a roster directly, with no handshake, which
+    is correct for in-process AI seats and catastrophic for a wire
+    transport: it would put arbitrary conn_ids in the roster and hand them
+    seats without any peer ever proving it holds the admission capability.
+    The whole M-7/M-8 perimeter sits in front of that roster, so a seam that
+    writes it must refuse to exist in wire mode.
+
+    Asserted on a HOST session with a real admission policy -- the exact
+    shape production uses -- so this cannot pass merely because the session
+    was misconfigured into compat.
+    """
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=_Spy(), admission=_host_adm())
+    s.local_conn_id = "me"
+
+    with pytest.raises(RuntimeError, match="local tables only"):
+        s.seat_local_table(["me", "someone_else"])
+
+    assert s.players == {}, "a refused seating still wrote to the roster"
+    assert s.seat_order == [], "a refused seating still set a seat order"
+
+
+def test_seat_local_table_is_refused_for_a_wire_mode_joiner_too():
+    """Not just the host. A joiner that seated its own table would be
+    declaring a roster nobody authenticated, which is the same defect from
+    the other side."""
+    s = Session(is_host=False, nickname="J", avatar_b64="",
+                transport=_Spy(), joiner_admission=_joiner_adm())
+    s.local_conn_id = "me"
+
+    with pytest.raises(RuntimeError, match="local tables only"):
+        s.seat_local_table(["me", "someone_else"])
+
+    assert s.players == {}

@@ -207,6 +207,19 @@ class MentalDeal:
     _joint_pk: Optional[Point] = None
     _deck: Optional[List[Ciphertext]] = None              # current accepted deck
     _shuffle_round: int = 0                               # rounds accepted so far
+    #: Shuffle proofs this instance has verified: incremented at exactly one
+    #: site, immediately after bg_shuffle.verify returns true. Evidence
+    #: rather than a label -- it distinguishes a table running Bayer-Groth
+    #: from one that merely says it is, and stays zero in detection-only
+    #: because nothing verifies anything there.
+    #:
+    #: What it does NOT prove: that bg_shuffle.verify is itself sound. A
+    #: verifier hardwired to return true increments this exactly as a
+    #: correct one does. That property belongs to the BG soundness suites
+    #: (tests/test_bg_shuffle_soundness.py and friends), which do catch it;
+    #: this counter answers "did verification run and pass", not "is the
+    #: verifier correct".
+    _proofs_verified: int = 0
     # Phase C (deal) state
     _deal_map: Optional[List[dmap.Destination]] = None
     _hole_pos: Dict[int, List[int]] = field(default_factory=dict)   # seat -> [pos,pos]
@@ -470,13 +483,16 @@ class MentalDeal:
         (session, hand, round, seat, key) tuple and replaying it anywhere
         else yields a different statement hash and a clean verify-False.
 
-        Fields are length-prefixed rather than delimiter-joined. No
-        collision exists under a plain separator today -- session_id is
-        the only variable-shape field and it comes first, while hand,
-        round and seat are separator-free integers -- but session_id IS
-        itself a "|"-joined string (see session._deal_session_id), so the
-        scheme would become ambiguous the moment a second string field is
-        added. Length prefixes cost nothing and remove the footgun.
+        Fields are length-prefixed rather than delimiter-joined, which
+        costs nothing and removes a footgun that turned out to be real
+        one layer down. session_id was itself a "|"-joined string, and
+        THAT join was ambiguous: ["a|b","c"] and ["a","b|c"] produced the
+        same id, so two structurally different tables shared a DKG domain.
+        This layer was never the problem -- one variable-shape field
+        first, then separator-free integers -- but it is the discipline
+        session._deal_session_id now also follows, where the id is a
+        digest of a canonically-encoded context that binds the deal
+        policy.
 
         The commitment key is additionally bound inside the proof itself --
         bg_shuffle._statement_context hashes ck.H and every ck.Gs. Naming
@@ -530,6 +546,14 @@ class MentalDeal:
                             round_no: int, seat: int) -> Optional[str]:
         """Check a round's prevention proof; None if it is acceptable.
 
+        NOT a pure predicate: on success it increments _proofs_verified.
+        The counter has to sit immediately past a true return from
+        bg_shuffle.verify -- one level further out and it counts "the
+        prevention branch ran" rather than "a proof verified", which is
+        the exact overclaim it was moved here to fix. The consequence is
+        that this method must keep exactly ONE call site; a second caller
+        would double-count silently.
+
         Missing, undecodable, and invalid proofs are all unacceptable and
         all reach the same abort, attributed to ``seat`` -- but each
         returns its own reason so logs and tests can tell them apart.
@@ -548,6 +572,13 @@ class MentalDeal:
                 BG_M, BG_N, self._bg_ctx(round_no, seat), proof):
             return (f"seat {seat} sent an invalid shuffle proof "
                     f"for round {round_no}")
+        # Counted HERE, immediately past a true return from
+        # bg_shuffle.verify, and nowhere else. It previously incremented in
+        # the caller, past `_prevention_failure(...) is None` -- one level
+        # of indirection away -- so neutering this method left the counter
+        # reporting full marks on a table that verified nothing, while
+        # every doc and test described it as counting verifications.
+        self._proofs_verified += 1
         return None
 
     def _on_deck_round(self, msg: dict) -> List[dict]:

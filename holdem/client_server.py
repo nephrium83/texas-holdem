@@ -35,10 +35,15 @@ class ClientServer:
     overlap the old socket); each gets its own hello + snapshot stream.
     """
 
-    def __init__(self, session, host: str = "127.0.0.1", port: int = 0):
+    def __init__(self, session, host: str = "127.0.0.1", port: int = 0,
+                 start_table=None):
         self._session = session
         self._host = host
         self._port = port
+        # Controller-owned "start the configured table" callable, forwarded
+        # verbatim to client_view.apply_command. This module stays transport
+        # only: it neither knows nor stores what the table is configured as.
+        self._start_table = start_table
         self._server: Optional[asyncio.AbstractServer] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._conns: set[_Conn] = set()
@@ -102,7 +107,7 @@ class ClientServer:
     # -- connections ---------------------------------------------------
 
     async def _accept(self, reader, writer) -> None:
-        conn = _Conn(self._session, reader, writer)
+        conn = _Conn(self._session, reader, writer, self._start_table)
         self._conns.add(conn)
         try:
             await conn.run()
@@ -114,10 +119,11 @@ class ClientServer:
 class _Conn:
     """One connected client: a reader loop plus a coalescing push task."""
 
-    def __init__(self, session, reader, writer):
+    def __init__(self, session, reader, writer, start_table=None):
         self._session = session
         self._reader = reader
         self._writer = writer
+        self._start_table = start_table
         self.dirty = asyncio.Event()
 
     def close(self) -> None:
@@ -185,8 +191,21 @@ class _Conn:
         payload = msg.get("payload") or {}
         try:
             result = client_view.apply_command(self._session, command,
-                                               payload)
-        except (KeyError, TypeError, ValueError) as exc:
+                                               payload,
+                                               start_table=self._start_table)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            # RuntimeError included deliberately: session-level refusals
+            # surface as one, and letting it escape unwinds the read loop
+            # and closes the client's socket. Dropping the connection is a
+            # far worse answer to a bad command than reporting the error.
+            #
+            # Logged at exception level because this catch is broad enough
+            # to swallow the codebase's own loud guards -- the bus
+            # re-entrancy guard, SessionOwner._assert_owner -- which exist
+            # precisely to be noticed. The client is told "ok: false", and
+            # nothing in the client renders an error for a command it did
+            # not initiate, so without this the only trace would be gone.
+            _log.exception("client command %r failed", command)
             result = {"type": "command_result", "command": command,
                       "ok": False, "error": str(exc)}
         self._send(result)

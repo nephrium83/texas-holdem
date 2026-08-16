@@ -134,6 +134,7 @@ def test_action_rejects_wrong_seat_owner():
         actor = 0
     s.set_host_engine(_Eng())
     s.configure_seats(["A", "B"])
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     s._VALID_ACTIONS = {"fold", "call", "raise", "check", "bet"}
 
     fired = []

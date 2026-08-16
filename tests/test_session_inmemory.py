@@ -7,6 +7,8 @@ anything is wired into session.py.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.session import Session
@@ -95,6 +97,99 @@ def test_unregister_simulates_disconnect():
     bus.drain()
     assert ("P1", "gone?") in got["peer0"]
     assert ("P1", "gone?") not in got["peer2"]     # no longer receiving
+
+
+def test_nested_drain_from_a_handler_is_refused():
+    """A handler that calls drain() while one is running is refused loudly.
+
+    The rule already existed -- BotDriver's docstring records that a nested
+    drain reorders the shared queue and cost a ~20 % hand-desync rate -- but
+    it lived only in prose, so every future callback author had to know it.
+    Now the bus enforces its own invariant. This matters specifically for
+    the on_game_start -> start_p2p_hand wiring, which runs INSIDE the drain
+    that delivered game_start: it must enqueue and let the outer drain
+    consume, never drain again itself.
+
+    Asserted on the raised error, not on a game outcome: the underlying
+    corruption is reordering, which is probabilistic and would make a
+    flaky control.
+    """
+    bus, sessions = make_sessions(2)
+    caught = []
+
+    class Reentrant:
+        def handle_message(self, from_conn, msg):
+            try:
+                bus.drain()                    # forbidden: already draining
+            except RuntimeError as exc:
+                caught.append(exc)
+
+    bus.register("peer1", Reentrant())
+    bus.enqueue("peer0", "peer1", {"type": "chat"})
+    bus.drain()
+
+    assert len(caught) == 1, "nested drain() was allowed"
+    assert "re-entered" in str(caught[0])
+
+
+def test_bus_is_usable_after_an_exception_escapes_a_handler():
+    """The guard releases on the EXCEPTIONAL path, not just the normal one.
+
+    This test previously swallowed the RuntimeError inside its own handler,
+    so nothing ever propagated through the outer drain -- the exact path
+    its own docstring claimed to cover. Review proved it: replacing
+    try/finally with a plain trailing assignment (which still releases on
+    the normal path) left the whole suite green.
+
+    So the handler now lets an exception escape. Without try/finally,
+    _draining stays set forever and every later drain on this bus raises,
+    turning one misbehaving handler into a permanently wedged fixture.
+    """
+    bus, sessions = make_sessions(2)
+    got = _capture_chat(sessions)
+
+    class Exploding:
+        def handle_message(self, from_conn, msg):
+            raise ValueError("handler blew up")
+
+    bus.register("peer1", Exploding())
+    bus.enqueue("peer0", "peer1", {"type": "chat"})
+    with pytest.raises(ValueError, match="handler blew up"):
+        bus.drain()
+
+    assert bus._draining is False, \
+        "the drain guard survived an exception and wedged the bus"
+
+    # And prove it behaviourally, not only by reading the flag.
+    bus.register("peer1", sessions["peer1"])
+    sessions["peer0"]._transport.broadcast(
+        {"type": "chat", "payload": {"nickname": "Host", "text": "still here"}})
+    bus.drain()
+    assert ("Host", "still here") in got["peer1"]
+
+
+def test_the_step_limit_raises_the_type_that_is_not_retried():
+    """Pins the RAISE SITE, not just the handling.
+
+    _drain_to_quiescence special-cases DrainLoopError so a runaway loop is
+    not retried 64 times. The test for that stubs bus.drain and constructs
+    the error by hand, so reverting this raise to a plain RuntimeError left
+    it green while the defect fully returned -- 3200 handler invocations
+    where a bare drain does 50.
+    """
+    from holdem.p2p.inmemory_transport import DrainLoopError
+
+    bus = InMemoryBus()
+
+    class Chatty:
+        def handle_message(self, from_conn, msg):
+            bus.enqueue("peer0", "peer1", {"type": "chat"})
+
+    bus.register("peer1", Chatty())
+    bus.enqueue("peer0", "peer1", {"type": "chat"})
+
+    with pytest.raises(DrainLoopError):
+        bus.drain(max_steps=25)
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ cannot match the current token.
 ```python
 @dataclass(frozen=True)
 class DeadlineToken:
-    hand_id: str        # e.g. "poker|peerA|peerB|peerC"
+    hand_id: str        # e.g. "poker.deal.v2:<sha256 hex>"
     phase: str          # "betting", "deal_shuffle", "deal_decrypt", etc.
     actor: str | None   # conn_id of the awaited peer; None for multi-peer phases
     action_seq: int     # replica's next_action_seq at time of proposal
@@ -227,7 +227,7 @@ filtering.
   "type": "timeout_proposal",
   "hand": 3,
   "token": {
-    "hand_id": "poker|peerA|peerB|peerC",
+    "hand_id": "poker.deal.v2:3f7a...c1",
     "phase": "betting",
     "actor": "peerA",
     "action_seq": 7

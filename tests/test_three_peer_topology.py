@@ -245,7 +245,12 @@ def three_sessions(three_peers):
     a, b, c = three_peers
     _await(a, lambda s: len(s["players"]) == 3, "a three-player roster")
 
-    a.send({"op": "start_game", "settings": {}})
+    # These are real Sessions on the real transport, so they are in wire
+    # mode, where Bayer-Groth is the only admissible policy. That makes this
+    # the one existing suite that exercises the mandate end to end over TCP:
+    # every hand below now generates and verifies real shuffle proofs.
+    a.send({"op": "start_game",
+            "settings": {"deal_policy": "bayer-groth-v1"}})
     assert a.wait_for(lambda e: e.get("type") == "ack"
                       and e.get("op") == "start_game") is not None, \
         f"host could not start the game; stderr={a.stderr[-8:]}"

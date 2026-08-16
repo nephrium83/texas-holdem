@@ -48,6 +48,7 @@ def table(n=3):
             s.players[c] = Player(conn_id=c, peer_id=c, nickname=c,
                                   avatar_b64="")
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         s.state = "PLAYING"
         bus.register(cid, s)
         sessions[cid] = s

@@ -37,6 +37,7 @@ def make_table(n):
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order
@@ -61,7 +62,11 @@ def _audit_all(sessions, order, bus):
 
 def _omniscient(deck, sessions, order, hand=1):
     """Decode every deck position using all seats' derived shares."""
-    session_id = "poker|" + "|".join(order)
+    # Ask the session for its own deal context rather than rebuilding it
+    # here. The id is now a digest of a canonically-encoded context, and a
+    # hand-built copy would silently drift from the real one -- which is
+    # precisely the failure this helper exists to detect.
+    session_id = sessions[order[0]]._deal_session_id()
     xs = {i: derive_share(sessions[order[i]]._deal_master_secret, session_id, hand, i)
           for i in range(len(order))}
     out = []

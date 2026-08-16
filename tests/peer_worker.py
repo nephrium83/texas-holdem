@@ -140,6 +140,7 @@ def main() -> None:
     )
     session.local_conn_id = conn_id
     session.configure_seats(seat_order)
+    session._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
 
     # Emit a snapshot on every state change.
     def _on_state_changed() -> None:

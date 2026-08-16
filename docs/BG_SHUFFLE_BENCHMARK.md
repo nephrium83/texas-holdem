@@ -138,7 +138,7 @@ the comparison, and the benchmark refuses a lower value.
 ## Decision
 
 Bayer–Groth is the prevention path. It is wired into `MentalDeal` and
-established table-wide by the host via `bg_prevention`; the measured
+established table-wide by the host via `deal_policy`; the measured
 end-to-end cost meets every budget target with headroom.
 
 `shuffle_proof.py` stays in the tree as an unwired reference implementation.

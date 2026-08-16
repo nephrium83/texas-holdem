@@ -142,7 +142,9 @@ class TerminalRecord:
     Deliberately carries no private cards, secret shares, secret scalars,
     or proof randomness.
     """
-    session_id: str
+    #: The deal context this session was running under, or None if it
+    #: died before one existed (e.g. terminated from the lobby).
+    session_id: Optional[str]
     hand_no: int
     previous_state: str
     terminal_state: str
@@ -152,6 +154,12 @@ class TerminalRecord:
     host_conn_id: str
     monotonic_ts: float
     sequence: int
+    #: The table's deal policy, recorded because session_id no longer
+    #: reveals it. session_id used to be a readable "poker|a|b|c"; it is now
+    #: a digest of a canonical context, which is the right thing for a
+    #: domain separator and useless to a human reading an incident. Carried
+    #: explicitly so a POLICY_REFUSED record says what was refused.
+    deal_policy: Optional[str] = None
 
 
 class SessionOwner:
@@ -304,15 +312,57 @@ class Session:
     VOID_TIMEOUT = "VOID_TIMEOUT"
     VOID_LOCAL_ABORT = "VOID_LOCAL_ABORT"
 
-    #: Key under table_settings carrying the table-wide shuffle-proof mode.
-    #: Absent or false means detection-only, so a table created by an older
-    #: build reads as detection-only rather than failing to parse.
-    PREVENTION_SETTING = "bg_prevention"
+    #: Key under table_settings naming the table-wide deal policy, and the
+    #: only two values that name one. There is deliberately no default: a
+    #: table that does not say how it deals is refused, because the previous
+    #: arrangement -- absent-or-false means detection-only -- is exactly how
+    #: every shipped game came to run without shuffle proofs while the
+    #: prevention implementation sat complete and unreferenced.
+    DEAL_POLICY_SETTING   = "deal_policy"
+    DEAL_POLICY_BG        = "bayer-groth-v1"
+    DEAL_POLICY_DETECTION = "detection-only-v1"
+    DEAL_POLICIES = frozenset({DEAL_POLICY_BG, DEAL_POLICY_DETECTION})
+
+    #: Terminal outcome for a table this peer will not play on.
+    POLICY_REFUSED = "POLICY_REFUSED"
+
+    @classmethod
+    def parse_deal_policy(cls, table_settings, author_mode) -> Optional[str]:
+        """Return the table's deal policy, or None if it does not have one.
+
+        Strict, and deliberately total: it NEVER raises. Two of the three
+        call sites are inbound message handlers, where raising would carry a
+        hostile or stale game_start out of handle_message and onto the
+        transport's dispatch thread. Refusal is a value here; the host path
+        turns that value into an exception itself.
+
+        Rejects, in order: a non-dict settings blob, a non-str value (which
+        is what catches True/False/1/0/None -- note bool is an int but not a
+        str, so the isinstance check is the thing that stops the old
+        coercion from creeping back), an unrecognised string, and finally
+        anything but Bayer-Groth on a verified-envelope transport.
+
+        That last rule is the mandate: detection-only remains a legitimate,
+        explicitly-declared mode for compat, test and benchmark tables,
+        where the deal is not carrying real money between strangers. On the
+        wire it is refused, because a table whose security property is "we
+        will notice afterwards that someone cheated" is not one this
+        protocol is willing to advertise as trustless.
+        """
+        if not isinstance(table_settings, dict):
+            return None
+        value = table_settings.get(cls.DEAL_POLICY_SETTING)
+        if not isinstance(value, str):
+            return None
+        if value not in cls.DEAL_POLICIES:
+            return None
+        if author_mode == AUTHOR_MODE_WIRE and value != cls.DEAL_POLICY_BG:
+            return None
+        return value
 
     def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
                  transport=None, clock: Optional[Clock] = None,
                  sink: Optional[EventSink] = None,
-                 require_prevention: bool = False,
                  master_secret: Optional[bytes] = None,
                  author_mode: Optional[str] = None,
                  admission=None, joiner_admission=None):
@@ -321,12 +371,19 @@ class Session:
         # mutated while this is held.
         self._owner = SessionOwner()
         self.is_host    = is_host
-        # Local policy, NOT table state: refuse to be dealt into a table
-        # that is not running Bayer-Groth prevention. The table-wide mode
-        # itself arrives in game_start; this only decides whether this peer
-        # is willing to play under it. Without it a host could silently
-        # downgrade a table to detection-only and nobody would notice.
-        self.require_prevention = require_prevention
+        # require_prevention used to live here: a per-peer flag meaning
+        # "refuse a table that is not running prevention". It is gone
+        # because deal_policy subsumes it and the two together were
+        # ambiguous -- a table declaring detection-only while a peer
+        # required prevention left no single answer to "what is this table
+        # running?". Wire mode now mandates Bayer-Groth for everyone, so
+        # there is nothing left for a per-peer override to express.
+        #
+        # It cost one capability, and the loss is real rather than
+        # theoretical: a COMPAT peer can no longer demand prevention, since
+        # only wire mode forbids detection-only. That is acceptable because
+        # compat is harnesses and benchmarks, but it is a subtraction, not
+        # a refactor.
         # transport module (or a mock) providing broadcast()/send().
         # Defaults to the real global transport; tests inject an
         # in-memory one so N sessions can run in one process.
@@ -439,11 +496,17 @@ class Session:
         self.on_session_terminated: Optional[Callable] = None
         self._terminal_seq = 0
 
-        # Table-wide shuffle-proof mode, re-read from every game_start.
-        # Held separately from _last_table_settings because that dict is
-        # only overwritten when non-empty, which would let a stale True
-        # survive into a table that is running detection-only.
-        self._prevention: bool = False
+        # Table-wide deal policy. None until a table is accepted, and then
+        # write-once through _adopt_deal_policy -- never assigned directly,
+        # by any path, including the local host's own start_game. Held
+        # separately from _last_table_settings because that dict is only
+        # overwritten when non-empty, which would let a stale policy survive
+        # into a table running under a different one.
+        self._deal_policy: Optional[str] = None
+        # Last successfully-built deal context id. Terminal recording
+        # reads this instead of recomputing, so a session can always
+        # produce a record even when the context no longer encodes.
+        self._deal_context_id: Optional[str] = None
 
         # UI callbacks -- set by the lobby after constructing the session.
         # Both are called from the transport's background thread; callers
@@ -747,9 +810,113 @@ class Session:
     # indices and are self-describing, so routing is by seat, not conn_id.
     # ------------------------------------------------------------------
 
+    #: Domain label for the deal context pre-image. Bump with the LAYOUT,
+    #: not with the product: it exists so two different encodings can never
+    #: produce the same digest.
+    _DEAL_CTX_LABEL   = b"poker.deal.context"
+    _DEAL_CTX_VERSION = 2
+
+    def _deal_context_bytes(self) -> bytes:
+        """Injective encoding of (layout version, deal policy, seat order).
+
+        Every variable-length field is length-prefixed, so no two distinct
+        inputs share an encoding. The old form -- "poker|" + "|".join(order)
+        -- was not injective: ["a|b", "c"] and ["a", "b|c"] both encode to
+        "poker|a|b|c", so two structurally different tables shared a DKG
+        domain, and a proof-of-possession minted at one verified at the
+        other. Not reachable on the honest path, where conn_ids are UUIDs,
+        but _on_game_start adopts whatever seat_order a host sends without
+        validating its contents, so a malicious host could reach it.
+
+        The version is encoded INSIDE the pre-image, not merely prefixed
+        onto the digest, so a future layout cannot collide with this one.
+
+        Non-str seat ids raise, matching the old behaviour where '|'.join
+        raised on them. Coercing with str() would trade a loud failure for
+        an injectivity hole, which is the opposite of the point.
+
+        Refuses to encode a session with no adopted policy, rather than
+        substituting a placeholder. An earlier version used
+        `self._deal_policy or ""`, which folded None and "" onto the same
+        pre-image and quietly broke the injectivity this whole function
+        exists for. The encoding has no representation for an invalid
+        lifecycle state because it should never be asked to describe one:
+        a deal context is meaningful only once a table is accepted, and
+        forensic callers must not route through here at all.
+        """
+        if self._deal_policy is None:
+            raise RuntimeError(
+                "cannot build a deal context before a policy is adopted; "
+                "forensic callers want _recorded_session_id()")
+        out = bytearray()
+        out += len(self._DEAL_CTX_LABEL).to_bytes(4, "big")
+        out += self._DEAL_CTX_LABEL
+        out += self._DEAL_CTX_VERSION.to_bytes(4, "big")
+        policy = self._deal_policy.encode("utf-8")
+        out += len(policy).to_bytes(4, "big") + policy
+        out += len(self._seat_order).to_bytes(4, "big")
+        for cid in self._seat_order:
+            if not isinstance(cid, str):
+                raise TypeError(
+                    f"seat id must be str, got {type(cid).__name__}: {cid!r}")
+            raw = cid.encode("utf-8")
+            out += len(raw).to_bytes(4, "big") + raw
+        return bytes(out)
+
     def _deal_session_id(self) -> str:
-        """Shared, stable per-game id (every peer holds the same seat order)."""
-        return "poker|" + "|".join(self._seat_order)
+        """Shared, stable per-game id: a digest of the canonical context.
+
+        Stays a str -- MentalDeal encodes it, it becomes DeadlineToken's
+        hand_id and is JSON-serialised onto the wire, and it is interpolated
+        into abort messages. Nothing anywhere parses it.
+
+        Binding the deal policy in makes "bayer-groth-v1" a real context
+        commitment rather than a label travelling alongside the deal: two
+        peers running different policies now derive different DKG domains
+        and cannot complete a hand together at all.
+
+        The cost is attribution, and it is worth naming. A policy mismatch
+        now surfaces at DKG as a proof-of-possession failure, which blames
+        an honest peer, rather than later as a missing-proof abort naming
+        the shuffler. Under the mandate a mismatch requires an equivocating
+        host -- wire mode admits exactly one policy, and every peer reads it
+        from the same message -- so the trade is a legible-but-misattributed
+        failure in exchange for making the commitment real. The terminal
+        record carries the policy so the cause is recoverable.
+
+        Caches on success so that terminal recording never has to recompute
+        it. See _recorded_session_id.
+        """
+        session_id = (f"poker.deal.v{self._DEAL_CTX_VERSION}:"
+                      + hashlib.sha256(self._deal_context_bytes()).hexdigest())
+        self._deal_context_id = session_id
+        return session_id
+
+    def _recorded_session_id(self) -> Optional[str]:
+        """The deal context for forensics. NEVER raises, never computes.
+
+        terminate() must be atomic: it sets the terminal flags and then
+        builds the record, so anything fallible between those two points
+        leaves a session that is terminal but never produced a record,
+        never invalidated its pending work, and never told its callbacks.
+        Terminal state is the strongest lifecycle invariant here, and it
+        cannot depend on encoding something that may not exist.
+
+        It very nearly did. _deal_context_bytes raises on a non-str seat
+        id, _on_game_start adopts whatever seat_order a host sends without
+        validating its shape, and terminate() called straight through to
+        it -- so a malicious host could send seat_order ["host", 7, "me"]
+        and split the terminal transition in half.
+
+        Returns None when no deal context was ever built. That covers a
+        session that died in the lobby, and also one that reached PLAYING
+        but was terminated before its first hand began -- accepting a
+        table adopts a policy, but the context is not built until a hand
+        constructs one. deal_policy is recorded separately and is set in
+        both cases, so a record with a policy and no session_id says
+        precisely that: the table was accepted, no hand started.
+        """
+        return self._deal_context_id
 
     @property
     def _deal_master_secret(self) -> bytes:
@@ -778,20 +945,107 @@ class Session:
         self._master_secret_override = secret
 
     @property
+    def deal_policy(self) -> Optional[str]:
+        """The accepted table deal policy, or None before a table is joined."""
+        return self._deal_policy
+
+    @property
+    def proofs_verified(self) -> int:
+        """Shuffle proofs this seat has verified in the current hand.
+
+        The difference between a table that declares Bayer-Groth and one
+        that runs it. deal_policy is what the table SAYS; this is what
+        actually happened, so a downgrade that leaves the policy string
+        intact -- the whole failure mode this mandate exists to prevent --
+        shows up here as zero.
+
+        Scope, stated precisely because an earlier version of this
+        docstring overclaimed: it counts verifications that ran and
+        returned true. It does not attest that the verifier is sound, and
+        a bg_shuffle.verify hardwired to return true would increment it
+        normally. That is the BG soundness suites' property, not this
+        counter's.
+        """
+        driver = self._deal_driver
+        if driver is None or driver.deal is None:
+            return 0
+        return driver.deal._proofs_verified
+
+    @property
     def prevention(self) -> bool:
         """Whether this table runs Bayer-Groth shuffle proofs.
 
-        Table-wide and uniform by construction: it rides in the same
-        game_start table_settings every peer already receives, so peers do
-        not negotiate and cannot disagree unless one is compromised or
-        running a different build. A peer that disagrees produces or
-        expects a proof the others do not, and the hand voids fail-closed
-        rather than silently dropping to detection-only.
+        The single mapping point from the policy string to the boolean the
+        deal layer consumes. MentalDeal and MentalDealDriver still key off a
+        bool, and that is fine, but the translation must happen exactly
+        once: a second place deriving the same bool is a place the two can
+        drift, and drift here means one peer producing a proof another does
+        not expect.
 
-        Defaults to False when the key is absent, which is what a table
-        created by an older build looks like.
+        Table-wide and uniform by construction: the policy rides in the same
+        game_start every peer already receives, so peers do not negotiate.
+        A peer that disagrees produces or expects a proof the others do not,
+        and the hand fails closed rather than silently dropping to
+        detection-only.
         """
-        return self._prevention
+        return self._deal_policy == self.DEAL_POLICY_BG
+
+    def _adopt_deal_policy(self, policy: str) -> bool:
+        """The ONE writer of _deal_policy. True if the session now holds it.
+
+        An explicit three-state machine, because the interesting case is the
+        third one:
+
+          None -> valid    adopted
+          same -> same     idempotent; retries and relay echoes are harmless
+          A    -> B        REFUSED, and the caller must terminate
+
+        Every path goes through here, including the host's own start_game.
+        The temptation is to let the local host assign directly on the
+        grounds that it is the one proposing the table -- but a field whose
+        invariant holds only for callers who remembered it is the defect
+        pattern this codebase has now paid for repeatedly. One writer.
+
+        It validates its own input rather than trusting callers to have
+        parsed first. A single writer that accepts anything is only half a
+        chokepoint: it centralises WHEN the field changes while leaving WHAT
+        it may hold to whoever calls it. Review found `_adopt_deal_policy
+        ("banana")` succeeded, reachable from _deal_first_hand, which takes
+        a caller-supplied policy. An unknown value is a programming error,
+        not a protocol event, so it raises rather than returning False --
+        the False channel means "refused a legitimate change".
+        """
+        if policy not in self.DEAL_POLICIES:
+            raise ValueError(
+                f"not a deal policy: {policy!r}; "
+                f"expected one of {sorted(self.DEAL_POLICIES)}")
+        current = self._deal_policy
+        if current is None:
+            self._deal_policy = policy
+            return True
+        return current == policy
+
+    def _assert_deal_preconditions(self) -> None:
+        """Everything that must hold before a hand may exist at all.
+
+        Shared by _begin_p2p_hand (which calls it before constructing any
+        gameplay state) and begin_hand (which re-checks at the last moment
+        before the driver exists). Two callers, one rule: a check duplicated
+        by hand is a check that can drift.
+        """
+        if self.terminal_state is not None:
+            raise RuntimeError(
+                f"cannot begin a hand: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
+        if self._deal_policy is None:
+            raise RuntimeError(
+                "cannot begin hand: no deal policy has been adopted; a hand "
+                "must follow an accepted table")
+        if self.author_mode == AUTHOR_MODE_WIRE and not self.prevention:
+            raise RuntimeError(
+                f"cannot begin hand: wire mode requires "
+                f"{self.DEAL_POLICY_BG!r}, but the adopted policy is "
+                f"{self._deal_policy!r}")
 
     @owned
     def begin_hand(self, hand_no: int, button: int = 0,
@@ -805,13 +1059,12 @@ class Session:
         set of seat indices dealt into the hand (default: every seat); busted
         seats are excluded by the caller and take no part in the deal.
         """
-        if self.terminal_state is not None:
-            # A terminated session must not acquire a live deal driver: it
-            # would run a hand no peer agreed to, under a session id derived
-            # from state the table has already abandoned.
-            raise RuntimeError(
-                f"cannot begin a hand: session terminated "
-                f"({self.terminal_state}: {self.terminal_reason})")
+        # Terminality, policy adoption and the wire-mode mandate. Checked
+        # here as well as in _begin_p2p_hand, at the last point before a
+        # driver exists: everything above this line is policy, everything
+        # below deals cards. begin_hand is also called directly by tests and
+        # harnesses that never go through _begin_p2p_hand.
+        self._assert_deal_preconditions()
         from holdem.p2p.mental_deal_driver import MentalDealDriver
         order = list(self._seat_order)
         if self.local_conn_id not in order:
@@ -823,13 +1076,6 @@ class Session:
             raise RuntimeError("cannot begin hand: local seat is not dealt in "
                                "(busted seats spectate via next_p2p_hand)")
         prevention = self.prevention
-        if self.require_prevention and not prevention:
-            # Fail closed rather than play on a downgraded table: a host
-            # that omits the setting would otherwise turn prevention off
-            # for everyone without any peer noticing.
-            raise RuntimeError(
-                "cannot begin hand: this peer requires Bayer-Groth "
-                "prevention but the table is running detection-only")
         self._deal_hole = [None, None]
         self._deal_board = [None] * 5
         self._deal_outbox = []
@@ -1618,6 +1864,21 @@ class Session:
         or None for the first hand (and a first-hand redeal)."""
         from holdem.p2p.replica_table import ReplicaTable
         cfg = self._table_cfg
+        # Everything that can refuse this hand runs BEFORE any gameplay
+        # state exists. Validating after the replica is live produces the
+        # worst outcome available: a table that has posted blinds, accepts
+        # bets (send_bet_action gates on _replica alone) and can never
+        # settle, because settlement needs a deal that was refused. The
+        # policy checks below are the ones this mandate added, so they are
+        # the ones that turned a theoretical ordering flaw into a reachable
+        # one; hoisting them keeps the transition transactional.
+        #
+        # session_id is built here for the same reason -- it encodes the
+        # policy, so it is fallible, and a failure must land before the
+        # replica rather than between the replica and the driver.
+        self._assert_deal_preconditions()
+        session_id = self._deal_session_id()
+
         self._hand_record = None
         self.void_reason = None
         self.hand_result = None
@@ -1625,7 +1886,7 @@ class Session:
         self._hand_stacks = list(stacks)
         self._hand_positions = positions
         self._replica = ReplicaTable(
-            session_id=self._deal_session_id(), hand_no=hand_no,
+            session_id=session_id, hand_no=hand_no,
             names=list(cfg["names"]), stacks=list(stacks),
             sb=cfg["sb"], bb=cfg["bb"], structure=cfg["structure"])
         if positions is None:
@@ -1638,8 +1899,17 @@ class Session:
             self._replica = None
             self._finish_session(stacks, announce=False)
             return False
-        self.begin_hand(hand_no, button=self._replica.button,
-                        seats_in=self._replica.seats_dealt)
+        try:
+            self.begin_hand(hand_no, button=self._replica.button,
+                            seats_in=self._replica.seats_dealt)
+        except Exception:
+            # begin_hand still has refusal paths that need the replica to
+            # evaluate (is the local seat dealt in?). If one fires, roll the
+            # replica back rather than leaving a bettable table with no deal.
+            self._replica = None
+            self._hand_stacks = []
+            self._hand_positions = None
+            raise
         self._last_digest = self._replica.state_digest()
         self._safe_emit(
             "hand_started",
@@ -2231,16 +2501,23 @@ class Session:
     def _on_game_start(self, conn_id: str, msg: dict) -> None:
         """Adopt the host's table settings -- once, from the host only.
 
-        This message defines seat order and the table-wide prevention mode,
-        and both were previously rewritten by any peer at any time. A
-        forged game_start mid-hand could repoint every seat index (which
-        reassigns hole cards and blame) or turn prevention off for this
-        peer, a downgrade nothing else would notice because prevention is
-        read from exactly this message.
+        This message defines seat order and the table-wide deal policy, and
+        both were previously rewritten by any peer at any time. A forged
+        game_start mid-hand could repoint every seat index (which reassigns
+        hole cards and blame) or downgrade the deal for this peer, which
+        nothing else would notice because the policy is read from exactly
+        this message.
 
         Capabilities are therefore frozen once play begins. A duplicate of
         the legitimate message is accepted as a no-op rather than refused,
         so retries and relay echoes stay harmless.
+
+        The policy is parsed and refused BEFORE state becomes PLAYING. That
+        ordering is the point: refusing at deal time, as the old
+        require_prevention check did, meant a peer had already accepted the
+        table -- announced itself as playing, taken a seat, become
+        answerable for a hand -- before discovering it disagreed about how
+        cards would be dealt.
         """
         payload = msg.get("payload", {})
         if self._host_conn_id and conn_id != self._host_conn_id:
@@ -2254,13 +2531,35 @@ class Session:
             # handle_message guard, and that guard is expected to relax for
             # teardown messages.
             settings = payload.get("table_settings", {})
+            # Compare the PARSED policy, and tolerate a malformed one. This
+            # branch is the reject path: a hostile or stale game_start must
+            # be logged and dropped, never raised out of a message handler
+            # onto the transport's dispatch thread.
+            proposed = self.parse_deal_policy(settings, self.author_mode)
             same = (list(payload.get("seat_order", [])) == list(self._seat_order)
-                    and bool(settings.get(self.PREVENTION_SETTING, False))
-                        == self._prevention)
+                    and proposed == self._deal_policy)
             if not same:
                 _log.warning(
                     "session: game_start from %s would change settled table "
                     "settings mid-session — ignoring", conn_id)
+            return
+        settings = payload.get("table_settings", {})
+        policy = self.parse_deal_policy(settings, self.author_mode)
+        if policy is None:
+            declared = (settings.get(self.DEAL_POLICY_SETTING)
+                        if isinstance(settings, dict) else None)
+            self.terminate(
+                self.POLICY_REFUSED,
+                f"table declared deal policy {declared!r}, which this peer "
+                f"will not play under in {self.author_mode}",
+                conn_id=conn_id)
+            return
+        if not self._adopt_deal_policy(policy):
+            self.terminate(
+                self.POLICY_REFUSED,
+                f"table changed deal policy from {self._deal_policy!r} to "
+                f"{policy!r}",
+                conn_id=conn_id)
             return
         self.state = "PLAYING"
         self._seat_order = payload.get("seat_order", [])
@@ -2268,9 +2567,10 @@ class Session:
         ts = payload.get("table_settings", {})
         if ts:
             self._last_table_settings = ts
-        # Read unconditionally: an absent key means detection-only, and
-        # must clear any mode carried over from an earlier table.
-        self._prevention = bool(ts.get(self.PREVENTION_SETTING, False))
+        # The policy was adopted above, before PLAYING. Nothing re-reads it
+        # here: this used to be the second of three places that derived the
+        # mode from a settings dict, and three readers of one field is how
+        # they drift.
         if self.on_game_start:
             self.on_game_start(payload)
 
@@ -2336,7 +2636,7 @@ class Session:
         self.terminal_reason = reason
         self._terminal_seq += 1
         self.terminal_record = TerminalRecord(
-            session_id=self._deal_session_id(),
+            session_id=self._recorded_session_id(),
             hand_no=self._hand_no,
             previous_state=previous,
             terminal_state=state,
@@ -2346,6 +2646,7 @@ class Session:
             host_conn_id=self._host_conn_id,
             monotonic_ts=time.monotonic(),
             sequence=self._terminal_seq,
+            deal_policy=self._deal_policy,
         )
 
         # Nothing queued may commit against a terminated session: a held
@@ -2591,12 +2892,28 @@ class Session:
                 f"({self.terminal_state}: {self.terminal_reason})")
         if not self.is_host:
             raise RuntimeError("Only the host can start the game")
+        # Parsed AFTER the terminal and host checks, so those keep winning:
+        # a terminated session must still report that it is terminated
+        # rather than complaining about a settings dict it will never use.
+        policy = self.parse_deal_policy(table_settings, self.author_mode)
+        if policy is None:
+            declared = (table_settings.get(self.DEAL_POLICY_SETTING)
+                        if isinstance(table_settings, dict) else None)
+            raise ValueError(
+                f"cannot start a game: table_settings[{self.DEAL_POLICY_SETTING!r}] "
+                f"is {declared!r}; {self.author_mode} requires "
+                f"{self.DEAL_POLICY_BG!r}"
+                + ("" if self.author_mode == AUTHOR_MODE_WIRE else
+                   f" or {self.DEAL_POLICY_DETECTION!r}")
+                + ". A table must declare how it deals; there is no default.")
+        if not self._adopt_deal_policy(policy):
+            raise RuntimeError(
+                f"cannot start a game: deal policy is already "
+                f"{self._deal_policy!r} and cannot change to {policy!r}")
         with self._lock:
             seat_order = [p.conn_id for p in self.players.values()]
         self._seat_order = seat_order
         self._last_table_settings = table_settings
-        self._prevention = bool(
-            table_settings.get(self.PREVENTION_SETTING, False))
         payload = {"table_settings": table_settings, "seat_order": seat_order}
         self._transport.broadcast({"type": "game_start", "payload": payload})
         self.state = "PLAYING"
@@ -2724,6 +3041,65 @@ class Session:
             raise ValueError(
                 f"local conn_id {self.local_conn_id!r} not in seat order")
         self._seat_order = list(order)
+        # The cached deal context commits to the seat order; changing the
+        # order invalidates it. Leaving a stale digest behind would let a
+        # terminal record name a context this session never ran under.
+        self._deal_context_id = None
+
+    @owned
+    def seat_local_table(self, order: list[str],
+                         nicknames: Optional[dict] = None) -> None:
+        """Seat a table whose every seat lives in this process.
+
+        The sidecar's non-human seats are AI players sharing one process and
+        one device identity -- not remote peers. They have no distinct
+        signing key and never will, because holdem.p2p.identity holds a
+        process-global private key. So the lobby handshake does not describe
+        them: routing them through player_info would make each seat dial the
+        host it already is, and _on_player_info hardcodes is_host=False, so
+        the resulting roster would claim the table has no host.
+
+        Rather than have local seats impersonate joiners, a local table says
+        what it is. Seats are keyless BY INTENT, not by omission: with no
+        ed25519 key on any Player, _bind_seat_keys leaves _seat_keys empty
+        and _author_owns_seat stays on the compat conn_id rule, which is the
+        correct authority when the bus itself is authoritative about who
+        sent what. A partially-keyed roster is the failure mode this avoids
+        -- one keyed seat makes _seat_keys truthy and every OTHER seat's
+        messages get refused, which presents as a table that deals nothing.
+
+        Refused outright in AUTHOR_MODE_WIRE. On a transport carrying real
+        envelopes, seats are earned through the admission handshake; this
+        seam must never become a way to seat a peer without one.
+        """
+        if self.author_mode == AUTHOR_MODE_WIRE:
+            raise RuntimeError(
+                "seat_local_table is for local tables only; a session on a "
+                "verified-envelope transport seats peers through admission")
+        if self.terminal_state is not None:
+            raise RuntimeError(
+                f"cannot seat a table: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
+        # configure_seats owns the structural rules (2-9 seats, unique ids,
+        # local seat present, no seating mid-hand). Run it FIRST so an
+        # invalid order is refused before any roster state is written.
+        self.configure_seats(order)
+        nicknames = nicknames or {}
+        with self._lock:
+            self.players.clear()
+            self._join_order.clear()
+            for cid in order:
+                self.players[cid] = Player(
+                    conn_id    = cid,
+                    peer_id    = "",
+                    nickname   = nicknames.get(cid, cid),
+                    avatar_b64 = "",
+                    is_host    = (cid == order[0]),
+                )
+                if cid != self.local_conn_id:
+                    self._join_order.append(cid)
+        if self.on_player_list_changed:
+            self.on_player_list_changed(list(self.players.values()))
 
     @owned
     def set_host_engine(self, engine) -> None:

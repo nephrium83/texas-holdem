@@ -54,6 +54,16 @@ def snapshot(session) -> dict:
     engine = replica.engine
     snap = contract.build_snapshot(engine, seat)
     snap["hand_num"] = session._hand_no
+    # The table's security level, stated rather than implied. Nothing
+    # reaching the client used to distinguish a Bayer-Groth table from a
+    # detection-only one: the field that looked like it did (`verification`,
+    # now `deal_progress`) was a pure function of phase, so a player had no
+    # way to know which guarantee they were playing under.
+    snap["deal_policy"] = session.deal_policy
+    # Evidence to go with the claim. deal_policy is what the table says;
+    # this is what this seat actually verified, so a client can tell a
+    # Bayer-Groth table from one that only declares itself as one.
+    snap["proofs_verified"] = session.proofs_verified
 
     dealt = _holes_recovered(session)
     phase = _phase(session, dealt)
@@ -102,7 +112,7 @@ def snapshot(session) -> dict:
         eliminated=snap["eliminated"],
         void_reason=snap["void_reason"],
     )
-    snap["verification"] = player_info.verification_view(
+    snap["deal_progress"] = player_info.deal_progress_view(
         phase, snap["void_reason"]
     )
     snap["settlement"] = (
@@ -172,6 +182,7 @@ def _lobby_snapshot(session) -> dict:
     return {
         "type": "snapshot",
         "phase": "lobby",
+        "deal_policy": getattr(session, "deal_policy", None),
         "hand_num": getattr(session, "_hand_no", 0),
         "seats": seats,
         "you": {"seat": my_seat},
@@ -193,22 +204,43 @@ def _lobby_snapshot(session) -> dict:
             "effective_stack": 0,
             "void_reason": None,
         },
-        "verification": player_info.verification_view("lobby"),
+        "deal_progress": player_info.deal_progress_view("lobby"),
         "events": [],
         "settlement": None,
     }
 
 
 def apply_command(session, command: str,
-                  payload: Optional[dict] = None) -> dict:
+                  payload: Optional[dict] = None, *,
+                  start_table=None) -> dict:
     """Apply a client command to the hostless session.
 
     Betting commands are broadcast to every replica via the session; the
     result echoes the engine's verdict so the client can surface 'not your
     turn' / 'illegal' without guessing. Legality is the replica's job, as
     for any peer action -- never trusted from the client.
+
+    ``start_table`` is the controller's zero-argument "start the already-
+    configured table" callable, supplied by whoever assembled the table (the
+    sidecar launcher). It is threaded in rather than read off the Session on
+    purpose: proposed table configuration belongs to the controller, and
+    accepted protocol state belongs to the Session. Parking pre-start
+    settings on the Session would create two competing truths -- a mutable
+    pre-start field and the settled _last_table_settings -- and the whole
+    reason this command exists is that a policy read from the wrong one of
+    those is how prevention silently defaulted off. A sidecar that cannot
+    start a table simply passes None.
     """
     payload = payload or {}
+    if command == "start_game":
+        # Starts the local table that is ALREADY configured (seats, blinds,
+        # deal policy). This is not table creation, and not a lobby: see
+        # GODOT_PROTOCOL.md section 8, which still owns that.
+        if start_table is None:
+            raise ValueError("this sidecar cannot start a table")
+        verdict = start_table()
+        return {"type": "command_result", "command": command,
+                "ok": verdict == "started", "verdict": verdict}
     if command == "fold":
         verdict = session.send_bet_action("fold")
     elif command == "check_call":

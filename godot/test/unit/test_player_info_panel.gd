@@ -37,9 +37,9 @@ func _turn_snapshot() -> Dictionary:
 				"board_plays": false,
 			},
 		},
-		"verification": {
-			"state": "audit_pending",
-			"label": "Deal active | final audit pending",
+		"deal_progress": {
+			"state": "in_hand",
+			"label": "Hand in progress",
 		},
 		"events": [
 			{"seq": 1, "text": "--- Hand #12 (10/20) ---"},
@@ -92,9 +92,9 @@ func test_settled_hand_replaces_decision_card_with_result():
 		"street_label": "Idle",
 		"pot": 0,
 	}
-	snapshot["verification"] = {
-		"state": "verified",
-		"label": "Deal and settlement verified",
+	snapshot["deal_progress"] = {
+		"state": "settled",
+		"label": "Hand settled",
 	}
 	snapshot["settlement"] = {
 		"headline": "You won 120",
@@ -112,7 +112,7 @@ func test_settled_hand_replaces_decision_card_with_result():
 	assert_true(panel.result_card.visible)
 	assert_string_contains(panel.result_text.text, "Main pot: You +120")
 	assert_string_contains(panel.result_text.text, "Your net: +70")
-	assert_eq(panel.verification_label.text, "Deal and settlement verified")
+	assert_eq(panel.deal_progress_label.text, "Hand settled")
 
 
 func test_match_complete_has_no_next_turn_decision():

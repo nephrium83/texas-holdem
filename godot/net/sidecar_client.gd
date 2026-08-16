@@ -114,6 +114,14 @@ func _route_message(msg: Dictionary) -> void:
 
 ## Section 4 commands. amount in raise_to is an absolute per-street
 ## target, not a delta -- see GODOT_PROTOCOL.md section 4.
+##
+## start_game takes no payload: the client does not propose table settings
+## and cannot alter them. It returns a bool because the lobby control
+## latches on press and needs to know a send that never went out.
+func start_game() -> bool:
+	return send_command("start_game")
+
+
 func fold() -> void:
 	send_command("fold")
 
@@ -130,8 +138,14 @@ func next_hand() -> void:
 	send_command("next_hand")
 
 
-func send_command(command: String, payload: Dictionary = {}) -> void:
-	_send_raw(_build_command_message(command, payload))
+## Returns false when the command demonstrably did NOT go out -- the
+## client believes it is disconnected, or put_data reported an error.
+## True is best-effort, not delivery: _connected refreshes on the next
+## _process tick, so a send into a socket that has just died can still
+## report true. A caller that latches UI state on send must therefore
+## ALSO release on disconnect -- see Main._on_sidecar_disconnected.
+func send_command(command: String, payload: Dictionary = {}) -> bool:
+	return _send_raw(_build_command_message(command, payload))
 
 
 ## Pure message construction, split out for testing without a socket.
@@ -142,8 +156,12 @@ func _build_command_message(command: String, payload: Dictionary) -> Dictionary:
 	return msg
 
 
-func _send_raw(msg: Dictionary) -> void:
+func _send_raw(msg: Dictionary) -> bool:
 	if not _connected:
 		push_warning("SidecarClient: send_command called while not connected to a sidecar")
-		return
-	_stream.put_data((JSON.stringify(msg) + "\n").to_utf8_buffer())
+		return false
+	var err := _stream.put_data((JSON.stringify(msg) + "\n").to_utf8_buffer())
+	if err != OK:
+		push_warning("SidecarClient: put_data failed (%d)" % err)
+		return false
+	return true

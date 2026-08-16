@@ -57,6 +57,7 @@ def make_session(conn_id="peer0", is_host=True, sink=None, clock=None):
     s.local_conn_id = conn_id
     # configure_seats requires ≥2; use a placeholder second seat
     s.configure_seats([conn_id, "placeholder"])
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     return s, bus
 
 
@@ -75,6 +76,7 @@ def make_table_with_sink(n=2, sinks=None):
         )
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         bus.register(cid, s)
         sessions[cid] = s
     for cid in order:
@@ -219,6 +221,7 @@ class TestPeerConnected:
                     transport=InMemoryTransport(bus, "h"), sink=sink)
         s.local_conn_id = "h"
         s.configure_seats(["h", "placeholder"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         s.add_local_player("h")
         matches = sink.of_type("peer_connected")
         assert any(e["conn_id"] == "h" for e in matches)
@@ -376,6 +379,7 @@ class TestTimeoutEvents:
                     clock=clk, sink=sink)
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(session_id="poker|peer0|peer1", hand_no=1,
                          names=["Alice", "Bob"], stacks=[1000, 1000],
@@ -427,6 +431,7 @@ class TestTimeoutEvents:
                     transport=InMemoryTransport(bus, "host"), sink=sink)
         s.local_conn_id = "host"
         s.configure_seats(["host", "peerA"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         from holdem.p2p.session import Player
         with s._lock:
             s.players["peerA"] = Player(

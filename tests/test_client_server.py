@@ -38,6 +38,7 @@ def make_sessions(n):
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order
@@ -369,3 +370,88 @@ def test_client_server_rejects_double_start_and_can_restart():
         finally:
             await srv.stop()
     asyncio.run(inner())
+
+
+def test_a_session_error_answers_the_command_instead_of_dropping_the_client():
+    """A RuntimeError from the session must not close the socket.
+
+    _handle_command's catch tuple omitted RuntimeError, so a session-level
+    guard -- the bus re-entrancy guard, SessionOwner._assert_owner -- would
+    unwind the read loop and take the client's connection with it. The
+    client gets an answer it can act on instead.
+    """
+    class _Boom:
+        def __init__(self):
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            pass
+
+    from holdem.client_server import _Conn
+
+    def explode():
+        raise RuntimeError("session guard fired")
+
+    conn = _Conn(session=None, reader=None, writer=_Boom(),
+                 start_table=explode)
+    # _handle_command builds a snapshot after the result; stub that out so
+    # this test is about the catch, not about client_view.
+    import holdem.client_view as cv
+    original = cv.snapshot
+    cv.snapshot = lambda _s: {"type": "snapshot"}
+    try:
+        conn._handle_command({"type": "command", "command": "start_game"})
+    finally:
+        cv.snapshot = original
+
+    sent = [json.loads(b.decode()) for b in conn._writer.written]
+    result = next(m for m in sent if m.get("type") == "command_result")
+    assert result["ok"] is False
+    assert "session guard fired" in result["error"]
+
+
+def test_a_swallowed_command_error_is_logged(caplog):
+    """The other half of the RuntimeError catch, and the half that makes it
+    defensible. The catch is broad enough to swallow this codebase's own
+    loud guards -- the bus re-entrancy guard, SessionOwner._assert_owner --
+    and the client is only told "ok: false", which nothing in the Godot
+    client renders for a command it did not initiate. Without the log the
+    only trace of a real invariant breach would be gone."""
+    import logging
+
+    class _W:
+        def __init__(self):
+            self.written = []
+
+        def write(self, data):
+            self.written.append(data)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            pass
+
+    from holdem.client_server import _Conn
+    import holdem.client_view as cv
+
+    conn = _Conn(session=None, reader=None, writer=_W(),
+                 start_table=lambda: (_ for _ in ()).throw(
+                     RuntimeError("owner assertion fired")))
+    original = cv.snapshot
+    cv.snapshot = lambda _s: {"type": "snapshot"}
+    try:
+        with caplog.at_level(logging.ERROR, logger="holdem.client_server"):
+            conn._handle_command({"type": "command", "command": "start_game"})
+    finally:
+        cv.snapshot = original
+
+    assert any("owner assertion fired" in r.getMessage()
+               or (r.exc_info and "owner assertion fired" in str(r.exc_info[1]))
+               for r in caplog.records),         "a swallowed command error left no trace in the log"

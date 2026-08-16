@@ -5,10 +5,10 @@ This document defines the initial performance contract for serverless, cryptogra
 ## Product policy
 
 - **Detection-only** is the v1 default: the hand is audited and cheats are detected without making every shuffle carry a prevention proof.
-- **Prevention** is available as an explicit opt-in, set table-wide by the host via `bg_prevention` in the table settings. Proof generation and verification are integrated into `MentalDeal` and the complete path is benchmarked below.
+- **Prevention** is MANDATORY for peer-to-peer play, set table-wide by the host via `deal_policy: "bayer-groth-v1"`. Proof generation and verification are integrated into `MentalDeal` and the complete path is benchmarked below.
 - No mode may reveal cards or accept a deal that failed its required verification.
 - Security parameters are not reduced to meet a timing target.
-- Prevention is not the default. Peers do not negotiate the mode, so a host that omits the flag downgrades the whole table to detection-only; a peer that will not accept that constructs its `Session` with `require_prevention=True` and refuses to be dealt in.
+- There is no default. A table that declares no `deal_policy` is refused before it starts, and on a verified-envelope transport `"bayer-groth-v1"` is the only admissible value — so a host cannot downgrade a table by omitting a flag, which is exactly how every shipped game came to run detection-only. `"detection-only-v1"` remains legal for in-process harnesses and benchmarks, stated explicitly. The former per-peer `require_prevention` opt-out is gone: it was a second, overlapping policy authority.
 
 ## Initial targets
 

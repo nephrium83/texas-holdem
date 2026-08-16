@@ -121,3 +121,155 @@ func test_next_hand_pressed_calls_sidecar_next_hand():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%NextHandControl").next_hand_pressed.emit()
 	assert_eq(fake.calls, [["next_hand"]])
+
+
+# ---------------------------------------------------------------- lobby start
+# The edge that was missing entirely: Main must route the lobby control's
+# press to the sidecar. Everything below the socket was already proven by
+# the Python suite; nothing proved the client could invoke it.
+
+func test_lobby_state_shows_the_lobby_control():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	assert_true(main.get_node("%LobbyControl").visible)
+	assert_true(main.get_node("%LobbyControl/Margin/Content/StartGameButton").visible)
+
+
+func test_mid_hand_state_hides_the_lobby_control():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())  # turn.state == "your_turn"
+	assert_false(main.get_node("%LobbyControl").visible)
+
+
+func test_start_game_pressed_calls_sidecar_start_game():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl").start_game_pressed.emit()
+	assert_eq(fake.calls, [["start_game"]])
+
+
+func test_pressing_the_real_button_reaches_the_sidecar():
+	## The whole client-side chain in one assertion, driven by an actual
+	## button press rather than a synthesised signal: real scene ->
+	## real control -> real Button.pressed -> Main -> sidecar command.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+	assert_eq(fake.calls, [["start_game"]])
+
+
+func test_a_failed_start_result_releases_the_lobby_control():
+	var main := _main()
+	# A sidecar whose send SUCCEEDS. Against the real %SidecarClient the
+	# send fails (nothing is connected in a unit test), which clears the
+	# latch by the dropped-send path -- and this test would then pass
+	# without the verdict routing it exists to check ever running.
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "start_game",
+		"ok": false, "verdict": "refused",
+	})
+
+	assert_false(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
+		"a refused start left the button wedged"
+	)
+
+
+func test_a_successful_start_result_does_not_release_the_latch():
+	## The hand is starting; the control should stay latched until the
+	## snapshot moves it out of the lobby.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "start_game",
+		"ok": true, "verdict": "started",
+	})
+
+	assert_true(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
+	)
+
+
+func test_a_send_that_never_left_the_client_releases_the_lobby_control():
+	## No reply can arrive for a command the socket dropped, so nothing
+	## else would ever clear the latch.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	fake.send_succeeds = false
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	assert_false(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
+	)
+
+
+func test_a_command_result_for_another_command_is_ignored():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "fold",
+		"ok": false, "verdict": "rejected",
+	})
+
+	assert_true(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
+		"a fold result cleared the start latch"
+	)
+
+
+func test_losing_the_sidecar_mid_start_releases_the_lobby_control():
+	## The one failure that produces no command_result at all. The deal
+	## holds the round-trip open for ~1s at three seats; a sidecar that
+	## dies in that window means no reply is ever coming, and nothing else
+	## would clear the latch.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "lobby"
+	main._on_snapshot_received(snapshot)
+	main.get_node("%LobbyControl/Margin/Content/StartGameButton").pressed.emit()
+	assert_true(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled
+	)
+
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+
+	assert_false(
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
+		"a dead sidecar left the start button wedged"
+	)

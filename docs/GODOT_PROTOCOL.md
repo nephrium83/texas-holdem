@@ -79,8 +79,9 @@ The board is an array of card strings, length 0 to 5.
 
 ## 4. Client → sidecar: commands
 
-The client sends a command object. Only the betting commands are defined in
-v1; lobby/seating commands are §8 (not yet finalised).
+The client sends a command object. The betting commands plus `start_game` are
+defined in v1; table **creation**, seating and joining remain §8 (not yet
+finalised).
 
 ```json
 { "type": "command", "command": "<name>", "payload": { ... } }
@@ -88,10 +89,17 @@ v1; lobby/seating commands are §8 (not yet finalised).
 
 | command      | payload            | meaning                                        |
 |--------------|--------------------|------------------------------------------------|
+| `start_game` | (none)             | start the already-configured table (see below) |
 | `fold`       | (none)             | fold the current hand                          |
 | `check_call` | (none)             | check if nothing is owed, otherwise call       |
 | `raise_to`   | `{"amount": <int>}`| raise so your total this street becomes amount |
 | `next_hand`  | (none)             | advance after a settled or voided hand         |
+
+`start_game` takes **no payload**, and that is deliberate. It starts the table
+the sidecar was already configured with at launch — seat count, blinds, stack,
+betting structure, and the deal policy (§4.1). The client does not propose
+table settings and cannot alter them; it only asks the configured table to
+begin. Sending it is what moves the session out of `lobby`.
 
 `amount` in `raise_to` is an **absolute target** (your total wagered on this
 street after the raise), not a delta. Legal bounds are given to you in the
@@ -101,6 +109,37 @@ The sidecar validates every command exactly as it validates a remote peer's
 action — an out-of-turn or illegal command is **rejected, never trusted**.
 The client should only enable a control when the snapshot says it is legal,
 but must handle rejection gracefully regardless.
+
+### 4.1 Deal policy  *(locked — implemented)*
+
+Every table declares how it deals, as a named protocol rather than a flag:
+
+| `deal_policy`         | meaning                                                |
+|-----------------------|--------------------------------------------------------|
+| `"bayer-groth-v1"`    | shuffle proofs generated and verified every round      |
+| `"detection-only-v1"` | no proofs; a bad shuffle is caught by the post-hand audit and the hand is voided **after** it is played |
+
+**There is no default.** A table that does not declare a policy is refused
+before it starts. On a verified-envelope transport — i.e. real peer-to-peer
+play — `"bayer-groth-v1"` is the **only** admissible value; detection-only is
+restricted to in-process harnesses, tests and benchmarks, and must still be
+stated explicitly there.
+
+Parsing is strict: the value must be a string and match exactly. `true`,
+`"true"`, `1`, `"bayer-groth"`, and `"BAYER-GROTH-V1"` are all refused, not
+coerced.
+
+The client does not choose the policy and cannot change it — it is fixed
+when the sidecar is launched. The client is *told* it: every snapshot (§5)
+carries a top-level `deal_policy`, so the front end can state the table's
+security level rather than implying it. It is `null` until a table has been
+accepted — which is normally the whole time the client is in the lobby, but
+the two are not the same thing: acceptance is what sets it, not phase.
+
+> Do not use §5's `deal_progress` field for this. It reports lifecycle
+> position only and is derived purely from `phase`. It was called
+> `verification` and had a `"verified"` state, which meant "the hand
+> settled", never "shuffle proofs checked out".
 
 ### Command result
 
@@ -115,6 +154,21 @@ For each command the sidecar replies with:
   `"buffered"` (accepted but queued behind an earlier action) |
   `"stale"` (a duplicate). On an unknown command, `ok` is `false` and an
   `"error"` string is present instead of `verdict`.
+
+For `start_game`, `verdict` is one of:
+
+- `"started"` — the table left the lobby and hand 1's deal is underway.
+- `"already_started"` — a hand is already in progress, or the session has
+  ended; the command is a no-op.
+- `"refused"` — the table's configuration was rejected (see §4.1) and
+  **nothing was started**. The session is still in the lobby.
+- `"hand_failed"` — the table was accepted and started, but its first hand
+  did not complete. The table is live; the hand is not. Distinct from
+  `refused` on purpose: those are very different states to recover from,
+  and reporting the second as the first tells the client the table never
+  began when it in fact did.
+
+`ok` is true only for `started`.
 
 For `next_hand`, `verdict` is one of:
 
@@ -175,10 +229,12 @@ the latest snapshot; it never advances state on its own.
       "call_is_all_in": false
     }
   },
-  "verification": {
-    "state": "audit_pending",
-    "label": "Deal active | final audit pending"
+  "deal_progress": {
+    "state": "in_hand",
+    "label": "Hand in progress"
   },
+  "deal_policy": "bayer-groth-v1",
+  "proofs_verified": 2,
   "events": [
     { "seq": 1, "event": "hand_started", "kind": "hand",
       "text": "--- Hand #7 (5/10) ---", "hand_num": 7, "street": "preflop" }
@@ -224,7 +280,9 @@ the latest snapshot; it never advances state on its own.
 | `bb_seat`     | int             | big-blind seat index                                         |
 | `action_on`   | int             | seat index to act, or `-1` if nobody is to act               |
 | `turn`        | object          | authoritative player-facing state and decision facts          |
-| `verification`| object          | truthful deal/audit status for the current phase               |
+| `deal_progress`| object         | where the hand is in the deal/play/settle lifecycle           |
+| `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` until a table is accepted |
+| `proofs_verified`| int         | shuffle proofs THIS seat has verified in the current hand      |
 | `events`      | array           | sequenced, append-only events for the current hand              |
 | `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
@@ -318,7 +376,7 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 
 | state | client treatment |
 |-------|------------------|
-| `lobby` / `dealing` | waiting or verification presentation; no betting controls |
+| `lobby` / `dealing` | waiting or deal-progress presentation; no betting controls |
 | `your_turn` | show `turn.decision` and enable only snapshot-legal actions |
 | `waiting` | name `actor_name`; hide all local decision facts |
 | `folded_waiting` | show that the local seat folded while the hand continues |
@@ -333,15 +391,37 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 pot odds, pot after calling, stack after calling, effective stack, and the
 legal raise-to range. Godot must not recalculate these poker facts.
 
-### `verification`
+### `deal_progress`, and why it is not a verification verdict
 
-The labels deliberately avoid claiming more than the protocol has proven:
+`deal_progress` reports **only** where the hand is:
 
-- `in_progress` while peer deal contributions are being verified.
-- `audit_pending` during betting: the hand is active, but the mandatory
-  post-hand audit has not completed.
-- `verified` only after the audit and settlement complete.
+- `not_started` in the lobby.
+- `dealing` while the mental-poker deal runs.
+- `in_hand` during betting.
+- `settled` once the hand completes.
 - `voided` when a proof, replica, or peer failure closed the hand.
+
+This field was previously called `verification`, with states named
+`audit_pending` and `verified` and labels like "Deal and settlement
+verified". Those were cryptographic claims, and the function producing them
+is a **pure function of `phase`** — it reads no proof, no audit result, and
+no verification outcome. It cannot report that verification *failed*: a
+hand whose proofs were never checked still reaches `settled`, and would
+have been labelled "verified". Do not reintroduce that reading.
+
+The security evidence is separate, and deliberately raw:
+
+- **`deal_policy`** — what the table committed to (§4.1).
+- **`proofs_verified`** — how many shuffle proofs *this seat* actually
+  verified, incremented at exactly one site, immediately after
+  `bg_shuffle.verify` returns true. It answers "did verification run and
+  pass", not "is the verifier correct" — a broken verifier would increment
+  it normally.
+
+Do **not** render "cryptographically verified" from `proofs_verified > 0`.
+The correct expected count depends on the seat and shuffle-round structure;
+until an explicit attestation predicate exists, show the policy and the
+count, not a conclusion drawn from them.
 
 ### `events`: current-hand action ledger
 
@@ -426,8 +506,12 @@ message types.
 
 ## 8. Not yet in this contract
 
-- Lobby / table creation / join / ready / seat selection (P2P lobby exists
-  in the sidecar; not yet exposed as client messages here).
+- Lobby / table **creation** / join / ready / seat selection (P2P lobby exists
+  in the sidecar; not yet exposed as client messages here). §4's `start_game`
+  is **not** this: it starts the table the sidecar was configured with at
+  launch, and carries no settings. Choosing seats, inviting or admitting
+  remote peers, and negotiating table settings from the client all remain
+  out of contract.
 - Chat.
 - Mid-hand dropout **timeout** (the void path exists; the timer for a peer
   that simply goes silent is not yet wired).

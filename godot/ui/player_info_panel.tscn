@@ -146,11 +146,11 @@ theme_override_font_sizes/font_size = 15
 text = "Made hand appears on the flop"
 autowrap_mode = 2
 
-[node name="VerificationLabel" type="Label" parent="Margin/Content"]
+[node name="DealProgressLabel" type="Label" parent="Margin/Content"]
 unique_name_in_owner = true
 theme_override_colors/font_color = Color(0.44, 0.82, 0.65, 1)
 theme_override_font_sizes/font_size = 12
-text = "Verification starts with the deal"
+text = "Waiting to deal"
 autowrap_mode = 2
 
 [node name="ResultCard" type="PanelContainer" parent="Margin/Content"]

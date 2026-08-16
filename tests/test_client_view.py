@@ -33,6 +33,7 @@ def make_table(n, stacks=None):
                     transport=InMemoryTransport(bus, cid))
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         s._deal_master_secret = bytes([100 + i]) * 32   # deterministic deal
         bus.register(cid, s)
         sessions[cid] = s
@@ -82,7 +83,7 @@ def test_snapshot_is_json_and_well_formed():
         assert snap["phase"] == "betting"
         assert len(snap["seats"]) == 3
         assert snap["hand_num"] == 1
-        assert snap["verification"]["state"] == "audit_pending"
+        assert snap["deal_progress"]["state"] == "in_hand"
         assert snap["events"][0]["event"] == "hand_started"
         assert snap["settlement"] is None
 
@@ -170,7 +171,7 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
     snap = json_safe(client_view.snapshot(sessions[order[0]]))
     assert snap["phase"] == "settled"
     assert snap["result"] is not None
-    assert snap["verification"]["state"] == "verified"
+    assert snap["deal_progress"]["state"] == "settled"
     assert snap["turn"]["state"] == "hand_complete"
     assert snap["settlement"]["pots"]
     assert snap["settlement"]["showdown"]
@@ -215,6 +216,7 @@ def test_lobby_snapshot_before_hand():
                 transport=InMemoryTransport(bus, "peer0"))
     s.local_conn_id = "peer0"
     s.configure_seats(list(order))
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     snap = client_view.snapshot(s)
     assert snap["phase"] == "lobby"
     assert snap["you"]["seat"] == 0
@@ -310,6 +312,48 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     assert snap["final_stacks"] == [0, 0, 1500]
     assert snap["turn"]["state"] == "match_complete"
     assert snap["turn"]["headline"] == "P2 won the match"
+
+
+def test_start_game_command_invokes_the_controller_callable():
+    """start_game routes to the controller's callable and echoes its verdict.
+
+    The adapter must not synthesise table settings of its own: proposed
+    configuration belongs to the controller that assembled the table, and
+    accepted protocol state belongs to the Session.
+    """
+    _, sessions, order = make_table(3)
+    calls = []
+
+    res = client_view.apply_command(
+        sessions[order[0]], "start_game",
+        start_table=lambda: (calls.append(1), "started")[1])
+
+    assert calls == [1], "controller callable was not invoked"
+    assert res["verdict"] == "started"
+    assert res["ok"] is True
+
+
+def test_start_game_verdicts_other_than_started_are_not_ok():
+    """ok is true only for 'started'. A refused or duplicate start must not
+    read as success, or the client will leave the lobby on a table that
+    never began."""
+    _, sessions, order = make_table(3)
+    for verdict in ("already_started", "refused", "hand_failed"):
+        res = client_view.apply_command(
+            sessions[order[0]], "start_game",
+            start_table=lambda v=verdict: v)
+        assert res["verdict"] == verdict
+        assert res["ok"] is False, f"{verdict} wrongly reported ok"
+
+
+def test_start_game_without_a_controller_is_an_error_not_a_silent_noop():
+    """A sidecar wired without a start callable must say so. Returning a
+    polite failure verdict here would look identical to a table that
+    declined to start, and the client could not tell a misconfigured
+    sidecar from a refused one."""
+    _, sessions, order = make_table(3)
+    with pytest.raises(ValueError):
+        client_view.apply_command(sessions[order[0]], "start_game")
 
 
 if __name__ == "__main__":

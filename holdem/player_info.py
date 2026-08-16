@@ -1,7 +1,7 @@
 """Authoritative, display-ready player information.
 
 The rendering clients should not infer poker meaning from raw state. This
-module turns engine/session data into stable turn, hand, event, verification,
+module turns engine/session data into stable turn, hand, event, deal-progress,
 and settlement views that Tkinter and Godot can render directly.
 """
 from __future__ import annotations
@@ -230,19 +230,39 @@ def turn_view(
     return view
 
 
-def verification_view(phase: str, void_reason: str | None = None) -> dict:
-    """Describe what the client may truthfully claim about deal verification."""
+def deal_progress_view(phase: str, void_reason: str | None = None) -> dict:
+    """Describe where the hand is in the deal/play/settle lifecycle.
+
+    This was called verification_view and reported states named
+    not_started / in_progress / audit_pending / VERIFIED, with labels like
+    "Deal and settlement verified" rendered straight into the client. Every
+    one of those was a cryptographic claim, and this function is a pure
+    function of `phase`: it never reads a proof, an audit result, or any
+    verification outcome at all. It is structurally incapable of reporting
+    that verification FAILED -- a hand whose proofs were never checked
+    reaches phase "settled" and would have been labelled "verified".
+
+    That is the same defect as a table declaring a deal policy it does not
+    run, one layer up, so it gets the same treatment: this now says only
+    what it measures, which is progress. The security evidence lives in
+    snapshot fields that are actually derived from the crypto --
+    `deal_policy` for what the table committed to, `proofs_verified` for
+    what this seat actually checked -- and deliberately stays raw. Turning
+    those into an "attested" boolean needs an explicit predicate over the
+    expected proof count for the seat and round structure, which is not
+    something a progress label should be inventing.
+    """
     if phase == "lobby":
-        return {"state": "not_started", "label": "Verification starts with the deal"}
+        return {"state": "not_started", "label": "Waiting to deal"}
     if phase == "dealing":
-        return {"state": "in_progress", "label": "Verifying peer deal contributions"}
+        return {"state": "dealing", "label": "Dealing"}
     if phase == "betting":
-        return {"state": "audit_pending", "label": "Deal active | final audit pending"}
+        return {"state": "in_hand", "label": "Hand in progress"}
     if phase == "settled":
-        return {"state": "verified", "label": "Deal and settlement verified"}
+        return {"state": "settled", "label": "Hand settled"}
     return {
         "state": "voided",
-        "label": f"Hand voided | {void_reason or 'verification failed'}",
+        "label": f"Hand voided | {void_reason or 'protocol failure'}",
     }
 
 
@@ -409,5 +429,5 @@ __all__ = [
     "made_hand_view",
     "settlement_view",
     "turn_view",
-    "verification_view",
+    "deal_progress_view",
 ]

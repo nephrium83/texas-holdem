@@ -59,6 +59,7 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0,
         )
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         bus.register(cid, s)
         sessions[cid] = s
     names  = [f"P{i}" for i in range(n)]
@@ -146,6 +147,7 @@ class TestDeadlineLifecycle:
                     transport=InMemoryTransport(bus, "peer0"), clock=clk)
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
 
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(
@@ -226,6 +228,7 @@ class TestBettingTimeout:
                     transport=InMemoryTransport(bus, "peer0"), clock=clk)
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
 
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(
@@ -367,6 +370,7 @@ class TestDealTimeout:
                         transport=InMemoryTransport(bus, cid), clock=clk)
             s.local_conn_id = cid
             s.configure_seats(list(order))
+            s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
             bus.register(cid, s)
             sessions[cid] = s
 
@@ -454,6 +458,7 @@ class TestProposalValidation:
                     transport=InMemoryTransport(bus, "A"))
         s.local_conn_id = "A"
         s.configure_seats(["A", "B"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(
             session_id="poker|A|B", hand_no=1,
@@ -605,6 +610,7 @@ class TestIdempotency:
                     transport=InMemoryTransport(bus, "A"))
         s.local_conn_id = "A"
         s.configure_seats(["A", "B"])
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(
             session_id="poker|A|B", hand_no=1,

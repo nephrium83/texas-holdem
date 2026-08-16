@@ -38,6 +38,7 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
         s._deal_master_secret = bytes([i + 1]) * 32
         s.local_conn_id = cid
         s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
         bus.register(cid, s)
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]

@@ -125,12 +125,17 @@ Today, multi-peer sessions are exercised through an in-memory transport; the
 libp2p/relay path and physical-machine playtest remain v1.x gate work.
 
 **Prevention mode.** The Bayer–Groth verifiable shuffle is integrated into the
-mental-deal coordinator as an explicit opt-in, set table-wide by the host
-(`bg_prevention` in the table settings). Every shuffler attaches a proof and
-every peer verifies it before accepting the deck; a missing, undecodable, or
-invalid proof voids the hand fail-closed and names the shuffler. Detection-only
-remains the default, and a table that does not set the flag behaves exactly as
-before.
+mental-deal coordinator and is **mandatory** for peer-to-peer play, set
+table-wide by the host as `deal_policy: "bayer-groth-v1"`. Every shuffler
+attaches a proof and every peer verifies it before accepting the deck; a
+missing, undecodable, or invalid proof voids the hand fail-closed and names
+the shuffler.
+
+**There is no default.** A table that declares no `deal_policy` is refused
+before it starts, and on a real peer-to-peer transport `"bayer-groth-v1"` is
+the only value accepted — a host cannot downgrade a table by omitting a
+setting. `"detection-only-v1"` stays available for in-process harnesses and
+benchmarks, and must be declared explicitly there too.
 
 **Performance policy:** measured end to end at 0.40 s (2 seats), 1.06 s
 (4 seats), and 4.11 s (9 seats) against budget targets of p95 under 5 s and
