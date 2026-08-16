@@ -311,12 +311,19 @@ def test_a_runaway_message_loop_is_not_retried():
         f"the runaway-loop guard was retried {calls['n']} times"
 
 
-def test_an_undeliverable_action_is_not_reported_as_applied():
-    """Routing the action paths through the shared drain helper made them
-    SWALLOW delivery failures: the bool was discarded and the client was
-    told its bet applied while peers may never have seen it. That also
-    silenced the logging at client_server._handle_command, because the
-    error stopped arriving there at all."""
+def test_an_undeliverable_action_surfaces_the_underlying_error():
+    """The action paths propagate a delivery failure; they do not swallow
+    it and they do not re-describe it.
+
+    These were briefly routed through the start_table drain helper for
+    "one drain policy" consistency, which made them discard the failure
+    and report a bet as applied. The fix for THAT then wrapped the error
+    in a new message and threw the engine verdict away. Both were worse
+    than the bare drain, which propagates the real exception --
+    client_server catches RuntimeError and logs it, so it reaches the
+    client as an error and the log as a stack trace, without inventing
+    anything.
+    """
     bus, sessions, order = _make_sessions(2)
     human = sessions[order[0]]
     _wrap_with_drain(human, bus)
@@ -328,5 +335,5 @@ def test_an_undeliverable_action_is_not_reported_as_applied():
     bus.register(order[1], Exploding())
     human._transport.broadcast({"type": "chat", "payload": {}})
 
-    with pytest.raises(RuntimeError, match="could not be delivered"):
+    with pytest.raises(RuntimeError, match="peer is broken"):
         human.send_bet_action("call", 0)

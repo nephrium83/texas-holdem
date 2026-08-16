@@ -181,22 +181,39 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
         # would drop the client's connection rather than answer.
         delivered = _drain_to_quiescence(bus)
         if verdict == "started":
-            # Measured, not inferred. A first version reported hand_failed
-            # whenever ANY drain attempt had raised -- so one transient
-            # hiccup in a bot's state hook branded a table that dealt
-            # perfectly, three verified proofs a seat, as failed. What the
-            # verdict is actually about is whether every seat began the
-            # hand, so ask that.
+            # "Did every seat get as far as having a hand to play." Four
+            # predicates were tried here and this is the only one that is
+            # both correct on healthy tables and catches a seat that never
+            # started. The rejected three, recorded so they are not
+            # re-attempted:
+            #
+            #   * "any drain attempt raised" -- branded a perfectly healthy
+            #     table hand_failed over one incidental hook error;
+            #   * "every seat completed the deal" (deal_done) -- the driver
+            #     stays not-done until the board completes, so this fails
+            #     at hand start on a healthy table;
+            #   * "every seat holds hole cards" -- this drain runs an
+            #     unbounded amount of gameplay, so the bots may be several
+            #     hands along when it returns and hole cards reset per
+            #     hand; it failed the real-socket reachability test.
+            #
+            # KNOWN GAP, deliberately left rather than chased with a fifth
+            # attempt: the replica is built BEFORE the deal runs, so a seat
+            # that accepts game_start and then dies on deal traffic has one
+            # and is reported as started, leaving the client on a table
+            # frozen at "Dealing". Catching that needs a stable notion of
+            # "this hand is progressing", which this seam does not have --
+            # it is a synchronous drain over an open-ended amount of play.
             missing = [cid for cid, sess in sessions.items()
                        if sess.replica is None]
             if bus.pending or missing:
-                _log.error("table started but seats %s never began the hand "
+                _log.error("table started but seats %s never began a hand "
                            "(%d message(s) undelivered, clean=%s)",
                            missing or "-", bus.pending, delivered)
                 verdict = "hand_failed"
             elif not delivered:
-                # Something raised and a retry covered for it. Worth a line,
-                # not a verdict: every seat dealt and nothing is queued.
+                # An error that delivery recovered from. A log line, not a
+                # verdict: every seat has a hand and nothing is queued.
                 _log.warning("start_table: delivery hit an error but "
                              "recovered; the table is playing")
         return verdict
@@ -248,27 +265,6 @@ def _drain_to_quiescence(bus: InMemoryBus) -> bool:
     return clean
 
 
-def _require_delivered(bus: InMemoryBus, what: str) -> None:
-    """Deliver, and refuse to pretend an action propagated when it did not.
-
-    The action paths originally called bus.drain() bare, so a delivery
-    failure raised. Routing them through _drain_to_quiescence for policy
-    consistency accidentally made them SWALLOW it: the bool was discarded
-    and the client was told its bet "applied" while the peers may never
-    have seen it. That also defeated the logging added at
-    client_server._handle_command, because the error stopped arriving.
-
-    Raising is right here, and safe now in a way it was not before:
-    _handle_command catches RuntimeError, so this reports an error to the
-    client instead of dropping the socket. The local action really did
-    apply -- what failed is its propagation, and that is worth saying.
-    """
-    if not _drain_to_quiescence(bus):
-        raise RuntimeError(
-            f"{what}: the action applied locally but could not be "
-            f"delivered to every seat")
-
-
 def _wrap_with_drain(session, bus: InMemoryBus) -> None:
     """Wrap the human seat's action methods so every call drains the bus.
 
@@ -276,18 +272,28 @@ def _wrap_with_drain(session, bus: InMemoryBus) -> None:
     knows about the bus, and that's correct -- keeping ClientServer
     bus-agnostic means it can be tested against a real socket with no bus.
     The drain coupling lives here, in the launcher that wires them together.
+
+    A bare drain, deliberately, and NOT the start_table helper. These two
+    were briefly routed through _drain_to_quiescence for "one drain policy"
+    consistency, which is how they came to swallow delivery failures and
+    report a bet as applied when peers never saw it. The three call sites
+    genuinely differ: start_table must survive a partial failure and turn
+    it into a verdict; these must not invent one. An escaping error here is
+    now safe -- client_server catches RuntimeError and logs it, rather than
+    dropping the socket as it once did -- so the simple thing is also the
+    correct thing.
     """
     orig_send_bet_action = session.send_bet_action
     orig_next_p2p_hand   = session.next_p2p_hand
 
     def send_bet_action(action: str, amount: int = 0) -> str:
         result = orig_send_bet_action(action, amount)
-        _require_delivered(bus, "send_bet_action")
+        bus.drain()
         return result
 
     def next_p2p_hand() -> str:
         result = orig_next_p2p_hand()
-        _require_delivered(bus, "next_p2p_hand")
+        bus.drain()
         return result
 
     session.send_bet_action = send_bet_action

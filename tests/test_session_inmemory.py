@@ -168,6 +168,30 @@ def test_bus_is_usable_after_an_exception_escapes_a_handler():
     assert ("Host", "still here") in got["peer1"]
 
 
+def test_the_step_limit_raises_the_type_that_is_not_retried():
+    """Pins the RAISE SITE, not just the handling.
+
+    _drain_to_quiescence special-cases DrainLoopError so a runaway loop is
+    not retried 64 times. The test for that stubs bus.drain and constructs
+    the error by hand, so reverting this raise to a plain RuntimeError left
+    it green while the defect fully returned -- 3200 handler invocations
+    where a bare drain does 50.
+    """
+    from holdem.p2p.inmemory_transport import DrainLoopError
+
+    bus = InMemoryBus()
+
+    class Chatty:
+        def handle_message(self, from_conn, msg):
+            bus.enqueue("peer0", "peer1", {"type": "chat"})
+
+    bus.register("peer1", Chatty())
+    bus.enqueue("peer0", "peer1", {"type": "chat"})
+
+    with pytest.raises(DrainLoopError):
+        bus.drain(max_steps=25)
+
+
 if __name__ == "__main__":
     passed = total = 0
     for name, fn in sorted(globals().items()):
