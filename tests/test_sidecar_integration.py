@@ -207,6 +207,27 @@ def _command(sock, reader, command: str, payload: dict | None = None):
             return result, msg
 
 
+def _await_snapshot(reader, predicate, what: str, limit: int = 200):
+    """Read snapshots until one satisfies *predicate*.
+
+    Bounded by message count as well as by the socket timeout, so a
+    sidecar that keeps pushing snapshots without ever reaching the wanted
+    state fails with a useful message instead of hanging.
+    """
+    last = None
+    for _ in range(limit):
+        msg = _readline(reader)
+        if msg.get("type") != "snapshot":
+            continue
+        last = msg
+        if predicate(msg):
+            return msg
+    raise AssertionError(
+        f"never observed {what} within {limit} messages; last snapshot: "
+        f"phase={(last or {}).get('phase')!r} "
+        f"voided={(last or {}).get('voided')!r}")
+
+
 class TestClientCanReachTheMentalDeal:
     """The load-bearing reachability test.
 
@@ -367,3 +388,84 @@ class TestSidecarArgValidation:
         )
         assert result.returncode != 0
         assert fragment.lower() in (result.stdout + result.stderr).lower()
+
+
+class TestTheProductDrivesItsOwnTimeouts:
+    """P2: Session.check_deadlines had NO production caller.
+
+    The deterministic timeout machinery -- deadlines, proposals, the void
+    path -- was complete, tested and unreachable, so a hand that stalled
+    stalled forever. Exactly the shape of the MentalDealDriver defect this
+    suite's other class exists for, one subsystem over.
+
+    These tests never call check_deadlines. That is the point: the claim
+    is not "timeouts work", which was already true, but "the shipped
+    product drives them".
+    """
+
+    def test_a_stalled_deal_fails_closed_through_the_production_ticker(self):
+        """The load-bearing one, and PR #34's M9 reproduced end to end.
+
+        A seat stops answering deal traffic. start_game still reports
+        started -- that verdict is a synchronous table-start result and
+        cannot divine a hand's future -- the client sees "dealing", and
+        then the production ticker drives the existing deadline to a void.
+        Nothing here touches the timeout API directly.
+        """
+        proc = _start_sidecar(
+            "--seats", "3",
+            "--test-stall-seat", "2",
+            "--test-deadline-scale", "0.02",     # 30s deal deadline -> 0.6s
+            "--test-tick-interval", "0.05",
+        )
+        try:
+            port = _read_port(proc)
+            with _connect(port) as (sock, reader):
+                _readline(reader)                          # hello
+                _readline(reader)                          # lobby snapshot
+
+                sock.settimeout(30.0)
+                result, snap = _command(sock, reader, "start_game")
+
+                # The table did start; only its hand is doomed.
+                assert result["verdict"] == "started", result
+                assert snap["phase"] == "dealing", (
+                    f"expected a stalled deal, got phase={snap['phase']!r}")
+                assert snap["voided"] is False
+
+                # ...and now the product's own ticker resolves it, with no
+                # help from this test.
+                voided = _await_snapshot(
+                    reader,
+                    lambda s: s.get("voided") is True,
+                    "the stalled hand to void")
+
+                assert voided["void_reason"] == "deal timeout: deal_shuffle", \
+                    voided["void_reason"]
+                assert voided["turn"]["state"] == "voided"
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)
+
+    def test_a_healthy_table_is_not_voided_by_the_ticker(self):
+        """The ticker must not be a hand-killer. Same accelerated
+        deadlines, no stalled seat: the hand plays normally."""
+        proc = _start_sidecar(
+            "--seats", "3",
+            "--test-deadline-scale", "0.05",
+            "--test-tick-interval", "0.05",
+        )
+        try:
+            port = _read_port(proc)
+            with _connect(port) as (sock, reader):
+                _readline(reader)
+                _readline(reader)
+                sock.settimeout(30.0)
+                _result, snap = _command(sock, reader, "start_game")
+
+                assert snap["phase"] in ("betting", "settled"), snap["phase"]
+                assert snap["voided"] is False
+                assert len(snap["you"].get("hole") or []) == 2
+        finally:
+            proc.terminate()
+            proc.wait(timeout=5)

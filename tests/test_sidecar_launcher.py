@@ -8,6 +8,7 @@ job is the launcher's new glue -- session/bot construction, the
 drain-wrapping, and BotDriver's react logic -- not re-deriving crypto
 guarantees already proven elsewhere.
 """
+import asyncio
 import random
 import sys
 from pathlib import Path
@@ -18,7 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem import client_view
 from holdem.p2p.inmemory_transport import InMemoryBus
+from holdem.p2p.timeout import FakeClock
+from holdem.p2p.session import Session
 from holdem.sidecar_launcher import (
+    _deadline_ticker, _stall_seat, _tick_deadlines,
     BotDriver, _deal_first_hand, _make_sessions, _make_start_table,
     _wire_hand_start, _wrap_with_drain,
 )
@@ -337,3 +341,171 @@ def test_an_undeliverable_action_surfaces_the_underlying_error():
 
     with pytest.raises(RuntimeError, match="peer is broken"):
         human.send_bet_action("call", 0)
+
+
+# --------------------------------------------------- the production ticker
+
+def _armed_table(seats=3):
+    """A table whose deal is stalled, with its deadlines already expired."""
+    clk = FakeClock()
+    bus, sessions, order = _make_sessions(seats)
+    for sess in sessions.values():
+        sess._clock = clk
+    _wire_hand_start(sessions, order)
+    _stall_seat(sessions[order[seats - 1]])
+    _make_start_table(sessions, order, bus, _SETTINGS)()
+    clk.advance(60.0)                      # past every phase deadline
+    return bus, sessions, order
+
+
+def test_a_tick_resolves_a_stalled_deal():
+    bus, sessions, order = _armed_table()
+    assert not any(s.hand_voided for s in sessions.values())
+
+    assert _tick_deadlines(sessions, bus) is True
+
+    assert all(s.hand_voided for s in sessions.values())
+    assert all(s.void_reason == "deal timeout: deal_shuffle"
+               for s in sessions.values())
+
+
+def test_a_tick_with_nothing_armed_emits_nothing():
+    """The sweep must be a cheap no-op on a healthy table, not a pump."""
+    bus, sessions, order = _make_sessions(2)
+    _wire_hand_start(sessions, order)
+    assert _tick_deadlines(sessions, bus) is False
+    assert bus.pending == 0
+
+
+def test_a_tick_does_not_deliver_work_it_did_not_create():
+    """The ticker is not a general bus pump.
+
+    Asserted against PRE-EXISTING queued work, because an empty queue
+    cannot tell the two apart: a version that drained unconditionally
+    passed the no-op test above, since draining nothing is harmless.
+    Delivery on every other path is owned by that path -- a ticker that
+    also pumped would move messages at a cadence no caller expects.
+    """
+    bus, sessions, order = _make_sessions(2)
+    _wire_hand_start(sessions, order)
+    bus.enqueue(order[0], order[1], {"type": "chat", "payload": {}})
+
+    assert _tick_deadlines(sessions, bus) is False
+    assert bus.pending == 1,         "the ticker delivered queued work that no deadline produced"
+
+
+def test_a_tick_skips_terminated_sessions():
+    """Terminal state is absorbing, and the ticker runs forever in the
+    background -- the thing most likely to poke a dead session.
+
+    Pins the OUTCOME, not the ticker's own skip: terminate() clears the
+    deadline token, so check_deadlines no-ops regardless and deleting the
+    skip fires nothing. The property the product needs is this assertion;
+    where it is enforced is Session's business.
+    """
+    bus, sessions, order = _armed_table()
+    for sess in sessions.values():
+        sess.terminate(Session.LOCAL_SHUTDOWN, "shutting down")
+    before = {cid: (s.terminal_state, s.terminal_reason, s.hand_voided)
+              for cid, s in sessions.items()}
+
+    _tick_deadlines(sessions, bus)
+
+    after = {cid: (s.terminal_state, s.terminal_reason, s.hand_voided)
+             for cid, s in sessions.items()}
+    assert after == before, "the ticker mutated a terminated session"
+
+
+def test_a_tick_does_not_nest_a_drain():
+    """The ticker delivers work IT created and is not a general pump.
+
+    If a drain is already running it shares this queue and will consume
+    the proposal itself, so the tick must skip rather than nest -- a
+    nested drain is refused outright by the bus.
+    """
+    bus, sessions, order = _armed_table()
+    outcome = {}
+
+    class Nosy:
+        def handle_message(self, from_conn, msg):
+            # Runs INSIDE an active drain.
+            try:
+                outcome["emitted"] = _tick_deadlines(sessions, bus)
+            except RuntimeError as exc:
+                outcome["raised"] = exc
+
+    bus.register("observer", Nosy())
+    bus.enqueue(order[0], "observer", {"type": "chat"})
+    bus.drain()
+
+    assert "raised" not in outcome,         f"the ticker nested a drain: {outcome.get('raised')}"
+    assert bus.pending == 0, "the outer drain did not pick up the tick's work"
+
+
+def test_the_ticker_survives_a_failing_iteration():
+    """One bad sweep must not end liveness for the whole session -- that
+    would silently restore the defect the ticker exists to fix."""
+    calls = {"n": 0}
+
+    class Boom(dict):
+        def values(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("one bad sweep")
+            return []
+
+    async def inner():
+        task = asyncio.create_task(_deadline_ticker(Boom(), InMemoryBus(), 0.01))
+        await asyncio.sleep(0.15)
+        still_running = not task.done()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return still_running
+
+    assert asyncio.run(inner()) is True, "the ticker died on one bad sweep"
+    assert calls["n"] > 1, "the ticker stopped sweeping after the failure"
+
+
+def test_scale_deadlines_refuses_a_factor_outside_the_test_range():
+    """The knob accelerates deadlines for tests and must not be able to
+    lengthen them. Nothing production-facing may reach it, but a typo in a
+    test harness should not quietly grant a table a longer timeout."""
+    bus, sessions, order = _make_sessions(2)
+    sess = sessions[order[0]]
+    before = dict(sess._phase_timeout)
+
+    for bad in (0.0, -1.0, 2.0):
+        with pytest.raises(ValueError, match="deadline scale"):
+            sess.scale_deadlines(bad)
+
+    assert sess._phase_timeout == before,         "a refused scale still altered the deadlines"
+
+
+def test_scale_deadlines_compresses_every_phase():
+    bus, sessions, order = _make_sessions(2)
+    sess = sessions[order[0]]
+    before = dict(sess._phase_timeout)
+
+    sess.scale_deadlines(0.5)
+
+    assert sess._phase_timeout == {k: v * 0.5 for k, v in before.items()}
+
+
+def test_the_ticker_stops_when_cancelled():
+    """Cancellation must actually stop it: a tick against a half-stopped
+    sidecar would deliver into a session nobody is reading."""
+    async def inner():
+        bus, sessions, order = _make_sessions(2)
+        task = asyncio.create_task(_deadline_ticker(sessions, bus, 0.01))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return True
+        return False
+
+    assert asyncio.run(inner()) is True

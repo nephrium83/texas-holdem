@@ -3111,6 +3111,33 @@ class Session:
     # ------------------------------------------------------------------
 
     @owned
+    def scale_deadlines(self, factor: float) -> None:
+        """Compress every phase deadline by ``factor``. TEST SUPPORT ONLY.
+
+        Exists so an integration test can drive the REAL timeout path --
+        the same check_deadlines, the same timeout_proposal, the same void
+        -- without a CI machine spending thirty seconds per case watching a
+        clock. It scales durations and nothing else: no table setting, no
+        protocol message, no negotiated value, nothing the client can see.
+
+        A method rather than a dict the launcher writes into, because
+        _phase_timeout is what check_deadlines reads to decide whether
+        waiting has become failure. Letting a caller reach in would put
+        that invariant outside the object that enforces it.
+
+        Restricted to (0, 1]: this accelerates deadlines for tests, and
+        lengthening them is not something any caller should be able to ask
+        for by passing a number.
+        """
+        if not 0.0 < factor <= 1.0:
+            raise ValueError(
+                f"deadline scale must be in (0, 1], got {factor!r}")
+        if factor == 1.0:
+            return
+        self._phase_timeout = {phase: limit * factor
+                               for phase, limit in self._phase_timeout.items()}
+
+    @owned
     def check_deadlines(self) -> None:
         """Broadcast a timeout_proposal if the current deadline has expired.
 

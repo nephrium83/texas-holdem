@@ -54,6 +54,19 @@ class InMemoryBus:
         failures tell whether delivery actually finished."""
         return len(self._queue)
 
+    @property
+    def is_draining(self) -> bool:
+        """Whether a drain is in progress.
+
+        For a caller that may enqueue from outside the normal command path
+        and wants to deliver its own work WITHOUT becoming a second pump.
+        If a drain is already running it will consume anything newly
+        enqueued -- same queue -- so the right move is to skip, not to
+        nest. drain() refuses re-entry outright, so this is how a caller
+        asks rather than finds out by exception.
+        """
+        return self._draining
+
     def register(self, conn_id: str, session) -> None:
         self._sessions[conn_id] = session
 

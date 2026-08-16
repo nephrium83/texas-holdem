@@ -48,6 +48,12 @@ HUMAN_SEAT = 0
 # States where next_p2p_hand() is meaningful.
 _ADVANCEABLE_STATES = ("hand_complete", "voided")
 
+# How often the production ticker sweeps deadlines. check_deadlines' own
+# docstring suggests "every second", and the shortest canonical deadline is
+# 10s (settlement_ack), so one second is well inside every phase budget
+# while costing a no-op call per seat.
+_DEADLINE_TICK_SECONDS = 1.0
+
 # Ceiling on retries when delivery keeps failing. Each drain() consumes at
 # least one message before it can raise, so this bounds a pathological
 # handler that enqueues as fast as it fails; a healthy table settles in one.
@@ -128,6 +134,88 @@ def _wire_hand_start(sessions: dict, order: list) -> None:
                 button=0,
             )
         session.on_game_start = _on_game_start
+
+
+#: Message types that make up the mental-poker deal. Used only by the
+#: test-only stall hook below.
+_DEAL_TRAFFIC = ("key_announce", "deck_round", "deal_share", "audit_open")
+
+
+def _stall_seat(session) -> None:
+    """Make one seat stop answering deal traffic. TEST SUPPORT ONLY.
+
+    Models a peer that went silent -- which is the condition timeouts
+    exist for -- by DROPPING deal messages rather than raising on them.
+    Raising would additionally exercise the drain's error path and muddy
+    what the test is proving; a silent peer is the honest shape and the
+    one the deadline machinery is designed against.
+
+    Needed because the acceptance test drives a real sidecar subprocess
+    over a real socket, where a seat cannot be reached to be broken from
+    the outside.
+    """
+    real_handle = session.handle_message
+
+    def deaf_to_the_deal(from_conn, msg):
+        if msg.get("type") in _DEAL_TRAFFIC:
+            return None
+        return real_handle(from_conn, msg)
+
+    session.handle_message = deaf_to_the_deal
+
+
+def _tick_deadlines(sessions: dict, bus: InMemoryBus) -> bool:
+    """One deadline sweep. True if it emitted bus work.
+
+    Session owns timeout SEMANTICS -- what a deadline is, when it has
+    expired, what to propose. This supplies only periodic execution, which
+    is the single thing that was missing: check_deadlines' own docstring
+    says "call this periodically from the event loop", and nothing ever
+    did. The machinery was complete, tested, and unreachable, so every
+    stalled hand was permanent.
+
+    Every seat is swept, not just the human. Each Session tracks its own
+    deadline and the protocol expects peers to notice independently and
+    converge on the proposal; check_deadlines is a cheap no-op when no
+    deadline is armed.
+
+    Deliberately NOT a general bus pump. It delivers work IT created and
+    nothing else, and skips the drain entirely if one is already running:
+    that drain shares this queue and will consume the proposal itself, so
+    nesting would be both unnecessary and refused.
+    """
+    before = bus.pending
+    for session in sessions.values():
+        # Not the guard it looks like: terminate() clears the deadline
+        # token, so check_deadlines already no-ops on a dead session, and
+        # a control that deletes this line fires nothing. Kept because a
+        # background sweep should not poke terminated sessions at all --
+        # but the guarantee lives in terminate(), not here.
+        if session.terminal_state is None:
+            session.check_deadlines()
+    emitted = bus.pending > before
+    if emitted and not bus.is_draining:
+        bus.drain()
+    return emitted
+
+
+async def _deadline_ticker(sessions: dict, bus: InMemoryBus,
+                           interval: float) -> None:
+    """Run _tick_deadlines forever, until cancelled.
+
+    One failing sweep must not end liveness for the whole session -- that
+    would silently restore the defect this exists to fix -- so an
+    exception is logged and the next tick still happens. Cancellation is
+    re-raised: shutdown must actually stop it.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            _tick_deadlines(sessions, bus)
+        except asyncio.CancelledError:
+            raise
+        except Exception:                          # noqa: BLE001
+            _log.exception("deadline ticker iteration failed")
 
 
 def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
@@ -391,8 +479,23 @@ class BotDriver:
 # ---------------------------------------------------------------------------
 
 async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
-              port: int, seed: int | None, nickname: str) -> None:
+              port: int, seed: int | None, nickname: str,
+              deadline_scale: float = 1.0,
+              tick_interval: float = _DEADLINE_TICK_SECONDS,
+              stall_seat: int | None = None) -> None:
     bus, sessions, order = _make_sessions(seats, nickname=nickname)
+    if stall_seat is not None:
+        _log.warning("TEST MODE: seat %d will not answer deal traffic",
+                     stall_seat)
+        _stall_seat(sessions[order[stall_seat]])
+    if deadline_scale != 1.0:
+        # TEST ONLY. Compresses the existing deadline durations so an
+        # integration test can drive the real timeout path without waiting
+        # thirty real seconds. Touches nothing else -- same clock, same
+        # check_deadlines, same proposal, same void.
+        _log.warning("TEST MODE: deadlines scaled by %.4f", deadline_scale)
+        for session in sessions.values():
+            session.scale_deadlines(deadline_scale)
     human_conn_id = order[HUMAN_SEAT]
     human_session = sessions[human_conn_id]
     bot_sessions  = {cid: s for cid, s in sessions.items()
@@ -427,11 +530,26 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
     # seat begins its mental-poker deal, and one drain carries it to
     # quiescence. BotDriver takes over from there.
 
+    # THE point of this module's liveness: Session.check_deadlines had no
+    # production caller at all, so a stalled deal or a peer that simply
+    # stopped answering left the hand permanently stuck. The timeout
+    # machinery was complete and unreachable.
+    ticker = asyncio.create_task(
+        _deadline_ticker(sessions, bus, tick_interval))
+
     try:
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         pass
     finally:
+        # Cancelled and awaited before the server goes: a tick that fired
+        # against a half-stopped sidecar would be delivering into a session
+        # nobody is reading any more.
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
         await server.stop()
         _log.info("sidecar stopped")
 
@@ -458,6 +576,26 @@ def _parse_args(argv=None):
     p.add_argument("--seed",        type=int, default=None, metavar="SEED")
     p.add_argument("--nickname",    type=str, default="Player", metavar="NAME")
     p.add_argument("--log-level",   default="WARNING",      dest="log_level")
+    p.add_argument(
+        "--test-deadline-scale", type=float, default=1.0, metavar="FACTOR",
+        dest="test_deadline_scale",
+        help="INTERNAL / TEST ONLY. Multiply every phase deadline by FACTOR "
+             "(0 < FACTOR <= 1) so integration tests can exercise the real "
+             "timeout path without waiting out a 30s deadline. Affects "
+             "deadline durations ONLY -- never table settings, protocol "
+             "messages, or anything the client can observe. Leave at 1.0.")
+    p.add_argument(
+        "--test-tick-interval", type=float, default=_DEADLINE_TICK_SECONDS,
+        metavar="SECONDS", dest="test_tick_interval",
+        help="INTERNAL / TEST ONLY. How often the deadline ticker sweeps. "
+             "Leave at the default.")
+    p.add_argument(
+        "--test-stall-seat", type=int, default=None, metavar="SEAT",
+        dest="test_stall_seat",
+        help="INTERNAL / TEST ONLY. Make SEAT stop answering mental-deal "
+             "traffic, modelling a peer that went silent, so the timeout "
+             "path can be exercised end to end. Never set this in "
+             "production.")
     args = p.parse_args(argv)
 
     if args.seats < 2:
@@ -472,6 +610,12 @@ def _parse_args(argv=None):
         p.error("--stack: must cover at least one big blind")
     if not (0 <= args.port <= 65535):
         p.error("--port: must be 0-65535")
+    if not 0.0 < args.test_deadline_scale <= 1.0:
+        p.error("--test-deadline-scale: must be in (0, 1]")
+    if args.test_tick_interval <= 0:
+        p.error("--test-tick-interval: must be positive")
+    if args.test_stall_seat is not None and             not 0 <= args.test_stall_seat < args.seats:
+        p.error(f"--test-stall-seat: must be 0-{args.seats - 1}")
 
     return args
 
@@ -492,6 +636,9 @@ def main(argv=None) -> None:
             port=args.port,
             seed=args.seed,
             nickname=args.nickname,
+            deadline_scale=args.test_deadline_scale,
+            tick_interval=args.test_tick_interval,
+            stall_seat=args.test_stall_seat,
         ))
     except KeyboardInterrupt:
         pass
