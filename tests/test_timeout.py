@@ -468,13 +468,18 @@ class TestProposalValidation:
         r.start_hand(0)
         s._replica = r
         s._hand_no  = 1
-        # Set a matching deadline token so proposals CAN match
-        token = DeadlineToken(
-            hand_id    = "poker|A|B",
-            phase      = "betting",
-            actor      = "B",
-            action_seq = r.next_seq,
-        )
+        # The token a proposal must match is the one this replica DERIVES
+        # from its own state, not one stashed on the session. The fixture
+        # used to fabricate hand_id="poker|A|B" and assign it to
+        # _current_deadline_token, which the old validation accepted -- a
+        # proposal could name a hand this replica was not playing and still
+        # be applied, provided the local stash agreed. That is the same
+        # defect class as the convergence bug: the local timer was being
+        # treated as protocol authority.
+        token = s._expected_timeout_token()
+        assert token is not None and token.phase == "betting", token
+        # The local timer is still armed here so the "stale token" cases
+        # below exercise a peer that IS watching someone.
         s._current_deadline_token = token
         s._deadline_started_at   = 0.0
         return s, token
@@ -802,3 +807,217 @@ class TestConvergence:
         src = inspect.getsource(tm)
         assert not re.search(r'\bsleep\s*\(', src), \
             "Found a sleep() call in holdem/p2p/timeout.py"
+
+
+# ---------------------------------------------------------------------------
+# Proposal applicability: the timed-out actor must converge too
+# ---------------------------------------------------------------------------
+
+class TestTimeoutProposalApplicability:
+    """A betting timeout must reach EVERY replica, including its subject.
+
+    _maybe_start_deadline correctly refuses to arm a timer against
+    yourself. Validation used to compare a received proposal against that
+    timer, so the one peer a betting timeout is ABOUT had nothing to
+    compare against and rejected it: observers folded that peer, the peer
+    did not fold itself, and the table diverged permanently.
+
+    The fix separates the deterministic "which transition is
+    timeout-eligible right now" from the local "may I propose failure yet"
+    clock. These tests pin the security half as hard as the liveness half:
+    actor names whose hand gets folded, so a valid sequence number must NOT
+    let a hostile peer nominate somebody else.
+    """
+
+    def _betting_table(self, seats=2):
+        """A table whose armed deadline is a BETTING one.
+
+        The deal driver is cleared after the deal completes, deliberately.
+        On this base _maybe_start_deadline gives the deal branch priority
+        whenever `not deal_done()` -- and deal_done() stays False until the
+        POST-HAND audit, so a normal table carries a deal_shuffle deadline
+        right through betting and every betting-timeout test would silently
+        exercise the void path instead. That defect is real and is fixed
+        separately (P2a); this file is about whether a RECEIVED PROPOSAL is
+        applicable, so it isolates that question rather than depending on
+        the other fix landing first.
+        """
+        clocks = [FakeClock() for _ in range(seats)]
+        bus, sessions, order = make_table(seats, clocks=clocks)
+        for sess in sessions.values():
+            sess._deal_driver = None
+            sess._notify_state_changed()
+        return bus, sessions, order, clocks
+
+    def _timeout_the_actor(self, seats):
+        bus, sessions, order, clocks = self._betting_table(seats)
+        s0 = sessions[order[0]]
+        actor_conn = order[s0.replica.actor]
+        watcher_conn = next(c for c in order if c != actor_conn)
+        clocks[order.index(watcher_conn)].advance(31.0)
+        sessions[watcher_conn].check_deadlines()
+        bus.drain()
+        return sessions, order, actor_conn
+
+    @pytest.mark.parametrize("seats", [2, 3])
+    def test_every_replica_including_the_actor_converges(self, seats):
+        sessions, order, actor_conn = self._timeout_the_actor(seats)
+        digests = {cid: s.replica.state_digest() for cid, s in sessions.items()}
+        assert len(set(digests.values())) == 1, \
+            "replicas diverged after a betting timeout: %r" % (digests,)
+        seqs = {cid: s.replica.next_seq for cid, s in sessions.items()}
+        assert len(set(seqs.values())) == 1, \
+            "the timed-out actor did not apply its own timeout: %r" % (seqs,)
+
+    def test_the_acting_peer_still_arms_no_timer_on_itself(self):
+        """Convergence must NOT be bought by starting self-timeouts."""
+        bus, sessions, order, _clocks = self._betting_table(2)
+        actor_conn = order[sessions[order[0]].replica.actor]
+        actor = sessions[actor_conn]
+        assert actor._current_deadline_token is None, \
+            "the acting peer armed a deadline against itself"
+        assert actor._expected_timeout_token() is not None, \
+            "but it must still know which transition is timeout-eligible"
+
+    def test_the_timeout_result_is_fold_or_check_per_spec(self):
+        """TIMEOUT_SPEC: fold when facing a bet, check when nothing is owed.
+        Never a void -- that is the deal path's consequence, not betting's."""
+        bus, sessions, order, clocks = self._betting_table(2)
+        s0 = sessions[order[0]]
+        actor_seat = s0.replica.actor
+        actor_conn = order[actor_seat]
+        facing = s0.replica.engine.legal(actor_seat).get("to_call", 0) > 0
+        watcher_conn = next(c for c in order if c != actor_conn)
+
+        clocks[order.index(watcher_conn)].advance(31.0)
+        sessions[watcher_conn].check_deadlines()
+        bus.drain()
+
+        for cid, s in sessions.items():
+            assert not s.hand_voided, \
+                "%s voided the hand on a BETTING timeout" % cid
+        player = s0.replica.engine.players[actor_seat]
+        if facing:
+            assert player.folded, "actor faced a bet and was not folded"
+        else:
+            assert not player.folded, "actor owed nothing and was folded"
+
+    # ---------------------------------------------------- hostile proposals
+
+    def _armed_table(self):
+        bus, sessions, order, _clocks = self._betting_table(3)
+        victim = sessions[order[0]]
+        return bus, sessions, order, victim, victim._expected_timeout_token()
+
+    def _propose(self, victim, frm, **overrides):
+        token = victim._expected_timeout_token()
+        raw = {"hand_id": token.hand_id, "phase": token.phase,
+               "actor": token.actor, "action_seq": token.action_seq}
+        raw.update(overrides)
+        before = victim.replica.state_digest()
+        victim.handle_message(frm, {"type": "timeout_proposal",
+                                    "hand": victim._hand_no,
+                                    "token": raw, "missing_seat": None})
+        return before, victim.replica.state_digest()
+
+    def test_a_betting_proposal_naming_a_different_actor_changes_nothing(self):
+        """A correct hand/phase/seq must not let a peer nominate whichever
+        player it would most like to see folded.
+
+        Note where this is actually enforced: the replica refuses an action
+        from a seat whose turn it is not, so on the BETTING path a wrong
+        actor is already inert and dropping the check here fires nothing.
+        The check earns its place on the DEAL path -- see the test below,
+        which is the one that discriminates.
+        """
+        bus, sessions, order, victim, token = self._armed_table()
+        other = next(c for c in order if c != token.actor)
+        before, after = self._propose(victim, order[1], actor=other)
+        assert before == after, "a wrong-actor timeout proposal was applied"
+
+    def test_a_deal_proposal_cannot_brand_an_innocent_peer(self):
+        """THE security case, and where actor validation is load-bearing.
+
+        _apply_deal_timeout uses token.actor as pure ATTRIBUTION: it marks
+        that peer unavailable and names it in the void reason. Nothing
+        cross-checks it -- unlike the betting path, where the replica
+        refuses an out-of-turn action on its own. The canonical deal token
+        carries actor=None, because a deal contribution is owed by every
+        required peer and no single one is named.
+
+        So without actor binding, any peer holding a valid sequence number
+        could void the hand AND pin the blame on whoever it chose. This
+        table has a deal deadline armed, which is the default on this base.
+        """
+        from holdem.p2p.session import Player
+        clocks = [FakeClock(), FakeClock(), FakeClock()]
+        bus, sessions, order = make_table(3, clocks=clocks)
+        victim = sessions[order[0]]
+        # make_table bypasses the lobby, so give the victim a roster: the
+        # branding half of the harm needs somebody to brand.
+        with victim._lock:
+            for cid in order:
+                victim.players[cid] = Player(conn_id=cid, peer_id="",
+                                             nickname=cid, avatar_b64="")
+        expected = victim._expected_timeout_token()
+        assert expected is not None and expected.phase == "deal_shuffle", expected
+        assert expected.actor is None, "a deal token must name no single peer"
+
+        scapegoat = order[1]
+        victim.handle_message(order[2], {
+            "type": "timeout_proposal",
+            "hand": victim._hand_no,
+            "token": {"hand_id": expected.hand_id, "phase": expected.phase,
+                      "actor": scapegoat,
+                      "action_seq": expected.action_seq},
+            "missing_seat": None,
+        })
+
+        assert not victim.hand_voided,             "a proposal naming an arbitrary peer voided the hand"
+        assert victim.players[scapegoat].unavailable is False,             "an innocent peer was branded unavailable by a forged proposal"
+
+    def test_a_proposal_with_the_wrong_phase_is_refused(self):
+        bus, sessions, order, victim, token = self._armed_table()
+        before, after = self._propose(victim, order[1], phase="deal_shuffle")
+        assert before == after
+
+    def test_a_proposal_with_the_wrong_hand_id_is_refused(self):
+        bus, sessions, order, victim, token = self._armed_table()
+        before, after = self._propose(victim, order[1],
+                                      hand_id="poker.deal.v2:deadbeef")
+        assert before == after
+
+    @pytest.mark.parametrize("seq_delta", [-1, 1, 99])
+    def test_a_proposal_with_a_stale_or_future_seq_is_refused(self, seq_delta):
+        bus, sessions, order, victim, token = self._armed_table()
+        before, after = self._propose(victim, order[1],
+                                      action_seq=token.action_seq + seq_delta)
+        assert before == after
+
+    def test_a_proposal_for_the_previous_actor_is_refused_after_an_action(self):
+        """Once a legitimate action advances next_seq, the old actor's
+        proposal describes a transition that is no longer eligible."""
+        bus, sessions, order, victim, stale = self._armed_table()
+        sessions[stale.actor].send_bet_action("call")
+        bus.drain()
+
+        raw = {"hand_id": stale.hand_id, "phase": stale.phase,
+               "actor": stale.actor, "action_seq": stale.action_seq}
+        before = victim.replica.state_digest()
+        victim.handle_message(order[1], {"type": "timeout_proposal",
+                                         "hand": victim._hand_no,
+                                         "token": raw, "missing_seat": None})
+        assert victim.replica.state_digest() == before, \
+            "a proposal for the superseded actor was applied"
+
+    def test_local_clock_state_does_not_affect_acceptance(self):
+        """Wall time decides when a peer may PROPOSE, never whether a
+        received proposal is applied -- that is the action sequence's job."""
+        digests = []
+        for started_at in (None, 0.0, -10000.0, 10000.0):
+            bus, sessions, order, victim, token = self._armed_table()
+            victim._deadline_started_at = started_at
+            self._propose(victim, order[1])
+            digests.append(victim.replica.state_digest())
+        assert len(set(digests)) == 1, \
+            "acceptance varied with local clock state: %r" % (digests,)

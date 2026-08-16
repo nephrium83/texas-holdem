@@ -3182,17 +3182,27 @@ class Session:
             _log.warning("session: malformed timeout_proposal from %s", conn_id)
             return
 
-        # Reject if this proposal is not for the current deadline.
-        if token != self._current_deadline_token:
-            _log.debug("session: stale timeout_proposal from %s (token mismatch)",
-                       conn_id)
-            return
-
-        # Reject if the replica has already advanced past the proposal's seq.
-        if token.action_seq != self._replica.next_seq:
-            _log.debug("session: out-of-order timeout_proposal from %s "
-                       "(seq %d, expected %d)",
-                       conn_id, token.action_seq, self._replica.next_seq)
+        # Does this proposal describe the transition that is actually
+        # timeout-eligible right now? Checked against the token this
+        # replica derives from its OWN state, not against whatever timer
+        # this peer happens to have armed.
+        #
+        # Those are different questions, and conflating them made the
+        # betting timeout impossible to converge: the acting peer arms no
+        # timer against itself, so _current_deadline_token is None there,
+        # and it rejected every proposal about itself while every other
+        # replica applied one. Permanent divergence.
+        #
+        # Equality covers all four fields, so a wrong actor, wrong phase,
+        # wrong hand, or stale/future sequence are each refused. That is
+        # stricter than the old check on the paths where a timer existed,
+        # and it is the only check available on the path where one cannot.
+        expected = self._expected_timeout_token()
+        if expected is None or token != expected:
+            _log.debug(
+                "session: timeout_proposal from %s does not describe the "
+                "currently timeout-eligible transition (got %r, expected %r)",
+                conn_id, token, expected)
             return
 
         self._apply_timeout(token)
@@ -3262,54 +3272,93 @@ class Session:
         self._void_hand(reason)
 
     @owned
-    def _maybe_start_deadline(self) -> None:
-        """Evaluate whether a deadline needs to be started or cleared after
-        any state change.  Called automatically by _notify_state_changed."""
-        # No deadline when no active, non-settled hand exists.
-        if self._replica is None or self.hand_voided or self.hand_result is not None:
-            self._clear_deadline()
-            return
+    def _expected_timeout_token(self) -> Optional[DeadlineToken]:
+        """The timeout token implied by this replica's current state.
 
-        # If the deal is still in flight, track a deal deadline regardless of
-        # the replica's betting phase (betting cannot proceed without holes).
+        Pure and deterministic: no wall clock, no local arming policy, no
+        "am I the actor" exclusion. Every replica computes the same value
+        from the same replica state, which is exactly what makes a received
+        proposal checkable.
+
+        This exists because one field was doing three different jobs. A
+        deadline has three separable concepts:
+
+          1. the expected transition -- who or what are we waiting for,
+             deterministic from protocol state;
+          2. the local timer -- may I propose failure yet, decided by this
+             peer's monotonic clock;
+          3. received-proposal validity -- does this proposal describe the
+             transition that is actually timeout-eligible right now, again
+             deterministic from protocol state.
+
+        (1) and (3) are the same question and answered here. (2) is a local
+        policy layered on top by _maybe_start_deadline, which declines to
+        arm a timer against yourself.
+
+        Collapsing them into _current_deadline_token made the betting
+        timeout logically impossible to converge: the acting peer correctly
+        arms no timer on itself, so it had nothing to compare a proposal
+        about itself against, and rejected it. Every other replica folded
+        that peer; it did not fold itself. The table diverged permanently
+        and TIMEOUT_SPEC requires all peers to converge.
+
+        Note this is STRICTER than checking a subset of fields. `actor` is
+        part of the security statement -- it names whose hand gets folded --
+        so a proposal must match the exact actor this replica independently
+        derives from replica.actor and the seat order, not merely a
+        plausible one carrying a valid sequence number.
+        """
+        if self._replica is None or self.hand_voided or self.hand_result is not None:
+            return None
+
+        # Deal in flight: a contribution is outstanding from every required
+        # peer, so the token names no single actor.
         if (self._deal_driver is not None
                 and not self.deal_done()
                 and not self.deal_aborted()):
-            token = DeadlineToken(
+            return DeadlineToken(
                 hand_id    = self._deal_session_id(),
                 phase      = "deal_shuffle",
                 actor      = None,
                 action_seq = self._replica.next_seq,
             )
-            if token != self._current_deadline_token:
-                self._start_deadline(token)
-            return
 
-        # Deal is done (or absent). Track the current actor's betting turn.
         from holdem.p2p.replica_table import PHASE_BETTING
         if self._replica.phase != PHASE_BETTING:
-            self._clear_deadline()
-            return
+            return None
 
         actor = self._replica.actor
         if actor is None or not (0 <= actor < len(self._seat_order)):
-            self._clear_deadline()
-            return
+            return None
 
-        actor_conn = self._seat_order[actor]
-        if actor_conn == self.local_conn_id:
-            # It is our turn; we set no deadline on ourselves.
-            self._clear_deadline()
-            return
-
-        token = DeadlineToken(
+        return DeadlineToken(
             hand_id    = self._deal_session_id(),
             phase      = "betting",
-            actor      = actor_conn,
+            actor      = self._seat_order[actor],
             action_seq = self._replica.next_seq,
         )
-        if token != self._current_deadline_token:
-            self._start_deadline(token)
+
+    def _maybe_start_deadline(self) -> None:
+        """Arm or clear THIS peer's local timer after any state change.
+
+        Local policy only. What the table is waiting for is
+        _expected_timeout_token's answer; this decides whether this peer
+        runs a clock against it.
+        """
+        expected = self._expected_timeout_token()
+        if expected is None:
+            self._clear_deadline()
+            return
+
+        # No timer against yourself: a peer does not get to declare its own
+        # turn expired. Unchanged behaviour -- and it is precisely why
+        # received proposals cannot be validated against this timer.
+        if expected.actor is not None and expected.actor == self.local_conn_id:
+            self._clear_deadline()
+            return
+
+        if expected != self._current_deadline_token:
+            self._start_deadline(expected)
 
     def _start_deadline(self, token: DeadlineToken) -> None:
         self._current_deadline_token = token

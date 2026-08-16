@@ -108,19 +108,44 @@ same token are idempotent — they resolve to a single replica transition.
 
 ### 3. Receiving and validating a proposal
 
+**Two different questions, two different authorities.** The local deadline
+state says when *this* peer may ORIGINATE a proposal. It does not say
+whether a RECEIVED proposal is valid. That is decided by the deterministic
+token the replica derives from its own protocol state:
+
+```
+_current_deadline_token   local timer   "may I propose failure yet?"
+_expected_timeout_token() replica state "is this the transition that is
+                                         timeout-eligible right now?"
+```
+
+Conflating them makes the betting timeout impossible to converge. A peer
+correctly arms no timer against *itself*, so the one peer a betting timeout
+is ABOUT has no local token to compare with — it rejects every proposal
+about itself while every other replica applies one, and the table diverges
+permanently, violating the convergence requirement below.
+
+Validation therefore compares against the derived token, and compares it
+**whole**. `actor` is part of the security statement: on the deal path it is
+pure attribution — it marks a peer unavailable and names it in the void
+reason, with nothing to cross-check it — so a peer holding a valid sequence
+number must not be able to nominate a scapegoat. (On the betting path the
+replica separately refuses an out-of-turn action, so the binding is defence
+in depth there and load-bearing on the deal path.)
+
 ```python
 def _on_timeout_proposal(self, conn_id: str, msg: dict) -> None:
     token = DeadlineToken(**msg["token"])
     # Reject if not in an active hand
     if self._replica is None or self.hand_voided:
         return
-    # Reject if token does not match current deadline
-    if token != self._current_deadline_token:
-        _log.debug("stale timeout proposal from %s — dropping", conn_id)
-        return
-    # Reject if action seq has already advanced past the proposal
-    if token.action_seq != self._replica.next_seq:
-        _log.debug("out-of-order timeout proposal from %s — dropping", conn_id)
+    # Reject unless the proposal describes the transition this replica
+    # independently believes is timeout-eligible. Equality covers hand,
+    # phase, actor AND action_seq, so a stale or future sequence, a wrong
+    # phase, a wrong hand and a nominated scapegoat are all refused here.
+    expected = self._expected_timeout_token()
+    if expected is None or token != expected:
+        _log.debug("inapplicable timeout proposal from %s — dropping", conn_id)
         return
     # Apply phase-specific timeout
     self._apply_timeout(token)
