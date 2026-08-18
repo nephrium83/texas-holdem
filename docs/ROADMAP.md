@@ -7,7 +7,8 @@ note, **this file wins**.
 
 - **Coordination issue:** see `docs/COLLABORATION.md`
 - **Base at time of writing:** `07f61a7` (origin/main)
-- **Research inputs:** `docs/research/`
+- **Research inputs:** `docs/research/` — dropout audit, timeout semantics,
+  professional rules audit, suspension/reconnect
 
 ---
 
@@ -72,6 +73,24 @@ regardless of how convenient it is.
 | **B4** | P2c accepts a hostile canonical timeout at t=0, and diverges on action-vs-timeout arrival order | current timeout path is unsafe | M4 |
 | **B5** | P2c ownership regression: `@owned` sits on the pure `_expected_timeout_token`, while the mutating `_maybe_start_deadline` is unguarded | thread-safety guarantee weakened | M5 |
 | **B6** | Engine does not accumulate cumulative short all-ins for re-opening (TDA 47) | rules non-conformance | M7 |
+| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | M2 |
+| **B8** | `wire.unpack` enforces a hard ±30 s freshness window | stored envelopes are already expired; transcript replay is impossible without re-signing, which destroys the property that made the transcript trustworthy | M2 |
+| **B9** | Honest re-sends are indistinguishable from equivocation: `wire.pack` stamps a fresh `ts`, so the same logical message re-sent has a different envelope hash, which `_author_seq_ok` reads as equivocation | voids the hand blaming the honest returning seat; needs no attacker | M2 |
+
+---
+
+## Defects in `main` (found incidentally, not yet fixed)
+
+These exist on `07f61a7` now. None is a hypothetical.
+
+| ID | Defect | Severity |
+|---|---|---|
+| **D1** | `_bind_seat_keys` accepts a **partial** map and is one-way. A peer disconnecting in the `start_game` → `start_p2p_hand` window freezes its seat with no key, permanently unauthorizable for the session | high |
+| **D2** | `_on_player_info` has no lifecycle gate, so any room-code holder can admit a fresh identity mid-hand and mutate roster state during play (gains no seat) | medium |
+| **D3** | `MentalDealDriver.all_hole_cards()` has no phase gate — returns every seat's hole cards whenever the audit passed, including fold-wins the UI hides | high |
+| **D4** | Bayer–Groth is enforced only when `author_mode == AUTHOR_MODE_WIRE`; on compat tables a shuffler can broadcast 52 arbitrary encryptions with no proof | high (compat only) |
+
+Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ---
 
@@ -121,10 +140,14 @@ regardless of how convenient it is.
     automatic void-and-refund — frozen value is preferable to a
     profitable disconnect primitive.
   - The **sole-live-player settlement exception** (award the pot without
-    board recovery when exactly one poker-live seat remains) is
-    **unproven at the protocol level**. `Engine.settle()` demonstrably
-    needs no cards, but that is not the same claim as "the protocol may
-    safely skip its remaining audit." Requires its own proof before use.
+    board recovery when exactly one poker-live seat remains) has been
+    examined and **REFUTED**. Two independent adversarial reviews
+    rejected it with high confidence: the audit is the only point in the
+    protocol where a seat publishes a proven share for its **own** hole
+    cards, and the exception's safety depends on a prevention-mode gate
+    that is transport-conditional (**D4**). Do not implement it. See
+    `docs/research/p2-suspension-reconnect.md` for the conditions any
+    revival would have to meet.
 
 ### M3 — Corrected timeout contract
 
