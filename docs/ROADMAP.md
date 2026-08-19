@@ -27,6 +27,19 @@ note, **this file wins**.
 
 ---
 
+## Decisions
+
+Product and merge decisions belong here, dated, with their rationale.
+Superseding a decision means adding a new row, not editing an old one.
+
+| Date | Decision | Rationale |
+|---|---|---|
+| 2026-08-18 | **D1–D4 get a dedicated security PR, scheduled before M2 implementation** (milestone **M0**). Keep it narrow; review it independently; do not fold it into M2. | D3 and D4 are confidentiality / security-path defects on current `main`; D1 is a seat-binding poison case. They are sufficiently independent of reconnect that mixing them into M2 would obscure both. |
+| 2026-08-18 | **B7 approved: sever `conn_id` from the cryptographic deal context.** The replacement must be a **stable seat identity** with a proven canonical mapping and lifecycle — not "whatever public key happens to be available." Prove the mapping before changing the domain. Ships with an **explicit version bump**. | This is a wire and proof-domain break. A replacement chosen for convenience rather than proven stability would reintroduce the same class of failure under a different name. |
+| 2026-08-18 | **`docs/p2-coordination` merges to `main` as a documentation-only PR** after review. | `docs/ROADMAP.md` and the collaboration contract are only a shared source of truth once they are on `main`. Leaving them on a branch defeats the purpose. |
+
+---
+
 ## Standing invariants
 
 These hold across every milestone. A change that violates one is wrong
@@ -73,7 +86,7 @@ regardless of how convenient it is.
 | **B4** | P2c accepts a hostile canonical timeout at t=0, and diverges on action-vs-timeout arrival order | current timeout path is unsafe | M4 |
 | **B5** | P2c ownership regression: `@owned` sits on the pure `_expected_timeout_token`, while the mutating `_maybe_start_deadline` is unguarded | thread-safety guarantee weakened | M5 |
 | **B6** | Engine does not accumulate cumulative short all-ins for re-opening (TDA 47) | rules non-conformance | M7 |
-| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | M2 |
+| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | M2 — **accepted**: replace with a proven *stable seat identity*, explicit version bump |
 | **B8** | `wire.unpack` enforces a hard ±30 s freshness window | stored envelopes are already expired; transcript replay is impossible without re-signing, which destroys the property that made the transcript trustworthy | M2 |
 | **B9** | Honest re-sends are indistinguishable from equivocation: `wire.pack` stamps a fresh `ts`, so the same logical message re-sent has a different envelope hash, which `_author_seq_ok` reads as equivocation | voids the hand blaming the honest returning seat; needs no attacker | M2 |
 
@@ -95,6 +108,29 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 ---
 
 ## Milestones
+
+### M0 — Security cleanup: D1–D4
+
+- **Status:** scheduled — **runs before M2 implementation**
+- **Depends on:** nothing; independent of the reconnect work
+- **Goal:** fix the four defects that exist on `main` today. Narrow scope,
+  reviewed independently, not folded into M2.
+- **Acceptance gate:** each defect reproduced on `origin/main` with a
+  faithful failing control; the earliest discriminating observable
+  identified; a minimum invariant-level fix; a deliberate-break control
+  proving the test depends on the fix; focused tests and the full suite
+  green.
+- **Per-defect requirements:**
+  - **D1** must **fail closed** if a complete immutable seat→signing-key
+    map cannot be established. Never freeze a partial authoritative map.
+  - **D2** must not break legitimate lobby admission or roster behaviour.
+  - **D3** must preserve legitimate showdown and audit behaviour while
+    preventing a client obtaining opponents' hole cards outside the
+    authorized reveal condition.
+  - **D4** must establish the actual **table-wide prevention invariant**
+    rather than keying security to transport or author-mode accidents.
+- **Non-goals:** reconnect, suspension, timeout certificates, transcript
+  replay, the production deadline scheduler.
 
 ### M1 — Professional poker rules profile
 
@@ -118,8 +154,8 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M2 — Suspension, reconnect, and crash recovery
 
-- **Status:** design in progress
-- **Depends on:** M1 (profile binding) is helpful but not blocking
+- **Status:** threat analysis outstanding (see Known limitations)
+- **Depends on:** **M0** (reviewed first); M1 profile binding is helpful but not blocking
 - **Goal:** define and prove exact-seat suspension and resumption. Cover
   the three failure classes separately: transport interruption with the
   process alive; process restart on the same device; device/secret loss.
@@ -131,6 +167,11 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
   a relaying peer lying about history, and loss of locally generated
   never-broadcast state; a SUSPENDED state machine with deterministic
   exit; controls proving committed chips are never refunded.
+  **B7 resolution at design level:** a canonical stable seat identity
+  with a proven lifecycle, a proof that it survives reconnect and
+  cannot be substituted, the wire/domain version break defined, and
+  every context currently derived from `_deal_session_id()`
+  enumerated.
 - **Non-goals:** threshold cryptography of any kind; changing admission
   beyond what the analysis shows is required; the production deadline
   ticker.
