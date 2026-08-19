@@ -33,7 +33,8 @@ def _run_drivers(seats, ms, session="s", hand=1, button=0):
     drivers = {
         s: MentalDealDriver(session_id=session, hand_no=hand, local_seat=s,
                             seats_in=list(seats), button=button,
-                            master_secret=ms[s], send=bus.append)
+                            master_secret=ms[s], send=bus.append,
+                            prevention=False)
         for s in seats
     }
     for s in seats:
@@ -150,7 +151,8 @@ def test_send_callback_receives_messages():
     sent = []
     d = MentalDealDriver(session_id="s", hand_no=1, local_seat=0,
                          seats_in=[0, 1, 2], button=0,
-                         master_secret=b"m", send=sent.append)
+                         master_secret=b"m", send=sent.append,
+                         prevention=False)
     returned = d.start()
     # start() emits the key_announce, which must have gone through send
     assert len(sent) == 1
@@ -161,7 +163,8 @@ def test_send_callback_receives_messages():
 def test_hole_cards_none_before_deal():
     d = MentalDealDriver(session_id="s", hand_no=1, local_seat=0,
                          seats_in=[0, 1], button=0,
-                         master_secret=b"m", send=lambda m: None)
+                         master_secret=b"m", send=lambda m: None,
+                         prevention=False)
     assert d.hole_cards == [None, None]
     assert not d.hole_complete()
 
