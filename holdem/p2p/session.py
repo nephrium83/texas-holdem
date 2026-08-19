@@ -1601,11 +1601,19 @@ class Session:
         seat resolves to no key. It now raises instead, leaving the map
         unfrozen so a later complete attempt can still succeed.
 
-        An EMPTY map is a different case and stays legitimate: a compat
-        transport carries no envelopes, so no seat has a verified key at
-        all, and _author_owns_seat falls through to the conn_id rule by
-        design. Empty means 'this transport has no authors'; partial means
-        'this transport has authors and we lost some'.
+        An EMPTY map is legitimate ONLY in compat: that transport carries
+        no envelopes, so no seat has a verified key at all, and
+        _author_owns_seat falls through to the conn_id rule by design.
+        Empty means 'this transport has no authors'; partial means 'this
+        transport has authors and we lost some'.
+
+        In WIRE mode an empty map is a third thing, and it is not
+        harmless. Authorization does still fail closed afterwards -- with
+        no bindings, _author_owns_seat refuses every seat rather than
+        trusting the delivering connection -- but that is the wrong
+        MOMENT to fail. Returning quietly starts a hand in which every
+        message is then refused: a dead table wearing the costume of a
+        live one. Wire mode raises here instead.
         """
         if self._seat_keys:
             return                                # already frozen
@@ -1618,6 +1626,14 @@ class Session:
                 if key:
                     bound[seat] = key
         if not bound:
+            if seats and self.author_mode == AUTHOR_MODE_WIRE:
+                raise RuntimeError(
+                    f"cannot bind seat keys: none of the {len(seats)} "
+                    f"seats resolved to a signing key, but this transport "
+                    f"delivers verified envelopes. An empty map is "
+                    f"legitimate only in compat, where no seat has a key at "
+                    f"all; in wire mode it would start a hand in which every "
+                    f"seat is refused at message time.")
             return                          # compat: no envelopes, no keys
         if len(bound) != len(seats):
             missing = [seat for seat, _cid in seats if seat not in bound]

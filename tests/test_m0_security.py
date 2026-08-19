@@ -95,6 +95,30 @@ def test_d1_empty_map_is_legitimate_and_unchanged():
         "compat must still fall through to the conn_id rule")
 
 
+def test_d1_wire_mode_rejects_a_wholly_unresolved_seat_order():
+    """An EMPTY map is legitimate only in compat.
+
+    Wire mode with zero resolvable keys is not the compat case. It used
+    to return quietly, which starts a hand where every seat is then
+    refused at message time -- fail-closed at the wrong moment, and a
+    dead table rather than a clean refusal.
+    """
+    s = seated(wire_session(), {"a": "", "b": "", "c": ""})
+
+    with pytest.raises(RuntimeError, match="none of the 3 seats"):
+        s._bind_seat_keys()
+
+    assert s._seat_keys == {}
+
+
+def test_d1_wire_mode_with_no_seats_is_not_an_error():
+    """No seat order yet is not the same as an unresolvable one."""
+    s = wire_session()
+    s._seat_order = []
+    s._bind_seat_keys()
+    assert s._seat_keys == {}
+
+
 def test_d1_disconnect_before_freeze_cannot_strand_a_seat():
     """The reachable form: a peer drops between start_game and the freeze,
     so handle_disconnect has already popped it from players."""
