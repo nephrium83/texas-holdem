@@ -36,6 +36,7 @@ Superseding a decision means adding a new row, not editing an old one.
 |---|---|---|
 | 2026-08-18 | **D1–D4 get a dedicated security PR, scheduled before M2 implementation** (milestone **M0**). Keep it narrow; review it independently; do not fold it into M2. | D3 and D4 are confidentiality / security-path defects on current `main`; D1 is a seat-binding poison case. They are sufficiently independent of reconnect that mixing them into M2 would obscure both. |
 | 2026-08-18 | **B7 approved: sever `conn_id` from the cryptographic deal context.** The replacement must be a **stable seat identity** with a proven canonical mapping and lifecycle — not "whatever public key happens to be available." Prove the mapping before changing the domain. Ships with an **explicit version bump**. | This is a wire and proof-domain break. A replacement chosen for convenience rather than proven stability would reintroduce the same class of failure under a different name. |
+| 2026-08-18 | **The rules-profile identifier's canonical deal-context binding is deferred to M2.** M1 settles `POKER_RULES_PROFILE.md` *semantics*; the actual binding rides M2's deliberate B7 stable-seat context and domain version break. M0/D4 changes **enforcement only**, never context encoding. | M1 and M2 must not independently redesign the same wire context. One deliberate domain break, not two accidental ones. |
 | 2026-08-18 | **`docs/p2-coordination` merges to `main` as a documentation-only PR** after review. | `docs/ROADMAP.md` and the collaboration contract are only a shared source of truth once they are on `main`. Leaving them on a branch defeats the purpose. |
 
 ---
@@ -111,7 +112,9 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M0 — Security cleanup: D1–D4
 
-- **Status:** scheduled — **runs before M2 implementation**
+- **Status:** **PR #39 open** (unmerged) — runs before M2
+  implementation. D3 closed as *not a defect at the named site*;
+  see the research note and PR #39.
 - **Depends on:** nothing; independent of the reconnect work
 - **Goal:** fix the four defects that exist on `main` today. Narrow scope,
   reviewed independently, not folded into M2.
@@ -142,12 +145,13 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
   into the canonical deal context so two peers cannot start a hand under
   different rules.
 - **Acceptance gate:** profile document exists with per-rule citations;
-  profile identifier is bound into the canonical deal context and a
-  mismatch fails closed; a control proves two peers with different
-  profile identifiers refuse to start a hand together.
+  the profile identifier and its exact canonical encoding are *specified*
+  and frozen. The **binding itself is deferred to M2** — see Decisions.
+  M1 does not touch `_deal_context_bytes`.
 - **Non-goals:** engine conformance fixes (M7); changing any existing
   engine behaviour; adopting a TDA 2026 identifier before TDA publishes
-  one.
+  one; **binding the identifier into the deal context** (M2 carries the
+  single deliberate domain break).
 - **Known limitations:** collusion, soft play and chip dumping are
   *policy*, not enforceable invariants, in a table with no operator. The
   profile must say so rather than imply protection it cannot deliver.
@@ -171,7 +175,8 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
   with a proven lifecycle, a proof that it survives reconnect and
   cannot be substituted, the wire/domain version break defined, and
   every context currently derived from `_deal_session_id()`
-  enumerated.
+  enumerated. The **rules-profile identifier from M1 is bound here**,
+  in the same deliberate break, so the wire context is redesigned once.
 - **Non-goals:** threshold cryptography of any kind; changing admission
   beyond what the analysis shows is required; the production deadline
   ticker.
