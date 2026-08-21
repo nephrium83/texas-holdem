@@ -58,3 +58,31 @@ python -m pytest tests/test_ristretto.py -q
 
 If libsodium is not found, those tests **skip** (they do not fail), so
 the rest of the suite still runs on machines without the native library.
+
+## When a skip is not allowed
+
+Roughly twenty modules skip themselves this way, and libsodium is a
+git-ignored build artifact, so its absence is invisible in the result: the
+shuffle-soundness, DLEQ, deal and audit suites vanish and the run still
+reports success. `tests/crypto_gate.py` decides whether that is allowed
+here, and `tests/test_crypto_gate.py` enforces it.
+
+Every run prints its posture in the pytest header, e.g.
+
+```
+libsodium: present (libsodium 1.0.20) -- required here: CI runner (GITHUB_ACTIONS, CI)
+libsodium: ABSENT (...) -- not required here: developer machine (...)
+```
+
+The requirement is **on by default on CI** (keyed to `GITHUB_ACTIONS` /
+`CI`, which the runner sets itself) and **off** elsewhere. Override it in
+either direction with `HOLDEM_REQUIRE_LIBSODIUM`:
+
+```sh
+HOLDEM_REQUIRE_LIBSODIUM=1 pytest -q   # arm it locally: absence fails
+HOLDEM_REQUIRE_LIBSODIUM=0 pytest -q   # waive it: absence skips
+```
+
+An unrecognised value raises rather than defaulting, because a typo'd
+waiver that read as "not required" would silently drop the whole crypto
+suite — the exact failure this gate exists to remove.

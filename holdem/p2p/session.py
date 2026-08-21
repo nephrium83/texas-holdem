@@ -1041,6 +1041,19 @@ class Session:
             raise RuntimeError(
                 "cannot begin hand: no deal policy has been adopted; a hand "
                 "must follow an accepted table")
+        # Keyed to the ADOPTED POLICY first, and to author_mode second.
+        # A table that settled on Bayer-Groth must enforce it on every
+        # peer path; verification is not optional merely because the
+        # transport happens to be compat. Today `prevention` is derived
+        # from the policy so this cannot fire -- that is the point. It
+        # pins the derivation the prevention docstring warns can drift,
+        # at the last moment before a driver exists.
+        if self._deal_policy == self.DEAL_POLICY_BG and not self.prevention:
+            raise RuntimeError(
+                f"cannot begin hand: the table adopted "
+                f"{self.DEAL_POLICY_BG!r} but this peer would deal "
+                f"without prevention. A settled Bayer-Groth table "
+                f"enforces Bayer-Groth on every participating peer path.")
         if self.author_mode == AUTHOR_MODE_WIRE and not self.prevention:
             raise RuntimeError(
                 f"cannot begin hand: wire mode requires "
@@ -1577,21 +1590,60 @@ class Session:
 
         Idempotent and one-way: once populated it is never rebuilt, so a
         later roster edit -- including one from a compromised or buggy host
-        -- cannot move a seat onto a different key mid-session. A seat that
-        cannot be resolved is simply absent from the table, and messages
-        claiming it are refused rather than silently trusted.
+        -- cannot move a seat onto a different key mid-session.
+
+        All or nothing. Because the map is authoritative AND one-way, a
+        partial freeze is not a smaller version of the same thing: every
+        seat it failed to resolve becomes permanently unauthorizable, and
+        nothing can undo it. That state is reachable without an attacker
+        -- a peer that drops between start_game and start_p2p_hand has
+        already been popped from ``players`` by handle_disconnect, so its
+        seat resolves to no key. It now raises instead, leaving the map
+        unfrozen so a later complete attempt can still succeed.
+
+        An EMPTY map is legitimate ONLY in compat: that transport carries
+        no envelopes, so no seat has a verified key at all, and
+        _author_owns_seat falls through to the conn_id rule by design.
+        Empty means 'this transport has no authors'; partial means 'this
+        transport has authors and we lost some'.
+
+        In WIRE mode an empty map is a third thing, and it is not
+        harmless. Authorization does still fail closed afterwards -- with
+        no bindings, _author_owns_seat refuses every seat rather than
+        trusting the delivering connection -- but that is the wrong
+        MOMENT to fail. Returning quietly starts a hand in which every
+        message is then refused: a dead table wearing the costume of a
+        live one. Wire mode raises here instead.
         """
         if self._seat_keys:
             return                                # already frozen
         bound: dict[int, str] = {}
         with self._lock:
-            for seat, cid in enumerate(self._seat_order):
+            seats = list(enumerate(self._seat_order))
+            for seat, cid in seats:
                 player = self.players.get(cid)
                 key = getattr(player, "ed25519_pubkey_hex", "") if player else ""
                 if key:
                     bound[seat] = key
-        if bound:
-            self._seat_keys = bound
+        if not bound:
+            if seats and self.author_mode == AUTHOR_MODE_WIRE:
+                raise RuntimeError(
+                    f"cannot bind seat keys: none of the {len(seats)} "
+                    f"seats resolved to a signing key, but this transport "
+                    f"delivers verified envelopes. An empty map is "
+                    f"legitimate only in compat, where no seat has a key at "
+                    f"all; in wire mode it would start a hand in which every "
+                    f"seat is refused at message time.")
+            return                          # compat: no envelopes, no keys
+        if len(bound) != len(seats):
+            missing = [seat for seat, _cid in seats if seat not in bound]
+            raise RuntimeError(
+                f"cannot bind seat keys: incomplete map, {len(bound)} of "
+                f"{len(seats)} seats resolved (missing seats {missing}). "
+                f"Refusing to freeze a partial authoritative map -- it is "
+                f"one-way, so every unresolved seat would be permanently "
+                f"unauthorizable for the rest of the session.")
+        self._seat_keys = bound
 
     def _seat_author_ok(self, conn_id: str, msg: dict, seat: int) -> bool:
         """Is this message authorized to act for ``seat``?
@@ -2288,6 +2340,19 @@ class Session:
         if not self.is_host:
             _log.warning("session: ignoring player_info from %s -- only a "
                          "host receives identity announcements", conn_id)
+            return
+        # Roster identity is established in the lobby. player_info is how
+        # a joiner announces itself, so accepting it later lets any holder
+        # of the room code land in `players` and `_join_order` mid-hand
+        # and trigger a roster broadcast. It gains no seat -- _seat_order
+        # and _seat_keys are frozen before the first hand -- but lobby
+        # state is not a scratchpad, and _on_player_ack and _on_game_start
+        # already carry this perimeter. This one did not.
+        if self.terminal_state is not None or self.state != "LOBBY":
+            _log.warning(
+                "session: ignoring player_info from %s -- roster identity "
+                "is established in LOBBY (state=%s, terminal=%s)",
+                conn_id, self.state, self.terminal_state)
             return
         payload = msg.get("payload", {})
         nickname = payload.get("nickname", "Player")

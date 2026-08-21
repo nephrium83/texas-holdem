@@ -165,7 +165,20 @@ def test_binding_is_frozen_once_established():
 
 
 def test_seat_with_no_bound_key_is_refused_not_trusted():
-    """An unresolvable seat fails closed."""
+    """An unresolvable seat fails closed -- by refusing the BINDING.
+
+    This test used to assert that _bind_seat_keys froze the partial map
+    and that seat 2 was then refused. The refusal was real, so the test
+    passed, and the assertion looked like a security property. It was
+    half of one. Because the map is authoritative and one-way, the
+    frozen partial state also made seat 2 permanently unauthorizable for
+    the rest of the session -- reachable with no attacker at all, by a
+    peer dropping between start_game and start_p2p_hand (D1, issue #37).
+
+    The invariant is unchanged: an unresolved seat is never trusted. The
+    mechanism is stronger: we refuse to freeze at all, so the session
+    fails before dealing rather than continuing with a dead seat.
+    """
     s = Session(is_host=False, nickname="n", avatar_b64="",
                 transport=_Spy(), sink=_Sink())
     s.local_conn_id = "A"
@@ -177,8 +190,13 @@ def test_seat_with_no_bound_key_is_refused_not_trusted():
     # C joined without a key ever reaching us.
     s.players["C"] = Player(conn_id="C", peer_id="", nickname="C",
                             avatar_b64="")
-    s._bind_seat_keys()
-    assert 2 not in s._seat_keys
+    with pytest.raises(RuntimeError, match="incomplete"):
+        s._bind_seat_keys()
+
+    # Nothing was frozen, so a later complete attempt can still succeed.
+    assert s._seat_keys == {}
+    # And the original property still holds: with no bindings, wire mode
+    # refuses the seat rather than falling back to the delivering conn.
     assert s._seat_author_ok("C", _env(KEY_C, seat=2), 2) is False
 
 
