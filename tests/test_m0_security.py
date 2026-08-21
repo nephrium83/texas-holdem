@@ -27,6 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import crypto_gate
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import (
     AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Player, Session,
@@ -205,6 +206,12 @@ def test_d4_driver_prevention_cannot_be_omitted():
     defaulted prevention to False, meaning any future construction site
     that forgot the argument would silently deal detection-only.
     """
+    # Importing the driver pulls holdem.p2p.mental_deal -> ristretto, so
+    # on a machine without libsodium this raises inside the test body and
+    # pytest reports an ERROR rather than a skip. Every other crypto-
+    # dependent module guards itself at import; this one cannot, because
+    # the import is the thing under test.
+    crypto_gate.require_crypto()
     from holdem.p2p.mental_deal_driver import MentalDealDriver
 
     with pytest.raises(TypeError):
