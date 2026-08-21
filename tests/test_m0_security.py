@@ -1,7 +1,12 @@
 """M0 security cleanup — D1-D4 from issue #37.
 
 Each test names the invariant, not the path that happened to be noticed.
-The deliberate-break controls live in test_m0_security_controls.py.
+
+The deliberate-break controls are recorded in PR #39 and issue #37: each
+guard named below was reverted in turn and the test that fired is listed
+there. There is no controls module in the tree -- an earlier version of
+this docstring claimed one, and pointing a reader at a file that does not
+exist is worse than pointing at the record that does.
 
 D1  A partial seat->signing-key map must never be frozen as authoritative.
     _bind_seat_keys is one-way; freezing an incomplete map permanently
