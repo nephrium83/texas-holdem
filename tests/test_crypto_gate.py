@@ -36,11 +36,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from unittest import mock
+
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import crypto_gate
 from crypto_gate import (
     CI_ENV, REQUIRE_ENV, CryptoStatus, CryptoUnavailable,
     crypto_required, crypto_status, enforce, flag, header_line,
@@ -68,6 +71,47 @@ def test_crypto_is_available_wherever_it_is_required():
             f"({REQUIRE_ENV} unset or 0, {CI_ENV} not set): the crypto-gated "
             f"suites did not run. {status.detail}")
     enforce(status, required)
+
+
+def test_a_present_libsodium_is_the_one_the_protocol_needs():
+    """Loading is not enough -- it must expose the Ristretto255 group.
+
+    ristretto.py refuses a build without the API at import time, so this
+    reads the same fact from the other side: the group sizes the shuffle
+    and the DLEQ proofs are built against. It matters because a libsodium
+    can be present and still be the wrong one -- PyNaCl's bundled copy
+    does not expose Ristretto255 (see native/README.md), so "pip install
+    pynacl" is exactly the near-miss this check catches.
+    """
+    crypto_gate.require_crypto()
+    from holdem.p2p import ristretto as R
+
+    assert (R.POINT_BYTES, R.SCALAR_BYTES, R.HASH_BYTES) == (32, 32, 64)
+
+
+def test_a_status_that_loaded_but_cannot_answer_is_not_reported_absent():
+    """'Absent' and 'broken' send the reader to different places.
+
+    The stub replaces the ATTRIBUTE on holdem.p2p rather than the
+    sys.modules entry: crypto_status does ``from holdem.p2p import
+    ristretto``, which reads the attribute off the already-imported
+    package and never consults sys.modules again.
+    """
+    import holdem.p2p
+
+    class Stub:
+        @staticmethod
+        def libsodium_version():
+            raise OSError("truncated library")
+
+    with mock.patch.object(holdem.p2p, "ristretto", Stub):
+        st = crypto_status(refresh=True)
+    crypto_status(refresh=True)          # restore the real probe result
+
+    assert st.available is False, (
+        "a library that imports and then fails to answer is not 'absent'")
+    assert "loaded but unusable" in st.detail
+    assert "truncated library" in st.detail
 
 
 def test_status_and_header_agree():

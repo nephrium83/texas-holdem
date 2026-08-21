@@ -2,11 +2,11 @@
 
 Each test names the invariant, not the path that happened to be noticed.
 
-The deliberate-break controls are recorded in PR #39 and issue #37: each
-guard named below was reverted in turn and the test that fired is listed
-there. There is no controls module in the tree -- an earlier version of
-this docstring claimed one, and pointing a reader at a file that does not
-exist is worse than pointing at the record that does.
+The deliberate-break controls live in tests/test_m0_security_controls.py,
+one per guard, each naming the invariant test it is the control FOR. They
+stage the pre-fix behaviour with monkeypatch rather than by hand-editing
+the source, so they re-run on every CI job instead of being a paragraph in
+a pull request saying someone once watched them fire.
 
 D1  A partial seat->signing-key map must never be frozen as authoritative.
     _bind_seat_keys is one-way; freezing an incomplete map permanently
@@ -144,7 +144,7 @@ def compat_host(cid="host"):
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="H", avatar_b64="",
                 transport=InMemoryTransport(bus, cid),
-                master_secret=b"" * 32)
+                master_secret=b"\x02" * 32)
     s.local_conn_id = cid
     s._host_conn_id = cid
     bus.register(cid, s)

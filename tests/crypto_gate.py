@@ -107,10 +107,22 @@ def crypto_status(*, refresh: bool = False) -> CryptoStatus:
     if _status is None or refresh:
         try:
             from holdem.p2p import ristretto as R
+        except RuntimeError as exc:
+            # The wrapper's own diagnosis: it names every candidate path
+            # it tried and why each was rejected, which is the entire
+            # lead for a machine that has the library somewhere odd.
+            _status = CryptoStatus(False, str(exc))
         except Exception as exc:
             _status = CryptoStatus(False, f"{type(exc).__name__}: {exc}")
         else:
-            _status = CryptoStatus(True, f"libsodium {R.libsodium_version()}")
+            try:
+                _status = CryptoStatus(True, f"libsodium {R.libsodium_version()}")
+            except Exception as exc:
+                # Imported and then failed to answer. Not the same as
+                # absent, and reporting it as a bare 'unavailable' sends
+                # the reader off to hunt for a library that is present.
+                _status = CryptoStatus(
+                    False, f"loaded but unusable: {type(exc).__name__}: {exc}")
     return _status
 
 
@@ -162,3 +174,28 @@ def header_line(status: Optional[CryptoStatus] = None,
     return (f"crypto: UNAVAILABLE — crypto-gated suites SKIP, and that is "
             f"permitted here (set {REQUIRE_ENV}=1 to make it a failure). "
             f"{status.detail}")
+
+
+def require_crypto() -> str:
+    """Guard a test that cannot run without libsodium. Returns the detail.
+
+    Three outcomes, never a silent pass: return the version when the stack
+    is here; raise when it is absent somewhere it was required; skip with a
+    stated reason when it is absent and this environment was allowed to do
+    without it.
+
+    Distinct from ``enforce``, which is the pure policy function and stays
+    free of pytest so the module can be read and tested outside a run. This
+    is the call site a crypto-dependent test wants: one line, and the
+    developer-machine case degrades to a named skip instead of a failure.
+    """
+    import pytest
+
+    status = crypto_status()
+    required = crypto_required()
+    if status.available:
+        return status.detail
+    if required:
+        enforce(status, required)          # raises CryptoUnavailable
+    pytest.skip(
+        f"libsodium unavailable and not required here: {status.detail}")
