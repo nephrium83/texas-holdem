@@ -29,8 +29,20 @@ This module makes the rule explicit and checkable:
   interpreter, carrying the loader's own diagnosis when it does not.
 * ``crypto_required()`` answers whether a skip is permitted in THIS
   environment. CI requires crypto; a developer machine does not.
-  ``HOLDEM_REQUIRE_CRYPTO`` overrides in either direction.
+  ``HOLDEM_REQUIRE_CRYPTO`` overrides in either direction, and a value it
+  cannot read is refused rather than guessed at -- see below.
 * ``enforce()`` turns the pair into one actionable failure.
+
+The override is deliberately strict about what it accepts. Falling back to
+the CI default on an unreadable value is safe on CI, where the default is
+"required" anyway, and wrong exactly where the override is actually typed:
+``HOLDEM_REQUIRE_CRYPTO=tru pytest`` on a developer machine is somebody
+arming the gate, and a silent fallback answers "not required" and drops the
+whole crypto estate from the run they were arming. That is the failure this
+module exists to remove, so an explicit value that is neither true nor false
+raises ``CryptoGateMisconfigured``. An empty or whitespace value reads as
+unset, because ``HOLDEM_REQUIRE_CRYPTO= pytest`` is the ordinary shell way
+to neutralise a variable rather than a typo.
 
 Deliberately not a session-level abort. tests/test_crypto_gate.py calls
 ``enforce`` as an ordinary test, so a runner without libsodium reports one
@@ -60,6 +72,16 @@ class CryptoUnavailable(RuntimeError):
     """libsodium/Ristretto255 did not load somewhere it was required."""
 
 
+class CryptoGateMisconfigured(RuntimeError):
+    """The requirement override was set to something this gate cannot read.
+
+    Separate from CryptoUnavailable because it is a different problem with a
+    different fix: the crypto estate may be perfectly healthy here, and what
+    is broken is the instruction about whether its absence would have been
+    tolerated.
+    """
+
+
 @dataclass(frozen=True)
 class CryptoStatus:
     """Whether the crypto stack loads here, plus why."""
@@ -77,6 +99,11 @@ def flag(value) -> Optional[bool]:
     Three-valued on purpose. A two-valued parse would fold "unset" into
     "false", and unset is exactly the case where the CI default has to
     decide instead.
+
+    Reporting only: this function does not decide what an unreadable value
+    means. ``crypto_required`` refuses one and ``CI`` tolerates one (a
+    ``CI`` this cannot read is not a claim that the run is evidence), so
+    the two callers need the same parse and different policies.
     """
     if value is None:
         return None
@@ -134,11 +161,26 @@ def crypto_required(env: Optional[Mapping[str, str]] = None) -> bool:
     matters -- a CI job that genuinely cannot install libsodium needs a way
     to say so out loud, in the workflow, where a reviewer sees it, rather
     than by the suite quietly deciding for itself.
+
+    An explicit value that is neither raises ``CryptoGateMisconfigured``
+    rather than falling back to the CI default. The fallback is harmless on
+    CI and dangerous off it: a mistyped *arming* reads as "not required" on
+    the machine where somebody just typed it, and the run they armed drops
+    the entire crypto estate and still prints green. Set-but-empty is unset,
+    not garbage -- ``VAR= cmd`` is how a shell neutralises a variable.
     """
     env = os.environ if env is None else env
-    explicit = flag(env.get(REQUIRE_ENV))
+    raw = env.get(REQUIRE_ENV)
+    explicit = flag(raw)
     if explicit is not None:
         return explicit
+    if raw is not None and str(raw).strip():
+        raise CryptoGateMisconfigured(
+            f"{REQUIRE_ENV}={raw!r} is neither true nor false, so this gate "
+            f"cannot say whether a missing crypto estate would be tolerated "
+            f"here. Set it to one of {sorted(_TRUE)} to demand crypto or "
+            f"{sorted(_FALSE)} to excuse it, or unset it to let the {CI_ENV} "
+            f"default decide.")
     return flag(env.get(CI_ENV)) is True
 
 
@@ -164,9 +206,20 @@ def header_line(status: Optional[CryptoStatus] = None,
     This is the whole point of the module for a reader of CI logs: the
     header states, on every run, whether the crypto estate is present and
     whether its absence would have been tolerated.
+
+    A misconfigured override is reported here, not raised. This function
+    runs from two pytest hooks; letting it raise would turn a typo into an
+    INTERNALERROR that buries the results of every test that did run. The
+    refusal belongs to the policy and to the gate's own test, which is the
+    same division of labour as ``enforce`` versus this line.
     """
     status = crypto_status() if status is None else status
-    required = crypto_required() if required is None else required
+    if required is None:
+        try:
+            required = crypto_required()
+        except CryptoGateMisconfigured as exc:
+            return (f"crypto: GATE MISCONFIGURED — {exc} "
+                    f"Probe says: {status.detail}")
     if status.available:
         return f"crypto: {status.detail} — crypto-gated suites RUN"
     if required:
@@ -188,6 +241,12 @@ def require_crypto() -> str:
     free of pytest so the module can be read and tested outside a run. This
     is the call site a crypto-dependent test wants: one line, and the
     developer-machine case degrades to a named skip instead of a failure.
+
+    A fourth outcome by inheritance: an unreadable ``HOLDEM_REQUIRE_CRYPTO``
+    raises out of ``crypto_required`` before availability is consulted, so a
+    misconfigured gate errors these tests instead of skipping them. That is
+    the intent -- a gate nobody can read must not be the thing that quietly
+    excuses the suites it guards.
     """
     import pytest
 

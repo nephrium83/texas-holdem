@@ -26,13 +26,20 @@ its inputs by argument, so both branches are driven for real:
 * ``test_enforce_is_silent_when_available`` and
   ``test_enforce_is_silent_when_not_required`` are the negative controls,
   so the break above cannot be satisfied by a function that always raises.
+* ``test_control_a_typoed_arming_used_to_leave_crypto_optional`` stages the
+  earlier fallback policy and shows the observable flip back, with
+  ``test_control_the_refusal_does_not_swallow_a_readable_override`` beside
+  it so "refuse everything" cannot pass for a fix.
 * The environment-policy tests drive ``crypto_required`` over the full
   cross-product of the two variables, so removing the CI default or the
   override fails a named test rather than silently widening what a green
-  run is allowed to mean.
+  run is allowed to mean. That cross-product includes the values the
+  override does NOT recognise, because "what does a typo mean" is a policy
+  decision here and not a detail.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -45,8 +52,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import crypto_gate
 from crypto_gate import (
-    CI_ENV, REQUIRE_ENV, CryptoStatus, CryptoUnavailable,
-    crypto_required, crypto_status, enforce, flag, header_line,
+    CI_ENV, REQUIRE_ENV, CryptoGateMisconfigured, CryptoStatus,
+    CryptoUnavailable, crypto_required, crypto_status, enforce, flag,
+    header_line,
 )
 
 _MISSING = CryptoStatus(False, "RuntimeError: libsodium ... could not be loaded")
@@ -170,10 +178,85 @@ def test_explicit_excusal_wins_on_ci(value):
     assert crypto_required({CI_ENV: "true", REQUIRE_ENV: value}) is False
 
 
-def test_unrecognised_flag_falls_back_to_the_ci_default():
-    """Garbage must not read as 'excused'. ``CI`` decides instead."""
-    assert crypto_required({CI_ENV: "true", REQUIRE_ENV: "maybe"}) is True
-    assert crypto_required({REQUIRE_ENV: "maybe"}) is False
+@pytest.mark.parametrize("env", [
+    {REQUIRE_ENV: "tru"},                       # the arming typo, off CI
+    {REQUIRE_ENV: "maybe"},
+    {CI_ENV: "true", REQUIRE_ENV: "maybe"},     # and on it
+])
+def test_an_unreadable_requirement_is_refused_not_guessed(env):
+    """A value the gate cannot read must not resolve to a posture.
+
+    This is the security half of the override. Falling back to the ``CI``
+    default is harmless on CI, where the default is "required" anyway, and
+    wrong exactly where the override gets typed: ``HOLDEM_REQUIRE_CRYPTO=tru
+    pytest`` on a developer machine is somebody ARMING the gate, and the
+    fallback answers "not required" -- so the run they armed drops the whole
+    crypto estate and still reports success. A run cannot be evidence and be
+    unable to say whether it covered the crypto suites.
+
+    The failure has to be actionable, hence the two assertions: it names the
+    variable and quotes the value back, because "misconfigured" without the
+    offending string sends the reader to re-read their own shell history.
+    """
+    with pytest.raises(CryptoGateMisconfigured) as exc:
+        crypto_required(env)
+    message = str(exc.value)
+    assert REQUIRE_ENV in message
+    assert repr(env[REQUIRE_ENV]) in message
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_a_set_but_empty_requirement_reads_as_unset(value):
+    """``VAR= cmd`` is a shell neutralising a variable, not a typo.
+
+    Treated as unset, so the ``CI`` default still decides -- which keeps the
+    strictness above aimed at values that were meant to say something.
+    """
+    assert crypto_required({REQUIRE_ENV: value}) is False
+    assert crypto_required({CI_ENV: "true", REQUIRE_ENV: value}) is True
+
+
+def test_an_unreadable_ci_flag_is_not_a_claim_that_this_run_is_evidence():
+    """``CI`` is inferred, not instructed, so it is read leniently.
+
+    The asymmetry is deliberate. ``CI`` is set by a runner and merely
+    signals "this looks like CI"; a value nobody recognises is no signal.
+    ``HOLDEM_REQUIRE_CRYPTO`` is typed by a human to state a posture, and an
+    unreadable statement of posture is a broken instruction, not a
+    non-signal.
+    """
+    assert crypto_required({CI_ENV: "possibly"}) is False
+
+
+def test_the_header_reports_a_misconfigured_gate_rather_than_crashing():
+    """The reporter must survive what the policy refuses.
+
+    ``header_line`` runs from ``pytest_report_header`` and
+    ``pytest_terminal_summary``; raising there would turn a typo into an
+    INTERNALERROR and bury the results of every test that did run. The gate
+    still fails -- through the tests above, as a named failure -- while the
+    log says in one line what is wrong.
+    """
+    with mock.patch.dict(os.environ, {REQUIRE_ENV: "tru"}):
+        line = header_line()
+
+    assert "MISCONFIGURED" in line
+    assert REQUIRE_ENV in line
+    assert "'tru'" in line
+
+
+def test_require_crypto_refuses_a_misconfigured_gate_before_availability():
+    """A gate nobody can read must not be what excuses the suites it guards.
+
+    ``require_crypto`` is the one-line guard a crypto-dependent test calls,
+    and its whole job is to choose between running, skipping and failing.
+    With the posture unreadable it cannot make that choice, so it raises --
+    regardless of whether libsodium happens to be present here, which is
+    what makes this test deterministic on both kinds of machine.
+    """
+    with mock.patch.dict(os.environ, {REQUIRE_ENV: "yess"}):
+        with pytest.raises(CryptoGateMisconfigured):
+            crypto_gate.require_crypto()
 
 
 def test_flag_is_three_valued():
@@ -183,3 +266,44 @@ def test_flag_is_three_valued():
     assert flag("") is None
     assert flag("1") is True
     assert flag("0") is False
+
+
+# ------------------------------------------------------------- controls
+
+def _prefix_crypto_required(env=None):
+    """``crypto_required`` as it stood before the invalid-value refusal.
+
+    The whole difference is the missing middle branch: an explicit value
+    that parses to neither true nor false fell through to the ``CI``
+    default, exactly as if the variable had never been set.
+    """
+    env = os.environ if env is None else env
+    explicit = flag(env.get(REQUIRE_ENV))
+    if explicit is not None:
+        return explicit
+    return flag(env.get(CI_ENV)) is True
+
+
+def test_control_a_typoed_arming_used_to_leave_crypto_optional():
+    """CONTROL FOR test_an_unreadable_requirement_is_refused_not_guessed.
+
+    The break is staged as a function rather than a monkeypatch because the
+    policy already takes its environment by argument -- patching the module
+    would prove nothing the direct call does not. Off CI the old fallback
+    answers ``False`` to somebody who just typed a requirement: the gate
+    reports "skips permitted here", the crypto suites leave the run, and the
+    summary is green. The named test's ``pytest.raises`` cannot hold against
+    this behaviour, which is what makes it load-bearing.
+    """
+    assert _prefix_crypto_required({REQUIRE_ENV: "tru"}) is False, (
+        "the pre-fix fallback read a mistyped arming as 'not required'")
+
+
+def test_control_the_refusal_does_not_swallow_a_readable_override():
+    """NEGATIVE CONTROL: against the REAL policy, both directions.
+
+    A ``crypto_required`` that raised on everything would satisfy the break
+    above and destroy the override, which is the more useful half of it.
+    """
+    assert crypto_required({REQUIRE_ENV: "1"}) is True
+    assert crypto_required({CI_ENV: "true", REQUIRE_ENV: "0"}) is False

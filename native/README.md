@@ -67,22 +67,35 @@ shuffle-soundness, DLEQ, deal and audit suites vanish and the run still
 reports success. `tests/crypto_gate.py` decides whether that is allowed
 here, and `tests/test_crypto_gate.py` enforces it.
 
-Every run prints its posture in the pytest header, e.g.
+Every run prints its posture, in the run header and again in the terminal
+summary — the second one because CI runs `pytest -q`, where the header is
+suppressed. Copy the wording from `tests/crypto_gate.py`, not from here:
 
 ```
-libsodium: present (libsodium 1.0.20) -- required here: CI runner (GITHUB_ACTIONS, CI)
-libsodium: ABSENT (...) -- not required here: developer machine (...)
+crypto: libsodium 1.0.20 — crypto-gated suites RUN
+crypto: UNAVAILABLE — crypto-gated suites SKIP, and that is permitted here (set HOLDEM_REQUIRE_CRYPTO=1 to make it a failure). ...
+crypto: UNAVAILABLE and REQUIRED here — ...
 ```
 
-The requirement is **on by default on CI** (keyed to `GITHUB_ACTIONS` /
-`CI`, which the runner sets itself) and **off** elsewhere. Override it in
-either direction with `HOLDEM_REQUIRE_LIBSODIUM`:
+The requirement is **on by default on CI** (keyed to `CI`, which the runner
+sets itself) and **off** elsewhere. Override it in either direction with
+`HOLDEM_REQUIRE_CRYPTO`:
 
 ```sh
-HOLDEM_REQUIRE_LIBSODIUM=1 pytest -q   # arm it locally: absence fails
-HOLDEM_REQUIRE_LIBSODIUM=0 pytest -q   # waive it: absence skips
+HOLDEM_REQUIRE_CRYPTO=1 pytest -q   # arm it locally: absence fails
+HOLDEM_REQUIRE_CRYPTO=0 pytest -q   # waive it: absence skips
 ```
 
-An unrecognised value raises rather than defaulting, because a typo'd
-waiver that read as "not required" would silently drop the whole crypto
-suite — the exact failure this gate exists to remove.
+Accepted values are `1/true/yes/on` and `0/false/no/off`, case-insensitive.
+Anything else **raises** rather than defaulting: a mistyped `1` that read as
+"not required" would silently drop the whole crypto suite on the machine
+where somebody had just armed the gate — the exact failure this gate exists
+to remove. Set-but-empty (`HOLDEM_REQUIRE_CRYPTO= pytest`) is treated as
+unset, since that is a shell neutralising a variable rather than a typo, and
+the `CI` default decides again.
+
+The refusal surfaces as a named test failure from
+`tests/test_crypto_gate.py`, plus a `crypto: GATE MISCONFIGURED` line in the
+log. It is deliberately not raised from the reporting hooks themselves,
+which would replace the results of every test that ran with an
+INTERNALERROR.

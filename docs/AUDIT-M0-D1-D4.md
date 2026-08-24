@@ -150,6 +150,27 @@ Executable, on every CI job:
   `pytest_terminal_summary`, because CI runs `pytest -q` and the run header
   is suppressed at negative verbosity.
 
+### The gate's own override had the same shape of hole
+
+`HOLDEM_REQUIRE_CRYPTO` overrides the posture in either direction. It used
+to fall back to the `CI` default on a value it could not parse, and
+`native/README.md` documented a variable that does not exist
+(`HOLDEM_REQUIRE_LIBSODIUM`) while promising a refusal the code did not
+perform. Both halves matter and they compound: the documented command is
+inert, and the working command mistyped — `HOLDEM_REQUIRE_CRYPTO=tru` —
+resolved to *not required* on precisely the machine where someone had just
+tried to arm the gate. The crypto estate then leaves the run and the summary
+is green, which is the failure the gate exists to remove, reintroduced by
+the gate's own front door.
+
+An unreadable explicit value now raises `CryptoGateMisconfigured`. Empty
+stays unset (`VAR= cmd` is a shell neutralising a variable), and `CI` is
+still read leniently — it is a signal a runner sets, not a posture a human
+typed. The refusal is reported, not raised, from the two pytest hooks: a
+typo must not become an INTERNALERROR that buries the results of every test
+that did run. Control and negative control both in
+`tests/test_crypto_gate.py`.
+
 Reproductions on `origin/main` before the fixes, and the CI results for each
 pushed head, are recorded in issue #37 and PR #39 rather than duplicated
 here.
