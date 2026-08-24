@@ -257,6 +257,46 @@ def _is_seat(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _duplicate_seat_ids(order) -> list:
+    """Seat ids appearing more than once, first-seen order. [] if none.
+
+    One definition, for the same reason ``_is_seat`` is one: the seat order
+    is validated by the local API (configure_seats), adopted from an inbound
+    game_start, and frozen into the authorization map by _bind_seat_keys.
+    Three checks written by hand are three checks that can disagree about
+    what counts as the same seat.
+
+    Uniqueness is not decoration. ``_seat_keys`` maps seat -> signing key
+    and ``_author_owns_seat`` falls back to ``_seat_order[seat] == conn_id``
+    in compat, so a repeated id makes one identity authoritative for two
+    seats -- while the peer holding it drives ONE driver, so the n-of-n deal
+    never receives the other seat's shares and the hand stalls with nobody
+    to blame.
+
+    TOTAL on hostile input, and never raises: this runs on the message
+    ingress path, where an exception would leave the transport's dispatch
+    thread carrying a malformed seat order. A non-sequence is not this
+    function's business -- shape is checked where the order is encoded --
+    so it reports no duplicates rather than inventing a verdict.
+
+    Compared by equality rather than through a set: ``set(order)`` raises
+    TypeError on an unhashable element, and "the attacker sent a list of
+    dicts" must not be the one input that gets an exception instead of an
+    answer.
+    """
+    if not isinstance(order, (list, tuple)):
+        return []
+    seen: list = []
+    dupes: list = []
+    for cid in order:
+        if any(cid == s for s in seen):
+            if not any(cid == d for d in dupes):
+                dupes.append(cid)
+        else:
+            seen.append(cid)
+    return dupes
+
+
 @dataclass(frozen=True)
 class HostlessInbound:
     """One inbound peer-authored message, with its three identities separated.
@@ -1614,9 +1654,33 @@ class Session:
         MOMENT to fail. Returning quietly starts a hand in which every
         message is then refused: a dead table wearing the costume of a
         live one. Wire mode raises here instead.
+
+        The seat order itself must name each seat exactly once, or the map
+        cannot express seat authority at all -- see _duplicate_seat_ids.
+        configure_seats already enforces that for the local API, but
+        _on_game_start adopts the order an inbound message carries, so the
+        rule belongs at the point authority is CONFERRED as well as at the
+        point the order is set.
+
+        What this does NOT establish: that two DIFFERENT seats hold two
+        different identities. A host that asserts one signing key for two
+        conn_ids produces a legal-looking complete map in which one author
+        speaks for two seats. That is the same guarantee admission.py
+        already declines to offer -- a joiner holds no attestation for any
+        seat but the host's -- and closing it here would be theatre while
+        the roster it is built from remains the host's assertion. Stated,
+        not silently assumed away.
         """
         if self._seat_keys:
             return                                # already frozen
+        repeated = _duplicate_seat_ids(self._seat_order)
+        if repeated:
+            raise RuntimeError(
+                f"cannot bind seat keys: seat order names {repeated!r} more "
+                f"than once. A seat id maps to one identity and one driver, "
+                f"so a repeated id would authorize one peer for two seats "
+                f"and then wait forever for shares from the seat nobody is "
+                f"playing.")
         bound: dict[int, str] = {}
         with self._lock:
             seats = list(enumerate(self._seat_order))
@@ -2608,6 +2672,26 @@ class Session:
                     "session: game_start from %s would change settled table "
                     "settings mid-session — ignoring", conn_id)
             return
+        # The seat order is host-authoritative but not host-trusted. A
+        # repeated seat id is never legitimate -- start_game builds the
+        # order from ``players``, which is keyed by conn_id -- and adopting
+        # one seats a table that cannot deal: one peer would be authorized
+        # for two seats while driving one, so the n-of-n deal waits forever
+        # for shares nobody is producing. Refused BEFORE the policy is
+        # adopted, because adoption is write-once and must not be spent on a
+        # message this handler is about to drop.
+        #
+        # Dropped rather than raised: this is an inbound handler, and it is
+        # dropped rather than terminal because refusing to enter PLAYING
+        # leaves a lobby that a correct game_start can still start.
+        seat_order = payload.get("seat_order", [])
+        repeated = _duplicate_seat_ids(seat_order)
+        if repeated:
+            _log.warning(
+                "session: game_start from %s names seat(s) %r more than once "
+                "— ignoring; a seat id maps to one identity and one driver",
+                conn_id, repeated)
+            return
         settings = payload.get("table_settings", {})
         policy = self.parse_deal_policy(settings, self.author_mode)
         if policy is None:
@@ -2627,7 +2711,7 @@ class Session:
                 conn_id=conn_id)
             return
         self.state = "PLAYING"
-        self._seat_order = payload.get("seat_order", [])
+        self._seat_order = seat_order       # the order checked above
         # Store table settings so _mp_new_game in gui.py can read them
         ts = payload.get("table_settings", {})
         if ts:
@@ -3100,8 +3184,13 @@ class Session:
             raise ValueError(f"seat order needs at least 2 seats, got {len(order)}")
         if len(order) > 9:
             raise ValueError(f"seat order needs at most 9 seats, got {len(order)}")
-        if len(set(order)) != len(order):
-            raise ValueError("seat order contains duplicate conn_ids")
+        # Through the shared rule, so the local API, the game_start ingress
+        # and the seat-key freeze cannot drift on what "the same seat"
+        # means. The wording is unchanged; the duplicates are now named.
+        repeated = _duplicate_seat_ids(order)
+        if repeated:
+            raise ValueError(
+                f"seat order contains duplicate conn_ids: {repeated!r}")
         if self.local_conn_id and self.local_conn_id not in order:
             raise ValueError(
                 f"local conn_id {self.local_conn_id!r} not in seat order")

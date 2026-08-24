@@ -12,6 +12,11 @@ every CI job instead of a paragraph in a pull request saying someone once
 saw them fire. Each pre-fix function below is the code as it stood on
 ``main`` at 07f61a7, reduced only where noted.
 
+Where a guard is a shared RULE rather than a rewritten method, the break is
+staged at the rule itself (``_duplicate_seat_ids``): restaging every caller
+would prove the callers were rewritten, not that the rule is what they
+depend on.
+
 Read with tests/test_m0_security.py: every control here names the invariant
 test it is the control FOR.
 """
@@ -25,13 +30,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import crypto_gate
+from holdem.p2p import session as session_mod
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import AUTHOR_MODE_WIRE, Player, Session
 
 # The controls stage the SAME scenarios the invariant tests do. Sharing the
 # builders rather than re-writing them is deliberate: a control that set up
 # a subtly different table would be measuring a different thing.
-from test_m0_security import compat_host, seated, wire_session
+from test_m0_security import compat_host, compat_joiner, seated, wire_session
 
 
 # ------------------------------------------------------ pre-fix behaviour
@@ -161,6 +167,73 @@ def test_control_wire_zero_key_starts_a_dead_table(monkeypatch):
     assert s._author_owns_seat("a", "AA", 0) is False
     assert s._author_owns_seat("b", "BB", 1) is False, (
         "every seat refused after the hand has already begun")
+
+
+def test_control_a_repeated_seat_id_freezes_a_two_seat_identity(monkeypatch):
+    """CONTROL FOR test_d1_a_repeated_seat_id_is_never_frozen.
+
+    The break is staged at the RULE rather than at either call site: the
+    guard is one function used by configure_seats, the game_start ingress
+    and the freeze, so neutering it is what "this rule is not there"
+    actually means. Both observables then come back at once.
+
+    With it gone the map resolves 3 of 3 seats and looks complete, while
+    one key owns seats 0 and 2 -- and the peer holding it reports
+    local_seat 0, so nothing is driving seat 2 and the deal cannot finish.
+    """
+    monkeypatch.setattr(session_mod, "_duplicate_seat_ids", lambda order: [])
+    s = wire_session("a")
+    s._seat_order = ["a", "b", "a"]
+    for cid, key in (("a", "AA"), ("b", "BB")):
+        s.players[cid] = Player(conn_id=cid, peer_id=cid, nickname=cid,
+                                avatar_b64="", ed25519_pubkey_hex=key)
+
+    s._bind_seat_keys()                     # no refusal: this is the defect
+
+    assert s._seat_keys == {0: "AA", 1: "BB", 2: "AA"}
+    assert s._author_owns_seat("b", "AA", 2) is True, (
+        "one identity was frozen as the authority for two seats")
+    assert s.local_seat == 0, (
+        "and the peer that holds it drives one driver, so seat 2 is played "
+        "by nobody while every peer waits for its shares")
+
+
+def test_control_game_start_adopts_a_repeated_seat_order_again(monkeypatch):
+    """CONTROL FOR test_d1_game_start_with_a_repeated_seat_is_refused...
+
+    Same break, the other observable. _on_game_start took the host's seat
+    order as given, so the table entered PLAYING with an order
+    configure_seats would have refused outright from the local API.
+    """
+    monkeypatch.setattr(session_mod, "_duplicate_seat_ids", lambda order: [])
+    s = compat_joiner()
+
+    s._on_game_start("host", {"payload": {
+        "seat_order": ["host", "joiner", "host"],
+        "table_settings": {Session.DEAL_POLICY_SETTING:
+                           Session.DEAL_POLICY_DETECTION}}})
+
+    assert s.state == "PLAYING"
+    assert s._seat_order == ["host", "joiner", "host"]
+
+
+def test_control_the_duplicate_guard_leaves_a_legitimate_order_alone():
+    """NEGATIVE CONTROL: against the REAL rule, on both call sites.
+
+    A guard that refused a normal table would be a worse defect than the
+    one it closed, and "refuses everything" would satisfy both breaks
+    above.
+    """
+    s = compat_joiner()
+    s._on_game_start("host", {"payload": {
+        "seat_order": ["host", "joiner"],
+        "table_settings": {Session.DEAL_POLICY_SETTING:
+                           Session.DEAL_POLICY_DETECTION}}})
+    assert s.state == "PLAYING"
+
+    keyed = seated(wire_session(), {"a": "AA", "b": "BB", "c": "CC"})
+    keyed._bind_seat_keys()
+    assert keyed._seat_keys == {0: "AA", 1: "BB", 2: "CC"}
 
 
 def test_control_the_wire_guard_does_not_fire_on_an_empty_seat_order():

@@ -10,7 +10,10 @@ a pull request saying someone once watched them fire.
 
 D1  A partial seat->signing-key map must never be frozen as authoritative.
     _bind_seat_keys is one-way; freezing an incomplete map permanently
-    strands every seat it could not resolve.
+    strands every seat it could not resolve. The same guard owns the two
+    other ways the map can come out meaningless: an EMPTY map in wire
+    mode (legitimate only in compat), and a seat order that names one seat
+    twice, which would make one identity authoritative for two seats.
 
 D2  player_info is a LOBBY message. Accepting it during PLAYING lets any
     holder of the room code mutate roster state mid-hand.
@@ -31,6 +34,7 @@ import crypto_gate
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import (
     AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Player, Session,
+    _duplicate_seat_ids,
 )
 
 
@@ -53,6 +57,23 @@ def seated(s, keys):
     for cid, key in keys.items():
         s.players[cid] = Player(conn_id=cid, peer_id=cid, nickname=cid,
                                 avatar_b64="", ed25519_pubkey_hex=key)
+    return s
+
+
+def compat_joiner(cid="joiner", host="host"):
+    """A joiner that has already established which connection is the host.
+
+    Compat, because what is under test is the lifecycle and the shape of an
+    inbound game_start, not envelope verification -- and a wire joiner would
+    additionally need the admission handshake before it accepted anything.
+    """
+    bus = InMemoryBus()
+    s = Session(is_host=False, nickname="J", avatar_b64="",
+                transport=InMemoryTransport(bus, cid),
+                master_secret=b"\x02" * 32)
+    s.local_conn_id = cid
+    s._host_conn_id = host
+    bus.register(cid, s)
     return s
 
 
@@ -123,6 +144,91 @@ def test_d1_wire_mode_with_no_seats_is_not_an_error():
     s._seat_order = []
     s._bind_seat_keys()
     assert s._seat_keys == {}
+
+
+def repeated_order(s, order, keys):
+    """Seat ``order`` (which may repeat an id) with roster ``keys``."""
+    s._seat_order = list(order)
+    for cid, key in keys.items():
+        s.players[cid] = Player(conn_id=cid, peer_id=cid, nickname=cid,
+                                avatar_b64="", ed25519_pubkey_hex=key)
+    return s
+
+
+def test_d1_a_repeated_seat_id_is_never_frozen():
+    """The invariant: a seat id names one identity and one driver.
+
+    The map is authoritative, so freezing ["a", "b", "a"] authorizes ONE
+    peer for seats 0 and 2 while it drives a single driver for seat 0 --
+    the n-of-n deal then waits forever for shares from a seat nobody is
+    playing. Discriminating observable: the freeze is refused and the map
+    stays empty, rather than resolving 3 of 3 seats and looking complete.
+    """
+    s = repeated_order(wire_session(), ["a", "b", "a"],
+                       {"a": "AA", "b": "BB"})
+
+    with pytest.raises(RuntimeError, match="more than once"):
+        s._bind_seat_keys()
+
+    assert s._seat_keys == {}
+
+
+def test_d1_a_repeated_seat_id_is_refused_in_compat_too():
+    """Not a wire-only rule: compat authorizes on ``_seat_order[seat] ==
+    conn_id``, so a repeated id makes one connection own two seats there
+    as well, with no keys involved at all."""
+    bus = InMemoryBus()
+    s = Session(is_host=False, nickname="P", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"),
+                master_secret=b"\x02" * 32)
+    s.local_conn_id = "peer0"
+    assert s.author_mode == AUTHOR_MODE_COMPAT
+    repeated_order(s, ["a", "b", "a"], {"a": "", "b": ""})
+
+    with pytest.raises(RuntimeError, match="more than once"):
+        s._bind_seat_keys()
+
+
+def test_d1_game_start_with_a_repeated_seat_is_refused_before_playing():
+    """The reachable route: the seat order is host-authoritative.
+
+    configure_seats has always refused duplicates, but _on_game_start
+    adopted whatever a host sent. Refused at ingress, so the peer never
+    enters PLAYING, never spends its write-once policy adoption, and can
+    still accept a correct game_start afterwards.
+    """
+    s = compat_joiner()
+    s._on_game_start("host", {"payload": {
+        "seat_order": ["host", "joiner", "host"],
+        "table_settings": {Session.DEAL_POLICY_SETTING:
+                           Session.DEAL_POLICY_DETECTION}}})
+
+    assert s.state == "LOBBY", "a duplicated seat order started the table"
+    assert s._seat_order == []
+    assert s.deal_policy is None, "the write-once policy was spent"
+    assert s.terminal_state is None
+
+    # ... and the lobby is still usable: a correct order is accepted.
+    s._on_game_start("host", {"payload": {
+        "seat_order": ["host", "joiner"],
+        "table_settings": {Session.DEAL_POLICY_SETTING:
+                           Session.DEAL_POLICY_DETECTION}}})
+    assert s.state == "PLAYING"
+    assert s._seat_order == ["host", "joiner"]
+
+
+def test_d1_duplicate_rule_is_total_on_hostile_input():
+    """It runs on the ingress path, so it must answer rather than raise.
+
+    Unhashable elements are the case a ``set()`` implementation gets wrong:
+    it raises TypeError, which on this path means an exception on the
+    transport's dispatch thread instead of a dropped message.
+    """
+    assert _duplicate_seat_ids([{"a": 1}, {"a": 1}]) == [{"a": 1}]
+    assert _duplicate_seat_ids(["a", "b"]) == []
+    assert _duplicate_seat_ids("not a list") == []
+    assert _duplicate_seat_ids(None) == []
+    assert _duplicate_seat_ids([]) == []
 
 
 def test_d1_disconnect_before_freeze_cannot_strand_a_seat():
