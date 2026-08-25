@@ -56,6 +56,14 @@ class MentalDealDriver:
     ``prevention`` opts this seat into Bayer-Groth shuffle proofs. It is a
     table-wide setting the session layer must apply uniformly to every
     peer in the hand; a table whose peers disagree voids the hand.
+
+    It is REQUIRED, with no default. The insecure state must not be
+    reachable by omission: a construction site that simply forgot the
+    argument would have dealt detection-only while the table believed it
+    was running Bayer-Groth, and nothing downstream would have said so.
+    MentalDeal itself still defaults it to False, because a deliberately
+    detection-only harness is a legitimate caller of that lower layer --
+    but the driver is the layer the product builds through.
     """
 
     def __init__(
@@ -68,7 +76,7 @@ class MentalDealDriver:
         button: int,
         master_secret: bytes,
         send: Callable[[dict], None],
-        prevention: bool = False,
+        prevention: bool,
     ):
         self.deal = MentalDeal(
             session_id=session_id,

@@ -257,6 +257,46 @@ def _is_seat(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _duplicate_seat_ids(order) -> list:
+    """Seat ids appearing more than once, first-seen order. [] if none.
+
+    One definition, for the same reason ``_is_seat`` is one: the seat order
+    is validated by the local API (configure_seats), adopted from an inbound
+    game_start, and frozen into the authorization map by _bind_seat_keys.
+    Three checks written by hand are three checks that can disagree about
+    what counts as the same seat.
+
+    Uniqueness is not decoration. ``_seat_keys`` maps seat -> signing key
+    and ``_author_owns_seat`` falls back to ``_seat_order[seat] == conn_id``
+    in compat, so a repeated id makes one identity authoritative for two
+    seats -- while the peer holding it drives ONE driver, so the n-of-n deal
+    never receives the other seat's shares and the hand stalls with nobody
+    to blame.
+
+    TOTAL on hostile input, and never raises: this runs on the message
+    ingress path, where an exception would leave the transport's dispatch
+    thread carrying a malformed seat order. A non-sequence is not this
+    function's business -- shape is checked where the order is encoded --
+    so it reports no duplicates rather than inventing a verdict.
+
+    Compared by equality rather than through a set: ``set(order)`` raises
+    TypeError on an unhashable element, and "the attacker sent a list of
+    dicts" must not be the one input that gets an exception instead of an
+    answer.
+    """
+    if not isinstance(order, (list, tuple)):
+        return []
+    seen: list = []
+    dupes: list = []
+    for cid in order:
+        if any(cid == s for s in seen):
+            if not any(cid == d for d in dupes):
+                dupes.append(cid)
+        else:
+            seen.append(cid)
+    return dupes
+
+
 @dataclass(frozen=True)
 class HostlessInbound:
     """One inbound peer-authored message, with its three identities separated.
@@ -1041,6 +1081,19 @@ class Session:
             raise RuntimeError(
                 "cannot begin hand: no deal policy has been adopted; a hand "
                 "must follow an accepted table")
+        # Keyed to the ADOPTED POLICY first, and to author_mode second.
+        # A table that settled on Bayer-Groth must enforce it on every
+        # peer path; verification is not optional merely because the
+        # transport happens to be compat. Today `prevention` is derived
+        # from the policy so this cannot fire -- that is the point. It
+        # pins the derivation the prevention docstring warns can drift,
+        # at the last moment before a driver exists.
+        if self._deal_policy == self.DEAL_POLICY_BG and not self.prevention:
+            raise RuntimeError(
+                f"cannot begin hand: the table adopted "
+                f"{self.DEAL_POLICY_BG!r} but this peer would deal "
+                f"without prevention. A settled Bayer-Groth table "
+                f"enforces Bayer-Groth on every participating peer path.")
         if self.author_mode == AUTHOR_MODE_WIRE and not self.prevention:
             raise RuntimeError(
                 f"cannot begin hand: wire mode requires "
@@ -1577,21 +1630,84 @@ class Session:
 
         Idempotent and one-way: once populated it is never rebuilt, so a
         later roster edit -- including one from a compromised or buggy host
-        -- cannot move a seat onto a different key mid-session. A seat that
-        cannot be resolved is simply absent from the table, and messages
-        claiming it are refused rather than silently trusted.
+        -- cannot move a seat onto a different key mid-session.
+
+        All or nothing. Because the map is authoritative AND one-way, a
+        partial freeze is not a smaller version of the same thing: every
+        seat it failed to resolve becomes permanently unauthorizable, and
+        nothing can undo it. That state is reachable without an attacker
+        -- a peer that drops between start_game and start_p2p_hand has
+        already been popped from ``players`` by handle_disconnect, so its
+        seat resolves to no key. It now raises instead, leaving the map
+        unfrozen so a later complete attempt can still succeed.
+
+        An EMPTY map is legitimate ONLY in compat: that transport carries
+        no envelopes, so no seat has a verified key at all, and
+        _author_owns_seat falls through to the conn_id rule by design.
+        Empty means 'this transport has no authors'; partial means 'this
+        transport has authors and we lost some'.
+
+        In WIRE mode an empty map is a third thing, and it is not
+        harmless. Authorization does still fail closed afterwards -- with
+        no bindings, _author_owns_seat refuses every seat rather than
+        trusting the delivering connection -- but that is the wrong
+        MOMENT to fail. Returning quietly starts a hand in which every
+        message is then refused: a dead table wearing the costume of a
+        live one. Wire mode raises here instead.
+
+        The seat order itself must name each seat exactly once, or the map
+        cannot express seat authority at all -- see _duplicate_seat_ids.
+        configure_seats already enforces that for the local API, but
+        _on_game_start adopts the order an inbound message carries, so the
+        rule belongs at the point authority is CONFERRED as well as at the
+        point the order is set.
+
+        What this does NOT establish: that two DIFFERENT seats hold two
+        different identities. A host that asserts one signing key for two
+        conn_ids produces a legal-looking complete map in which one author
+        speaks for two seats. That is the same guarantee admission.py
+        already declines to offer -- a joiner holds no attestation for any
+        seat but the host's -- and closing it here would be theatre while
+        the roster it is built from remains the host's assertion. Stated,
+        not silently assumed away.
         """
         if self._seat_keys:
             return                                # already frozen
+        repeated = _duplicate_seat_ids(self._seat_order)
+        if repeated:
+            raise RuntimeError(
+                f"cannot bind seat keys: seat order names {repeated!r} more "
+                f"than once. A seat id maps to one identity and one driver, "
+                f"so a repeated id would authorize one peer for two seats "
+                f"and then wait forever for shares from the seat nobody is "
+                f"playing.")
         bound: dict[int, str] = {}
         with self._lock:
-            for seat, cid in enumerate(self._seat_order):
+            seats = list(enumerate(self._seat_order))
+            for seat, cid in seats:
                 player = self.players.get(cid)
                 key = getattr(player, "ed25519_pubkey_hex", "") if player else ""
                 if key:
                     bound[seat] = key
-        if bound:
-            self._seat_keys = bound
+        if not bound:
+            if seats and self.author_mode == AUTHOR_MODE_WIRE:
+                raise RuntimeError(
+                    f"cannot bind seat keys: none of the {len(seats)} "
+                    f"seats resolved to a signing key, but this transport "
+                    f"delivers verified envelopes. An empty map is "
+                    f"legitimate only in compat, where no seat has a key at "
+                    f"all; in wire mode it would start a hand in which every "
+                    f"seat is refused at message time.")
+            return                          # compat: no envelopes, no keys
+        if len(bound) != len(seats):
+            missing = [seat for seat, _cid in seats if seat not in bound]
+            raise RuntimeError(
+                f"cannot bind seat keys: incomplete map, {len(bound)} of "
+                f"{len(seats)} seats resolved (missing seats {missing}). "
+                f"Refusing to freeze a partial authoritative map -- it is "
+                f"one-way, so every unresolved seat would be permanently "
+                f"unauthorizable for the rest of the session.")
+        self._seat_keys = bound
 
     def _seat_author_ok(self, conn_id: str, msg: dict, seat: int) -> bool:
         """Is this message authorized to act for ``seat``?
@@ -2289,6 +2405,19 @@ class Session:
             _log.warning("session: ignoring player_info from %s -- only a "
                          "host receives identity announcements", conn_id)
             return
+        # Roster identity is established in the lobby. player_info is how
+        # a joiner announces itself, so accepting it later lets any holder
+        # of the room code land in `players` and `_join_order` mid-hand
+        # and trigger a roster broadcast. It gains no seat -- _seat_order
+        # and _seat_keys are frozen before the first hand -- but lobby
+        # state is not a scratchpad, and _on_player_ack and _on_game_start
+        # already carry this perimeter. This one did not.
+        if self.terminal_state is not None or self.state != "LOBBY":
+            _log.warning(
+                "session: ignoring player_info from %s -- roster identity "
+                "is established in LOBBY (state=%s, terminal=%s)",
+                conn_id, self.state, self.terminal_state)
+            return
         payload = msg.get("payload", {})
         nickname = payload.get("nickname", "Player")
         with self._lock:
@@ -2543,6 +2672,26 @@ class Session:
                     "session: game_start from %s would change settled table "
                     "settings mid-session — ignoring", conn_id)
             return
+        # The seat order is host-authoritative but not host-trusted. A
+        # repeated seat id is never legitimate -- start_game builds the
+        # order from ``players``, which is keyed by conn_id -- and adopting
+        # one seats a table that cannot deal: one peer would be authorized
+        # for two seats while driving one, so the n-of-n deal waits forever
+        # for shares nobody is producing. Refused BEFORE the policy is
+        # adopted, because adoption is write-once and must not be spent on a
+        # message this handler is about to drop.
+        #
+        # Dropped rather than raised: this is an inbound handler, and it is
+        # dropped rather than terminal because refusing to enter PLAYING
+        # leaves a lobby that a correct game_start can still start.
+        seat_order = payload.get("seat_order", [])
+        repeated = _duplicate_seat_ids(seat_order)
+        if repeated:
+            _log.warning(
+                "session: game_start from %s names seat(s) %r more than once "
+                "— ignoring; a seat id maps to one identity and one driver",
+                conn_id, repeated)
+            return
         settings = payload.get("table_settings", {})
         policy = self.parse_deal_policy(settings, self.author_mode)
         if policy is None:
@@ -2562,7 +2711,7 @@ class Session:
                 conn_id=conn_id)
             return
         self.state = "PLAYING"
-        self._seat_order = payload.get("seat_order", [])
+        self._seat_order = seat_order       # the order checked above
         # Store table settings so _mp_new_game in gui.py can read them
         ts = payload.get("table_settings", {})
         if ts:
@@ -3035,8 +3184,13 @@ class Session:
             raise ValueError(f"seat order needs at least 2 seats, got {len(order)}")
         if len(order) > 9:
             raise ValueError(f"seat order needs at most 9 seats, got {len(order)}")
-        if len(set(order)) != len(order):
-            raise ValueError("seat order contains duplicate conn_ids")
+        # Through the shared rule, so the local API, the game_start ingress
+        # and the seat-key freeze cannot drift on what "the same seat"
+        # means. The wording is unchanged; the duplicates are now named.
+        repeated = _duplicate_seat_ids(order)
+        if repeated:
+            raise ValueError(
+                f"seat order contains duplicate conn_ids: {repeated!r}")
         if self.local_conn_id and self.local_conn_id not in order:
             raise ValueError(
                 f"local conn_id {self.local_conn_id!r} not in seat order")

@@ -36,3 +36,10 @@ packages = ["holdem", "holdem.p2p"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# -ra: name every non-passing outcome and its reason in the run summary.
+# CI runs `pytest -q`, which reports a bare "N skipped" -- and the suites
+# that skip themselves when libsodium is missing are the ones carrying the
+# mental-poker security properties. A count cannot tell "Godot is not
+# installed" from "the entire crypto estate did not run". See
+# tests/crypto_gate.py.
+addopts = "-ra"

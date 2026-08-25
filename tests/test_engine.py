@@ -21,6 +21,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from holdem.engine import (Card, Engine, Player, Brain, evaluate, chen,
                            FULL_DECK, AI_STYLES)
 
+try:
+    import pytest
+except ImportError:                      # this module also runs as a script
+    pytest = None
+
+# CI gives every test 60 s (PYTEST_TIMEOUT in .github/workflows/ci.yml).
+# test_game_fuzz is fully seeded -- random.Random(seed * 100 + n) -- so its
+# inputs are deterministic and it is not input-flaky; it simply runs ~30 s
+# on a fast machine, which is roughly 2x headroom there and evidently less
+# than that on the slowest interpreter on a variable runner. It timed out
+# once on `engine-tests (3.10)` and went green on a re-run of the identical
+# commit. A test that flips red without saying anything about what it
+# asserts costs review attention every time, so it carries its own budget
+# rather than the suite-wide one. This changes the BUDGET only: the seeds,
+# the work and the invariants are untouched.
+_own_timeout = (pytest.mark.timeout(300) if pytest is not None
+                else (lambda fn: fn))
+
 
 # ------------------------------------------------------------------ oracle
 
@@ -136,6 +154,7 @@ def _run_hand(e, brain):
     return e.settle()
 
 
+@_own_timeout
 def test_game_fuzz():
     """Chip conservation + legality + round-close invariant, all structures."""
     for seed in range(30):
