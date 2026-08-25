@@ -39,6 +39,7 @@ Superseding a decision means adding a new row, not editing an old one.
 | 2026-08-18 | **The rules-profile identifier's canonical deal-context binding is deferred to M2.** M1 settles `POKER_RULES_PROFILE.md` *semantics*; the actual binding rides M2's deliberate B7 stable-seat context and domain version break. M0/D4 changes **enforcement only**, never context encoding. | M1 and M2 must not independently redesign the same wire context. One deliberate domain break, not two accidental ones. |
 | 2026-08-18 | **`docs/p2-coordination` merges to `main` as a documentation-only PR** after review. | `docs/ROADMAP.md` and the collaboration contract are only a shared source of truth once they are on `main`. Leaving them on a branch defeats the purpose. |
 | 2026-08-25 | **A ruling this repository cannot tie to a published professional rule is classified OVERRIDE (house), never ADOPT** — `docs/POKER_RULES_PROFILE.md` §2.2. Uncalled bets, side pots and big-blind ante order move to OVERRIDE; the rulings themselves are unchanged. | ADOPT is a claim about what a professional rule *says*. Sound pot arithmetic or a consensus argument justifies our ruling but cannot establish someone else's text, and the only TDA 2024 material in this repository is what the research note records. Labelling the difference stops a later reader mistaking a house rule for professional authority. No ruling changed, so the profile identifier does not bump. |
+| 2026-08-25 | **The authoritative TDA 2024 ruleset is vendored into the repository** at `docs/research/sources/`, and every M1 classification is re-based on it. **Supersedes the row above:** uncalled bets, side pots and big-blind ante order return to ADOPT, now on cited text (15-B/65-A, 21 with the Rule 16 addendum, RP-11); run-it-twice and the straddle are excluded by the pinned blind and dealing structure (51-B, 38, 39) rather than by house preference; only residual dead-money allocation and cryptographic absence remain house rulings, each with the search recorded. `POKER_RULES_PROFILE.md` §3.6 now maps all 71 rules and 22 Recommended Procedures. **No ruling changed at any point** in this sequence, so the profile identifier does not bump. | The previous row recorded honest uncertainty, but uncertainty is not a classification: OVERRIDE-because-we-cannot-check says nothing about whether the game agrees with the professional ruleset. The fix was not better labelling, it was obtaining the source. Two findings only the text could produce: Rule 35-E already treats a fouled deck as stop-and-return-all-bets, which is the precedent our void-and-redeal implements, and Rule 28 forbids rabbit hunting, which the full-deck audit structurally breaks. |
 | 2026-08-24 | **The M0/D3 fold-win exposure question is decided in M1** (`docs/POKER_RULES_PROFILE.md` §4, decision D-M1-1). Post-hand hole-card secrecy is given up deliberately and stated in the product; a fold-win still reveals nothing at the client; folded seats are never rendered at a showdown, which is a conformance gap for M7. | The audit is the only point where a seat publishes a proven share for its own hole cards, and settling without it is REFUTED. A UI-level muck over an opened deck would advertise a guarantee the protocol does not provide. |
 
 ---
@@ -139,7 +140,8 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M1 — Professional poker rules profile
 
-- **Status:** in review — PR #40, `docs/POKER_RULES_PROFILE.md` written
+- **Status:** in review — PR #40, `docs/POKER_RULES_PROFILE.md` written and
+  re-based on the vendored TDA 2024 source (Decisions, 2026-08-25)
 - **Depends on:** nothing — runs independently of the P2 crypto work
 - **Goal:** create `docs/POKER_RULES_PROFILE.md` pinned to
   `poker.tda.2024.nlhe.v1`, classifying every relevant rule as
@@ -147,9 +149,11 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
   canonical encoding so that M2 can bind it into the deal context and two
   peers cannot start a hand under different rules. The binding itself is
   **not** M1's — see Decisions, 2026-08-18.
-- **Acceptance gate:** profile document exists with per-rule citations;
-  the profile identifier and its exact canonical encoding are *specified*
-  and frozen. The **binding itself is deferred to M2** — see Decisions.
+- **Acceptance gate:** profile document exists with per-rule citations
+  resolving to lines of the vendored TDA 2024 source, and a coverage map in
+  which all 71 rules and 22 Recommended Procedures are classified; the
+  profile identifier and its exact canonical encoding are *specified* and
+  frozen. The **binding itself is deferred to M2** — see Decisions.
   M1 does not touch `_deal_context_bytes`.
 - **Non-goals:** engine conformance fixes (M7); changing any existing
   engine behaviour; adopting a TDA 2026 identifier before TDA publishes
@@ -340,5 +344,5 @@ Not yet milestones; do not lose them.
 | N1 | (carried from PR #34 review) |
 | L3, L8 | (carried) |
 | LOW-4, LOW-5 | (carried) |
-| — | ~~Straddle behaviour unverified against TDA provisions~~ — **closed by M1**: classified in `docs/POKER_RULES_PROFILE.md` §3.2 (OVERRIDE, house). What remains is the conformance gap **C5**, owned by M7 |
+| — | ~~Straddle behaviour unverified against TDA provisions~~ — **closed by M1**: verified against the vendored source and classified in `docs/POKER_RULES_PROFILE.md` §3.2 (ADOPT — TDA 2024 51-B makes the posted big blind the pre-flop opener, so no profile-governed hand contains a straddle). What remains is the conformance gap **C5**, owned by M7 |
 | — | Detection-only chain attribution needs a new message exchange; currently `bad_seat` is `None` for a corrupt deck with no bad decryptor |
