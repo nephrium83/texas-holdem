@@ -38,6 +38,7 @@ Superseding a decision means adding a new row, not editing an old one.
 | 2026-08-18 | **B7 approved: sever `conn_id` from the cryptographic deal context.** The replacement must be a **stable seat identity** with a proven canonical mapping and lifecycle — not "whatever public key happens to be available." Prove the mapping before changing the domain. Ships with an **explicit version bump**. | This is a wire and proof-domain break. A replacement chosen for convenience rather than proven stability would reintroduce the same class of failure under a different name. |
 | 2026-08-18 | **The rules-profile identifier's canonical deal-context binding is deferred to M2.** M1 settles `POKER_RULES_PROFILE.md` *semantics*; the actual binding rides M2's deliberate B7 stable-seat context and domain version break. M0/D4 changes **enforcement only**, never context encoding. | M1 and M2 must not independently redesign the same wire context. One deliberate domain break, not two accidental ones. |
 | 2026-08-18 | **`docs/p2-coordination` merges to `main` as a documentation-only PR** after review. | `docs/ROADMAP.md` and the collaboration contract are only a shared source of truth once they are on `main`. Leaving them on a branch defeats the purpose. |
+| 2026-08-24 | **The M0/D3 fold-win exposure question is decided in M1** (`docs/POKER_RULES_PROFILE.md` §4, decision D-M1-1). Post-hand hole-card secrecy is given up deliberately and stated in the product; a fold-win still reveals nothing at the client; folded seats are never rendered at a showdown, which is a conformance gap for M7. | The audit is the only point where a seat publishes a proven share for its own hole cards, and settling without it is REFUTED. A UI-level muck over an opened deck would advertise a guarantee the protocol does not provide. |
 
 ---
 
@@ -137,13 +138,14 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M1 — Professional poker rules profile
 
-- **Status:** ready to start (research complete)
+- **Status:** in review — PR #40, `docs/POKER_RULES_PROFILE.md` written
 - **Depends on:** nothing — runs independently of the P2 crypto work
 - **Goal:** create `docs/POKER_RULES_PROFILE.md` pinned to
   `poker.tda.2024.nlhe.v1`, classifying every relevant rule as
-  ADOPT / DIGITALIZE / OVERRIDE / N/A, and bind the profile identifier
-  into the canonical deal context so two peers cannot start a hand under
-  different rules.
+  ADOPT / DIGITALIZE / OVERRIDE / N/A, and *specify* the identifier's
+  canonical encoding so that M2 can bind it into the deal context and two
+  peers cannot start a hand under different rules. The binding itself is
+  **not** M1's — see Decisions, 2026-08-18.
 - **Acceptance gate:** profile document exists with per-rule citations;
   the profile identifier and its exact canonical encoding are *specified*
   and frozen. The **binding itself is deferred to M2** — see Decisions.
@@ -263,10 +265,12 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 - **Status:** ready to start; independent of the P2 crypto chain
 - **Depends on:** M1
-- **Goal:** close the conformance gaps found by the rules audit —
-  cumulative short all-ins reopening betting (**B6**); reject rather than
-  silently coerce a sub-minimum raise; consider an engine-level turn
-  guard.
+- **Goal:** close the conformance gaps listed in
+  `docs/POKER_RULES_PROFILE.md` §7.2 — cumulative short all-ins reopening
+  betting (**B6**); the showdown reveal of seats that folded earlier
+  (**C1**); reject rather than silently coerce a sub-minimum raise
+  (**C2**); consider an engine-level turn guard (**C3**); the untyped
+  `"check"` action string (**C4**); verify the straddle (**C5**).
 - **Acceptance gate:** each fix has a deliberate-break control; no
   existing behaviour regresses.
 - **Non-goals:** rewriting the engine; adding physical-casino rule

@@ -1,8 +1,9 @@
 # Professional Poker Rules Audit
 
-**Type:** Research / proposed classification. **Not** yet a normative
-profile — `docs/POKER_RULES_PROFILE.md` does not exist and is a roadmap
-deliverable.
+**Type:** Research / proposed classification. **Not** normative. The
+normative profile is `docs/POKER_RULES_PROFILE.md` (M1), which supersedes
+this note wherever the two differ; this note is retained as the evidence
+the profile was built from.
 **Date:** 2026-08-18
 **Base:** `07f61a7` (origin/main)
 
