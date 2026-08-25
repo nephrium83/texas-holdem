@@ -1,0 +1,711 @@
+SOURCE SNAPSHOT - 2024 Poker TDA Rules, Version 1.0 (October 9, 2024)
+Official source: https://www.pokertda.com/poker-tda-rules/
+TDA rules used by permission of the Poker TDA, Copyright 2026, https://www.pokertda.com, All rights reserved.
+This UTF-8 text was mechanically extracted from the official long-form DOCX; see poker-tda-2024-v1.0-source.md for provenance and integrity hashes.
+
+| POKER TOURNAMENT DIRECTORS ASSN. 2024 Rules Version 1.0. Oct 9, 2024 Longform Version Includes: Recommended Procedures and Illustration Addendum
+
+The Poker TDA is a voluntary poker industry association founded in 2001. The TDA mission is to increase global uniformity of poker tournament rules. TDA Rules supplement the conventional rules of this house. In case of conflict with a gaming agency, the agency rules apply. | The Poker TDA is a voluntary poker industry association founded in 2001. The TDA mission is to increase global uniformity of poker tournament rules. TDA Rules supplement the conventional rules of this house. In case of conflict with a gaming agency, the agency rules apply.
+
+General Concepts
+
+1:  Floor Decisions
+
+The best interest of the game and fairness are top priorities in decision-making. Unusual circumstances occasionally dictate that common-sense decisions in the interest of fairness take priority over technical rules. Floor decisions are final.
+
+2:  Player Responsibilities
+
+Players should verify registration data and seat assignments, verify they’re dealt the correct number of cards before SA occurs, protect their hands, make their intentions clear, follow the action, act in turn with proper terminology and gestures, defend their right to act, keep cards visible and chips correctly stacked, remain at the table with a live hand, table all cards properly when competing at showdown, speak up if they see a mistake, play in a timely manner, call for a clock when warranted, transfer tables promptly, follow one player to a hand, know and comply with the rules, practice proper etiquette, inform the house if they see or experience discriminatory or offensive behavior, and generally contribute to an orderly event where all players feel welcome.
+
+3:  Official Terminology and Gestures
+
+Official betting terms are simple, unmistakable, time-honored declarations like bet, raise, call, fold, check, all-in, complete, and pot (pot-limit only). Regional terms may also meet this test. Also, players must use gestures with caution when facing action; tapping the table is a check. It is the responsibility of players to make their intentions clear: using non-standard terms or gestures is at player’s risk and may result in a ruling other than what the player intended. See also Rules 2 and 42.
+
+4:  Player Identity
+
+Players must be clearly identifiable at all times. Tournament staff may request a player to remove any item (sunglasses, hood, or other facial covering) which inhibits their identification or is a distraction to other participants.
+
+5:  Electronic Devices and Communication
+
+A: Players may not talk on a phone at the table. Ring tones, music, images, video etc. should be inaudible and non-disturbing to others. These and other devices, tools, photography, videography, and communication must not create a nuisance, delay the game or create competitive advantage and are subject to house and gaming regulations.
+
+B. Phones and other devices may not rest on the table.
+
+C: Players with live hands may not interact with or operate an electronic or communication device. The definition of such devices may include new technologies and shall be as updated by the TD.
+
+D: Betting apps, charts, and other poker strategy tools may not be used at the table. Nor may players receive or use poker strategy data from another person or source. Violations of Rule 5 may be subject to penalties in Rule 71.
+
+6:  Official Language
+
+The house will clearly post and announce acceptable language(s) at the table.
+
+Seating, Breaking and Balancing Tables
+
+7:  Random Correct Seating
+
+Tournament and satellite seats will be randomly assigned. A player starting in a wrong seat with a correct chip stack will move to the correct seat with their current total chip stack.
+
+8:  Alternates, Late Registration, and Re-Entries
+
+A: Alternates, players registering late, and re-entries will be sold full stacks. They will randomly draw a seat and table by the same process and from the same seat pool then in place for new players and are dealt in except between the small blind and button.
+
+B: In re-entry events, if a player is permitted to forfeit chips and buy a new stack, the forfeited chips will be removed from play.
+
+9:  Special Needs
+
+Accommodations for players with special needs will be made when possible.
+
+10:  New Players and Players from Broken Tables
+
+A: New players entering the tournament and players from broken tables can get any seat including the small or big blind or the button and be dealt in except between the SB and button.
+
+B: Players from a broken table will be assigned new tables and seats by a 2-step random process. See Illustration Addendum.
+
+11:  Balancing Tables and Halting Play
+
+A: To balance in flop and mixed-games, the player to be big blind next moves to the worst position, including single big blind if available, even if that means the seat is big blind twice. Worst position is never the small blind. In stud-only, players move by position (last seat open at the short table is the seat filled).
+
+B: In mixed games (ex: HORSE), when the game shifts from hold’em to stud, after the last hold’em hand the button moves to the position it would be if the next hand was hold’em and is frozen there during stud. The player moved in stud is the player who would be big blind if the game were hold’em for that hand. Shifting to hold'em the button starts where it was frozen.
+
+C: The table from which a player is moved will be specified by a predetermined procedure.
+
+D: Play will halt on tables 3 or more players short (by elimination) than the table with the most players once the blinds are impacted (See Illustration Addendum). Play halts on other formats (ex: 6-hand and turbos) at TDs discretion. TDs may waive halting play and waiver is not a misdeal. As the event progresses, at TD’s discretion tables should be more tightly balanced.
+
+Pots / Showdown
+
+12:  Declarations. Cards Speak at Showdown
+
+Cards speak to determine the winner. Verbal declarations of hand value are not binding at showdown but deliberately miscalling a hand may be penalized. Dealers should read and announce hand values at showdown. Any player, in the hand or not, should speak up if they think a mistake is made in reading hands or calculating and awarding the pot.
+
+13:  Tabling Cards and Killing Winning Hand
+
+A: Proper tabling is both 1) turning all cards face up on the table and 2) allowing the dealer and players to read the hand clearly. “All cards” means both hole cards in hold’em, all 4 hole cards in Omaha, all 7 cards in 7-stud, etc.
+
+B: At showdown players must protect their hands while waiting for cards to be read (See also Rule 65). Players who don’t fully table all cards, then muck thinking they’ve won, do so at their own risk. If a hand is not 100% retrievable and identifiable and the TD rules it was not clearly read, the player has no claim to the pot. The TDs decision on whether a hand was sufficiently tabled is final.
+
+C: Dealers cannot kill a properly tabled hand that was obviously the winner.
+
+14:  Live Cards at Showdown
+
+Discarding non-tabled cards face down does not automatically kill them; players may change their minds and table cards that remain 100% identifiable and retrievable. Cards are killed by the dealer when pushed into the muck or otherwise rendered irretrievable and unidentifiable.
+
+15: Showdown and Discarding Irregularities
+
+A: If a player tables one card that would make a winning hand, the dealer should advise the player to table all cards. If the player refuses, the floor should be called.
+
+B: If a player bets then discards thinking they have won (forgetting another player is still in the hand), the dealer should hold the cards and call the floor (a Rule 58 exception). If cards are mucked and not retrievable and identifiable to 100% certainty, the player is out and not entitled to a refund of called bets. If cards are mucked and the player initiated a bet or raise not yet called, the uncalled amount will be returned.
+
+16:  Face Up for All-Ins
+
+All hands will be tabled without delay once a player is all-in and all betting action by all other players in the hand is complete. No player who is either all-in or has called all betting action may muck their hand without tabling. All hands in both the main and side pot(s) must be tabled and are live. See Illustration Addendum.
+
+17:  Non All-In Showdowns and Showdown Order
+
+A: In a non all-in showdown, if cards are not spontaneously tabled or discarded, the TD may enforce an order of show. The last aggressive player on the final betting round (final street) must table first. If there was no final round bet, the player who would act first in a final betting round must table first (i.e. first seat left of the button in flop games, high hand showing in stud, low hand in razz, etc.).
+
+B: A non all-in showdown is uncontested if all but one player mucks face down without tabling. The last player with live cards wins and is not required to table the cards.
+
+18:  Asking to See a Hand
+
+A: Players not still in possession of cards at showdown, or who have mucked their cards face down without tabling, lose any rights or privileges to ask to see any hand.
+
+B: If there was a river bet, any caller has an inalienable right to have the last aggressor’s hand tabled on request (“the hand they paid to see”) provided the caller tabled or retains his or her cards. TDs discretion governs all other requests such as to see the hand of another caller, or if there was no river bet. See Illustration Addendum [adopted 2013].
+
+19:  Playing the Board at Showdown
+
+To play the board, players must table all hole cards to get part of the pot (See Rule 13-A).
+
+20:  Awarding Odd Chips
+
+First, odd chips will be broken into the smallest denomination in play. A) Board games with 2 or more high or low hands: the odd chip goes to the first seat left of the button. B) Stud, razz, and if 2 or more high or low hands in stud/8: the odd chip goes to the high card by suit in the player’s 5-card winning hand. C) H/L split: the odd chip in the total pot goes to the high side. D) Deleted 2022.
+
+21:  Side Pots
+
+Each side pot will be split separately.
+
+22:  Disputed Hands and Pots
+
+The reading of a tabled hand may be disputed until the next hand begins (see Rule 23). Accounting errors in calculating and awarding the pot may be disputed until substantial action occurs on the next hand. If a hand finishes during a break, the right to any dispute ends 1 minute after the pot is awarded.
+
+General Procedures
+
+`
+
+23:  New Hand and New Limits
+
+A new level starts on announcement by the floor or audio signal by the clocking system. The new level applies to the next hand. Hands begin on the first riffle, push of the shuffler button, or on the dealer push. If a hand starts at the prior level by mistake, the hand will continue at the prior level after substantial action occurs (Rule 36). If a new level starts during the dealer push, the incoming dealer will deal one hand at the prior level.
+
+24:  Chip Race, Scheduled Color Ups
+
+A: At scheduled color-ups, chips will be raced off starting in seat 1, with a maximum of one chip awarded to a player. Players can’t be raced out of play: a player losing their last chip(s) in a race will get 1 chip of the lowest denomination still in play.
+
+B: Players must have their chips fully visible and are encouraged to witness the chip race.
+
+C: If after the race, a player still has chips of a removed denomination, they will be exchanged for current denominations only at equal value. Chips of removed denominations that do not fully total at least the smallest denomination still in play will be removed without compensation.
+
+25:  Cards and Chips Kept Visible, Countable, and Manageable. Discretionary Color-Ups
+
+A: Players, dealers, and the floor are entitled to a reasonable estimation of chip counts; thus, chips should be kept in countable stacks. The TDA recommends clean vertical stacks of 20 same denomination chips each as a standard. Higher denomination chips must be visible and identifiable at all times. If a floor person can’t look at a chip stack and quickly estimate its value, players likely can’t either.
+
+B: TDs control the number and denominations of chips in play and may color up one or more players at their discretion at any time. Discretionary color ups are to be announced.
+
+C: Players must keep live hands in plain view at all times.
+
+26:  Deck Changes
+
+Deck changes will be on the dealer push or level changes or as prescribed by the house. Players may not ask for deck changes.
+
+27:  Re-buys
+
+Players may not miss a hand. Players declaring intent to rebuy before a hand are playing chips behind and must make the re-buy.
+
+28:  Rabbit Hunting
+
+Rabbit hunting (revealing cards that would have come if the hand had not ended) is not allowed.
+
+29:  Calling for a Clock
+
+Players should act in a timely manner to maintain a reasonable pace of the game. If in TD’s judgement reasonable time has passed, they may call the clock or approve a clock request by any player in the event. Players must be at their seats to call for a clock (Rule 30). A player on the clock has up to 25 seconds plus a 5 second countdown to act. If the player faces a bet and time expires, the hand is dead; if not facing a bet, the hand is checked. A tie goes to the player. TDs may adjust the time allowed and take other steps to fit the game and stop persistent delays. See also Rules 2 and 70.
+
+Player Present / Eligible for Hand
+
+30:  At Your Seat and Live Hands
+
+To have a live hand, players must be at their seats when the last card is dealt to all players on the initial deal. Players not then at their seats may not look at their cards which are killed immediately. Their posted blinds and antes forfeit to the pot and an absent player dealt the stud bring-in card posts the bring-in. “At your seat” means in reach of your chair. This rule is not intended to encourage players to be out of their seats while in a hand.
+
+31:  At the Table with Action Pending
+
+Players with live hands (including players all-in or otherwise finished betting) must remain at the table for all betting rounds and showdown. Leaving the table is incompatible with protecting your hand and following the action and is subject to penalty.
+
+Button / Blinds
+
+32:  Dead Button
+
+Tournament play will use a dead button.
+
+33:  Dodging Blinds
+
+Players who intentionally dodge any blind will incur a penalty. See Rule 71-B.
+
+34:  Button Placement and Movement
+
+A: If incorrect button movement is discovered before SA occurs, the error will be corrected. However, if SA has occurred, play will continue. Ex: If the button is moved twice and SA occurs the error will stand, the button will not be backed-up on the next hand. All players have a responsibility to monitor button placement and speak up if they see a mistake (Rule 2)
+
+B: Heads-up, the small blind is the button, is dealt the last card, and acts first pre-flop and last on all other betting rounds. Starting heads-up play, the button may need to be adjusted to ensure no player has the big blind twice in a row.
+
+Dealing Rules
+
+35:  Misdeals and Fouled Decks
+
+A: Misdeals include but are not necessarily limited to: 1) 2 or more boxed cards on the initial deal; 2) first card dealt to the wrong seat; 3) cards dealt to a seat not entitled to a hand; 4) a seat entitled to a hand is dealt out; 5) the wrong number of cards is dealt to any player (except Rule 37); 6) Before SA, a non-standard card for the game type is found (example: jokers, 2-3-4-5 in short deck); 7) In flop games, if 1 of the first 2 cards dealt off the deck or any other 2 downcards are exposed by dealer error. House rules apply for draw games (ex: lowball).
+
+B: Players may be dealt 2 consecutive cards on the button (see also Rule 37).
+
+C: In misdeals, the re-deal is an exact re-play: the button doesn’t move, no new players are seated, limits stay the same. Cards are dealt to players who were dealt-in but not at their seats for the original deal and they can play the re-deal (Rule 30). Players on penalty who were originally dealt-in will receive cards then their hands are killed. The original deal and re-deal count as 1 hand for a player on penalty, not 2.
+
+D: Once substantial action occurs (see Rule 36) a misdeal cannot be declared; the hand must proceed unless the deck is fouled. Non-standard cards found after SA are treated as scraps of paper (exception: fouled decks).
+
+E: Fouled decks.If 2 or more cards of the same suit and rank are found, the deck is fouled. Other fouled deck conditions may be defined by local gaming regulations and house policy. If a fouled deck is discovered, regardless of SA, play will stop and all bets will be returned. Once a hand concludes, the right to dispute based on a fouled deck ends according to Rule 22.
+
+36:  Substantial Action (SA)
+
+Substantial Action is either A) any 2 actions in turn, at least one of which puts chips in the pot (i.e. any 2 actions except 2 checks or 2 folds) or B) any combination of 3 actions in turn (check, bet, raise, call, fold). Posted blinds do not count towards SA. See Rules 35-D and 53-B.
+
+37: Button with Too Few Cards
+
+A player on the button dealt too few cards should announce it immediately. Missing button cards may be replaced even after substantial action if permitted for the game type. However, if the button acts on a hand with too few cards (by check or bet), the button’s hand is dead.
+
+38:  Burns After Substantial Action
+
+The burn card is to protect the stub, not “preserve card order”. If SA occurs and a hand is killed due to the wrong number of cards, all cards of the killed hand are mucked and randomness applies to further dealing (See also RP-14 Randomness). The stub is treated as a normal stub and one and only one card is burned off the stub for each subsequent street. The burn is always one card per street, never more. See Illustration Addendum.
+
+39:  Irregular Flops and Premature-Dealt Cards
+
+A: 4-Card Flops. If the flop has 4 rather than 3 cards, exposed or not, and regardless of whether the door card is presumed known, the floor will be called. The dealer then scrambles the 4 cards face down, the floor randomly selects 1 as the next burn card and the other 3 are the flop (See also RP-14 Randomness).
+
+B: If there was no burn on a 3-card flop, exposed or not and regardless of whether the door card is presumed known, if no action has occurred, the 3 cards are scrambled face down, one chosen as the burn. The flop will be the other 2 cards plus the next card off the stub. If any action (even one check) has occurred, play proceeds with the initial 3 cards. Only one card is burned for the turn.
+
+C: For prematurely dealt cards, see Recommended Procedure 5.
+
+D: Reshuffling During a Hand. To protect game integrity, anytime the stub must be re-shuffled during the play of a hand, the cards must be shuffled face-down and unexposed. Examples include premature cards (Rule 39 and RP-5), disordered stub (RP-4), extra draw or stud cards (RP-10-H), etc.
+
+Play: Bets and Raises
+
+40:  Methods of Betting: Verbal and Chips
+
+A: Bets are by verbal declaration and/or pushing out chips. If a player does both, whichever is first defines the bet. If simultaneous, a clear and reasonable verbal declaration takes precedence, otherwise the chips play. In unclear situations or where verbal and chips are contradictory, the TD will determine the bet based on the circumstances and Rule 1. See Illustration Addendum. See also Rule 57.
+
+B: Verbal declarations may be general (“call”, “raise”), a specific amount only (“one thousand”) or both (“raise, one thousand”).
+
+C: For all betting rules, declaring a specific amount only is the same as silently pushing out an equal amount. Ex: Declaring “two hundred” is the same as silently pushing out 200 in chips.
+
+41:  Methods of Calling
+
+Standard and acceptable forms of calling include: A) saying “call”; B) pushing out chips equal to a call; C) silently pushing out an overchip; or D) silently pushing out multiple chips equal to a call under the multi-chip rule (Rule 45). Silently betting chip(s) relatively tiny to the bet (ex: blinds 2k-4k. A bets 50k, B then silently puts out one 1k chip) is non-standard, strongly discouraged, subject to penalty, and will be interpreted at TDs discretion, including being ruled a full call.
+
+42:  Methods of Raising
+
+In no-limit or pot-limit, a raise must be made by A) pushing out the full amount in one motion or B) verbally declaring the full amount prior to pushing out chips. It is the responsibility of players to make their intentions clear. Note: 2-motion raises eliminated in 2019.
+
+43:  Raise Amounts
+
+A: A raise must be at least equal to the largest prior full bet or raise of the current betting round. A player who raises 50% or more of the largest prior bet but less than a minimum raise must make a full minimum raise. If less than 50% it is a call unless “raise” is first declared or the player is all-in (Rule 45-B). Declaring an amount or pushing out the same amount of chips is treated the same (Rule 40-C). Ex: NLHE, opening bet is 1000, verbally declaring “Fourteen hundred” or silently pushing out 1400 in chips are both calls unless raise is first declared. See Illustration Addendum.
+
+B: Without other clarifying information, declaring raise and an amount is the total bet. Ex: A opens for 2000, B declares “Raise, eight thousand.” The total bet is 8000.
+
+44:  Oversized Chip Betting (Overchips)
+
+If facing a bet or blind, pushing out a single oversized chip (including your last chip) is a call if raise isn’t first declared. To raise with an overchip you must declare raise before the chip hits the table surface. If raise is declared but no amount is stated, the raise is the maximum allowable for the chip. If not facing a bet, pushing out an overchip silently (no declaration) is a bet of the maximum for the chip.
+
+45:  Multiple Chip Betting
+
+A: If facing a bet, unless raise or all-in is declared first, a multiple-chip bet (including a bet of your last chips) is a call if every chip is needed to make the call; i.e. removal of just one of the smallest chips leaves less than the call amount. Ex-1: Player A opens for 400: B raises to 1100 total (a 700 raise), C puts out one 500 and one 1000 chip silently. This is a call because removing the 500 chip leaves less than the 1100 call amount. Ex-2: NLHE 25-50. Post-flop A opens for 1050 and B puts out his last chips (two 1000’s). B calls unless raise or all-in was first declared.
+
+B: If every chip is not needed to make the call; i.e. removing just one of the smallest chips leaves the call amount or more: 1) if the player has chips remaining, the 50% standard in Rule 43 governs the bet. 2) A bet of a player’s last chip(s) is an all-in bet whether reaching the 50% threshold or not. See Addendum.
+
+46:  Prior Bet Chips Not Pulled In
+
+A: To avoid confusion, players with prior-bet chips not yet pulled in who face a raise should verbalize their action before adding chips to the prior bet.
+
+B: If facing a raise, clearly pulling back a prior bet chip binds a player to call or raise; they may not put the chip(s) back out and fold.
+
+C: If new chip(s) are added silently and the bet is unclear to the house, the call and raise rules 41-45 apply as follows: 1) If prior chips don’t cover the call AND are either left alone OR fully pulled back, an overchip is a call and multiple new chips are subject to the 50% raise standard (Rule 43). 2) If prior chips are partly pulled back OR if prior chip(s) cover the call, the combined final chip bet is a raise if reaching the 50% standard (Rules 43 and 45), if less it is a call. See Illustration Addendum.
+
+47: Re-Opening the Bet.
+
+A: In no-limit and pot limit, an all-in wager (or cumulative multiple short all-ins) totaling less than a full bet or raise will not reopen betting for players who have already acted and are not facing at least a full bet or raise when the action returns to them. If multiple short all-ins re-open the betting, the minimum raise is always the last full valid bet or raise of the round (See also Rule 43).
+
+B: In limit, at least 50% of a full bet or raise is required to re-open betting for players who have already acted. See Illustration Addendum.
+
+48:  Number of Allowable Raises
+
+There is no cap on the number of raises in no-limit and pot-limit. In limit play, there is a limit to raises even when heads-up until the event is down to 2 players; the house limit applies.
+
+49:  Accepted Action
+
+Poker is a game of alert, continuous observation. It is the caller’s responsibility to determine the correct amount of an opponent’s bet before calling, regardless of what is stated by others. If a caller requests a count but receives incorrect information from a dealer or player, then pushes out that amount or declares call, the caller has accepted the full correct action and is subject to the correct wager or all-in amount. As with all situations, Rule 1 may apply at TD’s discretion. See also RP-12.
+
+50: Acting in Turn
+
+A: Players must act in turn verbally and/or by pushing out chips. Action in turn is binding and commits chips to the pot that stay in the pot.
+
+B: Players must wait for clear bet amounts before acting. Ex: NLHE, A says “raise” (but no amount), and B quickly folds. B should wait to act until A’s raise amount is clear.
+
+51: Binding Declarations / Undercalls in Turn
+
+A: General verbal declarations in turn (such as “call” or “raise”) commit a player to the full current action. See Illustration Addendum
+
+B: A player undercalls by declaring or pushing out less than the call amount without first declaring “call”. An undercall is a mandatory full call if made in turn facing 1) any bet heads-up or 2) the opening bet on any round multi-way. In other situations, TD’s discretion applies. The opening bet is the first chip bet of each betting round (not a check). In blind games the posted BB is the pre-flop opener. All-in buttons reduce undercall frequency (See Recommended Procedure 1). This rule governs when players must make a full call and when, at TDs discretion they may forfeit the amount of the intended undercall and fold (see Illustration Addendum). For underbets and underraises, see Rule 52.
+
+C: If two or more undercalls occur in sequence, play backs up to the first undercaller who must correct his or her bet per Rule 51-B. The TD will determine how to treat hands of the remaining bettors based on the circumstances.
+
+52: Incorrect Bets, Underbets and Underraises
+
+A: In limit and no-limit, opening or raising less than the minimum legal amount is corrected anywhere on the current street (if on the river any time before showdown starts). Ex: NLHE 100-200, post-flop A opens for 600 and B raises to 1000 (a 200 underraise). C and D call, E folds then the error is noticed. Increase the bet to 1200 total for all bettors any time before the turn is dealt. After the turn the error stands. For undercalls, see Rule 51.
+
+B: In pot limit, if a player underbets the pot based on an inaccurate count, if the pot count is too high (an illegal bet), it will be corrected for all players anywhere on the current street; if too low, corrected until substantial action occurs after the bet. See Illustration Addendum.
+
+53:  Action Out of Turn (OOT)
+
+A: Any action out of turn (check, call, or raise) will be backed up to the correct player in order. The OOT action is subject to penalty and is binding if action to the OOT player does not change. A check, call or fold by the correct player does not change action. If action changes, the OOT action is not binding; any bet or raise is returned to the OOT player who has all options: call, raise, or fold. An OOT fold is binding. See Illustration Addendum.
+
+B: Players skipped by OOT action must defend their right to act. If a skipped player had reasonable time and does not speak up before substantial action (Rule 36) OOT occurs after the player, the OOT action is binding. Action backs up and the floor will rule on how to treat the skipped hand given the circumstances, including ruling the hand dead or limiting the player to non-aggressive action. See Addendum.
+
+54:  Pot Size and Pot-Limit Bets
+
+A: Players are entitled to a pot count in pot-limit only. Dealers will not count the pot in limit and no-limit. See also RP-22 Spreading the Pot
+
+B: Pre-flop a dead or short all-in blind will not affect pot calculation. All pre-flop pot and re-pot bets will assume full blinds were posted. Ex 1: PLO, 100-200 blinds, dead SB, BB posts 200. Ex 2: SB posts 100, BB short posts 100. In both examples the pot-limit bet for first player to act is 700.
+
+C: Post-flop, bets are based on actual pot size.
+
+D: Declaring “I bet the pot” is not a valid bet in no-limit but it does bind the player to making a valid bet (at least a minimum bet) and may be subject to penalty. Players facing a bet must make a valid raise.
+
+55: Invalid Bet Declarations
+
+If a player faces no bet and: A) declares “call”, it is a check; B) declares “raise”, the player must make at least a minimum bet. A player declaring “check” when facing a bet may call or fold, but cannot raise.
+
+56:  String Bets and Raises
+
+String bets and raises are not allowed. Such wagers involve multiple movements whereby a player puts out a bet then returns to their stack for more chips to add to the bet.
+
+57:  Non-Standard and Unclear Betting
+
+Players use unofficial betting terms and gestures at their own risk. These may be interpreted to mean other than what the player intended. Also, if a declared bet can legally have multiple meanings, it will be ruled the highest reasonable amount that is less than or equal to the pot size* before the bet. Ex: NLHE 200-400, the pot totals less than 5000, player declares “I bet five.” With no other clarifying information, the bet is 500; if the pot totals 5000 or more, the bet is 5000. *The pot is the total of all prior bets including any bets in front of a player not yet pulled in. See Rules 2, 3, 40 and 42.
+
+58:  Non-Standard Folds
+
+Any time before the end of the final betting round, folding in turn if there’s no bet to you (ex: facing a check or first to act post-flop) or folding out of turn are binding folds subject to penalty. See also 15-B.
+
+59:  Conditional and Premature Declarations
+
+A: Conditional statements of future action are non-standard and strongly discouraged. At TDs discretion they may be binding and/or penalized. Example: “if – then” statements such as "If you bet, I will raise.”
+
+B: If Player A declares “bet” or “raise” and B calls before A’s exact bet amount is known, the TD will rule the bet as best fits the situation including possibly obliging B to call any amount.
+
+60:  Count of Opponent’s Chip Stack
+
+Players, dealers, and the floor are entitled to a reasonable estimation of opponents’ chip stacks (Rule 25). A player may request a more precise count only if facing an all-in bet and it is his or her turn to act. The all-in player is not required to count; on request the dealer or floor will count it. Accepted action applies (Rule 49). Visible and countable chip stacks (Rule 25) greatly improve counting accuracy.
+
+61:  Over-Betting Expecting Change
+
+Betting should not be used to obtain change. Pushing out more than the intended bet can confuse everyone at the table. All chips pushed out silently are at risk of being counted in the bet. Ex: the opening bet is 325 to player A who silently puts out 525 (one 500 and one 25), expecting 200 change. This is a raise to 650 under the multiple chip rule (Rule 45).
+
+62: All-In with Chips Found Behind Later
+
+If A bets all-in and a hidden chip is found behind after a player calls, the TD will determine if the chip behind is part of accepted action (Rule 49). If not part of the action, A is not paid off for the chip(s) if he or she wins. If A loses, he or she is not saved by the chip(s) and the TD may award the chip(s) to the winning caller.
+
+Play: Other
+
+63:  Chips Out of View and in Transit
+
+Players may not hold or transport chips in a way that takes them out of view. A player who does so will forfeit the chips and may be disqualified. The forfeited chips will be taken out of play. The TDA recommends the house provide racks or bags to transport chips when needed.
+
+64: Lost and Found Chips
+
+Lost and found chips for which ownership cannot be determined will be taken out of play and returned to tournament inventory.
+
+65:  Accidentally Killed / Fouled / Exposed Hands
+
+A: Players must protect their hands at all times, including at showdown while waiting for hands to be read. If the dealer kills a hand by mistake or if in TDs judgement a hand is fouled and cannot be identified to 100% certainty, the player has no redress and is not entitled to a refund of called bets. If the player initiated a bet or raise and hasn’t been called, the uncalled amount will be returned.
+
+B: If a hand is fouled but can be identified, it remains in play despite any cards exposed.
+
+66:  Dead Hands and Mucking in Stud
+
+In stud poker, if a player picks up the upcards while facing action, the hand is dead. Proper mucking in stud is turning down all up cards and pushing them all forward face down.
+
+Etiquette and Penalties
+
+67:  No Disclosure. One Player to a Hand
+
+Players must protect other players in the tournament at all times. Therefore players, whether in the hand or not, must not:
+
+1.  Discuss contents of live or mucked hands,
+
+2.  Advise or criticize play at any time,
+
+3.  Read a hand that hasn't been tabled.
+
+One-player-to-a-hand is in effect. Among other things, this rule prohibits showing a hand to or discussing strategy with another player, advisor, or spectator.
+
+68:  Exposing Cards and Proper Folding
+
+Exposing cards with action pending, including the current player when last to act, may result in a penalty but not a dead hand. Any penalty begins at the end of the hand. When folding, cards should be pushed forward low to the table, not deliberately exposed or tossed high (“helicoptered”). See Rule 66.
+
+69:  Ethical Play
+
+Poker is an individual game. Soft play will result in penalties, which may include chip forfeiture and/or disqualification. Chip dumping and other forms of collusion will result in disqualification.
+
+70: Etiquette Violations
+
+Etiquette violations are subject to enforcement actions in Rule 71. Examples include but are not limited to: persistent delay of the game, unnecessarily touching another player’s person, cards or chips, repeatedly acting out of turn, maintaining poor card or chip visibility and countability, betting out of reach of the dealer, abusive conduct, offensive hygiene, and excessive chatter.
+
+71:  Warnings, Penalties, and Disqualification
+
+A: Enforcement options include but are not limited to verbal warnings, one or more “missed hand” or “missed round” penalties, and disqualification. For missed rounds, the offender will miss one hand for every player (including him or her) at the table when the penalty is given multiplied by the number of penalty rounds. Repeat infractions are subject to escalating penalties. Players away from the table or on penalty may be anted or blinded out of a tournament.
+
+B: A penalty may be invoked for etiquette violations (Rule 70), card exposure with action pending, throwing cards, violating one-player-to-a-hand, improper use of devices or strategy tools (Rule 5), or similar incidents. Penalties will be given for soft play, abuse, disruptive behavior, dodging blinds or cheating. Checking the exclusive nuts when last to act on the river is not an automatic soft play violation; TD’s discretion applies based on the situation.
+
+C: Players on penalty must be away from the table. Cards are dealt to their seats, their blinds and antes posted, their hands are killed after the initial deal, and if dealt the stud bring-in they must post the bring-in.
+
+D: Chips of a disqualified player shall be removed from play.
+
+ | POKER TOURNAMENT DIRECTORS ASSN. 2024 Recommended Procedures, Version 1.0, October, 2024
+
+TDA Recommended Procedures are policy suggestions to reduce errors and improve event management. They also may apply to situations with too many variations to address in one universal rule. The fairest ruling in these cases may require use of multiple rules, evaluation of all circumstances, and reliance on Rule 1 as a primary guide. | TDA Recommended Procedures are policy suggestions to reduce errors and improve event management. They also may apply to situations with too many variations to address in one universal rule. The fairest ruling in these cases may require use of multiple rules, evaluation of all circumstances, and reliance on Rule 1 as a primary guide.
+
+RP-1. All-In Buttons
+
+All-in buttons clearly indicate a player is “all-in.” The dealer should keep the buttons (not each player). When a player bets all-in, the dealer places an all-in button in front of the player, in full view of the rest of the table.
+
+RP-2. Bringing in Bets is Discouraged
+
+Routinely bringing in chips as betting and raising proceeds around the table is poor dealing practice. Reducing bet stacks can influence action, create confusion and increase errors. Only the player currently facing action may ask the dealer to bring-in bets.
+
+RP-3. Personal Belongings
+
+The table surface is vital for chip stack management, dealing, and betting. The table and nearby spaces (legroom and walkways) must not be cluttered by non-essential personal items. Each cardroom should clearly display its policy on items allowed in the tournament area.
+
+RP-4. Disordered Stub
+
+When cards remain to be dealt on a hand and the stub is accidentally dropped and appears to be disordered: 1) first try to reconstruct the stub in its original order if possible; 2) If not possible, create a new stub using only the stub cards (not the muck and prior burns). These should be scrambled, shuffled, cut, and play proceeds with the new stub; 3) If when dropped the stub is mixed in with the muck and/or burns, then scramble the mixed cards together, shuffle, and cut. Play proceeds with the new stub.
+
+RP-5. Prematurely Dealt Cards
+
+Board and burn cards are sometimes dealt prematurely, before action on the preceding round is finished. The general procedures for these situations are:
+
+A: Premature flop, leave the flop burn card as the burn. Return the premature board cards to the deck stub and reshuffle the entire stub. Re-deal the flop (without another burn) from the newly shuffled stub.
+
+B: A premature turn card: leave the turn burn card as the burn. Return the premature turn card to the deck stub and reshuffle the entire stub. Re-deal the turn (without another burn) from the newly shuffled stub
+
+C: A premature river card: leave the river burn card as the burn. Return the premature river card to the deck stub and reshuffle the entire stub. Re-deal the river (without another burn) from the newly shuffled stub
+
+D: Premature card in stud: the premature card is returned to the stub, the stub is re-shuffled (See RP-17, reshuffling), and a new street is dealt from the newly shuffled stub without another burn.
+
+RP-6. Efficient Movement of Players
+
+Moving players for breaking and balancing should be expeditious so as not to unduly miss blinds or otherwise delay the game. If possible, players should have racks for chip transport and sufficient color-ups should be done so players do not carry unusually large numbers of chips (see Rules 10, 11 and 63).
+
+RP-7. Timing of Dealer Pushes
+
+The TDA recommends that dealers hold up the push 90 seconds prior to a scheduled break or a level change. This avoids having time expire in crucial stages of the game.
+
+RP-8: Hand for Hand Procedures
+
+A: Payoff eligibility starts at the announcement: “finish the current hand you’re on then hold up, we are going hand for hand”. If enough players bust on the current hand to break into the money, the busting players will be eligible for a share of the place(s) paid on the current hand. Example: NLHE tournament paying 50 players. 52 players remain when the announcement is made and during the current hand 3 players bust. All 3 players will share in the 50th place payout.
+
+B: During H4H play, a maximum of 3 minutes per hand will be deducted from the clock.
+
+C: So that players can most clearly know the timing of level changes, whenever possible the clock should be reduced by 2-minutes each hand not after “batches” of multiple hands.
+
+D: Blinds continue to increase as time elapses off the clock at the rate of 2 minutes per hand and new levels are reached.
+
+E: Players are encouraged but not required to remain seated during H4H play.
+
+F: In the event of an all-in and call during H4H, the cards of all players in the hand should remain face down. Dealers should not deal additional cards until instructed.
+
+RP-9:  Number of Players at Final Table
+
+9 and 8-handed events will combine from two tables of five players each to a 9-handed final table. 7 and 6-handed events will combine from two tables of four players each to a 7-handed final table.
+
+RP-10: Tournament Stud Dealing Procedures
+
+A: A downcard exposed on the initial deal will be the player’s upcard and 3rd street will be dealt down to that player. The player can be the bring-in.
+
+B: A card exposed by the dealer on 7th street will be replaced if betting action remains on the hand. 7th street should be dealt down even if no betting action remains on the hand and in all-in situations the player(s) not at risk expose first.
+
+C: Cards of a player not at his or her seat (See Rule 30) for the deal will be killed. No cards will be dealt to a hand on 4th street that is not live.
+
+D: If there are two or more matching high hands showing in Stud (or Stud-8) or low hands in Razz, betting starts on the hand with the high card by suit in both games.
+
+E: If the player dealt the low card by suit is all-in for the ante, betting starts to his or her left. Players with chips must bet at least the bring-in or fold.
+
+F: Bets will not be doubled on 4th street for a pair showing.
+
+G: For premature cards dealt in stud see RP-5-D.
+
+H: 7th street short stub procedure. If before dealing 7th street the number of cards in the current stub is less than the “required number” (# remaining players + burn card + undealt last card) proceed as follows: A) if the required number can be reached by adding the 3 prior burn cards (for 4th, 5th, and 6th street) the current stub will be scrambled with the prior burns to create a new stub. The new stub will be cut, a card burned, and one card dealt to each player. B) if there are at least 3 cards in the current stub but adding the prior burns would not reach the required number, the dealer will burn the top card of the current stub and deal the next card as a community card in the center of the table. C) if the current stub has less than 3 cards, it will be scrambled with the 3 prior burns for a new stub which will then be cut, a card burned, and the next card dealt as a community card. D) If a community card is in play, the first player who would act on 6th street will be first to act on 7th street.
+
+RP-11: Ante Formats and No Ante Reduction
+
+If a single-payer ante is used, the big blind ante format (BBA) with big-blind-first calculation is recommended. Antes should not be reduced (including at the final table) as play progresses in the event.
+
+RP-12: Dealers Should Announce Bets and Raises
+
+Dealers should routinely announce non-all-in bet values as betting proceeds around the table. All-in bets will be counted only on request of the player currently facing action. Accepted action continues to apply (Rule 49). Scheduled and discretionary color-ups improve bet countability.
+
+RP-13: Dealers Should Stack Chips in Split-Pot Games
+
+Where possible, dealers should periodically stack pot chips in split-pot games. Stacking chips should not obscure players’ view or otherwise disrupt the game.
+
+RP-14: Randomness May be Applied to Special Situations
+
+For error remedies not otherwise covered in the TDA Rules and Procedures, TDs may use the concept of randomness to design a solution.
+
+RP-15: Proper Tournament Staff Communication
+
+A: Outgoing dealers should inform incoming dealers of pertinent information regarding the table. Examples include: blind information, players on warning or penalties, disruptive behavior.
+
+B: The dealer should inform the floor of all existing and potential infractions of Rule 2 (Player Responsibilities) and Rule 70 (Etiquette). Special emphasis on any discriminatory or offensive behavior in general or towards specific players or staff.
+
+RP-16: Player Absent on a Breaking Table
+
+If a player is not present during breaking of a table, their chips should be moved to the new table by a staff member.
+
+RP-17: Tournament Draw Betting Procedures
+
+Limping is allowed in all single-draw games.
+
+RP-18: Order of Mixed Games
+
+In order to reduce errors, in mixed game events (ex HORSE), stud and stud-8 need not be played consecutively.
+
+RP-19: Reducing Stalling
+
+The house should clearly announce intention to reduce stalling so that players understand timely play is expected. It’s recommended that each house establish creative methods for reducing stalling. Some methods successfully used by TDA member houses include:
+
+Random table breaks instead of table draws, using fixed # of hands per level, going orbit for orbit, soft hand for hand, and adding a shot clock
+
+RP-20: Cards Ready for Shuffle
+
+At the start of the tournament of ending of a break, within one minute of starting or resuming play, the floor should announce “dealers prepare your decks”. When at least 2 players are at the table, the dealer will wash and square the deck, to be ready for shuffle when the level starts.
+
+RP-21: Spreading the Pot
+
+The pot will only be counted in pot-limit events. On request the pot may be spread to increase chip visibility. See also Rule 54: Pot Size and Pot-Limit Bets.
+
+RP-22: Betting Non-Denominational Items (Bounty chips, clock tokens etc)
+
+Action items with no nominal value (bounty chips, clock tokens etc) should be of different size than standard betting chips. Betting with these items will be interpreted per house policy or Rule 1 and may be ruled a call or all-in at TDs discretion.
+
+ | POKER TOURNAMENT DIRECTORS ASSN. Illustration Addendum 2024 Rules Version 1.0, October, 2024
+
+The Poker TDA is a voluntary poker industry association founded in 2001. The TDA mission is to increase global uniformity of poker tournament rules. TDA Rules supplement the rules of this house. In case of conflict with a gaming agency, the agency rules apply. | The Poker TDA is a voluntary poker industry association founded in 2001. The TDA mission is to increase global uniformity of poker tournament rules. TDA Rules supplement the rules of this house. In case of conflict with a gaming agency, the agency rules apply.
+
+Rule 10: Breaking Tables, 2-Step Random Process. A 2-step random or “double-blind” process assures that there is no favoritism in distributing new seat assignments. An example of one such process: 1) show players at the breaking table the new seat cards then scramble the cards face down and form a stack; 2) the dealer then deals one playing card face up to each player. The seat cards are then dealt out with the first seat card going to the player with the highest playing card by suit showing.
+
+Rule 11-D: Balancing Tables and Halting Play.
+
+Example: NLHE 9-handed, table A has 5 players, table B has the most players with 8. Play halts on table A once the BB hits an open seat.
+
+Rule 16: Face Up for All-Ins. “All hands will be tabled without delay once a player is all-in and all betting action by all other players in the hand is complete”. This rule means that all downcards of all players will be turned up at once when at least one player is all-in and there is no chance of further betting action by the other player(s). Do not wait for the showdown to turn the cards up; do not wait for side pots to be divided before turning up the all-in who is only in for the main pot; if betting action is finalized on any street prior to the showdown, turn the cards up at that point and then run out the remaining cards.
+
+Example 1. NLHE. Two players remain. On the turn, Player A (the shorter stack) pushes all-in and is called by B. Turn both A and B’s downcards up at this point, then burn and turn the river and proceed to showdown.
+
+Example 2. NLHE. Three players remain.
+
+Pre-flop, Player A (the shortest stack) pushes all-in and is called by both B and C. Do not turn cards up yet because B and C both have chips so further betting action is possible.
+
+On the flop B and C check; betting is still possible so don’t turn the cards up yet.
+
+On the turn B pushes all-in and C calls. Turn all hands up now (A, B, and C) because no further betting is possible. Burn and turn the river then proceed to showdown. Award the side pot between B and C first, then award the main pot. Notice: you do not keep A’s cards face down until the side pot between B and C is awarded.
+
+Example 3. NLHE.  Three players remain.
+
+Pre-flop, Player A (the shortest stack) pushes all-in for 700 and is called by both B and C who have several thousand each left. Do not turn cards up yet because B and C both have chips so further betting action is possible.
+
+On the flop B and C check; betting is still possible so don’t turn the cards up yet.
+
+On the turn B bets 1000 and C calls. Since both B and C still have chips and the river remains to be dealt, betting is still possible so don’t turn the cards up yet.
+
+On the river both B and C check. Turn all hands up now (A, B, and C) because betting is over and the hand is moving to showdown. Award the 2000 side pot between B and C first, then award the main pot. Notice: do not keep A’s cards face down until the side pot between B and C is awarded.
+
+Rule 18: Asking to See a Hand
+
+Example 1: NLHE. 3 players remain in the hand. There is no betting on the river and no player is all-in. At showdown Player A discards face down and the cards are pushed into the muck by the dealer. B tables his hand, showing trips. C pushes his cards forward face-down. B may ask to see C’s hand because B has tabled his cards. However, B’s request is at TDs discretion; B has no inalienable right to see it because there was no bet on the river thus he did not “pay to see C’s hand.” Neither A nor C may ask to see a competitor’s hand because they have neither tabled their cards nor retained them.
+
+Example 2: NLHE. 4 players remain in the hand. On the river A bets 1000, B calls, C raises to 5000, and D, A and B all call. No player is all-in. B tables his hand, showing trips. D instantly discards face down and the dealer kills his hand into the muck. C begins to push his cards forward face-down. Both A and B have an inalienable right to see C’s hand on request because 1) they paid to see it as C was the last aggressor on the river and 2) both A and B retain their cards. D (who also called C) relinquished his right to see C’s hand when he discarded without tabling. All other requests in this situation are at TD’s discretion, such as B asking to see A’s cards (the cards of another caller).
+
+Rule 38: Burns After Substantial Action
+
+Example 1-A: THE 50-100. SB / BB in seats 1 and 2. Pre-flop, initial cards dealt to all players. SB / BB in seats 1 and 2. Seat 3 (UTG) folds and Seat 4 calls, completing substantial action with 2 actions with chips. Seat 5 then realizes they have only 1 card and the hand is dead because SA has occurred. The dealer will burn only one card and then put out the flop. The dealer will not burn 2 cards to “return to the original stub order”.
+
+Example 1-B: Same game and initial deal. Seat 3 (UTG) folds and Seat 4 calls, completing substantial action. Seat 5 then realizes they have 3 cards and the hand is dead because SA has occurred. The dealer will burn one card and then put out the flop. The dealer will not consider Seat 5’s third card as the burn and put out the flop without a burn off the stub.
+
+Rule 40-A: Methods of Betting, Unclear or Contradictory Bets. “In unclear situations or where verbal and chips are contradictory, the TD will determine the bet based on the circumstances and Rule 1”.
+
+Example 1: THE, heads-up on the river Player A verbally declares “forty-two thousand” but pushes out only a 5k chip. Not everyone at the table heard the declaration. Player B pushes out 5k to call. Both players table and A has the best hand.  Ruling criteria is mixed: verbal came first but wasn’t necessarily clear. The chip appeared to be a bet of 5k. In these unclear and contradictory situations, the TD will make the fairest ruling possible using Rule 1.
+
+Rule 43: Raise Amounts. “The largest prior full bet or raise of the current betting round”.
+
+This line refers to the largest additional action or “last legal increment” by a preceding bettor in the current round. The current round is the “current street”, i.e. pre-flop, flop, turn, river in board games; 3rd – 4th – 5th – 6th – 7th street in 7-stud, etc.
+
+Example 1: NLHE, Blinds 100-200. Post-flop, A opens with a bet of 600. B raises 1000 for total of 1600. C re-raises 2000 for total of 3600. If D wants to raise, he must at least raise the “largest bet or raise of the current round”, which is C’s raise of 2000. So, D must re-raise at least 2000 more for a total of 5600. Note that D’s minimum raise is not 3600 (C’s total bet), but only 2000, the additional raise action that C added.
+
+Example 2: NLHE, Blinds 50-100. Pre-flop A is under the gun and goes all-in for a total of 150 (an increase in the bet of 50). So, we have a 100 blind bet and an all-in wager that increases the total by 50. Which is larger? The 100 is still the “largest bet or raise of the current round”, so if B wants to re-raise he must raise at least 100 for a total of 250.
+
+Example 3: NLHE, Blinds 100-200. On the turn A bets 300. B pushes out two 500 chips making the total 1000 (a 700 raise). It is 1000 to C to call. If C wants to raise, it must be “at least the largest bet or raise of the current round”, which is B’s raise of 700. So, C’s minimum raise would be 700 for a total of 1700. Note his minimum raise is not 1000, B’s total bet.
+
+Example 4-A: NLHE, Blinds 25-50. A raises 75 to 125 total. Notice that 125 total = 50 (bet) plus 75 (raise).  The next raise on this street must be “at least the size of the largest previous bet or raise”, which is 75. B now raises the minimum (75) to 200 total. C then re-raises 300 for total of 500. We now have a bet of 50, two raises of 75 and a raise of 300 for total of 500. If D wants to re-raise, “the raise must be at least the size of the largest previous bet or raise of the current betting round”, which is now 300. So, D must raise at least 300 more to a total of 800.  
+
+Example 4-B: Same as 4-A. It's the same 500 to D, but there’s just been one raise of 450 by A to a total of 500 and B and C have both called. So, there’s a blind bet of 50 and a raise of 450. "A raise must be at least the size of the largest previous bet or raise of the current betting round", which is A’s raise of 450. So, it’s 500 for D to call, and if D wants to re-raise he must raise at least 450 for a total of 950.
+
+Rule 45: Multiple Chip Betting.
+
+“A: If facing a bet, unless raise or all-in is declared first, a multiple-chip bet (including a bet of your last chips) is a call if every chip is needed to make the call; i.e. removal of just one of the smallest chips leaves less than the call amount. B: If every chip is not needed to make the call; i.e. removal of just one of the smallest chips leaves the call amount or more: 1) if the player has chips remaining, the bet is governed by the 50% standard in Rule 43; 2) if the player’s last chips are bet he or she is all-in whether reaching the 50% threshold or not.”
+
+Example 1: There is not one chip that can be removed and still leave the call amount.
+
+1-A: Player A opens post flop for 1200, B silently puts out two 1000’s. This is a call because neither chip can be removed and still leave at least 1200.
+
+1-B: NLHE, blinds 250-500. Preflop the UTG raises 600 to total of 1100. The UTG+1 silently puts out one 500 and one 1000 chip. This is a call because neither the 500 nor the 1000 can be removed and still leave at least 1100.
+
+Example 2: Same as 1-B above except the UTG+1 puts out one 1000 and five 100s silently. Four of the 100s could be removed and still leave the 1100 call amount. Therefore, this would be subject to the 50% standard in Rule 43: the minimum raise is 600, 50% of 600 is 300, therefore, if the UTG+1 puts out 1400 or more, he will be held to making a full raise to 1700 total. Since the UTG put out 1500 he must raise in this example.
+
+Example 3: Same as 2 above except the UTG+1 puts out one 1000 and three 100s silently. Two of the 100s can be removed and still leave the 1100 call amount therefore this is subject to Rule 43. Since the player did not put out at least 50% of a minimum raise, this bet is ruled a call and 200 is returned to the player.
+
+Example 4: Multiple-chip bet of all chips. A) If all chips are needed to make the call, this is treated exactly the same as a player with chips behind (See example 1 above). B) If removing just one of the smallest chips leaves the call amount or more, the player is all-in regardless of whether the bet reaches the 50% raise standard.
+
+Example 4-A: A opens for 1400, B (with remaining chips behind in large chip stack) silently pushes out one 1000 and three 500’s. This is a mandatory min-raise to 2800 because the 50% threshold of 2100 (1400+700=2100) is reached.
+
+Example 4-B: Same 1400 opener, B (with remaining chips behind in large chip stack) puts out one 1000 and two 500s. This is a call because it is short of the 50% threshold of 2100. NOTE: In both example 4-A and 4-B, Player B would be all-in if putting out his or her last chips.
+
+Rule 46: Prior Bet Chips Not Pulled In, situation examples.
+
+Situation 1: If prior chips don’t cover the call AND are left alone. Ex: THE 25-50, the BB posts two 25’s, button raises to 600 total (550 more to BB).
+
+1: Adding an overchip is a call (drop a 1k chip onto the two 25’s).
+
+2: Adding multiple new chips is a call if all new chips are needed to call a) drop two 500’s onto the two 25’s or b) drop a 100 and 500 chip onto the two 25’s. In these two examples all new chips when combined with the prior chips are needed to make the call.
+
+3: Adding multiple new chips is a Rule 45 multiple chip bet if one of the smallest new chips is not needed to make the call (drop a 1k and 500 chip onto the two 25’s is a total bet of 1550). Per Rule 45, a silent multi-chip bet is a raise if it hits the 50% threshold; otherwise it is a call.
+
+Situation 2: If prior chips don’t cover the call AND are fully pulled back:
+
+1) Removing all prior chips and adding an overchip is a call (pull back the two 25’s, add 1k chip).
+
+2) Removing all prior chips and adding new multiple chips is a Rule 45 bet (pull back two 25’s, add two or more new chips).
+
+Situation 3: if prior chip(s) are partly pulled back (whether or not they cover the call amount)
+
+1) Partial removal of prior chips (pull back one 25, leave the other 25 out, add any new chip(s), is a Rule 45 multiple-chip bet (a raise if hitting 50%, otherwise a call).
+
+Situation 4: If prior chip(s) cover the call amount, adding any new chip(s) is a Rule 45 multiple chip bet. Ex: THE 50-100, BB posts one 1k chip. Pre-flop raise to 700 (600 more to BB). The 1k prior chip covers the raise, thus adding any new chip(s) is a Rule 45 bet of all chips. This applies whether or not the initial 1k posted is pulled back or left alone.
+
+Situation 5: Regardless of the above, the gesture of combining and pushing or tossing all chips forward may be interpreted as intent to bet all chips under Rule 45.
+
+Rule 47: Re-opening the bet.
+
+Example 1. Multiple short all-in wagers that cumulatively equal a full raise and therefore re-open betting:
+
+NLHE, Blinds 50-100. Post-flop, A opens betting for the 100 minimum.
+
+B goes all in for a total of 125. C calls the 125,
+
+D goes all in for 200 total and E calls 200.
+
+Action returns to A who is facing a total raise of 100. Since 100 is a full raise, the betting is re-opened for A who can fold, call, or raise here. Note that neither B’s increment of 25 or D’s increment of 75 is by itself a full raise, but when added together they total a full raise and thus re-open the betting to “a player who is facing at least a full raise when the action returns”.
+
+Example 1-A: At the end of Example 1 above, A smooth calls the 200 total (another 100 to him). The bet is now on C who only faces a 75 increment. C called 125 previously and now faces 200 total (75 more). C must face at least 225 total to re-open betting. Because 75 is not a full raise, betting for C is not re-opened and C can either call with 75 more or fold, he cannot raise.
+
+Example 1-B: At the end of Example 1 above, A raises the minimum (100), and makes it 300 total to C. C already has called 125 so it’s an additional 175 for C to call. 175 is more than a full raise. Since C already acted and is “now facing at least a full raise”, the betting is re-opened to C who can fold, call, or re-raise here.
+
+Example 2: Multiple short all-ins, the min-raise is the last full valid bet or raise.
+
+NLHE, Blinds 50-100. Post-flop A opens for 300, B pushes all-in for 500 total, C goes all-in for 650 total, D goes all-in for 800 total, E calls 800. What is the min raise for Player F? The opening bet (300) sets the initial min raise. Because no single player was all-in for more than 300, the min raise for F remains 300. F can either smooth call 800 or raise to at least 1100. See also Rule 43, Example 2 in Illustration Addendum.
+
+Example 3. Short all-in, 2 scenarios.
+NLHE, Blinds 2000-4000. Pre-flop A calls the BB for 4000. B folds and C pushes all-in for 7500 total (an increment of 3500 above the 4000 BB). It’s folded around to the SB who also folds.
+
+Example 3-A. It’s 3500 more to the BB who has not yet acted on his option. The BB can fold, smooth call the 3500, or raise by at least 4000 for a total of 11,500. The BB smooth calls and it’s 3500 more to A. A has already acted and is facing 3500 which is not a full raise. Therefore, A can only fold or call the 3500, he cannot raise because it is not “at least a full bet when the action returns to him”.
+
+Example 3-B. The BB raises the minimum (4000), for a total of 11500. It is now 7500 to A and because 7500 is more than a full minimum raise, betting is now re-opened for A who can fold, call, or re-raise.
+
+Rule 51: Binding Declarations / Undercalls in Turn
+
+Example 1: NLHE, blinds 1000-2000. Post-flop, A opens for 2000, B raises to 8000, C pushes out 2000 silently. C has undercalled B’s bet. Per Rule 51-B, because B is not the opener (A is) and the round is still multi-way, at TD’s discretion C may be required to make a full call or allowed to forfeit the 2000 undercall and fold.
+
+Example 2: NLHE, blinds 1000-2000. Post-flop 4 players remain. A opens for 8000, B silently puts out 2000. Per Rule 51-B, B undercalled the opening bet and must make a full call of 8000.
+
+Example 3: NLHE, blinds 1000-2000. Post-flop, A opens for 2000, B raises to 8000, C declares “call”. Per Rule 51-A, C has made a general verbal declaration (“call”) in turn. C is obligated to call B’s full bet of 8000.
+
+Example 4: NLHE, blinds 200-400. Opener bets 400, player A raises to 1200 and Player B puts out one 500 chip silently. Dealer tells B it’s 1200 and B folds. At TD’s discretion B forfeits 400 and 100 is returned.
+
+Rule 52-B: Incorrect Bet Amounts, Pot-Limit Games
+
+Example 1: PLO, 500-1000 blinds. Post-flop the pot totals 10,500. Player A wants to bet the pot and asks the dealer for a count. Dealer replies “nine thousand five hundred”. A pushes out 9,500. Player B folds and Player C calls 9,500. Substantial action has occurred after the initial erroneous bet. The dealer then realizes A’s pot bet should have been 10,500. Because the quoted amount was less than the pot and substantial action has occurred, the 9,500 bet is binding and will not be increased to 10,500.
+
+Example 2: Same as example 1 above, Player B folds then the dealer realizes A’s pot bet should have been 10,500. Substantial action has not occurred, so A must increase his or her bet to 10,500 total.
+
+Example 3: PLO, 500-1000 blinds. Post-flop the pot totals 10,500. Player A wants to bet the pot and asks the dealer for a count. Dealer replies “eleven thousand five hundred”. A pushes out 11,500. Player B folds, Player C and D both call 11,500. Before burning and turning the next card, the dealer realizes the initial bet was an illegal overbet. Despite substantial action occurring, because the bet was illegal it will be reduced to 10,500 for all players calling anywhere on the current street. If the next card is dealt the error will stand.
+
+Rule 53-A: Action Out of Turn (OOT)
+
+Example 1: THE 50-100. Post flop Seat 3 opens for 300, Seat 4 folds, action is on Seat 5 when Seat 6 declares “raise to eight hundred”.
+
+Step 1: Action backs up to the correct player in order (Seat 5) who is facing a bet of 300.
+
+Step 2: If Seat 5 calls or folds then the action (a 300 bet) has not changed and Seat 6’s OOT raise is binding (raise to 800). However, if Seat 5 raises, (say, to 600 total), then the action to Seat 6 has changed from a 300 bet to a 600 bet. If action changes, the 800 chips may be returned to Seat 6 who has all options open: call 600, re-raise to at least 900, or fold.
+
+Example 2: THE 50-100. Post flop Seat 3 checks, Seat 4 checks, action is on Seat 5 when Seat 6 declares “check”.
+
+Step 1: Action backs up to the correct player in order (Seat 5) who is not facing a bet.
+
+Step 2: If Seat 5 checks then the action (a check) has not changed and Seat 6’s OOT check is binding. However, if Seat 5 bets, (say, 300), then the action to Seat 6 has changed from a check to a 300 bet. If action changes, then Seat 6 has all options open: call 300, raise to at least 600, or fold.
+
+Rule 53-B: Substantial Action Out of Turn (OOT). A player skipped by OOT action must defend his right to act. If there is reasonable time and the skipped player has not spoken up by the time substantial action (see Rule 36) OOT occurs to his left, the OOT action is binding. The floor will be called to render a decision on how to treat the skipped hand.
+
+Example 1: NLHE, blinds 100-200. UTG (Seat 3) makes it 600. Seat 4 is skipped when Seat 5 calls 600 OOT. Seat 6 thinks for a moment then folds. There are now two players acting with chips involved to the left of Seat 4. Two players with chips qualifies as substantial action (Rule 36). Also, Seat 4 has had reasonable time to speak up and bring it to the dealer’s attention that he has been skipped. The OOT call by Seat 5 is now binding due to substantial action OOT, and the OOT fold by Seat 6 is binding (Rule 58). The floor is called to make a decision on the fate of Seat 4’s hand.
+
+Example 2: NLHE, blinds 100-200. Four players remain to see the turn. After the dealer tables the turn card, the UTG (Seat 3) opens betting for 600. Seat 4 is skipped when Seat 5 checks and Seat 6 calls 600 OOT. The floor is called to make a decision on the fate of Seat 4’s hand.
