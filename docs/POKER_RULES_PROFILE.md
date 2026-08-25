@@ -153,10 +153,22 @@ revision it meant "this repository has not established a provision", which
 recorded *our* uncertainty rather than the ruleset's content — a reviewer
 correctly refused it as a substitute for reading the source. With the text
 pinned, an [H] row must name the provisions examined and say why none governs.
-Exactly two rows survive that test: residual dead-money allocation (§3.1) and
-timeout while cryptographically absent (§3.4). Attaching a contradicting
-provision to an [H] row later is a ruling change and a revision bump (§1.3);
-attaching a *confirming* one refines the citation and is not.
+Exactly four rows survive that test: residual dead-money allocation (§3.1), one
+board per hand (§3.1), the straddle (§3.2), and timeout while cryptographically
+absent (§3.4). Attaching a contradicting provision to an [H] row later is a
+ruling change and a revision bump (§1.3); attaching a *confirming* one refines
+the citation and is not.
+
+**Silence is a grant to the house, not a prohibition.** The pinned source says
+so on its own masthead: *"TDA Rules supplement the conventional rules of this
+house"* [V] `src:8`. A subject the ruleset does not address is therefore left
+to the house to settle — it is not thereby forbidden. This is what decides
+whether a ruling may be attached to the rules that surround an unaddressed
+subject or must stand as our own, and it cuts against us twice: the straddle
+and the second runout are both absent from
+the 2024 text, and absence cannot be read as a professional prohibition
+however strongly the surrounding procedures assume a single board and a single
+pair of blinds. Both rulings stand; both are **ours** (§3.1, §3.2).
 
 **How the negative claims were reached.** Where this document says a subject is
 not addressed — the straddle, a second runout, the residual dead-money layer, a
@@ -182,23 +194,38 @@ The citation burden is not the same for all four classes:
     another. The row cites what is being departed from.
   * **(b) house** — the source was searched and no provision governs, so the
     ruling is ours. The row names the search.
-* **N/A** asserts that a rule's failure mode **cannot occur here**. That claim
-  is proved by our code, not by TDA's text. N/A rows cite the mechanism that
-  makes the failure impossible, *and* the rule being retired, so §3.6 can show
-  that no rule was quietly dropped.
+* **N/A** asserts that a rule **has no subject matter here**, in one of two
+  ways: its failure mode cannot occur, or the thing it administers does not
+  exist at this table. Either claim is proved by our own construction, not by
+  TDA's text — the first by the mechanism that makes the failure impossible,
+  the second by the table model (§3.6): one self-selected table, a roster
+  frozen at the deal, no operator or staff, stacks as integers with no
+  denominations, and no level clock. An N/A row cites that mechanism or model
+  *and* the rule being retired, so §3.6 can show that no rule was quietly
+  dropped. N/A is a statement about the rule's subject, never a claim that we
+  conform to it.
 
 **The checkable consequence: no [H] row is ADOPT or DIGITALIZE.** [H] is a
 basis, not a class, and it cannot support a claim that a professional rule was
 taken as written.
 
-Three rows record that discipline working. Uncalled bets, side pots and
-big-blind ante order were first written ADOPT on reasoning rather than text;
-the previous revision demoted them to OVERRIDE (b) because no citation existed
-here; this revision restores ADOPT because the pinned source supplies one
-(R15-B and R65-A, R21 with the Rule 16 addendum, and RP-11 respectively).
-**The ruling never changed through any of it** — only the claim about whose
-rule it is. Labelling corrections are not ruling changes (§1.3), so the
-identifier does not bump.
+Five rows record that discipline working, and it has moved in both directions.
+Uncalled bets, side pots and big-blind ante order were first written ADOPT on
+reasoning rather than text; a revision demoted them to OVERRIDE (b) because no
+citation existed here; the pinned source supplies one (R15-B and R65-A, R21
+with the Rule 16 addendum, and RP-11 respectively), so they are ADOPT. The
+straddle (§3.2) and the single runout (§3.1) went the other way: with the text
+in hand the previous revision read Rules 51-B, 38 and 39 as *excluding* them,
+and that reading does not hold — 51-B defines the opening bet for its undercall
+remedy and Rules 38–39 prescribe burns and repairs for an ordinary board.
+Neither prohibits anything, and under the masthead rule above their silence
+leaves the question to us. Both are now OVERRIDE (b), with the search written
+out.
+
+**No ruling changed through any of it** — only the claim about whose rule it
+is. No profile-governed hand contained a straddle or a second board before
+these corrections and none does after. Labelling corrections are not ruling
+changes (§1.3), so the identifier does not bump.
 
 ---
 
@@ -213,8 +240,9 @@ a cited rule says one thing and this game does another, and the row cites what
 it departs from; or **(b)** the pinned source was searched and no provision
 governs, so the ruling is **ours** (§2.2). Branch (b) rows are marked **[H]**
 and are house rules, not adoptions.
-**N/A** — the rule exists to manage a physical or procedural failure mode that
-cannot occur here.
+**N/A** — the rule has no subject matter here: either it manages a physical or
+procedural failure mode that cannot occur, or it administers something this
+table does not have (§2.2). **Four classes, and no fifth.**
 
 §3.1–§3.5 give the reasoned rows. **§3.6 maps all 71 rules and all 22
 Recommended Procedures**, so "every relevant rule is classified" is a claim a
@@ -248,7 +276,7 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Area | TDA 2024 | Class | Ruling | Evidence |
 |---|---|---|---|---|
 | Cards speak | 12 [V] `src:78` | ADOPT | *"Cards speak to determine the winner. Verbal declarations of hand value are not binding at showdown…"* The verified cards plus the evaluator determine the result; no UI text, chat, or declaration alters settlement | `engine.py:910-915` scores from `evaluate(p.hole + b)` |
-| All-in hands tabled | 16 [V] `src:100`, addendum `src:552-572` | ADOPT | *"All hands will be tabled without delay once a player is all-in and all betting action by all other players in the hand is complete. No player who is either all-in or has called all betting action may muck their hand without tabling."* | `engine.py:1000-1002` `must_show` is true whenever `tabled` |
+| All-in hands tabled | 16 [V] `src:100`, addendum `src:552-572` | ADOPT | *"All hands will be tabled without delay once a player is all-in and all betting action by all other players in the hand is complete. No player who is either all-in or has called all betting action may muck their hand without tabling."* Adopted in **both** its parts, and the addendum makes the second part a timing rule, not a settlement rule: *"Do not wait for the showdown to turn the cards up… if betting action is finalized on any street prior to the showdown, turn the cards up at that point and then run out the remaining cards"* `src:552`. **No card is unmucked and no pot is awarded differently — but the exposure is late.** `must_show` is true for every seat whenever `tabled`, so nothing is concealed at settlement (`engine.py:1000-1002`); on the P2P path, however, the hole cards do not *exist* for other peers until the hand-end audit, so a hand that goes all-in on the turn is run out with the cards still face down. That is a timing deviation from `src:552` and Examples 1–2, recorded as gap **C6** | `engine.py:1000-1002`; late-exposure path `session.py:2331-2355`, `replica_table.py:211-222`; gap **C6** |
 | Showdown order | 17-A [V] `src:104` | ADOPT | *"The last aggressive player on the final betting round (final street) must table first. If there was no final round bet, the player who would act first in a final betting round must table first (i.e. first seat left of the button in flop games…)"* | `engine.py:984-995` |
 | Beaten hand may muck | 17-B [V] `src:106`; 13-B `src:84`; 14 `src:90` | **OVERRIDE (a)** | The right is verbatim: *"A non all-in showdown is uncontested if all but one player mucks face down without tabling. The last player with live cards wins and is not required to table the cards."* In the P2P game every contested seat is tabled and **there is no muck right** — the deck is opened at hand end regardless, so a muck would conceal nothing (§4.2b). The engine's muck path still exists and still runs in the single-process game, where the deck is not opened | `session.py:2354-2355` passes `force_tabled=True` for every P2P showdown; `engine.py:1000-1019`; §4 |
 | Asking to see a hand | 18-B [V] `src:112` | DIGITALIZE | the **consequence** — *"If there was a river bet, any caller has an inalienable right to have the last aggressor's hand tabled on request ('the hand they paid to see')"* — is adopted and then some: every contested seat is tabled unconditionally, so the right is satisfied without a request, and without TDA's conditions on it. The **mechanism** (a request, and TD discretion over every other request) is replaced, because both the request channel and the discretion require a floor (§3.0). 18-A, which strips the right from a player who mucked, is moot for the same reason | `session.py:2354-2355`; §4.2 D-M1-1c |
@@ -258,7 +286,7 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Dead money never returns | 30 [V] `src:174` | ADOPT | *"Their posted blinds and antes forfeit to the pot…"* Antes and dead blinds stay in the pot | `engine.py:861-863`, `settle` never refunds `total_dead` |
 | Side pots | 21 [V] `src:124`; addendum Rule 16 Ex. 2–3 [V] `src:562`, `src:572` | ADOPT | *"Each side pot will be split separately"* (21), and the addendum fixes eligibility by matched contribution in worked numbers: the short all-in is *"the all-in who is only in for the main pot"*, while B's 1000 bet and C's call form *"the 2000 side pot between B and C"*, awarded before the main pot. That is exactly layering by committed total with each layer contested only by the seats that matched it. **[D]** for one implementation detail: two adjacent layers with *identical* eligible sets are merged, which is invisible to Rule 21 because splitting them separately and splitting the merged layer award the same chips to the same seats | `engine.py:917-932` |
 | Residual dead money above every live stake | **[H]** | **OVERRIDE (b) — house** | a folded big blind's ante can sit above every *live* stake, funding no layer with an eligible contestant. It joins the top pot. **The search:** Rule 21 `src:124` splits side pots but does not build them; Rule 30 `src:174` forfeits blinds and antes *"to the pot"*, singular, and names no layer; Rule 20 `src:120` allocates odd chips, not dead stakes; 35-E `src:208`, 71-C `src:410` and RP-11 `src:492` create dead money without allocating it. No provision in the 2024 rules, Recommended Procedures or Addendum governs the residue. Ours, on the same arithmetic as the rows above: a stake no contesting seat matched cannot define its own eligible layer | `engine.py:933-938` |
-| Run it twice | 38 [V] `src:220`; 39-A/B [V] `src:224-226` | ADOPT | *"The burn is always one card per street, never more"* (38), and Rule 39 reconstructs a **three-card flop and a single board** whenever dealing goes wrong. The ruleset deals one board per hand and provides no second runout anywhere — that is an affirmative single-board procedure, not an argument from silence. **No hand governed by this profile runs the board twice.** The engine's two-run path is a cash-game extension outside this tournament base, and is structurally impossible on the P2P path anyway: a second run deals from the deck, which mental poker cannot produce | `engine.py:884-898`, `engine.py:947`; `replica_table.py:29-31` pins `runs=1` |
+| Run it twice — one board per hand | **[H]** | **OVERRIDE (b) — house** | **No hand governed by this profile runs the board twice.** **The search:** Rule 38 `src:220` governs how many cards are burned off *"a normal stub"* per street; Rule 39-A/B `src:224-226` repairs a four-card flop or a missing burn and reconstructs *one* three-card flop; Rule 12 `src:78`, Rule 20 `src:120` and Rule 21 `src:124` settle a showdown and split pots without contemplating more than one board; the Rule 16 addendum `src:552-572` says *"run out the remaining cards"*, singular, in a procedure about tabling. Every one of these **assumes** a single board; **none forbids a second**, and the words *run it twice*, *multiple boards* and *multiple runouts* appear nowhere in the 71 rules, 22 Recommended Procedures or the Illustration Addendum. The previous revision read that assumption as an affirmative single-board rule; it is not one, and under §2.1 the ruleset's silence leaves the question to the house. Ours, on two grounds: this profile is a tournament base and running it twice is a cash-game courtesy that changes the variance of a settled all-in; and on the P2P path a second run must deal from the deck, which mental poker cannot produce | `engine.py:884-898`, `engine.py:947` implement the cash-game two-run path; `replica_table.py:29-31` pins `runs=1` |
 | Rabbit hunting | 28 [V] `src:164` | **OVERRIDE (a)** | *"Rabbit hunting (revealing cards that would have come if the hand had not ended) is not allowed."* This game **cannot** keep that rule. The post-hand audit opens all 52 deck positions, so after any hand — including one that ends pre-flop by folds — every peer can read the board that would have come. It is structural, not a client behaviour: the same event that proves the deck was a deck reveals the undealt stub. No client should *display* a rabbit hunt, but no client can prevent one either (§4.2b) | `mental_deal.py:766-788`, `deck_audit.py:55-69` |
 
 ### 3.2 Position, blinds, deal
@@ -269,7 +297,7 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Heads-up button | 34-B [V] `src:194` | ADOPT | *"Heads-up, the small blind is the button, is dealt the last card, and acts first pre-flop and last on all other betting rounds."* All four clauses, including dealt-last | `engine.py:471-473`, `engine.py:609-617`, `engine.py:830` |
 | Big-blind ante order | RP-11 [V] `src:492` | ADOPT | *"If a single-payer ante is used, the big blind ante format (BBA) with big-blind-first calculation is recommended."* **Big-blind-first is the whole ruling**: when the big blind cannot cover both posts, its chips fill the **blind** first and only the remainder becomes the ante. The engine does exactly that — `_post` takes `min(amount, stack)` for the blind, then `_post_dead` takes what is left for the ante — so `engine.py:569`'s "TDA order" comment is corroborated by the source, not merely asserted. The order is load-bearing: it decides whether a short big blind's last chips land in the **live** bet or in **dead** money, which changes pot eligibility and the amount others face. **Two things this row does not claim.** RP-11 is a *Recommended* Procedure, advisory to houses; this profile makes it **binding** here, and that mandatory force is ours, not TDA's. And RP-11 recommends a calculation order without spelling out the short-stack arithmetic, so the reading above is stated explicitly for a reviewer to check against `src:492`. **Consensus-critical** | `engine.py:569-571`, `_post` (`621-629`) then `_post_dead` (`631-642`) |
 | Burn cards | 38 [V] `src:220` | **N/A** | *"The burn is always one card per street, never more"* — a rule about protecting a physical stub. No burn cards exist here: the deal map is `2m + 5` positions and nothing else | `deal_map.py:13`, `engine.py:814-825` |
-| Straddle | 51-B [V] `src:298`; 43 addendum Ex. 2 [V] `src:596` | ADOPT | **No hand governed by this profile may contain a straddle.** The blind structure is stated, not inferred: *"In blind games the posted BB is the pre-flop opener"* (51-B), and the Rule 43 addendum works a pre-flop example — an under-the-gun all-in for 150 over a 100 blind — in which *"The 100 is still the 'largest bet or raise of the current round'"* `src:596`: the big blind, and nothing else, opens the betting and sets the first minimum raise. A straddle is a third voluntary blind that displaces the BB as opener and doubles that minimum, which 51-B does not admit; and the word *straddle* appears nowhere in the 2024 rules, Recommended Procedures or Addendum. Adopting the pinned structure therefore excludes it. `ReplicaTable.start_hand` calls the engine without `straddle_fn`, so the branch is already unreachable on the P2P path — but by omission, not refusal, which is gap **C5**. Where a single-process caller supplies `straddle_fn` it is a cash-game option outside this tournament base, in the form the engine implements: 3+ handed, big-bet only, UTG, a live post of 2×BB. It must never be enabled on the P2P path unless it first becomes a bound table parameter (§8) — two replicas disagreeing about it differ in blinds, in `min_raise` and in the first actor before a single action is taken | `engine.py:585-600`; `replica_table.py:111` passes no `straddle_fn`; gap **C5** |
+| Straddle | **[H]** | **OVERRIDE (b) — house** | **No hand governed by this profile may contain a straddle.** **The search:** the word *straddle* appears nowhere in the 71 rules, the 22 Recommended Procedures or the Illustration Addendum. Rule 51-B `src:298` says *"In blind games the posted BB is the pre-flop opener"*, but it says so to fix *the opening bet* for its own undercall remedy — the sentence before it defines *"The opening bet is the first chip bet of each betting round (not a check)"* — not to enumerate which blinds a house may post; the Rule 43 addendum Ex. 2 `src:596` works a pre-flop example over a 100 big blind (*"The 100 is still the 'largest bet or raise of the current round'"*) without contemplating a third blind; Rules 32 `src:184` and 34 `src:192-194` place the button and the blinds and are silent on voluntary extra posts. The previous revision read 51-B as excluding the straddle. It does not: it presupposes a table where no straddle was posted, and under §2.1 the ruleset's silence leaves the question to the house. Ours, and unchanged: a straddle is a cash-game option outside this tournament base, and enabling it here would make blinds, `min_raise` and the first actor depend on a table setting that is **not** bound into the deal context (§8) — two replicas disagreeing about it diverge before a single action is taken. `ReplicaTable.start_hand` calls the engine without `straddle_fn`, so the branch is already unreachable on the P2P path — but by omission, not refusal, which is gap **C5**. The form the engine implements for a single-process caller is 3+ handed, big-bet only, UTG, a live post of 2×BB | `engine.py:585-600`; `replica_table.py:111` passes no `straddle_fn`; gap **C5** |
 
 ### 3.3 Betting
 
@@ -329,13 +357,22 @@ needed a paragraph. The **Where** column points at the section that rules on
 the rule; a blank one means this map is its only home and nothing further is
 owed on it.
 
-One class appears only here. **OUT OF SCOPE** means the rule governs
-multi-table tournament *administration* — registration, seat draws, table
-balancing, chip races, level clocks, staff procedure. This game is a single
-self-selected table with a fixed roster, no operator, no chips of denomination
-and no level structure, so these rules have no subject matter here. That is a
-statement about the rule's subject, not about our conformance, and each is
-listed individually rather than waved at as a group.
+**The map uses the four classes and no others.** A previous revision marked
+the administrative rules **OUT OF SCOPE**, which was a fifth class in
+everything but name and left those rules unclassified against the scheme this
+profile froze. They are **N/A**, for the reason §2.2 gives: N/A is the class
+for a rule with no subject matter here, whether the missing subject is a
+physical failure mode or an institution. The rationale is not lost by the
+merge — it is written into each row as *"N/A — out of scope: …"*, naming which
+part of **the table model** is absent:
+
+> one self-selected table, no second table and no seat pool; a roster frozen
+> at the deal; no operator, floor or staff; stacks as integers with no chip
+> denominations; no registration, re-buy or level structure.
+
+Each such rule is listed individually rather than waved at as a group, and the
+phrase stays visible so a reader can still separate "we removed the failure
+mode" from "this institution does not exist here".
 
 | Rules | Subject | Class | Where |
 |---|---|---|---|
@@ -344,14 +381,14 @@ listed individually rather than waved at as a group.
 | 3 | official terminology and gestures | N/A | §3.3 |
 | 4 | player identity | OVERRIDE (a) — policy | §3.5, §5 |
 | 5 | electronic devices, strategy tools | OVERRIDE (a) — policy | §3.5 |
-| 6 | official language | OUT OF SCOPE — house posting |
-| 7–11 | random seating, alternates and late registration, special needs, broken tables, table balancing | OUT OF SCOPE — no seat pool, no second table |
+| 6 | official language | N/A — out of scope: a house posting, and there is no house to post it |
+| 7–11 | random seating, alternates and late registration, special needs, broken tables, table balancing | N/A — out of scope: no seat pool, no second table, no registration desk |
 | 12 | cards speak | ADOPT | §3.1 |
 | 13 | tabling cards, killing a winning hand | N/A — no physical tabling; every contested seat is revealed by the audit | §3.1, §4 |
 | 14 | live cards at showdown | N/A — no retrievable-versus-irretrievable distinction exists | §3.1 |
 | 15-A | one card tabled, floor called | N/A — no floor, no partial tabling | §3.0 |
 | 15-B | uncalled amount returned | ADOPT for that clause; the surrounding procedure (hold the cards, call the floor, no refund of called bets) is N/A | §3.1, §3.0 |
-| 16 | face up for all-ins | ADOPT | §3.1 |
+| 16 | face up for all-ins | ADOPT — including the addendum's timing | §3.1, gap **C6** |
 | 17-A | showdown order | ADOPT | §3.1 |
 | 17-B | uncontested showdown, muck right | OVERRIDE (a) | §3.1 |
 | 18 | asking to see a hand | DIGITALIZE | §3.1 |
@@ -359,11 +396,11 @@ listed individually rather than waved at as a group.
 | 20 | odd chips | ADOPT | §3.1 |
 | 21 | side pots | ADOPT | §3.1 |
 | 22 | disputed hands and pots | N/A | §3.5 |
-| 23 | new hand, new limits | OUT OF SCOPE — no level clock |
-| 24 | chip race, scheduled color-ups | OUT OF SCOPE — stacks are integers, no denominations |
+| 23 | new hand, new limits | N/A — out of scope: no level clock, so limits never change mid-session |
+| 24 | chip race, scheduled color-ups | N/A — out of scope: stacks are integers with no denominations, so there is nothing to race off |
 | 25 | chips visible and countable | N/A — replicated state is exact and always visible | §3.3 |
 | 26 | deck changes | N/A — the rule exists because a physical deck wears and can be marked; every hand here is dealt from a freshly generated verifiable deck |
-| 27 | re-buys | OUT OF SCOPE — no tournament registration model |
+| 27 | re-buys | N/A — out of scope: no registration model, and the roster is frozen at the deal |
 | 28 | rabbit hunting | OVERRIDE (a) | §3.1, §4.2 |
 | 29 | calling for a clock | DIGITALIZE | §3.4 |
 | 30 | at your seat, live hands, blinds forfeit | ADOPT | §3.4 |
@@ -376,8 +413,8 @@ listed individually rather than waved at as a group.
 | 35-E | fouled deck | DIGITALIZE | §3.5, §6 |
 | 36 | substantial action | N/A | §3.5, §6 |
 | 37 | button with too few cards | N/A — the deal map fixes the card count structurally | §3.2 |
-| 38 | burns after substantial action | N/A (burns); ADOPT for one board per hand | §3.1, §3.2 |
-| 39 | irregular flops, premature cards, reshuffling | N/A — the board is a fixed set of deal-map positions revealed in order | §3.2 |
+| 38 | burns after substantial action | N/A — a rule about protecting a physical stub, and there is none. It is **not** the authority for one board per hand: that ruling is ours (OVERRIDE (b), §3.1) | §3.1, §3.2 |
+| 39 | irregular flops, premature cards, reshuffling | N/A — the board is a fixed set of deal-map positions revealed in order. Like Rule 38, it prescribes a single board without forbidding a second (§3.1) | §3.1, §3.2 |
 | 40–41 | methods of betting and calling | N/A | §3.3 |
 | 42 | methods of raising | ADOPT via the no-limit structure; the one-motion mechanics are N/A | §3.3 |
 | 43-A | raise amounts and the 50% remedy | ADOPT (minimum) + DIGITALIZE (remedy) | §3.3 |
@@ -388,7 +425,7 @@ listed individually rather than waved at as a group.
 | 48 | number of allowable raises | ADOPT — no cap | §3.3 |
 | 49 | accepted action | N/A | §3.3 |
 | 50 | acting in turn; committed chips stay committed | ADOPT | §3.3 |
-| 51 | binding declarations, undercalls | N/A | §3.3 |
+| 51 | binding declarations, undercalls | N/A — 51-B's "the posted BB is the pre-flop opener" defines the opening bet for this remedy and is not a blind-structure rule (§3.2) | §3.3, §3.2 |
 | 52 | incorrect bets, underbets, underraises | DIGITALIZE | §3.3 |
 | 53 | action out of turn | DIGITALIZE | §3.3, gap **C3** |
 | 54 | pot size, pot-limit bets | N/A — not a pot-limit game; 54-D supports the no-limit reading | §3.3 |
@@ -406,20 +443,24 @@ listed individually rather than waved at as a group.
 | 71 | warnings, penalties, disqualification | N/A — no authority, and no eviction primitive (B1) | §3.5, §5 |
 | RP-1–RP-3 | all-in buttons, bringing in bets, personal belongings | N/A — table furniture and dealer practice |
 | RP-4–RP-5 | disordered stub, prematurely dealt cards | N/A — no stub to disorder; see Rule 39 |
-| RP-6–RP-9 | player movement, dealer pushes, hand-for-hand, final-table size | OUT OF SCOPE — multi-table administration |
+| RP-6–RP-9 | player movement, dealer pushes, hand-for-hand, final-table size | N/A — out of scope: multi-table administration; there is one table and no dealer |
 | RP-10 | stud dealing procedures | N/A — not a stud game |
 | RP-11 | big blind ante format, big-blind-first calculation | ADOPT (made binding here) | §3.2 |
 | RP-12–RP-13 | dealers announcing bets, stacking split pots | N/A — no dealer |
 | RP-14 | randomness for uncovered situations | **OVERRIDE (a)** — the escape hatch of last resort, and the same one Rule 1 provides: it authorises a TD to *design* a remedy. There is no TD, and a remedy invented at runtime by one peer is a consensus split. Uncovered situations must be settled in this document before they occur, which is what this profile is for |
-| RP-15–RP-16 | staff communication, absent player on a breaking table | OUT OF SCOPE — staff procedure |
+| RP-15–RP-16 | staff communication, absent player on a breaking table | N/A — out of scope: staff procedure, and no table breaks |
 | RP-17–RP-18 | draw betting, order of mixed games | N/A — not draw, not a mixed game |
 | RP-19 | reducing stalling | DIGITALIZE — the clock (§3.4) is our only instrument; the rest are house practices |
 | RP-20–RP-22 | deck preparation, spreading the pot, non-denominational items | N/A — no physical deck, pot or bounty chips |
 
-**Nothing in the 2024 ruleset is unclassified.** Two rows carry the [H] house
-basis (§3.1 residual dead money, §3.4 cryptographic absence), and both name the
-provisions searched. Every other row rests on a cited line of the source or on
-a stated N/A mechanism.
+**Nothing in the 2024 ruleset is unclassified, and every entry is one of the
+four classes.** Four rulings carry the [H] house basis — §3.1 residual dead
+money, §3.1 one board per hand, §3.2 the straddle, §3.4 cryptographic absence —
+and each names the provisions searched. Two of those four are not classifications
+of any TDA rule at all: nothing in the ruleset addresses a second runout or a
+straddle, so they appear in §3.1 and §3.2 as house rulings and take no row in
+this map, which maps *rules*. Every other row rests on a cited line of the
+source or on a stated N/A mechanism or model.
 
 ---
 
@@ -698,8 +739,8 @@ Recorded in §9; it belongs to M2 and M7, not to a rules document.
 ## 7. Conformance status, and the gaps M7 owns
 
 Read against `holdem/engine.py`, `holdem/p2p/replica_table.py`,
-`holdem/client_view.py` and `holdem/contract.py` at `c69a4bf`. **Nothing was
-changed.**
+`holdem/p2p/session.py`, `holdem/p2p/mental_deal.py`, `holdem/client_view.py`
+and `holdem/contract.py` at `c69a4bf`. **Nothing was changed.**
 
 ### 7.1 Conformant today
 
@@ -717,13 +758,13 @@ changed.**
 | Side pots layered by matched contribution, identical-eligibility merge | §3.1, R21 | `engine.py:917-932` |
 | Committed chips stay committed | §3.3, R50-A | `engine.py:644-650` |
 | Big-blind ante posted after the blind (big-blind-first) | §3.2, RP-11 | `engine.py:569-571`, `621-642` |
-| One board per hand on the P2P path | §3.1, R38 / R39 | `replica_table.py:29-31` pins `runs=1` |
+| One board per hand on the P2P path | §3.1 (house ruling — no TDA rule requires it) | `replica_table.py:29-31` pins `runs=1` |
 | Hidden information during play | §4.1 | `contract.py:46-85`, `mental_deal.py:741-762` |
 | No burn cards | §3.2, R38 | `deal_map.py:13` |
 | Fold-win reveals nothing at the client | §4.2 D-M1-1a | `client_view.py:129-142` |
-| No straddle on the P2P path (by omission, not refusal — C5) | §3.2, R51-B | `replica_table.py:111` |
+| No straddle on the P2P path (by omission, not refusal — C5) | §3.2 (house ruling — no TDA rule requires it) | `replica_table.py:111` |
 
-### 7.2 Gaps — all owned by M7, none fixed here
+### 7.2 Gaps — all owned by M7 (**C6** also needs M2), none fixed here
 
 | ID | Gap | Profile rule violated | Site |
 |---|---|---|---|
@@ -732,21 +773,29 @@ changed.**
 | **C2** | a sub-minimum raise is silently coerced up to `min_to` instead of being rejected. Deterministic, so replicas converge — and it is close to TDA's own correction remedy (52-A), which is why the gap is a **decision** rather than a defect. The profile still says reject: a repair rule is safe for a human at a table, not for arbitrary bytes from a hostile peer | §3.3, Rules 43-A and 52-A | `engine.py:747-750` |
 | **C3** | `Engine.act(i, ...)` never checks `i == self.actor`. The replica layer gates it today, so the P2P path is safe; the engine itself is not | §3.3, Rule 53 | `engine.py:709`, gated at `replica_table.py:176-177` |
 | **C4** | `contract.apply_command` sends the action string `"check"`, which `Engine.act` does not name. It matches no branch, so it silently discards the actor from `need_to_act` and advances the turn with no event and no `last_action`. Single-process path only — the P2P client sends `"call"` (`client_view.py:246-248`) | §3.3 "one canonical typed action, validated once" | `contract.py:106-107` vs `engine.py:713-747` |
-| **C5** | nothing *asserts* that a P2P hand cannot contain a straddle. §3.2's ruling holds today only because `ReplicaTable.start_hand` omits `straddle_fn` — an omission, not a refusal. A future caller could pass one and no test would object, and straddle enablement is not a bound table parameter, so two replicas could disagree about it. Sharpening the point: the lobby already forwards a `straddles` flag from the stored table settings into the `game_start` payload (`onboarding.py:842`), and `ReplicaTable` has no parameter that could receive it (`replica_table.py:70-83`). The flag is inert, which is why the ruling holds — and nothing tells a host who set it that it was ignored | §3.2 | `replica_table.py:111`, `replica_table.py:70-83`, `engine.py:585-600`, `onboarding.py:842` |
+| **C5** | nothing *asserts* that a P2P hand cannot contain a straddle. §3.2's ruling holds today only because `ReplicaTable.start_hand` omits `straddle_fn` — an omission, not a refusal. A future caller could pass one and no test would object, and straddle enablement is not a bound table parameter, so two replicas could disagree about it. Sharpening the point: the lobby already forwards a `straddles` flag from the stored table settings into the `game_start` payload (`onboarding.py:842`), and `ReplicaTable` has no parameter that could receive it (`replica_table.py:70-83`). The flag is inert, which is why the ruling holds — and nothing tells a host who set it that it was ignored | §3.2 (house) | `replica_table.py:111`, `replica_table.py:70-83`, `engine.py:585-600`, `onboarding.py:842` |
+| **C6** | **all-in hands are not tabled until the board is complete.** Rule 16's addendum requires the cards up *"at that point"* — the moment betting is finalised on any street — *"and then run out the remaining cards"* `src:552`. On the P2P path the replica sees betting close with more than one seat contested and simply moves to `PHASE_STREET_OVER`, revealing the turn and river one street at a time (`replica_table.py:211-222`, `session.py:2331-2344`); no seat's hole cards exist for anyone else until the hand-end audit runs and `set_all_holes` injects them (`session.py:2346-2355`). Every hand is settled on exactly the cards it would have been, so this is a **spectator-visibility** deviation, not a settlement one. It is also the most expensive gap in this table to close: tabling early means each all-in seat publishing its **own** withheld share for its own hole positions — the one thing `_enter_deal` deliberately never sends (`mental_deal.py:663-692`) and `_try_complete` deliberately never combines for another seat (`mental_deal.py:741-762`) — so it needs a new authorised reveal step alongside `reveal_street` (`mental_deal.py:694-713`), and, because the deal is n-of-n, an answer for a seat that goes quiet at exactly that moment (**B1**, M2) | §3.1, Rule 16 addendum | `replica_table.py:211-222`, `session.py:2331-2355`, `mental_deal.py:663-713` |
 
 C4 is new in this document; it was not in the research note. It is the same
 class as C2 — an action outside the closed set is absorbed rather than refused
 — and it is the reason the "one canonical typed action" invariant needs a test
 rather than a sentence.
 
-C5 has now changed meaning twice, and the second change is the substantive one.
-It began as "straddle behaviour is unverified against TDA provisions". The
-previous revision classified the straddle as a house ruling, because no
-provision could be shown here. With the source pinned, §3.2 rules it out on
-Rule 51-B — the posted big blind *is* the pre-flop opener — so the exclusion is
-now an adoption of the professional blind structure rather than a preference of
-ours. What remains under C5 is purely conformance: the ruling is true of the
-code today and nothing holds it there.
+C5's *label* has changed three times while the gap itself has not moved. It
+began as "straddle behaviour is unverified against TDA provisions"; became a
+house ruling when no provision could be shown here; was briefly read as an
+adoption of Rule 51-B once the source was pinned; and is a house ruling again,
+because 51-B fixes the opening bet for its undercall remedy rather than
+prohibiting a straddle (§3.2). Through all four readings the gap is the same
+sentence: **no profile-governed hand may contain a straddle, and nothing in
+the code says so.** The ruling is true of the code today and only an omission
+holds it there.
+
+C6 is new in this revision. The previous one cited `must_show` and stopped
+there, which establishes that an all-in hand is never *concealed* — a true and
+insufficient claim, because Rule 16's addendum is a rule about **when**. Reading
+the addendum's own examples against the P2P path is what turned an adoption
+this document asserted into an adoption with a dated exception.
 
 ---
 
@@ -764,7 +813,7 @@ list the profile requires it to carry.
 | `timeout_policy_version` | **yes, M2** | so a future change is a clean wire break, not a silent split |
 | deal policy | already bound | `session.py:895-896` |
 | `seats_in`, button | already bound | frozen participant set and deal map |
-| straddle enablement | **no — and not offered** | §3.2 rules that no P2P hand contains a straddle, so there is nothing to bind. The `straddles` flag the lobby already ships inside `table_settings` (`onboarding.py:842`) is **not** a binding of this field and must not be read as one — nothing consumes it (C5). If straddles are ever enabled here it becomes consensus-critical the moment they are, and must be bound in the same pre-image: replicas that disagree about it differ in blinds, in `min_raise` and in the first actor |
+| straddle enablement | **no — and not offered** | §3.2's house ruling is that no P2P hand contains a straddle, so there is nothing to bind. The `straddles` flag the lobby already ships inside `table_settings` (`onboarding.py:842`) is **not** a binding of this field and must not be read as one — nothing consumes it (C5). If straddles are ever enabled here it becomes consensus-critical the moment they are, and must be bound in the same pre-image: replicas that disagree about it differ in blinds, in `min_raise` and in the first actor |
 | big-blind ante order | **no — fixed by this profile** | not a parameter: §3.2 adopts RP-11's big-blind-first calculation for every table. It is listed because it is consensus-critical and someone will eventually want the alternative (ante-first) as an option; providing it would be a ruling change and a revision bump, not a table option |
 
 The profile identifier and the timeout parameters are **separate** fields. They
@@ -788,11 +837,16 @@ a rules-profile bump every time someone picked a different clock.
   because membership cannot shrink mid-hand (B1). A peer that voids every hand
   is a denial of service this document can classify but not answer. M2 owns
   suspension; any exclusion policy is later still.
-* **Two rulings here are ours, not TDA's** — the rows marked **[H]** in §3:
-  the allocation of dead money that sits above every live stake (§3.1) and
-  timeout while cryptographically absent (§3.4). Each names the provisions
-  searched. Finding published text that contradicts one is a ruling change and
-  a revision bump (§1.3); text that confirms one only refines the citation.
+* **Four rulings here are ours, not TDA's** — the rows marked **[H]** in §3:
+  the allocation of dead money that sits above every live stake (§3.1), one
+  board per hand (§3.1), the exclusion of the straddle (§3.2), and timeout
+  while cryptographically absent (§3.4). Each names the provisions searched.
+  Two of the four were briefly claimed as adoptions of Rules 38/39 and 51-B;
+  they are not, because those rules assume a single board and a posted big
+  blind without forbidding the alternatives, and the source's own masthead
+  leaves what it does not address to the house (§2.1). Finding published text
+  that contradicts one of these four is a ruling change and a revision bump
+  (§1.3); text that confirms one only refines the citation.
 * **The classification rests on an extraction, not on the official PDF.** The
   pinned source is a mechanical text extraction of the official 2024 v1.0
   DOCX, with the DOCX and PDF SHA-256 hashes recorded alongside it. Paragraph
@@ -808,6 +862,12 @@ a rules-profile bump every time someone picked a different clock.
 * **The straddle is classified but unenforced** (C5). §3.2 rules that no
   profile-governed hand may contain one; today that holds only because
   `ReplicaTable` never passes `straddle_fn`. M7 owns the control.
+* **All-in hands are tabled late** (C6). Rule 16 is adopted, including the
+  addendum's requirement to turn the cards up when betting finalises and only
+  then run out the board; the P2P path cannot show another seat's cards before
+  the hand-end audit. Nothing about settlement changes, and closing the gap
+  needs a new reveal step in the mental deal rather than an engine fix, which
+  is why it is the one M7 item with an M2 dependency (B1).
 * **`docs/TIMEOUT_SPEC.md` is known to be wrong in three places** and is
   rewritten in M3. §3.4 cites it for the currently implemented default only, not
   as a correct contract.
