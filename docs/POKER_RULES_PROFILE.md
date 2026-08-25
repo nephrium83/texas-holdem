@@ -108,7 +108,7 @@ scheduled gap, not an oversight — see §9.
 
 ---
 
-## 2. Sources and citation provenance
+## 2. Sources, and how a rule is cited here
 
 | Source | Version | Role |
 |---|---|---|
@@ -116,18 +116,45 @@ scheduled gap, not an oversight — see §9.
 | WSOP | 2026 Main Event | cross-check, clock policy |
 | GGPoker house rules | current | cross-check, online disconnect/timeout |
 
-Every rule citation below carries a provenance marker, so a reviewer can tell
-what is verifiable inside this repository from what must be checked against the
-published TDA text:
+### 2.1 The citation rule
 
-| Marker | Meaning |
+**No ruling in this document rests on a rule number this repository cannot
+show.** The only TDA text present here is what
+`docs/research/professional-poker-rules-audit.md` recorded. Every row in §3
+therefore carries a basis marker, and there are exactly four:
+
+| Marker | Basis |
 |---|---|
-| **[V]** | quoted verbatim in `docs/research/professional-poker-rules-audit.md` |
-| **[R]** | rule **number and substance** recorded in that research note |
-| **[U]** | cited by title/substance only — the rule **number is not established in this repository** and must be confirmed against the published TDA 2024 text before anyone quotes it as a number |
+| **[V]** | TDA 2024 text quoted **verbatim** in the research note. The words are in the repository. |
+| **[R]** | TDA 2024 rule **number and substance** recorded in the research note. |
+| **[D]** | **Derived** — from a [V]/[R] rule, or from the structure of the ruleset itself. The derivation is written out in the row and *is* the citation. |
+| **[H]** | **House.** No TDA 2024 citation is established in this repository for this point. The ruling stands on its own stated basis and is **not** offered as a professional-rule citation. |
 
-Nothing here invents a rule number. Where the number is unverified the row says
-so rather than guessing.
+An earlier draft carried a fifth marker meaning *"the substance is TDA's, the
+number is unverified."* That is not a citation, it is a promise of one, and it
+left normative ADOPT rulings resting on text nobody here has read. Every such
+row is now re-based on [D] or [H].
+
+**[H] does not deny that a TDA provision exists.** It says this repository has
+not established one, and that the ruling does not depend on it. Attaching a
+verified citation to an [H] row later **refines the citation without changing
+the ruling**, so it needs no revision bump (§1.3). Published text that
+*contradicts* an [H] ruling is a ruling change and does need one.
+
+### 2.2 What each class has to prove
+
+The citation burden is not the same for all four classes:
+
+* **ADOPT** and **DIGITALIZE** change how a hand plays *because a professional
+  rule says so*. They need [V], [R], or an explicit [D] derivation — otherwise
+  they are our rules, and are marked [H] and named as ours.
+* **OVERRIDE** asserts a departure. What it must identify is the thing departed
+  from, or say plainly that there is nothing to depart from.
+* **N/A** asserts that a rule's failure mode **cannot occur here**. That claim
+  is proved by our code, not by TDA's text, and a rule number adds nothing to
+  it. N/A rows cite the mechanism that makes the failure impossible; where the
+  research note happens to record a number it is kept, and where it does not
+  the row says `none needed §2.2` rather than reaching for one.
 
 ---
 
@@ -138,7 +165,9 @@ same rule.
 **DIGITALIZE** — the *consequence* is adopted, the *mechanism* is replaced,
 because the mechanism assumes a human floor, a dealer, or physical objects.
 **OVERRIDE** — this game deliberately does something the professional rule does
-not say, and the reason is recorded.
+not say, or acts where it says nothing at all, and the reason is recorded.
+Either way the row states what is being departed from, or that there is nothing
+to depart from (§2.2).
 **N/A** — the rule exists to manage a physical or procedural failure mode that
 cannot occur here.
 
@@ -149,12 +178,12 @@ cannot occur here.
 | Cards speak | 12 [R] | ADOPT | the verified cards plus the evaluator determine the result; no UI text, chat, or declaration alters settlement | `engine.py:910-915` scores from `evaluate(p.hole + b)` |
 | All-in hands tabled | 16 [R] | ADOPT | an all-in showdown is tabled, not mucked | `engine.py:1000-1002` `must_show` is true whenever `tabled` |
 | Showdown order | 17 [R] | ADOPT | last river aggressor tables first; otherwise the first live seat left of the button | `engine.py:984-995` |
-| Beaten hand may muck | — [U] | **OVERRIDE** | in the P2P game every contested seat is tabled at showdown; there is no muck right. The engine's muck path still exists and still runs in the single-process game, where the deck is not opened | `session.py:2354-2355` passes `force_tabled=True` for every P2P showdown; `engine.py:1000-1019`; §4 |
+| Beaten hand may muck | **[D]** from 16, 17 | **OVERRIDE** | Rule 16 [R] compels tabling for an all-in hand *as a stated exception*, and Rule 17 [R] orders a showdown in which a seat may decline to show; the muck right at a non-all-in showdown is what both rules presuppose, and that is the whole citation. In the P2P game every contested seat is tabled and there is no muck right. The engine's muck path still exists and still runs in the single-process game, where the deck is not opened | `session.py:2354-2355` passes `force_tabled=True` for every P2P showdown; `engine.py:1000-1019`; §4 |
 | Odd chips | 20 [R] | ADOPT | to the first winner left of the button, walking forward. **Consensus-critical** — every replica must award the same chip | `engine.py:969-977` |
-| Uncalled bet returned | — [U] | ADOPT | returned only to a single seat holding the top live total | `engine.py:861-877` |
+| Uncalled bet returned | **[H]** | ADOPT | returned only to a single seat holding the top live total. No TDA citation is established here, and the ruling does not need one: it is the same arithmetic as the side-pot row below — a pot layer is funded by matched contributions and contested by the seats that matched them, so a wager no opponent matched funds no layer and has no eligible contestant | `engine.py:861-877` |
 | Dead money never returns | 30 [R] | ADOPT | antes and dead blinds stay in the pot | `engine.py:861-863`, `settle` never refunds `total_dead` |
-| Side pots | — [U] | ADOPT | layered by committed total, identical-eligibility layers merged, residual dead money to the top pot | `engine.py:917-938` |
-| Run it twice | — | **OVERRIDE** | not a TDA tournament rule; supported as a cash-game extension in the single-process engine (odd chip to run 1), and **structurally impossible** in the P2P game — a second run deals from the deck, which mental poker cannot produce | `engine.py:884-898`, `engine.py:947`; `replica_table.py:29-31` pins `runs=1` |
+| Side pots | **[H]** | ADOPT | layered by committed total, identical-eligibility layers merged, residual dead money to the top pot. Ours by the same derivation as the uncalled bet: eligibility follows matched contribution | `engine.py:917-938` |
+| Run it twice | **[H]** | **OVERRIDE** | there is no TDA tournament provision to depart from — running it twice is a cash-game agreement, not tournament procedure. Supported as a cash-game extension in the single-process engine (odd chip to run 1), and **structurally impossible** in the P2P game — a second run deals from the deck, which mental poker cannot produce | `engine.py:884-898`, `engine.py:947`; `replica_table.py:29-31` pins `runs=1` |
 
 ### 3.2 Position, blinds, deal
 
@@ -162,21 +191,21 @@ cannot occur here.
 |---|---|---|---|---|
 | Dead / moving button | 34 [R] | ADOPT | forward-moving BB anchor; SB and button trail it and may land on vacated seats | `engine.py:462-506` |
 | Heads-up button | 34-B [R] | ADOPT | SB is the button, dealt last, acts first pre-flop and last thereafter | `engine.py:471-473`, `engine.py:613-617`, `engine.py:830` |
-| Big-blind ante order | — [U] | ADOPT | the ante is posted after the blind | `engine.py:569-571` |
-| Burn cards | — | **N/A** | no burn cards exist: the deal map is `2m + 5` positions and nothing else | `deal_map.py:13`, `engine.py:814-825` |
-| Straddle | — [U] | **unverified** | the engine supports a UTG straddle; it has **not** been checked against TDA straddle provisions. Carried, not claimed | `engine.py:585-600` |
+| Big-blind ante order | **[H]** | ADOPT | the ante is posted **after** the blind. `engine.py:569` calls this "TDA order"; the repository does not evidence that, so the profile adopts the ordering as ours and pins it for the reason that actually bites — when the big blind cannot cover both posts, order decides whether its last chips land in the **live** bet or in **dead** money, which changes pot eligibility and the amount others face. **Consensus-critical** | `engine.py:569-571`, `_post` then `_post_dead`; §9 |
+| Burn cards | none needed §2.2 | **N/A** | no burn cards exist: the deal map is `2m + 5` positions and nothing else | `deal_map.py:13`, `engine.py:814-825` |
+| Straddle | **[H]** | **OVERRIDE** | **No hand governed by this profile's consensus rules may contain a straddle.** `ReplicaTable.start_hand` calls the engine without `straddle_fn`, so the straddle branch is unreachable on the P2P path — structurally the same shape as run-it-twice. Where a single-process caller does supply `straddle_fn`, a straddle is a cash-game option outside this tournament base, permitted only in the form the engine already implements: 3+ handed, big-bet only, UTG, a live post of 2×BB that raises `min_raise` to 2×BB and moves first action to its left. It must never be enabled on the P2P path unless it first becomes a bound table parameter (§8) — two replicas disagreeing about it differ in blinds, in `min_raise` and in the first actor before a single action is taken. No TDA straddle provision is established here and the ruling does not rest on one | `engine.py:585-600`; `replica_table.py:111` passes no `straddle_fn`; gap **C5** |
 
 ### 3.3 Betting
 
 | Area | TDA 2024 | Class | Ruling | Evidence |
 |---|---|---|---|---|
-| No maximum bet (NLHE) | — | ADOPT | bounded only by stack | `engine.py:664-705` |
+| No maximum bet (NLHE) | **[D]** | ADOPT | bounded only by stack. This is the defining property of the variant rather than a numbered rule, and the `nlhe` field of the identifier (§1.1) is where this profile commits to it | `engine.py:664-705` |
 | Raise amounts | 43 [R] | DIGITALIZE | the "50% or more" clause is a remedy for an ambiguous human gesture. There is no gesture: a sub-minimum raise is **rejected**, never rounded up | current code coerces — gap **C2**, §7 |
 | Re-opening the bet | 47 [R] | ADOPT | including **cumulative** short all-ins that together total a full raise | current code judges each all-in alone — gap **B6**, §7 |
 | Action out of turn | 53 [R] | DIGITALIZE | rejected before it becomes game state. No backup, no binding, no penalty machinery — those exist to unwind an action that was already physically taken | `replica_table.py:176-177` rejects a non-actor; engine-level guard is gap **C3** |
 | Binding declarations, undercalls | 51 [R] | **N/A** | one canonical typed action, validated once, accepted once | `client_view.py:244-251` |
 | Oversized chip betting | 44 [R] | **N/A** | no chips are pushed |
-| String bets, verbal-vs-chip conflict, dealer gesture | various [R] | **N/A** | the whole class is eliminated by typed actions |
+| String bets, verbal-vs-chip conflict, dealer gesture | none needed §2.2 | **N/A** | the whole class is eliminated by typed actions: there is no gesture to interpret and no moment between two chips leaving a hand | `client_view.py:244-251` |
 
 ### 3.4 Clock and absence
 
@@ -184,8 +213,14 @@ cannot occur here.
 |---|---|---|---|---|
 | Calling for a clock | 29 **[V]** | DIGITALIZE | *"A player on the clock has up to 25 seconds plus a 5 second countdown to act. If the player faces a bet and time expires, the hand is dead; if not facing a bet, the hand is checked."* The **consequence** is adopted verbatim, including the fold/check split; the 25 + 5 becomes a single deterministic `T = 30 s`; the **authority** to declare expiry is replaced, because there is no floor to call | `TIMEOUT_SPEC.md:69-79` (betting default 30 s); the corrected contract is **M3** |
 | Absent player, blinds forfeit | 30 **[V]** | ADOPT | cards killed, posted blinds forfeit to the pot. This is the professional precedent for the non-profitability invariant: absence forfeits the hand and the chips already committed, and does not refund them | ROADMAP standing invariants 1 and 4 |
-| Timeout while **cryptographically** absent | — | **OVERRIDE** | no professional analogue exists. A seat may stop making poker decisions and still be a required cryptographic participant; that case is suspension semantics, **M2/M3**, not a poker rule | ROADMAP standing invariant 2, blocker B1 |
-| Clock duration as event policy | WSOP 2026 [R] | — | WSOP ran a 20 s clock with extension chips on Day 7 and removed it for the final table, confirming duration is event-level policy rather than a fixed rule. `T` is therefore a table parameter, and a **consensus-critical** one (§8) | research note, "Source hierarchy" |
+| Timeout while **cryptographically** absent | **[H]** | **OVERRIDE** | there is no professional analogue to depart from. A seat may stop making poker decisions and still be a required cryptographic participant; that case is suspension semantics, **M2/M3**, not a poker rule | ROADMAP standing invariant 2, blocker B1 |
+
+**Duration is event policy, not a rule.** WSOP 2026 ran a 20 s clock with six
+30 s extension chips on Day 7 of the Main Event and removed it for the final
+table (research note, "Source hierarchy"). That is a cross-check, not a rule to
+classify, and it is why the Rule 29 row above adopts the **consequence** while
+leaving the number to the table: `T` is a table parameter, and a
+**consensus-critical** one (§8).
 
 ### 3.5 Errors, integrity, ethics
 
@@ -193,8 +228,8 @@ cannot occur here.
 |---|---|---|---|---|
 | Misdeals, fouled decks | 35 [R] | **N/A** | there is no physical dealing. Explicitly **not** the home for cryptographic failures — see §6 |
 | Substantial action | 36 [R] | **N/A** | exists to bound the correction of physical errors; "substantial action occurred, play on" must never be applied to an integrity failure — §6 |
-| Exposed cards, fouled deck, dropped cards | various [R] | **N/A** | eliminated by a cryptographic deck |
-| Ethical play — soft play, chip dumping, collusion | Ethical Play [U] | **OVERRIDE (policy, not invariant)** | these are real risks and this protocol **cannot** enforce them. TDA's remedy is an administrative act by a floor person, and there is no floor — §5 |
+| Exposed cards, fouled deck, dropped cards | none needed §2.2 | **N/A** | eliminated by a cryptographic deck: no card has a physical face to expose and no seat holds one | `mental_deal.py:741-762` |
+| Ethical play — soft play, chip dumping, collusion | **[D]** | **OVERRIDE (policy, not invariant)** | these are real risks and this protocol **cannot** enforce them. The derivation needs no rule number: TDA is a *tournament directors'* ruleset, and every remedy it defines for this class — penalty, forfeiture, disqualification — is an administrative act by a director. Our own identifier records that authority in its `tda` field (§1.1). A table with no director cannot inherit a remedy whose instrument is a director — §5 |
 
 ---
 
@@ -313,10 +348,12 @@ Why each is out of reach:
 
 What the protocol *does* guarantee, and which must not be confused with the
 above: chips are conserved and the arithmetic is replicated
-(`session.py:1881-1888`, `replica_table.py:251-272`), and **cryptographic**
-misbehaviour is detected and attributed to a seat (`mental_deal.py:813-834`).
-Cheating the *deck* is caught. Cheating the *game* between two consenting
-players is not.
+(`session.py:1881-1888`, `replica_table.py:251-272`), and cryptographic
+evidence that fails to verify is **detected**, and attributed to the seat that
+authored it wherever the evidence identifies one (`mental_deal.py:813-834`;
+§6). Cheating the *deck* is caught — though catching it is not always the same
+as naming who did it, and naming a seat is not the same as proving intent (§6).
+Cheating the *game* between two consenting players is not caught at all.
 
 The only mitigation is out of band: play with people you are willing to sit
 down with. That is product policy, and it does not become an invariant by being
@@ -326,22 +363,58 @@ written in a specification.
 
 ## 6. A cryptographic integrity failure is not a misdeal
 
-TDA 35 and 36 exist because a physical procedural error has **no bad actor**.
-That is exactly why "once substantial action occurs the hand must proceed" is a
-sane remedy there — the error is noise, and unwinding it costs more than
-absorbing it.
+TDA 35 and 36 exist for errors where **the facts are still known**. A misdealt
+card, a card flashed by a dealer's hand: everyone saw what happened, the
+correction is obvious, and "once substantial action occurs the hand must
+proceed" is a sane remedy precisely because absorbing the error costs less than
+unwinding it.
 
 An invalid Bayer–Groth proof, a malformed ciphertext, a failed DLEQ, or a deck
-that fails the multiset check is **evidence of attempted cheating**. "Play on"
-is correct for the first category and unacceptable for the second. Rules 35 and
-36 are therefore `N/A` (§3.5) and must never be reached for by analogy.
+that fails the multiset check is a different kind of event: **the protocol
+cannot establish that the state is what it must be.** The facts are not known.
+That is why "play on" is available for the first category and unavailable for
+the second — continuing would settle real chips against state nobody can
+verify. Rules 35 and 36 are therefore `N/A` (§3.5) and must never be reached
+for by analogy.
 
-The distinction is structural in the code, not merely editorial:
+**This is a statement about verification, not about intent.** An integrity
+failure does not prove attempted cheating. The same detector fires for a
+software defect, a version skew between two builds, truncated or corrupted
+data, and an ordinary lifecycle fault: this repository already records honest
+re-sends that are indistinguishable from equivocation (**B9**), and a
+reconnecting peer that derives a different `x_share` and aborts the hand
+*blaming the honest returning seat* (**B7**). We fail closed **because** the
+failure does not tell us which of those it is — not because we have concluded
+it is an attack. A profile that claimed otherwise would assert a finding the
+evidence does not support and would turn every honest fault into an accusation.
+
+This **supersedes the research note's wording**, which called such a failure
+"evidence of attempted cheating"
+(`docs/research/professional-poker-rules-audit.md`, "Cryptographic integrity
+failure is not a misdeal"). The classification that note argued for stands and
+is adopted in full; the inference about intent does not, and the note remains
+in `docs/research/` as research rather than being edited to match.
+
+Attribution follows the same discipline, and the implementation already states
+it: `MentalDeal` is *"fail-closed, with attribution wherever the evidence
+identifies a seat"* (`mental_deal.py:37-51`). A bad proof-of-possession, an
+out-of-turn shuffle, a bad decryption proof and an invalid prevention proof
+each pin their author; the detection-only multiset check sees only the final
+deck, says only that the chain was corrupted somewhere, and names **no** seat
+(`mental_deal.py:826-834`, `blame = None`). So a `blamed_seat` is a fact about
+the transcript — *this seat authored evidence that did not verify* — and not a
+verdict about a person. Read alongside B7 and B9, the seat named may be the
+honest one. No remedy here is entitled to treat attribution as proof of
+cheating, and none does.
+
+What survives all of that is the classification, and it is structural in the
+code rather than merely editorial:
 
 | | Procedural (TDA 35/36) | Cryptographic integrity failure |
 |---|---|---|
-| Bad actor | none assumed | assumed, and named where the evidence names one |
+| What the failure establishes | the facts are known; only the procedure went wrong | the state cannot be verified; the failure alone does not determine the cause (defect, skew, corruption, or attack) |
 | Remedy | correct and continue; substantial action bounds the correction | fail closed, no skip-and-continue (`mental_deal.py:37-41`) |
+| Attribution | not at issue; no author is in question | the seat that authored the unverifiable evidence, **where the evidence identifies one**; otherwise none (`mental_deal.py:826-834`) |
 | Record | table talk | a `HandRecord` with an outcome and a `blamed_seat` (`session.py:2239-2281`) |
 | Outcome vocabulary | "misdeal" | `VOID_PROTOCOL`, `VOID_EQUIVOCATION` (`session.py:1251-1254`, `session.py:2283-2293`) |
 
@@ -349,11 +422,12 @@ The distinction is structural in the code, not merely editorial:
 mistaken for the classification.** A voided hand redeals the same seats at the
 same button from the same pre-hand chain state (`session.py:2067-2076`) — which
 is a live room's misdeal handling. What differs is that the void is classified,
-recorded, announced, and attributed. What is missing is any *consequence* for a
-seat proven to have cheated, because there is no eviction primitive (B1). A
-peer that voids every hand is a denial-of-service the profile can classify but
-the protocol cannot yet answer. Recorded in §9; it belongs to M2 and M7, not to
-a rules document.
+recorded, announced, and attributed where the evidence allows. What is missing
+is any *consequence* beyond the redeal, because there is no eviction primitive
+(B1) — and, per the paragraphs above, a seat repeatedly named by a void has not
+thereby been shown to have cheated. A peer that voids every hand is a
+denial-of-service the profile can classify but the protocol cannot yet answer.
+Recorded in §9; it belongs to M2 and M7, not to a rules document.
 
 ---
 
@@ -378,6 +452,7 @@ changed.**
 | Hidden information during play | `contract.py:46-85`, `mental_deal.py:741-762` |
 | No burn cards | `deal_map.py:13` |
 | Fold-win reveals nothing at the client | `client_view.py:129-142` |
+| No straddle on the P2P path (by omission, not refusal — C5) | `replica_table.py:111` |
 
 ### 7.2 Gaps — all owned by M7, none fixed here
 
@@ -388,12 +463,17 @@ changed.**
 | **C2** | a sub-minimum raise is silently coerced up to `min_to` instead of being rejected. Deterministic, so replicas converge — but a malformed action from a hostile peer still mutates state, and the profile says reject | §3.3, Rule 43 | `engine.py:747-750` |
 | **C3** | `Engine.act(i, ...)` never checks `i == self.actor`. The replica layer gates it today, so the P2P path is safe; the engine itself is not | §3.3, Rule 53 | `engine.py:709`, gated at `replica_table.py:176-177` |
 | **C4** | `contract.apply_command` sends the action string `"check"`, which `Engine.act` does not name. It matches no branch, so it silently discards the actor from `need_to_act` and advances the turn with no event and no `last_action`. Single-process path only — the P2P client sends `"call"` (`client_view.py:246-248`) | §3.3 "one canonical typed action, validated once" | `contract.py:106-107` vs `engine.py:713-747` |
-| **C5** | straddle behaviour is unverified against TDA straddle provisions | §3.2 | `engine.py:585-600` |
+| **C5** | nothing *asserts* that a P2P hand cannot contain a straddle. §3.2's ruling holds today only because `ReplicaTable.start_hand` omits `straddle_fn` — an omission, not a refusal. A future caller could pass one and no test would object, and straddle enablement is not a bound table parameter, so two replicas could disagree about it | §3.2 | `replica_table.py:111`, `engine.py:585-600` |
 
 C4 is new in this document; it was not in the research note. It is the same
 class as C2 — an action outside the closed set is absorbed rather than refused
 — and it is the reason the "one canonical typed action" invariant needs a test
 rather than a sentence.
+
+C5 changed meaning in this revision. It was "straddle behaviour is unverified";
+the straddle is now **classified** (§3.2, OVERRIDE), and what remains is purely
+a conformance gap: the ruling is true of the code today and nothing holds it
+there.
 
 ---
 
@@ -411,6 +491,8 @@ list the profile requires it to carry.
 | `timeout_policy_version` | **yes, M2** | so a future change is a clean wire break, not a silent split |
 | deal policy | already bound | `session.py:895-896` |
 | `seats_in`, button | already bound | frozen participant set and deal map |
+| straddle enablement | **no — and not offered** | §3.2 rules that no P2P hand contains a straddle, so there is nothing to bind. If that ever changes it becomes consensus-critical the moment it does, and must be bound in the same pre-image: replicas that disagree about it differ in blinds, in `min_raise` and in the first actor |
+| big-blind ante order | **no — fixed by this profile** | not a parameter: §3.2 fixes blind-then-ante for every table. It is listed because it is consensus-critical and someone will eventually want it configurable; making it so requires a revision bump, not a table option |
 
 The profile identifier and the timeout parameters are **separate** fields. They
 are not folded into one string: the profile revision changes when a *ruling*
@@ -428,16 +510,23 @@ a rules-profile bump every time someone picked a different clock.
   refutation of the alternative recorded in ROADMAP M2.
 * **Collusion, soft play and chip dumping are unenforceable** (§5). No part of
   this document should be read as mitigating them.
-* **A proven cheat still gets a redeal.** Void → redeal is the only remedy
-  available, because membership cannot shrink mid-hand (B1). A peer that voids
-  every hand is a denial of service this document can classify but not answer.
-  M2 owns suspension; any exclusion policy is later still.
-* **Several rule numbers are unverified in this repository** — every row marked
-  **[U]** in §3. Their *substance* is what this profile adopts; the numbers must
-  be confirmed against the published TDA 2024 text before being quoted as
-  citations elsewhere.
-* **The straddle is unverified** (C5), and it is a *rules* gap rather than a
-  code gap: nobody has checked what the correct behaviour is.
+* **A seat named by a void still gets a redeal**, and being named is not a
+  finding that it cheated (§6). Void → redeal is the only remedy available,
+  because membership cannot shrink mid-hand (B1). A peer that voids every hand
+  is a denial of service this document can classify but not answer. M2 owns
+  suspension; any exclusion policy is later still.
+* **Some rulings here are ours, not TDA's** — every row marked **[H]** in §3.
+  They are labelled as ours rather than dressed as citations (§2.1). Attaching
+  a verified TDA provision to one later refines the citation and changes no
+  ruling; finding published text that contradicts one is a revision bump.
+* **`engine.py:569` claims "TDA order" for the big-blind ante and this
+  repository does not evidence that claim.** §3.2 pins the ordering as a house
+  rule for a consensus reason, not on the strength of that comment. Code
+  comments are not citations, in either direction: the comment is not wrong,
+  it is unsupported here.
+* **The straddle is classified but unenforced** (C5). §3.2 rules that no P2P
+  hand may contain one; today that holds only because `ReplicaTable` never
+  passes `straddle_fn`. M7 owns the control.
 * **`docs/TIMEOUT_SPEC.md` is known to be wrong in three places** and is
   rewritten in M3. §3.4 cites it for the currently implemented default only, not
   as a correct contract.
