@@ -173,10 +173,11 @@ pair of blinds. Both rulings stand; both are **ours** (§3.1, §3.2).
 **How the negative claims were reached.** Where this document says a subject is
 not addressed — the straddle, a second runout, the residual dead-money layer, a
 participant whose duties outlive their hand — the basis is a **complete read of
-the pinned source**, all 712 lines: 71 rules, 22 Recommended Procedures and the
-Illustration Addendum, which is the entire published long-form document. That
-is a bounded claim about one file whose hashes are recorded, and it is
-falsifiable by opening it. It is **not** a claim about TDA rulings, forum
+the pinned source, first line to last** (`src:1` through `src:711`, its final
+line): 71 rules, 22 Recommended Procedures and the Illustration Addendum, which
+is the entire published long-form document. That is a bounded claim about one
+file whose provenance and hashes are recorded, and it is falsifiable by opening
+it. It is **not** a claim about TDA rulings, forum
 answers, seminar material or house rules that supplement the ruleset.
 
 ### 2.2 What each class has to prove
