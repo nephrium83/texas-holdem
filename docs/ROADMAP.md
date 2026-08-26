@@ -46,6 +46,7 @@ Superseding a decision means adding a new row, not editing an old one.
 | 2026-08-25 | **The authoritative TDA 2024 ruleset is vendored into the repository** at `docs/research/sources/`, and every M1 classification is re-based on it. **Supersedes the row above:** uncalled bets, side pots and big-blind ante order return to ADOPT, now on cited text (15-B/65-A, 21 with the Rule 16 addendum, RP-11); run-it-twice and the straddle are excluded by the pinned blind and dealing structure (51-B, 38, 39) rather than by house preference; only residual dead-money allocation and cryptographic absence remain house rulings, each with the search recorded. `POKER_RULES_PROFILE.md` §3.6 now maps all 71 rules and 22 Recommended Procedures. **No ruling changed at any point** in this sequence, so the profile identifier does not bump. | The previous row recorded honest uncertainty, but uncertainty is not a classification: OVERRIDE-because-we-cannot-check says nothing about whether the game agrees with the professional ruleset. The fix was not better labelling, it was obtaining the source. Two findings only the text could produce: Rule 35-E already treats a fouled deck as stop-and-return-all-bets, which is the precedent our void-and-redeal implements, and Rule 28 forbids rabbit hunting, which the full-deck audit structurally breaks. |
 | 2026-08-25 | **Silence in the pinned ruleset is a grant to the house, not a prohibition** — `docs/POKER_RULES_PROFILE.md` §2.1, on the source's own masthead: *"TDA Rules supplement the conventional rules of this house."* **Supersedes the row above in two rulings:** the straddle and the second runout return to **OVERRIDE (b) — house**, each with the bounded source search written out. Rules 38/39 prescribe burns and repairs for an ordinary board and Rule 51-B fixes the opening bet for its undercall remedy; all three *assume* one board and a posted big blind, and none forbids the alternative. Residual dead-money allocation and cryptographic absence remain house rulings, so **four** [H] rulings now carry a search. Separately, Rule 16's addendum is read in full: adopting it exposes gap **C6** — all-in hands are not tabled until after the board is run. **No ruling changed**, so the profile identifier does not bump. | An adoption is a claim about what someone else's text *says*. The previous row upgraded two house rulings on procedures that presuppose the ordinary case rather than legislate against the exception, which is an argument from silence — and the same silence the masthead assigns to the house. The engine's own support for both features made the overclaim visible. C6 is the matching lesson on the other side: `must_show` proves an all-in hand is never concealed, which is not what a rule about *timing* asserts. |
 | 2026-08-24 | **The M0/D3 fold-win exposure question is decided in M1** (`docs/POKER_RULES_PROFILE.md` §4, decision D-M1-1). Post-hand hole-card secrecy is given up deliberately and stated in the product; a fold-win still reveals nothing at the client; folded seats are never rendered at a showdown, which is a conformance gap for M7. | The audit is the only point where a seat publishes a proven share for its own hole cards, and settling without it is REFUTED. A UI-level muck over an opened deck would advertise a guarantee the protocol does not provide. |
+| 2026-08-26 | **Giving up is not a protocol transition, and host restart is not an exception to failure class 2.** **Amends the row below, which is still open in PR #41 and not yet normative.** Three changes to the proposed contract after independent review. (1) `SUSPENDED` → `BLOCKED / UNRECOVERABLE` now requires **authenticated evidence** — a signed `seat_lost` declaration from the affected seat's frozen key, or a peer's own proven loss — and never a local timer; a grace deadline or a user abandoning a hand is a **local stand-down** that writes no terminal record, deletes no journal, is not absorbing, and is invisible to every other replica. Elapsed local time may not gate whether a resume is accepted. (2) Same-device **host process restart** is specified (`RECOVERY_SPEC.md` §9.7) rather than carried as a limitation. (3) The journal gains a version header and a canonical, bounded `HAND_OPEN` encoding, plus a `LOBBY` record carrying the invite parameters. | The original justification for a timer-driven terminal was that the state allocates no value, so replicas that give up at different moments still hold identical chips. That proved chip agreement and not lifecycle agreement — and `BLOCKED / UNRECOVERABLE` is absorbing, so identical signed evidence could yield permanently different answers to "may this hand still be played", decided by whose timeout was shortest. A five-second Wi-Fi drop could be made permanent by one peer's private clock. Host restart was recorded as out of reach on evidence that only showed *no shipped code does it*: the host holds no authoritative game state under the hostless design, and the invite pin that forbids **migration** is exactly what permits **resumption** by the same key. What was actually missing was mundane — the admission capability and the table configuration were memory-only, so no role could re-authenticate or rebuild its replica after a restart. |
 | 2026-08-26 | **M2's normative recovery contract is `docs/RECOVERY_SPEC.md`**, promoted from `docs/research/m2-recovery-mechanism-threat-analysis.md` in PR #41. It settles: a **durable recovery journal** of signed envelopes, journal-then-send, with recovery by replay rather than snapshot; the **stable seat identity** is the frozen 32-byte Ed25519 seat key, encoded with a kind tag; **deal context v3** binds the rules profile as one length-prefixed field beside the deal policy, the seat identities, `timeout_policy_version`, `T`, `Δ` and `L`, with `G` and `E` derived and never bound; envelope freshness becomes type-classed and conditional on the stronger `ctx` + `author_seq` binding being present; and `SUSPENDED` is a third state that neither settles nor unwinds, exiting only to resume, to `BLOCKED / UNRECOVERABLE`, to local shutdown, or to a void on signed evidence of misbehaviour. **Proposed until PR #41 merges; normative on merge.** | Three separate failure classes were being answered by one mechanism, and the obvious mapping — disconnect → `VOID_PEER_LOST` — reverts to the pre-hand stacks, which turns pulling the network cable into a refund primitive. Freezing value is the only outcome that refunds nobody, pays no unaudited pot, and needs no threshold cryptography. The journal is the only mechanism that reaches a process restart; peer-supplied history cannot prove completeness, because an omitted tail is indistinguishable from silence. Snapshotting `MentalDeal` was rejected: it would put a secret scalar at rest to store conclusions where a journal stores re-verifiable evidence. |
 
 ---
@@ -90,7 +91,7 @@ regardless of how convenient it is.
 
 | ID | Blocker | Impact | Tracked in |
 |---|---|---|---|
-| **B1** | `MentalDeal` is fixed-membership and n-of-n at every phase | evict → fold → continue is impossible; a missing participant stalls the hand with no abort path | M2 — **design resolved** (`RECOVERY_SPEC.md` §0.1, §8): not removed, accepted as permanent without threshold crypto, and its consequence specified as `SUSPENDED` → `BLOCKED / UNRECOVERABLE` with chips frozen rather than an undefined stall. Implementation pending |
+| **B1** | `MentalDeal` is fixed-membership and n-of-n at every phase | evict → fold → continue is impossible; a missing participant stalls the hand with no abort path | M2 — **design resolved** (`RECOVERY_SPEC.md` §0.1, §8): not removed, accepted as permanent without threshold crypto, and its consequence specified rather than left an undefined stall — the hand suspends with chips frozen, and reaches `BLOCKED / UNRECOVERABLE`, still frozen, once authenticated evidence establishes the loss (§8.6). Implementation pending |
 | **B2** | Nothing in the P2P layer persists hand or session state | a process crash loses everything except the device secret and signing identity | M2 — **design resolved** (`RECOVERY_SPEC.md` §6, §7): durable recovery journal, journal-then-send, recovery by replay. Implementation pending |
 | **B3** | n = 2 has no peer-only Byzantine-safe betting timeout | heads-up silence must suspend, not fold | M3 |
 | **B4** | P2c accepts a hostile canonical timeout at t=0, and diverges on action-vs-timeout arrival order | current timeout path is unsafe | M4 |
@@ -182,11 +183,14 @@ independent second leg. The exception remains REFUTED.
 
 ### M2 — Suspension, reconnect, and crash recovery
 
-- **Status:** **IN PROGRESS** — PR #41. Threat analysis complete
-  (`docs/research/m2-recovery-mechanism-threat-analysis.md`) and the
-  normative contract written (`docs/RECOVERY_SPEC.md`), both under review.
-  B1, B2, B7, B8 and B9 are **resolved at design level**; no production
-  change has landed yet, and nothing in either document has been executed.
+- **Status:** **IN PROGRESS** — PR #41, design revision 2. Threat analysis
+  (`docs/research/m2-recovery-mechanism-threat-analysis.md`) and the normative
+  contract (`docs/RECOVERY_SPEC.md`) are written and were revised after
+  independent review returned three blocking findings — host process restart,
+  the timer-driven terminal, and the `HAND_OPEN` encoding (Decisions,
+  2026-08-26). B1, B2, B7, B8 and B9 are **resolved at design level**; no
+  production change has landed yet, and nothing in either document has been
+  executed.
 - **Depends on:** **M0** — satisfied (merged). M1 is merged, so the profile
   binding of `RECOVERY_SPEC.md` §3.3 is unblocked
 - **Goal:** define and prove exact-seat suspension and resumption. Cover
@@ -232,13 +236,32 @@ independent second leg. The exception remains REFUTED.
     the exception is still refused (`RECOVERY_SPEC.md` §11).
   - **Host loss** during `PLAYING` becomes a suspension rather than an
     immediate termination (`RECOVERY_SPEC.md` §9.6). Host *migration*
-    stays forbidden; a host **process restart** is out of reach and is
-    named as a limitation, not solved.
+    stays forbidden; a host **process restart** is specified (§9.7) and
+    unimplemented, like everything else in that document. What it needs
+    is ordinary — the invite capability and the bound port persisted, the
+    listener restored after the journal is read, and every joiner
+    reconnecting through the unchanged §9 sequence. Its residual limit is
+    **reachability**: a changed address or NAT mapping leaves joiners
+    unable to reach a recoverable host, which costs liveness and no chips.
+  - **Permanent loss is not always provable.** `BLOCKED / UNRECOVERABLE`
+    needs authenticated evidence (`RECOVERY_SPEC.md` §8.6), and total
+    device loss produces none — the peer that would sign the declaration
+    is the peer that is gone. Those tables stay `SUSPENDED` with chips
+    frozen, which is the identical chip position under a different label.
   - `identity.py` silently regenerates the protocol identity on a corrupt
     file and does not write atomically, which turns a recoverable restart
     into permanent seat loss with no observable transition. In M2 scope
     because exact-seat reconnect depends on that key
     (`RECOVERY_SPEC.md` §5.4).
+  - **The recovery journal writes one capability to disk**: the invite's
+    16-byte admission secret, without which no role can re-authenticate
+    after a restart (`RECOVERY_SPEC.md` §6.5, §6.7). It proves "holds the
+    invitation" and confers no seat, and anyone who can read it can also
+    read the device secret and the signing key — so it adds nothing to
+    that attacker — but it is a deliberate widening of what sits at rest
+    and must be revisited before this design is reused for anything of
+    value. An implementation may instead require the room code to be
+    re-entered.
 
 ### M3 — Corrected timeout contract
 

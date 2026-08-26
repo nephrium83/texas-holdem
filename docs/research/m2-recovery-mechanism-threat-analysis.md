@@ -9,6 +9,13 @@
 **Normative output:** `docs/RECOVERY_SPEC.md`. Nothing in this note binds
 anything. Where this note and that spec disagree, the spec wins for
 implementation and this note wins for *why*.
+**Revised 2026-08-26** after independent review of the first increment, which
+rejected three conclusions: that host process restart was out of reach (§7),
+that a local grace timer could drive a terminal transition (§8), and that
+`HAND_OPEN` needed no canonical encoding (spec §6.8). The superseded
+reasoning is restated in each section rather than deleted — the arguments were
+plausible, and a later reader who reconstructs them deserves to find out here
+why they fail.
 
 This workspace covers M2 — suspension, reconnect, and crash recovery — as
 defined by `docs/ROADMAP.md`. Candidate designs recorded here do not become a
@@ -156,6 +163,49 @@ that replays stored shares must not be the thing that makes `(X, C0)` recur.
 It does not: replay under this design re-emits stored envelopes into the hand
 that produced them, never into another.
 
+**F-5 — the invite capability is memory-only, so failure class 2 is not
+actually reachable for *any* role until it is persisted.**
+
+Admission is a fresh handshake on every connection — `handle_disconnect`
+calls `forget(conn_id)` unconditionally (`session.py:2841-2842`), which is
+correct and is what makes a captured response worthless. But answering that
+fresh handshake needs the invite's `admission_secret`, and nothing holds it
+across a process boundary:
+
+* a **joiner** parsed it out of the room code the user typed
+  (`invite.parse_room_code`), and holds it only in memory;
+* a **host** generated it in `generate_room_code` (`invite.py:131-142`), and
+  holds it only in memory. On restart it would mint a *new* secret, and every
+  invite already in players' hands would stop verifying — the host would be
+  locked out of its own table.
+
+So the first draft's reconnect sequence was complete for class 1 and
+incomplete for class 2, in a way that reading the sequence does not reveal:
+every step is right, and the peer cannot reach step 2. This is the reason
+`RECOVERY_SPEC.md` §6.7 exists, and the reason it is honest about writing one
+capability to disk (§6.5) rather than claiming the journal holds nothing
+sensitive.
+
+Bounding what that capability is worth to an attacker who reads it:
+`admission.py:38-44` states outright that it proves "has the invitation", not
+"is entitled to seat N". Mid-hand it buys admission and nothing else —
+`_on_player_info` is LOBBY-only (`session.py:2415-2420`) and `_bind_seat_keys`
+is one-way (`session.py:1674-1675`) — and anyone who can read the file can
+also read `identity.py`'s private key, at which point they need no capability
+because they can be the peer.
+
+**F-6 — `_table_cfg` is memory-only, and the replica cannot be rebuilt
+without it.**
+
+`ReplicaTable` is constructed from `names`, `stacks`, `sb`, `bb`, `structure`
+(`replica_table.py:70-83`), sourced from `_table_cfg`
+(`session.py:2004-2007`), which is set in `start_p2p_session`
+(`session.py:1962-1965`) and never written anywhere else. §4's reconstruction
+pivot — "resume state ≡ constructor tuple + the ordered set of envelopes" —
+is exactly right, and this is a piece of the constructor tuple the first
+inventory pass left out. Replaying `bet_action` envelopes against a replica
+built with the wrong blinds does not fail loudly; it diverges.
+
 ---
 
 ## 2. The three failure classes, separated
@@ -216,8 +266,9 @@ for, and it is the input to the mechanism comparison.
 
 | Field | Class | How, and the hazard |
 |---|---|---|
-| `_seat_order` | **must persist** | seat index → identity. Survives disconnect but not restart |
-| `_seat_keys` | **must persist** | the immutable seat↔signing-key binding; the sole basis of exact-seat authorization (`session.py:1737-1771`) |
+| `_seat_order` | **must NOT persist** — corrected, see below | seat index → **transport hop**. The 2026-08-18 note called it "seat index → identity", which was true only while `conn_id` *was* the identity. Under v3 it is a list of dead sockets |
+| `_seat_keys` | **must persist** | the immutable seat↔signing-key binding; the sole basis of exact-seat authorization (`session.py:1737-1771`). It need not be stored separately: it is field 5 of the deal-context pre-image (`RECOVERY_SPEC.md` §3.2), so the authorization bytes and the domain bytes cannot drift |
+| `_table_cfg` (`names`, `sb`, `bb`, `structure`) | **must persist** | `ReplicaTable.__init__` (`replica_table.py:70-83`) takes all four, and `_begin_p2p_hand` reads them from `_table_cfg` (`session.py:2004-2007`). Memory-only today, so a restart cannot rebuild the replica at all — the betting layer's equivalent of losing `button`, though without the card-leak edge |
 | `_deal_policy` | **must persist** | write-once (`session.py:1033-1066`); without it no context can be built |
 | `local_conn_id` | **must NOT persist** | it is a per-socket UUID with no cryptographic content. Persisting it is the bug, not the fix. It is replaced, not restored |
 | `_author_seq_out` | **must persist** | **B9.** Locally generated, never broadcast, no peer holds it. Restarting it at `AUTHOR_SEQ_START` (`session.py:1190`) re-issues numbers peers have already bound to different fingerprints, and `_author_seq_ok` (`session.py:1242-1255`) voids the hand blaming the honest returning seat |
@@ -228,6 +279,17 @@ for, and it is the input to the mechanism comparison.
 | `_deal_outbox` | **discardable** | drained in place; anything that left it is in the journal, anything that did not was never sent |
 | `_current_deadline_token`, `_deadline_started_at` | **discardable** | local clock gating only. Standing invariant 3 forbids them from changing what evidence means, so losing them cannot change an outcome |
 | `terminal_state`, `terminal_record` | **must persist** | terminal state is absorbing; a restart that forgets it revives a session that ended |
+
+**`_seat_order` keeps one non-transport job, and it has to be replaced rather
+than dropped.** `_author_owns_seat` opens with
+`if not (0 <= seat < len(self._seat_order))` (`session.py:1757-1758`), so the
+list is also the seat-count bound. A recovering peer that simply left it empty
+would refuse every seat in the session it just recovered. The seat count is in
+the context pre-image, so the fix is a placeholder table of the right length
+(`RECOVERY_SPEC.md` §5.2) — with the constraint, which is easy to miss, that a
+placeholder must never equal `local_conn_id`: `session.py:1759-1760` returns
+`True` for the local hop before any key is consulted, so a colliding
+placeholder would authorize an absent seat.
 
 **The receiver-side replay/equivocation binding is the subtle entry.** It is
 listed as reconstructable, and that is true only if the retained envelopes are
@@ -343,10 +405,14 @@ answerable by design rather than by acceptance:
   record of, and after restart re-issue that number for different content,
   which is B9 arriving through the recovery mechanism itself.
 * **Secrets at rest** are answered by storing no card plaintext and no secret
-  scalar. Everything needed is either a public envelope or re-derivable from
-  the device secret that is already on disk. The journal's sensitivity is
+  scalar. Everything of that kind is either a public envelope or re-derivable
+  from the device secret that is already on disk. One exception survives and
+  is not smoothed over: the invite's admission capability, which F-5 shows
+  class-2 recovery cannot proceed without. The journal's sensitivity is
   therefore bounded by `device_secret.py`'s existing, stated threat model
-  (`device_secret.py:16-25`) and adds nothing new to it.
+  (`device_secret.py:16-25`) — an attacker who can read the journal already
+  holds the master secret and the signing key, so the capability adds nothing
+  to what they can do.
 
 ### 5.4 Recommendation
 
@@ -394,7 +460,116 @@ or requires threshold cryptography.
 
 ---
 
-## 7. What this analysis does not establish
+## 7. Host process restart: is it actually out of reach?
+
+The first draft of this workspace recorded host restart as an unsolved
+limitation. Independent review challenged that, and the challenge was right:
+what the draft had established was that *no shipped code does it*, which is a
+statement about the implementation, not about the design. Re-derived here from
+the merged baseline.
+
+### 7.1 What a host uniquely holds
+
+Strip away the parts every peer shares — signing key, device secret, journal —
+and the host holds exactly three things a joiner does not.
+
+| Held | Survives restart today? | Consequence if lost |
+|---|---|---|
+| the **pinned identity** every invite names (`invite.py:35-41`) | **yes**, `identity.json` | none — this is the one thing that must not change, and it is already the one thing on disk |
+| the **admission capability** (`admission_secret`, `discovery_token`) | **no** (F-5) | every existing invite stops verifying; joiners cannot re-admit |
+| the **listener** and its bound port | **no** | joiners cannot reach it, even with a valid invite |
+
+Nothing in that table is cryptographic state, and nothing in it is
+irreproducible. Two are configuration; the third already persists.
+
+### 7.2 The argument that host restart is impossible, and where it fails
+
+The intuition behind "impossible" is the migration prohibition: host authority
+cannot move, because the invite pins one exact key
+(`session.py:2884-2911`). That is sound — and it is an argument about *which
+key*, not about *which process*. A restarted host presents the **same** key,
+so `mark_host_authenticated`'s 32-byte comparison (`session.py:1336-1353`)
+accepts it for the same reason it would accept it before the restart. The pin
+that forbids migration is what *permits* resumption.
+
+The second intuition is that the host holds authoritative game state that a
+restart destroys. Under the hostless design it does not. The host is a
+courier: it forwards the eight `_HOSTLESS_PAYLOAD_TYPES`
+(`session.py:106-110`) byte-for-byte and gains no authority over them, which
+is the whole basis on which `TOPOLOGY_DECISION.md` §4 chose the star. The deal
+and betting layers are peer-symmetric replicas, so the host's own state is a
+*seat's* state, recovered by the same replay as any other seat's (§4).
+
+So the residue is F-5 plus a socket. Both are answerable, and
+`RECOVERY_SPEC.md` §9.7 answers them.
+
+### 7.3 What genuinely does not survive
+
+Reachability. The invite carries an address discovered by STUN
+(`invite.py:144-149`), and a restart that lands behind a different NAT mapping
+leaves joiners holding a code that routes nowhere. The host can regenerate a
+code with the same token and secret — `generate_room_code` accepts both for
+precisely this case (`invite.py:114-120`) — but delivering it to the players
+is out of band and outside the protocol.
+
+That is a liveness failure, not a safety one, and the distinction is not a
+consolation: while it persists, every replica holds the same frozen suspended
+position, nothing settles, and no chip moves.
+
+---
+
+## 8. Giving up: why a local timer must not be a terminal transition
+
+The first draft let a local grace deadline drive the session into
+`BLOCKED / UNRECOVERABLE`, and justified it with an argument that looked
+sound: the state allocates no value, so two replicas that give up at different
+moments still hold identical chips. Independent review rejected it. The
+rejection is correct, and the reason is worth recording because the original
+argument is the one a reader is likely to reconstruct.
+
+**What the argument proved, and what it did not.** It proved chip agreement.
+It did not prove *lifecycle* agreement, and lifecycle is not decoration here:
+`BLOCKED / UNRECOVERABLE` is absorbing. Once one replica enters it, that
+replica will never accept the returning seat. So two replicas holding
+byte-identical signed evidence could reach permanently different verdicts
+about whether the hand may still be played — decided by nothing but whose
+timer was shorter. Standing invariant 3 says the final replicated outcome must
+be a deterministic function of signed evidence; a private timer choosing
+between "resumable" and "never" is exactly the thing it forbids.
+
+**The sharper version of the objection.** A five-second Wi-Fi drop — failure
+class 1, the most recoverable event in this document — could be converted into
+a permanent loss by whichever peer had the most aggressive timeout. The
+mechanism intended to answer disconnects would be manufacturing them.
+
+**The three candidate repairs.**
+
+| Candidate | Verdict |
+|---|---|
+| a **grace period bound into the deal context**, so every replica gives up at the same nominal moment | rejected. It makes the clock evidence, which is invariant 3 again in a costume; peers' clocks differ, and M4 owns timeout certificates in any case. It would also drag the M3 timeout contract into M2, which is a non-goal |
+| **authenticated evidence of loss** — the affected seat signs a declaration | **adopted.** `RECOVERY_SPEC.md` §8.6. It is deterministic, replicated, clock-free, and grants no power a silent peer does not already have, since the deal is n-of-n and refusing to contribute freezes the hand anyway |
+| **local stand-down that creates no shared state** | **adopted**, for everything the declaration cannot cover. The process stops; the journal keeps the hand suspended; a later start re-enters `SUSPENDED` and may resume |
+
+**What the pair does not cover, stated rather than papered over.** Total device
+loss produces no declaration, because the peer that would sign it is gone.
+Those tables stay `SUSPENDED` — chips frozen, identical to
+`BLOCKED / UNRECOVERABLE` in every value-bearing respect — and no mechanism
+short of threshold cryptography or an external authority changes that. The
+honest form of the M2 result is therefore: *the chip position is always
+determined; the lifecycle label is determined whenever evidence exists to
+determine it.*
+
+**One consequence worth naming for the implementer.** Because a peer with an
+unreadable journal cannot derive its next outbound `author_seq` (spec §7.6),
+the declaration must sit outside the sequenced stream. Numbering it would make
+the one message a lost peer needs to send collide with a number its peers have
+already bound to a different fingerprint — read as equivocation, ending in a
+`VOID_*` that refunds the very seat that just declared itself gone (F-3). The
+requirement falls out of the failure it is being sent *from*.
+
+---
+
+## 9. What this analysis does not establish
 
 * **Nothing here was executed.** No test was run, no vector was computed, no
   timing was measured. Every claim is a citation. The pinned pre-image digest
@@ -411,14 +586,18 @@ or requires threshold cryptography.
   unacceptable, the mitigation is to trust *locally journalled, previously
   verified* proofs — which is a real weakening and would need its own analysis,
   not a quiet optimisation.
-* **Host process restart is not solved.** §9 of the spec records what it would
-  take.
+* **Host restart is designed, not demonstrated.** §7 argues from the merged
+  baseline that nothing blocks it; that argument is a code reading like every
+  other claim here. The spec's C32 is what would turn it into a result.
+* **The cost of a wrong `journal_version` decision is unmeasured**, because
+  there is only one version. The fail-closed rule (spec §6.2) is a design
+  choice made before any migration exists to test it against.
 * **The `L + 2Δ` fairness leak from the timeout research is untouched.** M2
   binds the parameters; it does not change what they mean.
 
 ---
 
-## 8. Findings carried to the ROADMAP
+## 10. Findings carried to the ROADMAP
 
 | ID | Finding | Disposition |
 |---|---|---|
@@ -426,3 +605,5 @@ or requires threshold cryptography.
 | F-2 | `DeadlineToken.actor` is a `conn_id` | binding fixed by M2; semantics owned by M3/M4 |
 | F-3 | a void refunds the blamed seat | **out of M2 scope**; carried follow-up |
 | F-4 | DLEQ proofs carry no session/hand binding | not a live hole; recorded so a future replay design does not create one |
+| F-5 | the invite's admission capability is memory-only, so no role can re-authenticate after a restart | in M2 scope — class 2 is unreachable without it; spec §6.7, and the sensitivity argument in §6.5 |
+| F-6 | `_table_cfg` is memory-only, so the replica cannot be rebuilt after a restart | in M2 scope — part of the constructor tuple; spec §6.8 carries it in `HAND_OPEN` |
