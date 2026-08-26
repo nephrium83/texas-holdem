@@ -7,8 +7,10 @@ note, **this file wins**.
 
 - **Coordination issue:** see `docs/COLLABORATION.md`
 - **Base at time of writing:** `07f61a7` (origin/main)
+- **Current base:** `4b5e85a` (origin/main) — M0 and M1 merged
 - **Research inputs:** `docs/research/` — dropout audit, timeout semantics,
-  professional rules audit, suspension/reconnect
+  professional rules audit, suspension/reconnect, M2 recovery-mechanism
+  threat analysis
 
 ---
 
@@ -16,7 +18,9 @@ note, **this file wins**.
 
 | Ref | SHA | Status |
 |---|---|---|
-| origin/main | `07f61a7` | canonical |
+| origin/main | `4b5e85a` | canonical — M0 (PR #39) and M1 (PR #40) merged |
+| origin/main | `07f61a7` | superseded; the base the 2026-08-18 research notes read |
+| PR #41 — M2 suspension / reconnect | — | **open**, in progress |
 | P2a — timeout phase ownership | `6955f4f` | **parked**, two tests red on purpose |
 | P2c — proposal applicability | `6b553a8` | **review artifact**, do not merge |
 | PR #36 — production deadline ticker | — | **closed / unmerged**, forensic only |
@@ -42,6 +46,7 @@ Superseding a decision means adding a new row, not editing an old one.
 | 2026-08-25 | **The authoritative TDA 2024 ruleset is vendored into the repository** at `docs/research/sources/`, and every M1 classification is re-based on it. **Supersedes the row above:** uncalled bets, side pots and big-blind ante order return to ADOPT, now on cited text (15-B/65-A, 21 with the Rule 16 addendum, RP-11); run-it-twice and the straddle are excluded by the pinned blind and dealing structure (51-B, 38, 39) rather than by house preference; only residual dead-money allocation and cryptographic absence remain house rulings, each with the search recorded. `POKER_RULES_PROFILE.md` §3.6 now maps all 71 rules and 22 Recommended Procedures. **No ruling changed at any point** in this sequence, so the profile identifier does not bump. | The previous row recorded honest uncertainty, but uncertainty is not a classification: OVERRIDE-because-we-cannot-check says nothing about whether the game agrees with the professional ruleset. The fix was not better labelling, it was obtaining the source. Two findings only the text could produce: Rule 35-E already treats a fouled deck as stop-and-return-all-bets, which is the precedent our void-and-redeal implements, and Rule 28 forbids rabbit hunting, which the full-deck audit structurally breaks. |
 | 2026-08-25 | **Silence in the pinned ruleset is a grant to the house, not a prohibition** — `docs/POKER_RULES_PROFILE.md` §2.1, on the source's own masthead: *"TDA Rules supplement the conventional rules of this house."* **Supersedes the row above in two rulings:** the straddle and the second runout return to **OVERRIDE (b) — house**, each with the bounded source search written out. Rules 38/39 prescribe burns and repairs for an ordinary board and Rule 51-B fixes the opening bet for its undercall remedy; all three *assume* one board and a posted big blind, and none forbids the alternative. Residual dead-money allocation and cryptographic absence remain house rulings, so **four** [H] rulings now carry a search. Separately, Rule 16's addendum is read in full: adopting it exposes gap **C6** — all-in hands are not tabled until after the board is run. **No ruling changed**, so the profile identifier does not bump. | An adoption is a claim about what someone else's text *says*. The previous row upgraded two house rulings on procedures that presuppose the ordinary case rather than legislate against the exception, which is an argument from silence — and the same silence the masthead assigns to the house. The engine's own support for both features made the overclaim visible. C6 is the matching lesson on the other side: `must_show` proves an all-in hand is never concealed, which is not what a rule about *timing* asserts. |
 | 2026-08-24 | **The M0/D3 fold-win exposure question is decided in M1** (`docs/POKER_RULES_PROFILE.md` §4, decision D-M1-1). Post-hand hole-card secrecy is given up deliberately and stated in the product; a fold-win still reveals nothing at the client; folded seats are never rendered at a showdown, which is a conformance gap for M7. | The audit is the only point where a seat publishes a proven share for its own hole cards, and settling without it is REFUTED. A UI-level muck over an opened deck would advertise a guarantee the protocol does not provide. |
+| 2026-08-26 | **M2's normative recovery contract is `docs/RECOVERY_SPEC.md`**, promoted from `docs/research/m2-recovery-mechanism-threat-analysis.md` in PR #41. It settles: a **durable recovery journal** of signed envelopes, journal-then-send, with recovery by replay rather than snapshot; the **stable seat identity** is the frozen 32-byte Ed25519 seat key, encoded with a kind tag; **deal context v3** binds the rules profile as one length-prefixed field beside the deal policy, the seat identities, `timeout_policy_version`, `T`, `Δ` and `L`, with `G` and `E` derived and never bound; envelope freshness becomes type-classed and conditional on the stronger `ctx` + `author_seq` binding being present; and `SUSPENDED` is a third state that neither settles nor unwinds, exiting only to resume, to `BLOCKED / UNRECOVERABLE`, to local shutdown, or to a void on signed evidence of misbehaviour. **Proposed until PR #41 merges; normative on merge.** | Three separate failure classes were being answered by one mechanism, and the obvious mapping — disconnect → `VOID_PEER_LOST` — reverts to the pre-hand stacks, which turns pulling the network cable into a refund primitive. Freezing value is the only outcome that refunds nobody, pays no unaudited pot, and needs no threshold cryptography. The journal is the only mechanism that reaches a process restart; peer-supplied history cannot prove completeness, because an omitted tail is indistinguishable from silence. Snapshotting `MentalDeal` was rejected: it would put a secret scalar at rest to store conclusions where a journal stores re-verifiable evidence. |
 
 ---
 
@@ -85,30 +90,37 @@ regardless of how convenient it is.
 
 | ID | Blocker | Impact | Tracked in |
 |---|---|---|---|
-| **B1** | `MentalDeal` is fixed-membership and n-of-n at every phase | evict → fold → continue is impossible; a missing participant stalls the hand with no abort path | M2 |
-| **B2** | Nothing in the P2P layer persists hand or session state | a process crash loses everything except the device secret and signing identity | M2 |
+| **B1** | `MentalDeal` is fixed-membership and n-of-n at every phase | evict → fold → continue is impossible; a missing participant stalls the hand with no abort path | M2 — **design resolved** (`RECOVERY_SPEC.md` §0.1, §8): not removed, accepted as permanent without threshold crypto, and its consequence specified as `SUSPENDED` → `BLOCKED / UNRECOVERABLE` with chips frozen rather than an undefined stall. Implementation pending |
+| **B2** | Nothing in the P2P layer persists hand or session state | a process crash loses everything except the device secret and signing identity | M2 — **design resolved** (`RECOVERY_SPEC.md` §6, §7): durable recovery journal, journal-then-send, recovery by replay. Implementation pending |
 | **B3** | n = 2 has no peer-only Byzantine-safe betting timeout | heads-up silence must suspend, not fold | M3 |
 | **B4** | P2c accepts a hostile canonical timeout at t=0, and diverges on action-vs-timeout arrival order | current timeout path is unsafe | M4 |
 | **B5** | P2c ownership regression: `@owned` sits on the pure `_expected_timeout_token`, while the mutating `_maybe_start_deadline` is unguarded | thread-safety guarantee weakened | M5 |
 | **B6** | Engine does not accumulate cumulative short all-ins for re-opening (TDA 47) | rules non-conformance | M7 |
-| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | M2 — **accepted**: replace with a proven *stable seat identity*, explicit version bump |
-| **B8** | `wire.unpack` enforces a hard ±30 s freshness window | stored envelopes are already expired; transcript replay is impossible without re-signing, which destroys the property that made the transcript trustworthy | M2 |
-| **B9** | Honest re-sends are indistinguishable from equivocation: `wire.pack` stamps a fresh `ts`, so the same logical message re-sent has a different envelope hash, which `_author_seq_ok` reads as equivocation | voids the hand blaming the honest returning seat; needs no attacker | M2 |
+| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | M2 — **accepted**, and **design resolved** (`RECOVERY_SPEC.md` §2-§4): stable seat identity is the frozen 32-byte Ed25519 seat key; deal context `v2 → v3`; all eight derived contexts enumerated. Implementation pending |
+| **B8** | `wire.unpack` enforces a hard ±30 s freshness window | stored envelopes are already expired; transcript replay is impossible without re-signing, which destroys the property that made the transcript trustworthy | M2 — **design resolved** (`RECOVERY_SPEC.md` §7.5): freshness becomes type-classed, and the relaxation is conditional on the stronger signed `ctx` + `(hand, seat, author_seq)` binding being present. Envelopes are never re-signed. Implementation pending |
+| **B9** | Honest re-sends are indistinguishable from equivocation: `wire.pack` stamps a fresh `ts`, so the same logical message re-sent has a different envelope hash, which `_author_seq_ok` reads as equivocation | voids the hand blaming the honest returning seat; needs no attacker | M2 — **design resolved** (`RECOVERY_SPEC.md` §7.6): retransmission is byte-identical replay of a journalled envelope, never a re-`pack`, and `author_seq` is derived from the journal rather than a counter. Implementation pending |
 
 ---
 
-## Defects in `main` (found incidentally, not yet fixed)
+## Defects found incidentally on `07f61a7`
 
-These exist on `07f61a7` now. None is a hypothetical.
+These were live on `07f61a7`. All four were taken by **M0**; three were fixed
+and one was closed as not a defect at the named site, so none remains open on
+`4b5e85a`. The descriptions below are the original findings and are not
+rewritten.
 
-| ID | Defect | Severity |
-|---|---|---|
-| **D1** | `_bind_seat_keys` accepts a **partial** map and is one-way. A peer disconnecting in the `start_game` → `start_p2p_hand` window freezes its seat with no key, permanently unauthorizable for the session | high |
-| **D2** | `_on_player_info` has no lifecycle gate, so any room-code holder can admit a fresh identity mid-hand and mutate roster state during play (gains no seat) | medium |
-| **D3** | `MentalDealDriver.all_hole_cards()` has no phase gate — returns every seat's hole cards whenever the audit passed, including fold-wins the UI hides | high |
-| **D4** | Bayer–Groth is enforced only when `author_mode == AUTHOR_MODE_WIRE`; on compat tables a shuffler can broadcast 52 arbitrary encryptions with no proof | high (compat only) |
+| ID | Defect | Severity | Status on `4b5e85a` |
+|---|---|---|---|
+| **D1** | `_bind_seat_keys` accepts a **partial** map and is one-way. A peer disconnecting in the `start_game` → `start_p2p_hand` window freezes its seat with no key, permanently unauthorizable for the session | high | **fixed** — all-or-nothing; raises on an incomplete map, and on an empty one in wire mode |
+| **D2** | `_on_player_info` has no lifecycle gate, so any room-code holder can admit a fresh identity mid-hand and mutate roster state during play (gains no seat) | medium | **fixed** — host-only and LOBBY-only |
+| **D3** | `MentalDealDriver.all_hole_cards()` has no phase gate — returns every seat's hole cards whenever the audit passed, including fold-wins the UI hides | high | **closed as not a defect at the named site** — the post-hand reveal is a deliberate product decision (`POKER_RULES_PROFILE.md` §4, D-M1-1); the showdown rendering gap is **C1**, owned by M7 |
+| **D4** | Bayer–Groth is enforced only when `author_mode == AUTHOR_MODE_WIRE`; on compat tables a shuffler can broadcast 52 arbitrary encryptions with no proof | high (compat only) | **fixed** — enforcement is keyed to the adopted deal policy first and `author_mode` second |
 
-Evidence: `docs/research/p2-suspension-reconnect.md`.
+Evidence: `docs/research/p2-suspension-reconnect.md`; revalidation against the
+merged baseline in `docs/research/m2-recovery-mechanism-threat-analysis.md`
+§1.2. That revalidation records one consequence worth carrying: D4's closure
+removes the *first* leg of the sole-live-player refutation, which stands on its
+independent second leg. The exception remains REFUTED.
 
 ---
 
@@ -116,9 +128,8 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M0 — Security cleanup: D1–D4
 
-- **Status:** **PR #39 open** (unmerged) — runs before M2
-  implementation. D3 closed as *not a defect at the named site*;
-  see the research note and PR #39.
+- **Status:** **MERGED** (PR #39). D3 closed as *not a defect at the named
+  site*; see the research note and PR #39.
 - **Depends on:** nothing; independent of the reconnect work
 - **Goal:** fix the four defects that exist on `main` today. Narrow scope,
   reviewed independently, not folded into M2.
@@ -141,10 +152,11 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M1 — Professional poker rules profile
 
-- **Status:** in review — PR #40, `docs/POKER_RULES_PROFILE.md` written and
-  re-based on the vendored TDA 2024 source, with every ADOPT re-checked
+- **Status:** **MERGED** (PR #40). `docs/POKER_RULES_PROFILE.md` is written
+  and re-based on the vendored TDA 2024 source, with every ADOPT re-checked
   against what the cited text actually forbids (Decisions, both
-  2026-08-25 rows)
+  2026-08-25 rows). The identifier and its encoding are frozen; the
+  **binding** is M2's and is specified in `docs/RECOVERY_SPEC.md` §3.3
 - **Depends on:** nothing — runs independently of the P2 crypto work
 - **Goal:** create `docs/POKER_RULES_PROFILE.md` pinned to
   `poker.tda.2024.nlhe.v1`, classifying every relevant rule as
@@ -170,8 +182,13 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 
 ### M2 — Suspension, reconnect, and crash recovery
 
-- **Status:** threat analysis outstanding (see Known limitations)
-- **Depends on:** **M0** (reviewed first); M1 profile binding is helpful but not blocking
+- **Status:** **IN PROGRESS** — PR #41. Threat analysis complete
+  (`docs/research/m2-recovery-mechanism-threat-analysis.md`) and the
+  normative contract written (`docs/RECOVERY_SPEC.md`), both under review.
+  B1, B2, B7, B8 and B9 are **resolved at design level**; no production
+  change has landed yet, and nothing in either document has been executed.
+- **Depends on:** **M0** — satisfied (merged). M1 is merged, so the profile
+  binding of `RECOVERY_SPEC.md` §3.3 is unblocked
 - **Goal:** define and prove exact-seat suspension and resumption. Cover
   the three failure classes separately: transport interruption with the
   process alive; process restart on the same device; device/secret loss.
@@ -189,9 +206,12 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
   every context currently derived from `_deal_session_id()`
   enumerated. The **rules-profile identifier from M1 is bound here**,
   in the same deliberate break, so the wire context is redesigned once.
+  Design-level portions of this gate are met by
+  `docs/RECOVERY_SPEC.md`; the controls are specified in its §12 and
+  **none has been run**.
 - **Non-goals:** threshold cryptography of any kind; changing admission
-  beyond what the analysis shows is required; the production deadline
-  ticker.
+  beyond what the analysis shows is required (the analysis showed none is);
+  the production deadline ticker.
 - **Known limitations:**
   - **B1** means a permanently lost participant leaves a multi-live-player
     hand **BLOCKED / UNRECOVERABLE**. That must not be mapped to
@@ -206,6 +226,19 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
     that is transport-conditional (**D4**). Do not implement it. See
     `docs/research/p2-suspension-reconnect.md` for the conditions any
     revival would have to meet.
+    **Amended 2026-08-26:** M0 closed D4, so the transport-conditional leg
+    of that argument no longer applies. The refutation stands on its
+    independent second leg — the audit is the only reciprocity point — and
+    the exception is still refused (`RECOVERY_SPEC.md` §11).
+  - **Host loss** during `PLAYING` becomes a suspension rather than an
+    immediate termination (`RECOVERY_SPEC.md` §9.6). Host *migration*
+    stays forbidden; a host **process restart** is out of reach and is
+    named as a limitation, not solved.
+  - `identity.py` silently regenerates the protocol identity on a corrupt
+    file and does not write atomically, which turns a recoverable restart
+    into permanent seat loss with no observable transition. In M2 scope
+    because exact-seat reconnect depends on that key
+    (`RECOVERY_SPEC.md` §5.4).
 
 ### M3 — Corrected timeout contract
 
@@ -361,3 +394,5 @@ Not yet milestones; do not lose them.
 | LOW-4, LOW-5 | (carried) |
 | — | ~~Straddle behaviour unverified against TDA provisions~~ — **closed by M1**: searched against the vendored source and classified in `docs/POKER_RULES_PROFILE.md` §3.2 (OVERRIDE (b) — house: the 2024 ruleset does not address straddles at all, so excluding them is our ruling, not TDA's). What remains is the conformance gap **C5**, owned by M7 |
 | — | Detection-only chain attribution needs a new message exchange; currently `bad_seat` is `None` for a corrupt deck with no bad decryptor |
+| M2-F3 | **A void refunds the seat it blamed.** `next_p2p_hand` on a voided hand reverts to the pre-hand stacks and redeals, so every `VOID_*` outcome — including `VOID_EQUIVOCATION` — returns everything the blamed seat committed. A seat that dislikes its holes can buy a mulligan for the cost of attribution, which is a standing-invariant-1 leak. Predates M2 and is **not** created or fixed by it; M2 only ensures disconnect and recovery never reach that path. Evidence: `docs/research/m2-recovery-mechanism-threat-analysis.md` §1.4 |
+| M2-F4 | DLEQ proofs carry no session or hand binding (`dleq.py:51-57` hashes only `G, X, D, C0, R1, R2`). Not a live hole — `X` is context-derived and `C0` carries per-shuffle randomness — but recorded so a future replay or caching design does not make `(X, C0)` recur |

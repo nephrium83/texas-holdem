@@ -8,6 +8,13 @@
 agents were lost to a usage limit. Sections below are what was
 established; the mechanism comparison is outstanding.
 
+> **Superseded in part, 2026-08-26.** The outstanding mechanism comparison was
+> completed in `docs/research/m2-recovery-mechanism-threat-analysis.md`, which
+> also revalidates every claim below against the merged post-M0/M1 baseline
+> `4b5e85a`. Read that note first. This one is preserved as written, against
+> `07f61a7`: in particular its **Defects in `main`** table describes defects
+> that M0 has since closed, and its line numbers are `07f61a7`'s.
+
 ## Headline
 
 Reconnect is **not supported today**, and the blocker is not the one an
