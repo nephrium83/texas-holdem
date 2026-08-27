@@ -12,10 +12,12 @@ implementation and this note wins for *why*.
 **Revised 2026-08-26** after independent review of the first increment, which
 rejected three conclusions: that host process restart was out of reach (§7),
 that a local grace timer could drive a terminal transition (§8), and that
-`HAND_OPEN` needed no canonical encoding (spec §6.8). The superseded
-reasoning is restated in each section rather than deleted — the arguments were
-plausible, and a later reader who reconstructs them deserves to find out here
-why they fail.
+`HAND_OPEN` needed no canonical encoding (spec §6.8).
+**Revised again 2026-08-27** after review of the second increment, which
+rejected a fourth: that total device loss could never reach a terminal state
+(§8.1). The superseded reasoning is restated in each section rather than
+deleted — the arguments were plausible, and a later reader who reconstructs
+them deserves to find out here why they fail.
 
 This workspace covers M2 — suspension, reconnect, and crash recovery — as
 defined by `docs/ROADMAP.md`. Candidate designs recorded here do not become a
@@ -547,17 +549,16 @@ mechanism intended to answer disconnects would be manufacturing them.
 | Candidate | Verdict |
 |---|---|
 | a **grace period bound into the deal context**, so every replica gives up at the same nominal moment | rejected. It makes the clock evidence, which is invariant 3 again in a costume; peers' clocks differ, and M4 owns timeout certificates in any case. It would also drag the M3 timeout contract into M2, which is a non-goal |
-| **authenticated evidence of loss** — the affected seat signs a declaration | **adopted.** `RECOVERY_SPEC.md` §8.6. It is deterministic, replicated, clock-free, and grants no power a silent peer does not already have, since the deal is n-of-n and refusing to contribute freezes the hand anyway |
+| **authenticated evidence of loss** — the affected seat signs a declaration | **adopted, then generalised.** It is deterministic, replicated, clock-free, and grants no power a silent peer does not already have, since the deal is n-of-n and refusing to contribute freezes the hand anyway. It covers only the cases where the departing seat can still sign; §8.1 replaces it with `hand_abandon`, which any seat may sign, and `RECOVERY_SPEC.md` §8.6 keeps this as its self-naming case |
 | **local stand-down that creates no shared state** | **adopted**, for everything the declaration cannot cover. The process stops; the journal keeps the hand suspended; a later start re-enters `SUSPENDED` and may resume |
 
-**What the pair does not cover, stated rather than papered over.** Total device
-loss produces no declaration, because the peer that would sign it is gone.
-Those tables stay `SUSPENDED` — chips frozen, identical to
-`BLOCKED / UNRECOVERABLE` in every value-bearing respect — and no mechanism
-short of threshold cryptography or an external authority changes that. The
-honest form of the M2 result is therefore: *the chip position is always
-determined; the lifecycle label is determined whenever evidence exists to
-determine it.*
+**What the pair did not cover, and it was not a detail.** Total device loss
+produces no declaration, because the peer that would sign it is gone. Those
+tables stayed `SUSPENDED` — chips frozen, identical to
+`BLOCKED / UNRECOVERABLE` in every value-bearing respect — and the note
+concluded that no mechanism short of threshold cryptography or an external
+authority changed that. The second independent review rejected that
+conclusion, and §8.1 is why it was wrong.
 
 **One consequence worth naming for the implementer.** Because a peer with an
 unreadable journal cannot derive its next outbound `author_seq` (spec §7.6),
@@ -565,7 +566,57 @@ the declaration must sit outside the sequenced stream. Numbering it would make
 the one message a lost peer needs to send collide with a number its peers have
 already bound to a different fingerprint — read as equivocation, ending in a
 `VOID_*` that refunds the very seat that just declared itself gone (F-3). The
-requirement falls out of the failure it is being sent *from*.
+requirement falls out of the failure it is being sent *from*, and it carries
+over unchanged to `hand_abandon`.
+
+### 8.1 The error above: evidence *of what?*
+
+Revised 2026-08-27, after the second independent review. The paragraph above
+is left standing because the mistake in it is instructive.
+
+Both the rejected timer and the adopted declaration were answers to the same
+implicit question: **how does a replica learn that a peer is gone?** The timer
+answered it badly (a private clock). The declaration answered it well but
+narrowly (only the departing peer can testify). Neither answer can cover total
+device loss, because the question is unanswerable in that case — and the note
+mistook "this question has no answer" for "this outcome is unreachable".
+
+The question was the wrong one. Nothing in the required outcome depends on
+knowing where a peer went. What a replica needs is a reason to believe **the
+hand can never complete**, and that is obtainable without knowing anything
+about the missing peer at all:
+
+* the deal is n-of-n (**B1**), and every original seat still owes at least its
+  audit shares until the hand is cryptographically complete — `make_shares`
+  covers the whole deck with no owner exclusion (`deck_audit.py:55-69`), which
+  is the same citation that refutes the sole-live-player exception;
+* therefore **any** seat's irrevocable refusal to contribute again makes the
+  hand incompletable;
+* a refusal is a statement about the signer's own future conduct. It is
+  self-authenticating, it needs no corroboration, and — unlike an assertion
+  that someone else is absent — every replica evaluates it identically.
+
+So a *surviving* seat can end the hand, and the class-3 gap closes. That is
+`hand_abandon` (spec §8.6). Note what it does **not** do: it does not decide
+that the missing peer is gone, it does not pay anybody, and it does not move a
+chip. It converts an indefinite freeze into a determinate one.
+
+**Three objections, and where each lands.**
+
+| Objection | Where it lands |
+|---|---|
+| "One impatient peer can now end a recoverable hand." | True, and it could already: under n-of-n, going quiet freezes the hand permanently and anonymously. The declaration changes speed and attribution, not power. Spec §8.5 nevertheless recommends the emission be a user act rather than a timer, and §8.4 requires the product to keep "end this hand" visibly distinct from "step away" |
+| "A losing player will blow up the table instead of paying." | It costs them their own committed chips, so it is never cheaper than folding — standing invariant 1 is untouched. It is a griefing vector, not a profit vector, and it is the same one silence already provided |
+| "What if the hand was actually completable and the declaration races the last contribution?" | Real, and handled: completion evidence outranks abandonment (spec §8.6.3). A declaration arriving at a replica that is still making progress is buffered; the replica retransmits what the emitter lacks; if the hand completes it settles normally and the session terminates at the hand boundary. The residual — a relay that withholds completion evidence from one replica — is a pre-existing split that no peer-only mechanism in a star topology closes |
+
+**What changed in the honest form of the M2 result.** Revision 2's version was
+*"the chip position is always determined; the lifecycle label is determined
+whenever evidence exists to determine it."* Revision 3's is stronger and
+simpler: **the chip position is always determined, and the lifecycle label is
+always reachable — by any surviving seat, at the cost of saying so on the
+record.** What is still not automatic is the decision to stop waiting, and
+that is deliberate: a table that is still hoping is correctly described as
+`SUSPENDED`.
 
 ---
 

@@ -47,6 +47,7 @@ Superseding a decision means adding a new row, not editing an old one.
 | 2026-08-25 | **Silence in the pinned ruleset is a grant to the house, not a prohibition** — `docs/POKER_RULES_PROFILE.md` §2.1, on the source's own masthead: *"TDA Rules supplement the conventional rules of this house."* **Supersedes the row above in two rulings:** the straddle and the second runout return to **OVERRIDE (b) — house**, each with the bounded source search written out. Rules 38/39 prescribe burns and repairs for an ordinary board and Rule 51-B fixes the opening bet for its undercall remedy; all three *assume* one board and a posted big blind, and none forbids the alternative. Residual dead-money allocation and cryptographic absence remain house rulings, so **four** [H] rulings now carry a search. Separately, Rule 16's addendum is read in full: adopting it exposes gap **C6** — all-in hands are not tabled until after the board is run. **No ruling changed**, so the profile identifier does not bump. | An adoption is a claim about what someone else's text *says*. The previous row upgraded two house rulings on procedures that presuppose the ordinary case rather than legislate against the exception, which is an argument from silence — and the same silence the masthead assigns to the house. The engine's own support for both features made the overclaim visible. C6 is the matching lesson on the other side: `must_show` proves an all-in hand is never concealed, which is not what a rule about *timing* asserts. |
 | 2026-08-24 | **The M0/D3 fold-win exposure question is decided in M1** (`docs/POKER_RULES_PROFILE.md` §4, decision D-M1-1). Post-hand hole-card secrecy is given up deliberately and stated in the product; a fold-win still reveals nothing at the client; folded seats are never rendered at a showdown, which is a conformance gap for M7. | The audit is the only point where a seat publishes a proven share for its own hole cards, and settling without it is REFUTED. A UI-level muck over an opened deck would advertise a guarantee the protocol does not provide. |
 | 2026-08-26 | **Giving up is not a protocol transition, and host restart is not an exception to failure class 2.** **Amends the row below, which is still open in PR #41 and not yet normative.** Three changes to the proposed contract after independent review. (1) `SUSPENDED` → `BLOCKED / UNRECOVERABLE` now requires **authenticated evidence** — a signed `seat_lost` declaration from the affected seat's frozen key, or a peer's own proven loss — and never a local timer; a grace deadline or a user abandoning a hand is a **local stand-down** that writes no terminal record, deletes no journal, is not absorbing, and is invisible to every other replica. Elapsed local time may not gate whether a resume is accepted. (2) Same-device **host process restart** is specified (`RECOVERY_SPEC.md` §9.7) rather than carried as a limitation. (3) The journal gains a version header and a canonical, bounded `HAND_OPEN` encoding, plus a `LOBBY` record carrying the invite parameters. | The original justification for a timer-driven terminal was that the state allocates no value, so replicas that give up at different moments still hold identical chips. That proved chip agreement and not lifecycle agreement — and `BLOCKED / UNRECOVERABLE` is absorbing, so identical signed evidence could yield permanently different answers to "may this hand still be played", decided by whose timeout was shortest. A five-second Wi-Fi drop could be made permanent by one peer's private clock. Host restart was recorded as out of reach on evidence that only showed *no shipped code does it*: the host holds no authoritative game state under the hostless design, and the invite pin that forbids **migration** is exactly what permits **resumption** by the same key. What was actually missing was mundane — the admission capability and the table configuration were memory-only, so no role could re-authenticate or rebuild its replica after a restart. |
+| 2026-08-27 | **A hand ends on an irrevocable refusal to continue it, not on a claim that someone is gone.** **Amends the two rows below, both still open in PR #41 and not yet normative.** `RECOVERY_SPEC.md` revision 3 replaces the `seat_lost` declaration with **`hand_abandon`** (§8.6): a signed, context-bound, irrevocable statement by *any* seat that it will never contribute to this hand again. One valid declaration is terminal, chips frozen. `seat_lost` and the own-proven-loss rule become its self-naming case, so the mechanism count falls. Total device loss — which revision 2 left `SUSPENDED` forever, because the only peer that could sign was the peer that was gone — now reaches `BLOCKED / UNRECOVERABLE` through a **surviving** seat. Completion evidence outranks abandonment: a declaration arriving at a replica that can still finish the hand is buffered, the hand settles normally, and the session terminates at the hand boundary. A local clock may decide *when this peer offers to abandon* and may never decide the transition itself. | Revision 2 satisfied standing invariant 3 by refusing to let a timer end a hand, and paid for it with a class-3 outcome that never terminated at all — the required result and the shipped contract disagreed. The fix was to change what the evidence is *about*. No peer can verify that another peer is absent, so evidence of absence is unobtainable; every peer can verify a signature over "I will not continue", and because the deal is n-of-n and every seat still owes its audit shares until the hand is cryptographically complete, that statement **proves** the hand can never finish. It is a fact about the protocol, checkable from the signature and the membership rule, with no clock and no claim about anyone's whereabouts. It grants no power silence did not already grant: the abandoning seat's own chips freeze with everyone else's. |
 | 2026-08-26 | **M2's normative recovery contract is `docs/RECOVERY_SPEC.md`**, promoted from `docs/research/m2-recovery-mechanism-threat-analysis.md` in PR #41. It settles: a **durable recovery journal** of signed envelopes, journal-then-send, with recovery by replay rather than snapshot; the **stable seat identity** is the frozen 32-byte Ed25519 seat key, encoded with a kind tag; **deal context v3** binds the rules profile as one length-prefixed field beside the deal policy, the seat identities, `timeout_policy_version`, `T`, `Δ` and `L`, with `G` and `E` derived and never bound; envelope freshness becomes type-classed and conditional on the stronger `ctx` + `author_seq` binding being present; and `SUSPENDED` is a third state that neither settles nor unwinds, exiting only to resume, to `BLOCKED / UNRECOVERABLE`, to local shutdown, or to a void on signed evidence of misbehaviour. **Proposed until PR #41 merges; normative on merge.** | Three separate failure classes were being answered by one mechanism, and the obvious mapping — disconnect → `VOID_PEER_LOST` — reverts to the pre-hand stacks, which turns pulling the network cable into a refund primitive. Freezing value is the only outcome that refunds nobody, pays no unaudited pot, and needs no threshold cryptography. The journal is the only mechanism that reaches a process restart; peer-supplied history cannot prove completeness, because an omitted tail is indistinguishable from silence. Snapshotting `MentalDeal` was rejected: it would put a secret scalar at rest to store conclusions where a journal stores re-verifiable evidence. |
 
 ---
@@ -91,7 +92,7 @@ regardless of how convenient it is.
 
 | ID | Blocker | Impact | Tracked in |
 |---|---|---|---|
-| **B1** | `MentalDeal` is fixed-membership and n-of-n at every phase | evict → fold → continue is impossible; a missing participant stalls the hand with no abort path | M2 — **design resolved** (`RECOVERY_SPEC.md` §0.1, §8): not removed, accepted as permanent without threshold crypto, and its consequence specified rather than left an undefined stall — the hand suspends with chips frozen, and reaches `BLOCKED / UNRECOVERABLE`, still frozen, once authenticated evidence establishes the loss (§8.6). Implementation pending |
+| **B1** | `MentalDeal` is fixed-membership and n-of-n at every phase | evict → fold → continue is impossible; a missing participant stalls the hand with no abort path | M2 — **design resolved** (`RECOVERY_SPEC.md` §0.1, §8): not removed, accepted as permanent without threshold crypto, and its consequence specified rather than left an undefined stall — the hand suspends with chips frozen, and reaches `BLOCKED / UNRECOVERABLE`, still frozen, on a signed `hand_abandon` (§8.6). n-of-n is also what makes that terminal sound: one irrevocable refusal proves the hand can never complete. Implementation pending |
 | **B2** | Nothing in the P2P layer persists hand or session state | a process crash loses everything except the device secret and signing identity | M2 — **design resolved** (`RECOVERY_SPEC.md` §6, §7): durable recovery journal, journal-then-send, recovery by replay. Implementation pending |
 | **B3** | n = 2 has no peer-only Byzantine-safe betting timeout | heads-up silence must suspend, not fold | M3 |
 | **B4** | P2c accepts a hostile canonical timeout at t=0, and diverges on action-vs-timeout arrival order | current timeout path is unsafe | M4 |
@@ -183,14 +184,16 @@ independent second leg. The exception remains REFUTED.
 
 ### M2 — Suspension, reconnect, and crash recovery
 
-- **Status:** **IN PROGRESS** — PR #41, design revision 2. Threat analysis
+- **Status:** **IN PROGRESS** — PR #41, design revision 3. Threat analysis
   (`docs/research/m2-recovery-mechanism-threat-analysis.md`) and the normative
-  contract (`docs/RECOVERY_SPEC.md`) are written and were revised after
-  independent review returned three blocking findings — host process restart,
-  the timer-driven terminal, and the `HAND_OPEN` encoding (Decisions,
-  2026-08-26). B1, B2, B7, B8 and B9 are **resolved at design level**; no
-  production change has landed yet, and nothing in either document has been
-  executed.
+  contract (`docs/RECOVERY_SPEC.md`) are written and have been revised twice
+  under independent review: revision 2 answered host process restart, the
+  timer-driven terminal, and the `HAND_OPEN` encoding (Decisions, 2026-08-26);
+  revision 3 answers the class-3 terminal outcome, replacing `seat_lost` with
+  the irrevocable `hand_abandon` declaration, and settles the one reconnect
+  mutation the document had described two ways (Decisions, 2026-08-27). B1,
+  B2, B7, B8 and B9 are **resolved at design level**; no production change has
+  landed yet, and nothing in either document has been executed.
 - **Depends on:** **M0** — satisfied (merged). M1 is merged, so the profile
   binding of `RECOVERY_SPEC.md` §3.3 is unblocked
 - **Goal:** define and prove exact-seat suspension and resumption. Cover
@@ -243,11 +246,19 @@ independent second leg. The exception remains REFUTED.
     reconnecting through the unchanged §9 sequence. Its residual limit is
     **reachability**: a changed address or NAT mapping leaves joiners
     unable to reach a recoverable host, which costs liveness and no chips.
-  - **Permanent loss is not always provable.** `BLOCKED / UNRECOVERABLE`
-    needs authenticated evidence (`RECOVERY_SPEC.md` §8.6), and total
-    device loss produces none — the peer that would sign the declaration
-    is the peer that is gone. Those tables stay `SUSPENDED` with chips
-    frozen, which is the identical chip position under a different label.
+  - **The terminal is reachable for every failure class, but somebody has to
+    decide to stop waiting.** `BLOCKED / UNRECOVERABLE` needs authenticated
+    evidence (`RECOVERY_SPEC.md` §8.6), and under revision 3 that evidence is
+    a **surviving** seat's irrevocable `hand_abandon` — so total device loss
+    is covered, which it was not in revision 2. It is not automatic: a table
+    whose players all keep waiting stays `SUSPENDED` with chips frozen, and
+    M2 declines to let a timer conclude the loss for them.
+  - **Abandonment is a griefing vector, as silence already was.** Any seat can
+    end any hand before cryptographic completion and freeze the pot,
+    including its own chips. It gains nothing — n-of-n already let it freeze
+    the hand by going quiet — but the act is now immediate, so E2 ("end this
+    hand for everyone") and E3 ("step away, keep the seat") must be visibly
+    different choices in the product (`RECOVERY_SPEC.md` §8.4).
   - `identity.py` silently regenerates the protocol identity on a corrupt
     file and does not write atomically, which turns a recoverable restart
     into permanent seat loss with no observable transition. In M2 scope

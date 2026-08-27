@@ -25,6 +25,24 @@ rule (§6.2). Two consequential omissions surfaced while making those changes
 and are fixed here too: the invite capability nothing persisted (§6.7) and the
 table configuration the replica is rebuilt from (§6.8).
 
+**Revision 3, 2026-08-27.** Independent review of revision 2 returned two
+blocking findings, and both are fixed here.
+
+1. Revision 2 left total device loss — failure class 3 with no surviving
+   secret — in `SUSPENDED` forever, because the only peer that could sign a
+   loss declaration was the peer that was gone. That contradicts the required
+   class-3 outcome. The repair is **`hand_abandon`** (§8.6): a signed,
+   irrevocable, context-bound refusal to continue a hand, which any *surviving*
+   seat can emit. It is evidence of **impossibility**, not evidence of absence,
+   so it survives the objection that killed the revision-1 timer while making
+   `BLOCKED / UNRECOVERABLE` reachable for every class-3 loss. It subsumes
+   revision 2's `seat_lost` as its self-naming case, so the mechanism count
+   goes down rather than up.
+2. §5.2 and §9.2 disagreed about whether reconnect may write `_seat_order`.
+   The rule is now stated once and exactly: `_seat_order[seat]` **is assigned**
+   the newly authenticated `conn_id`; `_seat_keys` and every deal-context field
+   are immutable (§5.2, §9.2 step 6, §9.7.2 step 5, control **C36**).
+
 ---
 
 ## 0. Scope
@@ -50,7 +68,7 @@ threat analysis did not show one is required, so none is made.
 
 | Blocker | Resolution | Where |
 |---|---|---|
-| **B1** — `MentalDeal` is fixed-membership n-of-n | **not removed.** Accepted as permanent without threshold crypto. Its consequence is specified rather than left as an undefined stall: the hand suspends with chips frozen, and ends `BLOCKED / UNRECOVERABLE` — still frozen — once the loss is established by authenticated evidence | §1, §8 |
+| **B1** — `MentalDeal` is fixed-membership n-of-n | **not removed.** Accepted as permanent without threshold crypto. Its consequence is specified rather than left as an undefined stall: the hand suspends with chips frozen, and ends `BLOCKED / UNRECOVERABLE` — still frozen — on a signed `hand_abandon`. n-of-n is also what makes that terminal *sound*: one irrevocable refusal proves the hand can never complete | §1, §8 |
 | **B2** — nothing persists | durable recovery journal | §6, §7 |
 | **B7** — `conn_id` in the crypto domain | stable seat identity; deal context v3 | §2, §3, §4 |
 | **B8** — envelopes expire, so stored transcripts cannot be replayed | freshness becomes type-classed, conditional on stronger anti-replay evidence being present. Envelopes are **never** re-signed | §7.5 |
@@ -67,7 +85,7 @@ document is a function of which class applies.
 |---|---|---|---|
 | **1** | transport interruption, process alive | everything in memory | `SUSPENDED` → resume at the exact seat |
 | **2** | process restart, same device | `identity.json`, `device_secret`, the journal, the lobby record | `SUSPENDED` → resume at the exact seat |
-| **3** | device or secret loss | nothing seat-specific | `SUSPENDED` → `BLOCKED / UNRECOVERABLE` when the loss is *established* (§8.4); otherwise `SUSPENDED` indefinitely, with identical frozen chips |
+| **3** | device or secret loss | nothing seat-specific | `SUSPENDED` → `BLOCKED / UNRECOVERABLE`, on the first valid `hand_abandon` (§8.4 E2, §8.6). Chips frozen |
 
 **The classes are role-independent.** A host is a seat with a listener
 attached, not a separate kind of participant. Class 2 therefore covers host
@@ -93,12 +111,25 @@ an input to this rule.
 **Permanence is a claim, and claims need evidence.** Absence is not evidence
 of permanence — that is the same asymmetry standing invariant 3 states for
 clocks, and it does not stop being true because the wait has been long. So
-`BLOCKED / UNRECOVERABLE` is reached from **authenticated evidence** that
-recovery is impossible (§8.4, E2), never from a local timer. Where no such
-evidence exists, the hand stays `SUSPENDED`. The two states are
-**chip-identical** — committed chips frozen, nothing settled, nothing
-reverted — so the difference is legibility, not value. Every prohibition in
-the governing rule holds in both.
+`BLOCKED / UNRECOVERABLE` is reached from **authenticated evidence** (§8.4,
+E2), never from a local timer and never from an observation of silence.
+
+**But the evidence that ends a hand is not evidence of absence.** That is the
+distinction revision 3 turns on, and it is what makes the class-3 outcome
+above reachable at all. A peer cannot prove that another peer is gone; a peer
+*can* sign an irrevocable statement that it will never itself contribute to
+this hand again. Because the deal is n-of-n (**B1**) and every original seat
+still owes at least its audit shares until the hand is cryptographically
+complete (standing invariant 2), one such refusal is a **proof that the hand
+can never complete** — a fact about the protocol, verifiable from the
+signature and the deal's own membership rule, with no clock and no claim about
+anyone's whereabouts. `hand_abandon` (§8.6) carries exactly that, and every
+replica holding those bytes reaches the identical terminal record.
+
+Chips are frozen in `SUSPENDED` and in `BLOCKED / UNRECOVERABLE` alike —
+committed chips committed, nothing settled, nothing reverted — so the
+transition allocates no value. Every prohibition in the governing rule holds
+in both states.
 
 ---
 
@@ -338,7 +369,7 @@ entry, and a new consumer MUST be added here.
 | 5 | `ReplicaTable` RNG seed `replica.v1\|{sid}\|{hand}\|` | `replica_table.py:62-64`, `session.py:2004-2007` | replica RNG diverges (betting never consults it today; belt and braces by design) |
 | 6 | `DeadlineToken.hand_id` | `timeout.py:56, 65`, `TIMEOUT_SPEC.md` | proposals from one hand cannot be replayed into another; a mismatch makes every proposal stale |
 | 7 | `Session._deal_context_id` → `TerminalRecord.session_id` | `session.py:932`, `session.py:2787-2799` | forensic records name a context nobody else recognises |
-| 8 | **new in M2** — the `ctx` field on every hostless message, on the §9 resume handshake, and on `seat_lost` | §7.5, §8.6, §9.2 | cross-session replay is refused; a resume or a loss declaration cannot be aimed at another table |
+| 8 | **new in M2** — the `ctx` field on every hostless message, on the §9 resume handshake, and on `hand_abandon` | §7.5, §8.6, §9.2 | cross-session replay is refused; a resume or an abandonment cannot be aimed at another table |
 
 Entries 1-4 are cryptographic and fail closed. Entry 5 is a determinism hedge.
 Entries 6-7 are coordination and forensics. Entry 8 is new and is what makes
@@ -415,13 +446,38 @@ recovering peer a set of conn_ids that name nothing.
 **What replaces it on recovery.** `_seat_order` retains one non-transport
 use: `_author_owns_seat` bounds-checks `0 <= seat < len(self._seat_order)`
 (`session.py:1757-1758`). A recovering peer therefore rebuilds it at the
-recovered seat count with **placeholder** entries, replacing each as that
-seat reconnects. Placeholders MUST be unique, MUST NOT equal `local_conn_id`,
-and MUST NOT equal any live `conn_id` — a placeholder that collided with
-`local_conn_id` would hit the self-delivery shortcut at `session.py:1759-1760`
-and authorize an absent seat. In wire mode the placeholder participates in no
-authorization decision: `_seat_keys` is non-empty, so authority comes from the
-key (`session.py:1761-1764`).
+recovered seat count with **placeholder** entries. Placeholders MUST be
+unique, MUST NOT equal `local_conn_id`, and MUST NOT equal any live
+`conn_id` — a placeholder that collided with `local_conn_id` would hit the
+self-delivery shortcut at `session.py:1759-1760` and authorize an absent seat.
+In wire mode the placeholder participates in no authorization decision:
+`_seat_keys` is non-empty, so authority comes from the key
+(`session.py:1761-1764`).
+
+**`_seat_order` is mutable, and exactly one write is permitted.** It is the
+seat-indexed table of live transport hops, so it must change as hops change;
+saying otherwise would make reconnect undeliverable. The permitted write is a
+single element assignment,
+
+```
+_seat_order[seat] = C'
+```
+
+performed only after the returning peer has been authorized against
+`_seat_keys[seat]` (§9.2 step 5), where `C'` is the `conn_id` of the
+connection that just authenticated. It replaces a placeholder or a dead hop.
+No other mutation of `_seat_order` is permitted after `_bind_seat_keys` has
+run: the list is never re-ordered, never grown, never shrunk, and never
+rebuilt except by the recovery path above.
+
+**What that write is not.** `_seat_keys` is unchanged, and no field of the
+deal-context pre-image (§3.2) is touched — under v3 `_seat_order` does not
+appear in it at all, which is the whole point of B7. So the assignment moves a
+delivery address and changes no identity, no authority and no cryptographic
+domain. **C36** is the control that separates the two: permitted hop
+replacement must keep the context digest byte-identical, and any path that
+also rewrites `_seat_keys[seat]` or rebuilds the context on reconnect must
+fail.
 
 No secret scalar (`_x_share`), no shuffle witness, no DLEQ or proof
 randomness, and no card plaintext. See §7.3.
@@ -622,6 +678,13 @@ while a hand is `SUSPENDED` — including after a local stand-down (§8.4, E3),
 which is precisely when discarding it would convert a recoverable interruption
 into a permanent one.
 
+**One exception to the permission, for a terminal reached by E2.** A peer that
+discards the journal loses the `hand_abandon` envelope the terminal was derived
+from, and can then only *assert* the `TerminalRecord` to a returning peer
+rather than let it verify the signature (§9.2). A peer that expects to answer
+returning peers MUST retain that envelope for the life of the session; the
+simplest conforming implementation is to keep the journal.
+
 ### 6.7 The `LOBBY` record
 
 Written once, when the table's invite parameters are established: on the host
@@ -793,16 +856,15 @@ leaves the machine in exactly the state every other peer is in.
 
 ### 7.5 Envelope freshness (B8) — type-classed, and conditional
 
-`wire.unpack`'s hard ±30 s window (`wire.py:190-195`) is replaced by two
+`wire.unpack`'s hard ±30 s window (`wire.py:190-195`) is replaced by three
 classes, decided in one place by message type.
 
-**`FRESHNESS_STRICT`** — unchanged ±30 s. Applies to every type that is not
-seat-sequenced: the admission handshake, `player_info`, `player_ack`,
-`player_list`, `game_start`, chat, the admin messages, the resume handshake of
-§9, and `seat_lost` (§8.6). Each of these is sent live by a live peer, so a
-clock window costs them nothing; `seat_lost` is in this class for the further
-reason given in §8.6, that its sender may have no journal to draw an
-`author_seq` from.
+**`FRESHNESS_STRICT`** — unchanged ±30 s. Applies to every type that is
+neither seat-sequenced nor durable evidence: the admission handshake,
+`player_info`, `player_ack`, `player_list`, `game_start`, chat, the admin
+messages, and the resume handshake of §9. Each of these is sent live by a live
+peer and is meaningful only to the connection it is sent on, so a clock window
+costs them nothing.
 
 **`FRESHNESS_SEQUENCED`** — no timestamp check. Applies to the eight hostless
 payload types (`session.py:106-110`). Their anti-replay evidence is strictly
@@ -818,11 +880,35 @@ stronger than a clock window and it is signed:
   different envelope at one number is equivocation
   (`session.py:1228-1255`).
 
-**The exemption is conditional on the replacement being present.** A message
-claiming a sequenced type but missing any of `ctx`, `hand`, `seat` or
-`author_seq`, or carrying one of the wrong shape, MUST be **refused** — not
-quietly given the strict window. An implementation MUST NOT be able to obtain
-the relaxed rule without supplying the stronger binding.
+**`FRESHNESS_EVIDENCE`** — no timestamp check. Applies to exactly one type:
+`hand_abandon` (§8.6). Its anti-replay evidence is `ctx` byte-compared against
+the receiver's own, `hand` compared against the hand the receiver holds open,
+and an author that MUST byte-equal `_seat_keys[seat]`.
+
+Three reasons it cannot take the strict window, each independently sufficient:
+
+* **it must survive storage.** An abandonment is durable evidence: it is
+  journalled, relayed, retransmitted to peers that were offline when it was
+  issued, and re-verified when a replica replays its own journal after a
+  restart (§7.3). A ±30 s window makes every one of those paths fail, and
+  envelopes are never re-signed (below);
+* **its sender may have no `author_seq` to offer**, so it cannot join the
+  sequenced class — see §8.6;
+* **replaying it confers nothing.** It asserts an irrevocable fact about one
+  `(ctx, hand, seat)`; a second copy asserts the same fact, and the receiver's
+  transition is idempotent. An old abandonment cannot be aimed at a later hand
+  (`hand` mismatch) or another table (`ctx` mismatch), and there is no later
+  hand in the same session to aim it at, because it is session-terminal.
+  Delivering the proof late does not make the hand more completable than it
+  already was.
+
+**The exemption is conditional on the replacement being present, in both
+relaxed classes.** A message claiming a sequenced type but missing any of
+`ctx`, `hand`, `seat` or `author_seq`, or carrying one of the wrong shape,
+MUST be **refused** — not quietly given the strict window. The same applies to
+an evidence-class message missing `ctx`, `hand`, `seat`, or a well-formed
+`subject` (§8.6). An implementation MUST NOT be able to obtain the relaxed
+rule without supplying the stronger binding.
 
 `_send_hostless` (`session.py:1164-1193`) MUST stamp `ctx` alongside `seat` and
 `author_seq`, before the transport signs, so all four are covered by the
@@ -928,8 +1014,8 @@ means every other seat (§9.7.2 step 3).
 | Exit | Trigger | Kind | Chip effect |
 |---|---|---|---|
 | **E1 · RESUME** | the absent participant completes §9 and its outstanding contributions arrive | replicated, evidence-driven | none — committed chips stay committed, uncommitted stacks stay with their owner |
-| **E2 · UNRECOVERABLE** | authenticated evidence that recovery is impossible: a valid `seat_lost` declaration (§8.6), or this peer's own proven loss | replicated, evidence-driven | **none.** Chips frozen exactly as committed. `BLOCKED / UNRECOVERABLE` |
-| **E3 · LOCAL STAND-DOWN** | this process stops waiting: a local grace deadline, the user abandoning the hand, or shutdown | **local only.** Not a session outcome, not absorbing, not evidence | none. Chips frozen as committed; the hand stays `SUSPENDED` on disk |
+| **E2 · UNRECOVERABLE** | a valid `hand_abandon` for this hand (§8.6) — from any seat, including this one | replicated, evidence-driven | **none.** Chips frozen exactly as committed. `BLOCKED / UNRECOVERABLE` |
+| **E3 · LOCAL STAND-DOWN** | this process stops waiting *without* abandoning: a local grace deadline, the user stepping away, or shutdown | **local only.** Not a session outcome, not absorbing, not evidence | none. Chips frozen as committed; the hand stays `SUSPENDED` on disk |
 | **E4 · INTEGRITY FAILURE** | signed evidence of a cryptographic failure — equivocation, a failed proof, a failed audit — that would have voided the hand with every peer present | replicated, evidence-driven | the existing `VOID_*` rules apply, including the stack revert |
 
 **E4 is narrow on purpose, and the boundary is the discriminating invariant of
@@ -942,6 +1028,15 @@ is not a casino misdeal, and "play on" is not available for it.
 
 There is no fifth exit. In particular there is **no** sole-live-player
 settlement exit; see §11.
+
+**E2 and E3 are different acts, and a user-facing implementation MUST offer
+them as different choices.** E3 is *"I am stepping away from this table"*: it
+keeps the hand alive on disk and keeps this seat's return possible. E2 is
+*"this hand is over"*: it is signed, table-wide, irrevocable, and it ends the
+hand for everybody with every chip frozen where it sits, this seat's included.
+Presenting one as the other — in particular, quietly emitting `hand_abandon`
+when a user closes a window — would let a routine exit destroy a recoverable
+hand. Closing the application is E3.
 
 ### 8.5 E3 is local, and that is the whole point
 
@@ -975,79 +1070,216 @@ matter how long the seat has been away. There is no expiry on returning,
 because an expiry would be a private timer deciding a replicated outcome
 through the back door.
 
-The grace period survives only as **local policy for presentation and process
-lifetime**. It is not bound into the deal context, not transmitted, and not
-evidence. M2 blesses no value for it.
+The grace period survives as **local policy for presentation, for process
+lifetime, and — new in revision 3 — for when this peer *offers* to abandon**.
+It is not bound into the deal context, not transmitted, and not evidence. M2
+blesses no value for it.
 
-### 8.6 `BLOCKED / UNRECOVERABLE` and the `seat_lost` declaration
+**The line between a permitted local clock and a forbidden one, stated once.**
+Standing invariant 3 allows a local clock to gate *when this peer emits
+evidence*; it forbids a local clock from making identical evidence mean
+different things on different replicas. A grace deadline that flips this
+replica into a terminal state privately is the forbidden kind — that is
+revision 1's defect, and **C29** still fires on it. A grace deadline that
+prompts this peer to sign and broadcast `hand_abandon` is the permitted kind:
+the transition every replica then makes is a function of the bytes, identical
+everywhere, and a replica that has not yet received them is behind rather than
+in disagreement (§8.6).
+
+Because a hand that any seat has abandoned can never complete, the two are not
+merely permitted-versus-forbidden; they are also not interchangeable in effect.
+The private version decides alone. The signed version tells everyone.
+
+**Emission SHOULD be a user act, not a timer.** Nothing here forbids an
+automatic policy, and an implementation choosing one is still sound. But an
+aggressive automatic deadline turns a survivable transport blip into a
+permanently ended hand for the whole table, which is the practical harm the
+revision-1 review named even though the formal defect was elsewhere. The
+recommendation is a local grace period that surfaces the *option* to abandon
+and leaves the decision with the player; if a timer does emit, its value MUST
+be well above the worst reconnect this table expects to survive.
+
+### 8.6 `BLOCKED / UNRECOVERABLE` and the `hand_abandon` declaration
 
 A terminal session state, reached by **E2 only**. Chips are frozen at their
 committed position: no winner, no refund, no redeal. The `TerminalRecord`
-(`session.py:2787-2799`) records the cause and the seat whose participation
-was lost, and a `TERMINAL` journal record makes it absorbing across restarts.
+(`session.py:2787-2799`) records the cause, the abandoning seat, and the
+subject seats it named, and a `TERMINAL` journal record makes it absorbing
+across restarts.
 
-Two triggers, and no others.
+**8.6.1 The message.** `hand_abandon` is new, table-wide, signed, and
+`FRESHNESS_EVIDENCE` (§7.5). Its signed payload carries, beside the envelope's
+own author and type:
 
-**(a) A `seat_lost` declaration.** New, table-wide, signed,
-`FRESHNESS_STRICT`. It carries `ctx`, `hand`, `seat`, a 16-byte nonce, and a
-reason code. A receiver accepts it only when the envelope's author
-byte-equals `_seat_keys[seat]`, `ctx` byte-equals its own, and `hand` equals
-the suspended hand. Every replica that receives it makes the identical
-transition from the identical bytes, with no clock involved — which is what
-makes E2 replicated rather than private.
+| Field | Type | Meaning |
+|---|---|---|
+| `ctx` | the v3 deal-context id (§3.1) | which table and which cryptographic domain |
+| `hand` | int | which hand |
+| `seat` | int | the **emitting** seat |
+| `subject` | strictly increasing list of seat indices, non-empty, ⊆ `seats_in` | the seats the emitter holds unreachable. MAY include `seat` itself |
+| `reason` | u16 | advisory (§8.6.6) |
+| `nonce` | 16 octets | uniqueness for the signature |
 
-It is emitted by a peer that can still authenticate for its seat but cannot
-resume it: the device secret is gone, the journal is unreadable (§6.3), or
-the user has decided the seat will not return and is willing to say so on the
-record. Note what that costs the sender: it is the *only* honest way to end
-the hand for everyone, and it ends it with the sender's own chips frozen too.
+A receiver accepts it only when **all** of: the envelope's author byte-equals
+`_seat_keys[seat]`; `ctx` byte-equals its own `_deal_context_id`; `hand`
+equals the hand it holds open; `seat ∈ seats_in`; and `subject` is non-empty,
+strictly increasing, and wholly contained in `seats_in`. Anything else is
+refused, and refusal changes no state. `subject` is strictly increasing for
+the same canonicality reason `seats_in` is in §6.8: one set, one byte string.
 
-**It must be relayed.** In the star topology a joiner's broadcast reaches the
-host and no one else (`TOPOLOGY_DECISION.md` §1), so the host MUST forward
-`seat_lost` to every other peer **byte-for-byte**, as it forwards the hostless
-set — courier, never re-signer. Without that, one replica terminates and the
-rest wait forever on a declaration they were never shown, which is precisely
-the divergence this exit exists to remove. The host cannot forge it
+**8.6.2 Why one declaration is enough, and why that is a proof rather than a
+policy.** The deal is n-of-n (**B1**), and standing invariant 2 says every
+original seat remains a required cryptographic participant until the hand is
+cryptographically complete — concretely, until it has published its audit
+shares, which `deck_audit.make_shares` (`deck_audit.py:55-69`) takes over the
+whole deck with no owner exclusion. So for any incomplete hand and any seat,
+that seat still owes at least one contribution.
+
+`hand_abandon` is an **irrevocable refusal to make those contributions**. It
+follows immediately that the hand can never complete. A receiver is therefore
+not weighing a claim about whether some peer is absent — a claim no peer can
+make and none is asked to — it is verifying a signature over a statement whose
+consequence follows from the deal's own membership rule. That is why E2 needs
+no corroboration, no quorum, and no clock: one valid declaration is a complete
+proof, and every replica holding those bytes computes the same verdict.
+
+This is the difference between revision 3 and the revision-1 timer that
+independent review rejected. The timer asserted *"the peer is gone"*, which no
+replica can verify and each would decide differently. This asserts *"I will
+never continue"*, which every replica verifies identically from the same
+signature.
+
+**8.6.3 When it takes effect.** The transition is E2 for the hand and for the
+session. Two ordering rules keep it from racing a hand that is still finishing:
+
+* **a `hand_abandon` for a hand this replica has not opened** — a past hand or
+  a future one — is dropped or buffered exactly as a sequenced payload is
+  (`session.py:1788-1793`). It is never applied to a different hand, and a
+  declaration naming hand *H* MUST NOT be read as a refusal to play hand
+  *H+1*. A stale one is reachable by a narrow race: a seat that abandons
+  after the hand was already cryptographically complete elsewhere, but before
+  it learned so. Dropping it leaves no hole — the abandoner will not
+  contribute to the next hand either, so that hand suspends when its
+  contribution is needed and any seat may abandon *it*, on the record, naming
+  the hand it is actually about;
+* **a `hand_abandon` for the open hand, received while that hand is not
+  `SUSPENDED` at this replica, is buffered and not applied.** The replica is
+  still making progress, which means it holds contributions the emitter did
+  not; it MUST first apply what it holds and MUST retransmit to the emitter
+  what the emitter lacks (§7.6). If the hand then reaches cryptographic
+  completion, it **settles normally** — the audit ran, every share is present,
+  and the pot is paid to the proven winner. The buffered declaration is then
+  applied at the hand boundary: the session enters `BLOCKED / UNRECOVERABLE`
+  and no further hand is dealt. If instead the hand suspends, the buffered
+  declaration applies immediately and the hand ends frozen.
+
+The second rule is what stops an abandonment unwinding a hand that was
+completable all along. Completion evidence outranks abandonment evidence,
+because completion is a *stronger* fact about the same hand and it is signed
+by more parties.
+
+**8.6.4 Irrevocability, and what it obliges the emitter to do.** Having
+emitted a valid `hand_abandon` for `(ctx, hand)`, a peer MUST NOT afterwards
+contribute to that hand, MUST NOT accept a `seat_resume` for it (§9.2), and
+MUST NOT resume it after a restart. The commitment is recoverable without any
+new record type: its own declaration is in the journal as an `OUTBOUND`
+record, so recovery reads it back with everything else (§7.6). A peer that
+resumed a hand it had abandoned would be equivocating about the one fact the
+terminal rests on, and **C37** is the control.
+
+An implementation MUST make abandonment **available**: a seat holding a
+`SUSPENDED` hand must have some path — user action or local policy (§8.5) — to
+emit it. `BLOCKED / UNRECOVERABLE` must not be unreachable in practice, or the
+class-3 outcome of §1 is a paper guarantee.
+
+**8.6.5 It must be relayed.** In the star topology a joiner's broadcast
+reaches the host and no one else (`TOPOLOGY_DECISION.md` §1), so the host MUST
+forward `hand_abandon` to every other peer **byte-for-byte**, exactly as it
+forwards the hostless set — courier, never re-signer.
+
+It is relayed *like* the hostless payload types and is **not one of them**.
+`_HOSTLESS_PAYLOAD_TYPES` (`session.py:106-110`) is the sequenced set, and
+membership of it would demand an `author_seq` the declaration must not carry
+(§8.6.8). An implementation that reuses the relay path MUST widen the *relay*
+predicate without widening the *sequencing* predicate; if one predicate serves
+both today, splitting it is part of this change.
+
+It MUST also be retransmitted on
+request like any journalled envelope (§7.6), and re-presented to a peer that
+reconnects into a terminated session (§9.2), so a returning peer can *verify*
+the terminal rather than take the host's word for it. The host cannot forge it
 (signatures) and can only suppress it, which leaves every suppressed replica
 `SUSPENDED` with frozen chips: the safe direction.
 
-**It is deliberately not `author_seq`-numbered**, and this is not an
-oversight. A peer whose journal is unreadable cannot derive its next outbound
-`author_seq` (§7.6). Numbering the declaration would make it re-issue a
-number peers have already bound to a different fingerprint — equivocation,
-read as E4, ending in a `VOID_*` that reverts stacks. The one message a lost
-peer must be able to send would then be the message that refunds it. So
-`seat_lost` sits outside the sequenced stream, and takes the strict clock
-window like the rest of the unsequenced types (§7.5).
+**8.6.6 `reason` is advisory and MUST NOT change the transition.** The codes
+distinguish `SELF_SECRET_LOST`, `SELF_JOURNAL_UNREADABLE`, `PEER_UNREACHABLE`
+and `USER_ENDED` for the user interface and for the `TerminalRecord`. A
+receiver that treated one code as terminal and another as advisory would
+reintroduce exactly the divergence this design removes, so every valid
+declaration produces the identical transition regardless of code.
 
-**It grants no new power.** A malicious seat can send `seat_lost` and freeze
-the table — but it can achieve exactly that today by simply never
-contributing again, because the deal is n-of-n (**B1**). The declaration
-makes an existing, unavoidable freeze immediate and attributable instead of
-indefinite and anonymous.
+Likewise `subject` is **not verified against anyone's view of reachability**,
+because no replica can check another's transport. It is a truthful statement
+of why the emitter gave up, it is recorded, and it names the seats in the
+`TerminalRecord` — and none of that is what makes the hand end. What ends the
+hand is the emitter's own refusal, which is self-authenticating. An
+implementation MUST NOT make its transition conditional on agreeing with
+`subject`.
 
-**(b) This peer's own proven loss.** A peer that restarts and finds its
-device secret absent, its journal at an unreadable version, or its
-`identity.json` refusing to load (§5.4) has *local* proof that it cannot
-resume its seat. It records `BLOCKED / UNRECOVERABLE` for itself, and MUST
-emit `seat_lost` if it still holds the seat key to sign with. Where it
-cannot sign, no evidence can reach the table and the other replicas stay
-`SUSPENDED` — see the limitation below.
+**8.6.7 The two cases it subsumes.** Revision 2 had a separate `seat_lost`
+declaration and a separate own-proven-loss rule. Both are now this one message:
 
-**What has no trigger, and why that is the honest answer.** Total device loss
-produces no evidence and never will: the peer that could sign the declaration
-is precisely the peer that is gone. Those replicas stay `SUSPENDED`
-indefinitely, holding frozen chips, until each user stands down locally (E3).
-The chip position is identical to `BLOCKED / UNRECOVERABLE` in every respect;
-what is missing is only the ability to *say* the loss is permanent. Inventing
-a timer to say it anyway is the finding this section was rewritten to fix.
+* **a seat declaring itself lost** emits `hand_abandon` with
+  `subject = [seat]`. This is a peer that can still authenticate but cannot
+  resume: its device secret is gone, its journal is unreadable (§6.3), or the
+  user has decided the seat will not return;
+* **this peer's own proven loss** — it restarts and finds its device secret
+  absent, its journal at an unreadable version, or its `identity.json`
+  refusing to load (§5.4) — records `BLOCKED / UNRECOVERABLE` locally and MUST
+  emit `hand_abandon` with `subject = [own seat]` if it still holds the seat
+  key to sign with. Where it cannot sign, it is indistinguishable from total
+  device loss, and the case below applies;
+* **total device loss**, where nothing of the lost peer survives to sign
+  anything, is answered by a **surviving** seat emitting `hand_abandon` with
+  the lost seat in `subject`. This is the case revision 2 could not reach, and
+  it is reachable now precisely because the declaration is a statement about
+  the *emitter's* future conduct rather than about the missing peer's fate.
 
-**The accepted cost, stated plainly.** A permanently lost participant leaves
-real chips frozen with no winner. That is a bad user outcome. It is a *safe*
-one, and every alternative examined either refunds a defector, pays a pot on
-unverified cards, or requires threshold cryptography — a non-goal. The ROADMAP
-already accepted this posture for B1: frozen value is preferable to a
-profitable disconnect primitive.
+**8.6.8 It is deliberately not `author_seq`-numbered.** A peer whose journal is
+unreadable cannot derive its next outbound `author_seq` (§7.6). Numbering the
+declaration would make it re-issue a number peers have already bound to a
+different fingerprint — equivocation, read as E4, ending in a `VOID_*` that
+reverts stacks. The one message a lost peer must be able to send would then be
+the message that refunds it. So `hand_abandon` sits outside the sequenced
+stream, in the evidence class of §7.5.
+
+**8.6.9 It grants no new power.** A seat can emit `hand_abandon` and freeze the
+table — and it can achieve exactly that today by simply never contributing
+again, because the deal is n-of-n. Its own chips freeze with everyone else's,
+so the act is never more profitable than folding: standing invariant 1 is not
+weakened, because the abandoning seat's chip outcome is no better than legal
+play would have given it. What the declaration changes is that an existing,
+unavoidable freeze becomes immediate, attributable and *legible* instead of
+indefinite and anonymous. It remains a griefing vector, as silence already was,
+and it is not a profit vector.
+
+**8.6.10 Convergence, and the one window that is not instant.** Replicas that
+hold the declaration terminate; a replica that has not yet received it stays
+`SUSPENDED`. That window cannot produce a chip disagreement, and the argument
+is short: the hand cannot complete (§8.6.2), `SUSPENDED` moves no chips (§8.3),
+and `BLOCKED / UNRECOVERABLE` moves no chips (§10). So the two states differ
+only in label until the bytes arrive, and the bytes are relayed, journalled and
+retransmittable. Being behind is not disagreeing.
+
+**8.6.11 The accepted cost, stated plainly.** A permanently lost participant
+leaves real chips frozen with no winner. That is a bad user outcome. It is a
+*safe* one, and every alternative examined either refunds a defector, pays a
+pot on unverified cards, or requires threshold cryptography — a non-goal. The
+ROADMAP already accepted this posture for B1: frozen value is preferable to a
+profitable disconnect primitive. What revision 3 adds is not a better chip
+outcome — the chips were always going to freeze — but a **determinate
+lifecycle**: the table can say the hand is over, name who ended it, and stop
+waiting.
 
 ---
 
@@ -1084,10 +1316,11 @@ invisible until a process restarts.
    Not the roster, not the connection, not the nickname — the frozen binding,
    which `handle_disconnect` never cleared. A mismatch is refused. An empty
    `_seat_keys` in wire mode is refused.
-6. **Hop rebinding only.** The host repoints the seat's transport hop to `C'`.
-   `_seat_order` and `_seat_keys` are **not** modified. Because v3 contains no
-   `conn_id`, this changes no cryptographic domain — which is the entire
-   purpose of B7.
+6. **Hop rebinding only.** The host assigns `_seat_order[seat] = C'` and does
+   nothing else: `_seat_keys` is not modified, no deal-context field is
+   touched, and the context digest stays byte-identical (§5.2). Because v3
+   contains no `conn_id`, moving the hop changes no cryptographic domain —
+   which is the entire purpose of B7.
 7. **`seat_resume_ack`** — host → joiner, signed, `FRESHNESS_STRICT`, echoing
    `resume_nonce` and carrying the retained absent-seat entitlement: the seat
    index, the frozen seat→key map, `seats_in`, `button`, `hand`, `ctx` and the
@@ -1100,13 +1333,22 @@ invisible until a process restarts.
 11. **Exit.** Each peer leaves `SUSPENDED` via **E1** when the outstanding
     contributions from that seat arrive.
 
-**Two refusals, both deterministic, neither time-based.**
+**Three refusals, all deterministic, none time-based.**
 
 * A `seat_resume` for a session that has reached an **evidence-derived**
-  terminal (§8.6) is refused, and the refusal carries the `TerminalRecord` so
-  the returning peer learns the cause rather than retrying into silence. Every
-  replica refuses identically, because every replica reached that terminal
-  from the same evidence.
+  terminal (§8.6) is refused. The refusal carries the `TerminalRecord` **and
+  the `hand_abandon` envelope it was derived from**, byte-for-byte, so the
+  returning peer verifies the terminal against `_seat_keys` itself instead of
+  taking the answering peer's word for it. That re-delivery is possible only
+  because the declaration is `FRESHNESS_EVIDENCE` (§7.5). Every replica
+  refuses identically, because every replica reached that terminal from the
+  same bytes.
+* A peer that has itself emitted `hand_abandon` refuses for the same reason
+  and by the same rule: its own declaration is evidence to itself, so it is
+  already terminal at the moment of emission (§8.6.4). This is worth stating
+  because the refusal is otherwise easy to implement as "have I *received* a
+  declaration", which would let the one peer that ended the hand be the one
+  peer still willing to resume it.
 * A `seat_resume` for a hand that is merely `SUSPENDED` is accepted regardless
   of how long the seat has been away (§8.5). A host MUST NOT expire an absent
   seat, and MUST NOT make acceptance conditional on a local clock.
@@ -1226,7 +1468,9 @@ it is a stranger, and §9.2 step 3 refuses it.
    *not* restored — it is connection-scoped and every connection is new
    (`session.py:2841-2842`), which is exactly the property that makes a
    captured response from before the restart worthless.
-5. **Rebuild the hop table** as placeholders (§5.2), and restore `_seat_keys`
+5. **Rebuild the hop table** as placeholders (§5.2) — one per seat, each
+   replaced by that seat's `conn_id` when it authenticates in step 6 — and
+   restore `_seat_keys`
    **from the recovered context pre-image**, before anything can call
    `_bind_seat_keys`. This applies to every recovering peer, not only the
    host, and the ordering is the point: `_bind_seat_keys` derives the map
@@ -1238,7 +1482,8 @@ it is a stranger, and §9.2 step 3 refuses it.
 6. **Every joiner reconnects through §9.2 unchanged** — full re-admission
    against a fresh server nonce, host pin verified against the invite, then
    `seat_resume` authorized against the frozen seat key. The host answers
-   with `seat_resume_ack` and repoints that seat's hop. Nothing in §9.2
+   with `seat_resume_ack` and assigns `_seat_order[seat]` that connection's
+   `conn_id`, replacing the placeholder (§5.2). Nothing in §9.2
    needed a host that had been running continuously; it needed a host that
    holds the pinned key and the frozen binding, and both survived.
 7. **Retransmission and replay** proceed as in §9.2 steps 9-10, in both
@@ -1286,6 +1531,11 @@ Uncommitted stack remains the player's. (Standing invariants 1 and 4.)
 5. There is no sole-live-player settlement exit (§11).
 6. A local stand-down moves nothing either: it writes no outcome and reverts
    no stack, and the position it leaves on disk is the suspended one (§8.5).
+7. **Abandoning a hand refunds the abandoner least of all.** `hand_abandon`
+   freezes every committed chip including the emitter's own (§8.6.9), so
+   ending a hand is never a cheaper exit than playing it out. This is the
+   obligation that keeps the new declaration from becoming the refund
+   primitive §8.1 exists to refuse, and **C2** covers it at the terminal.
 
 **The known adjacent leak, named so it is not mistaken for this one.** A
 `VOID_*` outcome reverts to the pre-hand stacks (`session.py:2074-2076`) and
@@ -1351,13 +1601,17 @@ against a broken implementation is a monument to a bug (standing invariant 9).
 | C26 | the journalled `button` is the post-advance value | journal `_table_cfg["button"]` instead of `_replica.button` | the recovering seat broadcasts a decryption share for its own hole position |
 | C27 | a local stand-down is not a terminal | write a `TERMINAL` record (or delete the journal) when the grace deadline elapses | a restarted peer refuses a resume that must succeed, or has no journal to resume from |
 | C28 | resume acceptance is never time-gated | expire an absent seat after the grace period | a late but otherwise valid `seat_resume` is refused |
-| C29 | E2 requires evidence | enter `BLOCKED / UNRECOVERABLE` on the local grace deadline | two replicas holding identical signed evidence reach different terminal states |
-| C30 | `seat_lost` is authenticated and context-bound | accept it without the `_seat_keys[seat]` author check, or without the `ctx`/`hand` comparison | a stranger, or another table's declaration, terminates a healthy hand |
-| C31 | `seat_lost` is outside the sequenced stream | stamp it with an `author_seq` | a journal-less peer's declaration is read as equivocation and the resulting void refunds it |
+| C29 | E2 requires evidence | enter `BLOCKED / UNRECOVERABLE` on the local grace deadline, without emitting or receiving a `hand_abandon` | two replicas holding identical signed evidence reach different terminal states |
+| C30 | `hand_abandon` is authenticated and context-bound | accept it without the `_seat_keys[seat]` author check, or without the `ctx`/`hand` comparison, or with an empty, unsorted or out-of-range `subject` | a stranger, or another table's declaration, terminates a healthy hand |
+| C31 | `hand_abandon` is relayed but not sequenced | stamp it with an `author_seq`, or add it to `_HOSTLESS_PAYLOAD_TYPES` so the relay and sequencing predicates widen together | a journal-less peer's declaration is read as equivocation and the resulting void refunds it, or the declaration is refused for a number it must not carry |
 | C32 | a host process restart resumes at the exact seat | regenerate the admission secret at startup instead of reading the `LOBBY` record | every joiner is locked out of a table it is legitimately seated at. Paired with a positive control: restart the host, reconnect both joiners, complete the hand |
 | C33 | a placeholder hop authorizes nothing | rebuild `_seat_order` with a placeholder equal to `local_conn_id` | an absent seat's message is authorized by the self-delivery shortcut (`session.py:1759-1760`) |
-| C34 | `seat_lost` reaches every replica | leave it out of the host's relay set | at three peers, one replica terminates while another stays suspended holding the same evidence set |
+| C34 | `hand_abandon` reaches every replica | leave it out of the host's relay set | at three peers, one replica terminates while another stays suspended holding the same evidence set |
 | C35 | seat keys are restored before anything rebinds them | let `_bind_seat_keys` run on a recovered session before the journalled map is restored | wire mode raises on the empty post-restart roster, or compat freezes an empty map and every seat becomes unauthorizable |
+| C36 | reconnect rebinds the **hop** and nothing else | on `seat_resume`, also write `_seat_keys[seat]` from the resuming envelope, or rebuild the deal context after the hop changes | a substituted key is accepted for the seat, or the context digest differs before and after a reconnect. Paired with a positive control: `_seat_order[seat]` **does** become `C'` and the seat receives traffic again |
+| C37 | abandonment is irrevocable | let a peer that emitted `hand_abandon` resume the hand — accept a `seat_resume` for it, contribute to it, or resume it after a restart from its own journalled `OUTBOUND` declaration | a replica progresses a hand it has proven cannot progress, and two replicas reach different outcomes from the same evidence |
+| C38 | permanent loss reaches the terminal | make `hand_abandon` unavailable (no path emits it), or treat it as advisory rather than terminal | a class-3 device-loss scenario in which no surviving replica ever leaves `SUSPENDED`. Paired with a positive control: destroy one peer's secrets entirely, have a survivor abandon, and assert every remaining replica records the identical `TerminalRecord` and identical stacks |
+| C39 | completion outranks abandonment | apply a `hand_abandon` immediately to a hand that is still progressing at this replica | a hand that had every contribution in hand is frozen instead of settled, and two replicas disagree about the pot |
 
 ---
 
@@ -1376,11 +1630,30 @@ against a broken implementation is a monument to a bug (standing invariant 9).
   otherwise perfectly recoverable, and the remedy — a regenerated invite
   carrying the same token and secret — is out of band. Liveness only: no chip
   moves either way.
-* **Permanent participant loss is not always *provable*** (§8.6). Where the
-  lost peer cannot sign a `seat_lost` declaration, the surviving replicas hold
-  frozen chips in `SUSPENDED` rather than in `BLOCKED / UNRECOVERABLE`. The
-  chip position is identical; the difference is that nothing can say the loss
-  is permanent, and M2 deliberately declines to let a timer say it.
+* **Reaching the terminal still requires somebody to decide to stop waiting**
+  (§8.5, §8.6). `BLOCKED / UNRECOVERABLE` is now reachable for every class-3
+  loss, including total device loss, but it is reached when a surviving seat
+  signs `hand_abandon` — not automatically. A table whose players all keep
+  waiting stays `SUSPENDED` with frozen chips, which is the correct state for
+  players who have not concluded anything. M2 deliberately declines to let a
+  timer conclude it for them, and equally declines to leave the terminal
+  unreachable.
+* **Abandonment is a griefing vector, as silence already was** (§8.6.9). Any
+  seat can end any hand it is in, at any point before cryptographic
+  completion, and freeze the pot. It gains nothing by it — its own chips
+  freeze too — and it could already do the same by going quiet under n-of-n.
+  What is new is that ending a hand is now a single deliberate act rather than
+  an indefinite wait, so the user interface carries real weight: see §8.4 on
+  keeping E2 and E3 visibly distinct.
+* **A withholding relay can still split a hand's outcome, and abandonment
+  makes the split terminal** (§8.6.3). If the host forwards the contributions
+  that complete a hand to one replica and not another, the informed replica
+  settles the pot while the deprived one can only freeze. The divergence
+  predates M2 — today the deprived replica stalls forever instead — and no
+  peer-only mechanism in a star topology closes it. What M2 adds is the
+  ordering rule that makes the split as narrow as possible: completion
+  evidence outranks abandonment, and a replica must retransmit what it holds
+  before it acts on a declaration.
 * **Replay cost is unmeasured.** Re-verifying a hand's Bayer-Groth proofs on
   every recovery is the dominant term. If it proves unacceptable, trusting
   locally journalled previously-verified proofs is a real weakening and needs
