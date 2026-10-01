@@ -168,6 +168,141 @@ def test_all_in_lockup_and_side_pots():
     assert results[0]["pots"][1]["eligible"] == [0, 2]
 
 
+# ------------------------------------------------------------- exact payouts
+#
+# The side-pot tests above assert pot shape. These assert the money: fixed
+# hole cards and a fixed board, so the payout is known in advance and was
+# derived by hand from the rules, not read back from the engine.
+#
+# Every case is three-handed with sb 5 / bb 10 and start_hand(button=0). On
+# a first hand the engine moves the button one seat, so seat 1 has the
+# button, seat 2 posts the small blind, seat 0 the big blind, and seat 1
+# acts first. Seat 0 (A) is the short stack, seat 1 (B) the middle, seat 2
+# (C) the deep one.
+
+BOARD = ["2c", "7d", "9h", "Js", "3d"]          # no pair, flush or straight
+
+
+def _shove(r, seat):
+    lg = r.engine.legal(seat)
+    return ("raise", lg["max_to"]) if lg["can_raise"] else ("call", 0)
+
+
+def _b_raises_then_folds_to_c(r, seat):
+    """B opens to 250 and folds to C's shove; A calls all-in for 100."""
+    if seat == 1:
+        return ("raise", 250) if r.engine.current_bet <= 10 else ("fold", 0)
+    return _shove(r, seat)
+
+
+def play_out(stacks, holes, board, script):
+    """Three replicas play one scripted hand to settlement; returns the
+    agreed (stacks, result)."""
+    reps = make_replicas(3, ["A", "B", "C"], stacks)
+    e = reps[0].engine
+    assert (e.button, e.sb_seat, e.bb_seat, reps[0].actor) == (1, 2, 0, 1)
+    seq = 0
+    streets = [board[:3], board[3:4], board[4:5]]
+    while reps[0].phase in (PHASE_BETTING, PHASE_STREET_OVER):
+        if reps[0].phase == PHASE_BETTING:
+            seat = reps[0].actor
+            action, amount = script(reps[0], seat)
+            assert apply_all(reps, seq, seat, action, amount) == "applied"
+            seq += 1
+        else:
+            cards = [C(c) for c in streets.pop(0)]
+            for r in reps:
+                r.advance_street(cards)
+            assert_synced(reps)
+    assert reps[0].phase == PHASE_SHOWDOWN
+    results = []
+    for r in reps:
+        r.set_all_holes({s: [C(a), C(b)] for s, (a, b) in holes.items()})
+        results.append(r.finish(force_tabled=True))
+    assert_synced(reps)
+    assert all(res == results[0] for res in results)
+    return reps[0].stacks, results[0]
+
+
+def pots_of(result):
+    """(amount, eligible, {seat: payout}) per pot, in layer order."""
+    return [(p["amount"], p["eligible"], p["runs"][0]["payouts"])
+            for p in result["pots"]]
+
+
+# All three shove [100, 300, 500]. B's shove to 300 is a full raise; C's to
+# 500 is a short all-in raise; A calls all-in for 100. C's top 200 is
+# uncalled (B, the next deepest, put in 300) and comes back as a refund,
+# leaving A 100, B 300, C 300 committed. Layers:
+#   main  100 x 3            = 300, A B C eligible
+#   side (300 - 100) x 2     = 400, B C eligible
+SHOVE_CASES = [
+    (   # A's aces take the main; B's kings beat C's queens for the side;
+        # C keeps only the refund.
+        {0: ("As", "Ah"), 1: ("Ks", "Kh"), 2: ("Qs", "Qh")},
+        [(300, [0, 1, 2], {0: 300}), (400, [1, 2], {1: 400})],
+        [300, 400, 200]),
+    (   # C's aces take both pots on top of the refund: 300 + 400 + 200.
+        {0: ("Qs", "Qh"), 1: ("Ks", "Kh"), 2: ("As", "Ah")},
+        [(300, [0, 1, 2], {2: 300}), (400, [1, 2], {2: 400})],
+        [0, 0, 900]),
+    (   # B's aces take main and side; C keeps the refund; A busts.
+        {0: ("Qs", "Qh"), 1: ("As", "Ah"), 2: ("Ks", "Kh")},
+        [(300, [0, 1, 2], {1: 300}), (400, [1, 2], {1: 400})],
+        [0, 700, 200]),
+]
+
+
+@pytest.mark.parametrize("case", SHOVE_CASES, ids=[
+    "short-main-middle-side-deep-refunded", "deep-stack-wins-everything",
+    "middle-wins-main-and-side"])
+def test_three_way_all_in_pays_exact_side_pots(case):
+    holes, pots, final = case
+    stacks, result = play_out([100, 300, 500], holes, BOARD, _shove)
+    assert result["refund"] == [2, 200]
+    assert pots_of(result) == pots
+    assert stacks == final
+    assert sum(stacks) == 900
+
+
+def test_folded_chips_stay_in_the_side_pot():
+    """B opens to 250, C shoves 500, A calls all-in for 100, B folds.
+
+    C's raise to 500 was only called to B's 250, so 250 comes back to C,
+    leaving A 100, B 250 (folded), C 250 committed. Layers:
+      main  100 x 3          = 300, A and C eligible (B folded)
+      side  (250 - 100) x 2  = 300, C alone -- B's dead 150 is in it
+    A's aces beat C's queens for the main; C takes the side it alone
+    contests. Final: A 300, B 300 - 250 = 50, C 250 + 300 = 550."""
+    holes = {0: ("As", "Ah"), 1: ("Ks", "Kh"), 2: ("Qs", "Qh")}
+    stacks, result = play_out([100, 300, 500], holes, BOARD,
+                              _b_raises_then_folds_to_c)
+    assert result["refund"] == [2, 250]
+    assert pots_of(result) == [(300, [0, 2], {0: 300}),
+                               (300, [2], {2: 300})]
+    assert stacks == [300, 50, 550]
+
+
+def test_split_main_pot_gives_the_odd_chip_left_of_the_button():
+    """Stacks [101, 300, 500], all shove. A calls all-in for 101 and C's
+    top 200 is refunded, so A 101, B 300, C 300 are committed:
+      main  101 x 3          = 303, A B C eligible
+      side  (300 - 101) x 2  = 398, B C eligible
+    The board T J Q K 2 gives A (As 3h) and C (Ad 6h) the same ace-high
+    straight; B (4s 5h) has king high. The main splits 151 each with one
+    chip over, and the odd chip goes to the first winner left of the
+    button (seat 1), which is C, not A. C's straight also wins the side.
+    Final: A 151, B 0, C 200 + 152 + 398 = 750."""
+    holes = {0: ("As", "3h"), 1: ("4s", "5h"), 2: ("Ad", "6h")}
+    stacks, result = play_out([101, 300, 500], holes,
+                              ["Tc", "Jd", "Qh", "Ks", "2d"], _shove)
+    assert result["refund"] == [2, 200]
+    assert pots_of(result) == [(303, [0, 1, 2], {0: 151, 2: 152}),
+                               (398, [1, 2], {2: 398})]
+    assert stacks == [151, 0, 750]
+    assert sum(stacks) == 901
+
+
 # ------------------------------------------------------------- ordering
 
 def test_out_of_turn_rejected_without_desync():
