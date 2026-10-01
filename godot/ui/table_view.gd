@@ -21,9 +21,13 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 	var seats: Array = snapshot.get("seats", [])
 	var action_on := int(snapshot.get("action_on", -1))
 	var you: Dictionary = snapshot.get("you", {})
+	var in_lobby := str(snapshot.get("phase", "")) == "lobby"
 	for i in range(MAX_SEATS):
 		if i < seats.size() and seats[i] is Dictionary:
 			var seat: Dictionary = seats[i]
+			if in_lobby:
+				_seat_views[i].apply_lobby_seat(seat)
+				continue
 			if bool(seat.get("is_you", false)):
 				seat = _with_own_hole(seat, you.get("hole"))
 			var is_action_on := int(seat.get("seat", i)) == action_on

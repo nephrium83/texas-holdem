@@ -39,6 +39,18 @@ func apply_seat(seat: Dictionary, is_action_on: bool) -> void:
 	_apply_cards(seat)
 
 
+## A lobby seat is table membership, not a dealt hand: the lobby snapshot
+## carries only seat, name and is_you (GODOT_PROTOCOL.md section 5), and no
+## in_seat -- which apply_seat() reads as "nobody here". So a named seat is
+## shown as taken, with no stack, position or cards, because none exist yet.
+func apply_lobby_seat(seat: Dictionary) -> void:
+	_apply_empty()
+	var name := str(seat.get("name", ""))
+	if name.is_empty():
+		return
+	_name_label.text = "%s (You)" % name if bool(seat.get("is_you", false)) else name
+
+
 func _apply_empty() -> void:
 	_name_label.text = "Empty seat"
 	_stack_label.text = ""

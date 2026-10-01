@@ -344,6 +344,10 @@ Public, per-seat, **never contains hole cards during play**.
 | `is_you`      | bool          | true for the local seat                           |
 | `hole`        | array of card | **present only at a contested showdown**, for seats in `result.shown`, never your own (§6) |
 
+In the lobby (`phase: "lobby"`) each entry is table membership only:
+`seat`, `conn_id`, `name` and `is_you`. Nothing has been dealt, so there is no
+`in_seat`, stack, bet, position or card; render a named entry as a taken seat.
+
 ### `you`
 
 Private to the local seat.
