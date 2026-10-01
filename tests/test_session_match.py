@@ -280,6 +280,67 @@ def test_eliminated_spectator_accepts_signed_session_end_envelope():
     assert spectator._final_stacks == [0, 1500, 0]
 
 
+# A seated peer that is still playing checks a session_end against its own
+# settlement: same hand, already settled here, identical stacks. Each case
+# below would have passed the old shape-and-total checks.
+
+def test_a_seated_peer_ignores_a_session_end_sent_mid_hand():
+    """The old hole: any seat could end the match mid-hand and name itself
+    the winner, with stacks that merely summed to the table total."""
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    before = target.replica.state_digest()
+    target.handle_message(order[1], {"type": "session_end", "hand": 1,
+                                     "seat": 1, "winner": 1,
+                                     "stacks": [0, 1500, 0]})
+    assert target.terminal_state is None
+    assert not target._session_over
+    assert target.replica.state_digest() == before
+
+
+def _heads_up_bust():
+    """A heads-up all-in that busts a seat. The shuffle is random and an
+    all-in can chop, so retry until the precondition holds."""
+    for _ in range(20):
+        bus, sessions, order = make_table(2, stacks=[500, 500])
+        _shove_hand(bus, sessions, order, alive=[0, 1])
+        stacks = sessions[order[0]].replica.stacks
+        if 0 in stacks:
+            return bus, sessions, order, stacks
+    pytest.fail("no heads-up all-in busted a seat in 20 tries")
+
+
+def test_a_seated_peer_accepts_a_session_end_matching_its_settlement():
+    """The honest path: the winner ends the match before the loser has
+    called next_p2p_hand. The loser has settled the same hand with the
+    same stacks, so it accepts."""
+    bus, sessions, order, stacks = _heads_up_bust()
+    winner, loser = (0, 1) if stacks[0] else (1, 0)
+    assert sessions[order[winner]].next_p2p_hand() == "session_over"
+    bus.drain()
+    s = sessions[order[loser]]
+    assert s.terminal_state == Session.ENDED_NORMAL
+    assert s._final_stacks == stacks
+    assert s._session_winner == winner
+
+
+@pytest.mark.parametrize("change", ["later-hand", "other-stacks"])
+def test_a_seated_peer_ignores_a_session_end_unlike_its_settlement(change):
+    bus, sessions, order, stacks = _heads_up_bust()
+    winner, loser = (0, 1) if stacks[0] else (1, 0)
+    claim = {"type": "session_end", "hand": 1, "seat": winner,
+             "winner": winner, "stacks": list(stacks)}
+    if change == "later-hand":
+        claim["hand"] = 2
+    else:                                         # the loser named winner
+        claim["stacks"] = list(reversed(stacks))
+        claim["winner"] = loser
+    s = sessions[order[loser]]
+    s.handle_message(order[winner], claim)
+    assert s.terminal_state is None
+    assert not s._session_over
+
+
 def test_heads_up_positions_and_play():
     """Down to two seats: the engine's heads-up override (button = SB,
     acts first preflop) holds, and a heads-up hand plays to settle across

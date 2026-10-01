@@ -1890,7 +1890,24 @@ class Session:
         self._void_hand(reason, announce=False)
 
     def _on_session_end(self, conn_id: str, msg: dict) -> None:
-        """Receive final match state, including on already-busted spectators."""
+        """Receive final match state, including on already-busted spectators.
+
+        A peer still playing does not take the sender's word for it. Before
+        this, any seat could end the match mid-hand and name itself the
+        winner with stacks that merely summed right. An honest sender ends
+        the match from next_p2p_hand, after settling its last hand, so the
+        notice must name this peer's own hand, arrive after this peer has
+        settled it too, and carry exactly this replica's settled stacks.
+
+        Anything else is ignored rather than terminal. A notice that
+        overtakes this peer's own settlement is honest skew, and this peer
+        reaches the same verdict itself from next_p2p_hand. A genuine
+        disagreement about the settled stacks is hand_settled's to catch,
+        with the digest that proves it.
+
+        A busted spectator stopped following hands, so it has nothing to
+        compare and keeps the shape and total checks alone.
+        """
         # Authorized at ingress; see _admit_hostless. The seat is checked for
         # shape only, and NOT coerced -- ingress declines to authorize a
         # non-integer seat, so int("1") here would apply one it refused.
@@ -1905,6 +1922,15 @@ class Session:
             return
         if hand < self._hand_no or len(stacks) != len(self._seat_order):
             return
+        if not self._p2p_spectator:
+            r = self._replica
+            if (hand != self._hand_no or self.hand_result is None
+                    or r is None or stacks != r.stacks):
+                _log.warning(
+                    "session: ignoring session_end from seat %s -- it does "
+                    "not match this peer's settled hand %s",
+                    msg.get("seat"), self._hand_no)
+                return
         if any(stack < 0 for stack in stacks):
             return
         expected_total = (self._table_cfg or {}).get("total_chips")
