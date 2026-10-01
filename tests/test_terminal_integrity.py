@@ -243,6 +243,23 @@ def test_repeated_identical_terminal_requests_are_idempotent():
     assert s.terminal_record.sequence == 1
 
 
+def test_termination_notifies_the_client_once_after_the_record():
+    """terminate() fires on_state_changed after on_session_terminated, so a
+    client re-renders from a session that already reports its terminal
+    state -- and only the winning transition does."""
+    bus, sessions, order = table()
+    s = sessions["peer1"]
+    calls = []
+    s.on_session_terminated = lambda rec: calls.append(("terminated",
+                                                        rec.terminal_state))
+    s.on_state_changed = lambda: calls.append(("state", s.terminal_state))
+    s.terminate(Session.HOST_LOST, "host dropped")
+    s.terminate(Session.ABORTED_PROTOCOL, "second cause")
+    assert calls == [("terminated", Session.HOST_LOST),
+                     ("state", Session.HOST_LOST)]
+    assert s._current_deadline_token is None    # no deadline re-armed
+
+
 def test_concurrent_terminal_requests_yield_one_winner():
     """Under the current single-writer model these arrive serialized; the
     mechanism should not depend on that to stay correct."""

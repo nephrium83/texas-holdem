@@ -2776,6 +2776,11 @@ class Session:
 
         Runs on the owner thread. All transport-originated callers already
         arrive on the dispatch consumer; local callers must too.
+
+        Ends by firing on_session_terminated, then on_state_changed. The
+        second is what a client renders from: without it a peer that died
+        mid-hand kept showing the live table until something else happened
+        to change, which on a dead table is never.
         """
         self._assert_owner()
         # Atomic by construction: @owned holds the owner across this
@@ -2818,6 +2823,11 @@ class Session:
                            else {"reason": f"{state}: {reason}"}))
         if self.on_session_terminated:
             self.on_session_terminated(self.terminal_record)
+        # Called directly, not through _notify_state_changed: that would
+        # re-arm a deadline on a session whose pending work was just
+        # invalidated.
+        if self.on_state_changed is not None:
+            self.on_state_changed()
         return True
 
     def _invalidate_pending_work(self) -> None:
