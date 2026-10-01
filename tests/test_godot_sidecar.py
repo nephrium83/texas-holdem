@@ -60,9 +60,11 @@ def _start_sidecar(log_path: Path, *extra_args: str) -> subprocess.Popen:
     """Start the sidecar with its stderr going to *log_path*.
 
     Never an undrained pipe: nothing reads stderr while a test waits on
-    stdout, so a sidecar that logged more than the pipe buffer holds would
-    block on its next write, mid-hand. A file cannot fill up that way, and
-    it leaves the log to show when a test fails.
+    stdout, so once the sidecar has logged more than the pipe buffer holds
+    it blocks on its next write, mid-hand. Two seats log almost nothing, but
+    three log relay warnings on every hand, and the ten-hand run then stalled
+    inside its first hand on Windows. A file cannot fill up that way, and it
+    leaves the log to show when a test fails.
     """
     with open(log_path, "w", encoding="utf-8") as log:
         return subprocess.Popen(
