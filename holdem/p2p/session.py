@@ -106,7 +106,7 @@ AUTHOR_MODE_COMPAT = "compat"   # unsigned flat dicts; conn_id stands in
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
-    "timeout_proposal", "peer_lost",
+    "timeout_proposal", "peer_lost", "hand_settled",
 })
 
 
@@ -630,6 +630,13 @@ class Session:
         self._final_stacks: list | None = None
         self._session_end_announced = False
         self._p2p_spectator = False
+        # Settlement agreement (hand_settled): how this replica ended its
+        # most recent hand -- the hand number, and its settled digest or
+        # None for a void -- and the digests peers reported for the CURRENT
+        # hand before it ended here, by seat.
+        self._ended_hand: int | None = None
+        self._ended_digest: str | None = None
+        self._early_settled: dict[int, str] = {}
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
         self.on_state_changed: Optional[Callable[[], None]] = None
@@ -804,6 +811,8 @@ class Session:
             self._on_timeout_proposal(conn_id, body)
         elif t == "peer_lost":
             self._on_peer_lost(conn_id, body)
+        elif t == "hand_settled":
+            self._on_hand_settled(conn_id, body)
 
     @staticmethod
     def _hostless_projection(msg: dict):
@@ -1853,7 +1862,20 @@ class Session:
         self._flush_deal()
 
     def _on_hand_void(self, conn_id: str, msg: dict) -> None:
-        """Fail the current hand closed when any authenticated seat voids it."""
+        """Fail the current hand closed when any authenticated seat voids it.
+
+        Unless this replica already settled that hand. The void used to be
+        ignored then (_end_hand refuses a settled hand), which split the
+        table: the voiding side redealt the hand while this side carried
+        the payout forward, and no later hand could agree. Checked before
+        the hand-scope filter, because the void may arrive after this peer
+        has already dealt the next hand.
+        """
+        hand = msg.get("hand", self._hand_no)
+        if (self._ended_digest is not None and hand == self._ended_hand
+                and not isinstance(hand, bool) and _is_seat(msg.get("seat"))):
+            self._settlement_disagrees(msg["seat"], hand, None)
+            return
         if not self._hand_msg_ok(conn_id, msg):
             return
         # Authorized at ingress; see _admit_hostless. What ingress could NOT
@@ -1894,6 +1916,67 @@ class Session:
         if len(alive) > 1 or winner != expected_winner:
             return
         self._finish_session(stacks, announce=False)
+
+    def _on_hand_settled(self, conn_id: str, msg: dict) -> None:
+        """Hold a seat's settlement digest against this replica's own.
+
+        Every seat broadcasts hand_settled {hand, digest} when its replica
+        settles a hand. The digest covers stacks, positions and the result
+        -- everything the next hand is dealt from -- so equal digests mean
+        the table agrees. Nothing compared them before: a divergence showed
+        up only as a desync in the next hand, whose void redealt from each
+        peer's own carry-in and diverged again, forever.
+
+        Compared whenever it arrives. If this replica has ended that hand,
+        against how it ended it, even if it has since dealt the next one
+        (the sender may be slower). If not, held in _early_settled until it
+        does; see _hand_ended. Authorized and replay-checked at ingress like
+        every hostless type.
+        """
+        seat, digest, hand = msg.get("seat"), msg.get("digest"), msg.get("hand")
+        if not _is_seat(seat) or not isinstance(digest, str):
+            return
+        if not isinstance(hand, int) or isinstance(hand, bool):
+            return
+        if hand == self._ended_hand:
+            if digest != self._ended_digest:
+                self._settlement_disagrees(seat, hand, digest)
+            return
+        if not self._hand_msg_ok(conn_id, msg):
+            return                       # a later hand buffers; older drops
+        self._early_settled[seat] = digest
+
+    def _hand_ended(self, digest: Optional[str]) -> None:
+        """Record how this replica ended the current hand -- its settled
+        digest, or None for a void -- and hold it to every hand_settled that
+        arrived first. A peer that settled a hand this replica voided
+        disagrees just as much as one that settled it differently."""
+        self._ended_hand = self._hand_no
+        self._ended_digest = digest
+        early, self._early_settled = self._early_settled, {}
+        for seat in sorted(early):
+            if early[seat] != digest:
+                self._settlement_disagrees(seat, self._hand_no, early[seat])
+                return
+
+    def _settlement_disagrees(self, seat: int, hand: int,
+                              theirs: Optional[str]) -> None:
+        """Two seats ended the same hand differently: end the table.
+
+        A void is no remedy. It redeals from each peer's own carry-in, so
+        peers that disagree about the stacks disagree again and void again,
+        for good, and a peer that already settled ignores the void anyway.
+        Nothing at the table can say which side is right. Every seat that
+        sees the other side's message reaches this too, so the table ends
+        everywhere rather than splitting.
+        """
+        def ended(d):
+            return "voided it" if d is None else f"settled it as {d[:16]}"
+        self.terminate(
+            self.ABORTED_PROTOCOL,
+            f"table state disagrees on hand {hand}: seat {seat} "
+            f"{ended(theirs)}, this peer {ended(self._ended_digest)}",
+            seat=seat)
 
     def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
         """Another seat saw a seated peer's connection drop: end the table.
@@ -2038,6 +2121,7 @@ class Session:
         self._hand_record = None
         self.void_reason = None
         self.hand_result = None
+        self._early_settled = {}
         self._own_hole_set = False
         self._hand_stacks = list(stacks)
         self._hand_positions = positions
@@ -2318,6 +2402,7 @@ class Session:
                 "seat": self.local_seat,
                 "reason": self.void_reason,
             })
+        self._hand_ended(None)
         return True
 
     @owned
@@ -2401,6 +2486,10 @@ class Session:
                 self._void_hand(str(exc))
                 return False
             self.hand_result = result
+            digest = r.state_digest()
+            self._send_hostless({"type": "hand_settled",
+                                 "hand": self._hand_no, "digest": digest})
+            self._hand_ended(digest)
             if self.on_hand_settled:
                 self.on_hand_settled(self.hand_result)
             return False               # settled: terminal state

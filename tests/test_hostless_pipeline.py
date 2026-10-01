@@ -212,21 +212,22 @@ def test_the_ingress_gate_is_the_only_authorizer_on_the_hostless_path():
 def test_the_typed_handlers_do_not_repeat_authorization():
     """Handlers receive an already-admitted body."""
     handlers = ["_on_deal_message", "_on_bet_action", "_on_hand_void",
-                "_on_session_end", "_on_timeout_proposal", "_on_peer_lost"]
+                "_on_session_end", "_on_timeout_proposal", "_on_peer_lost",
+                "_on_hand_settled"]
     for name in handlers:
         src = _src(getattr(Session, name))
         assert "_seat_author_ok" not in src and "_author_owns_seat" not in src, (
             f"{name} re-authorizes; ingress already did")
 
 
-def test_there_is_one_hostless_type_registry_of_exactly_nine():
+def test_there_is_one_hostless_type_registry_of_exactly_ten():
     """Pinned as a literal, because a test parametrized over the registry
     cannot notice the registry shrinking -- it would simply run one case
     fewer and stay green."""
     assert _HOSTLESS_PAYLOAD_TYPES == frozenset({
         "key_announce", "deck_round", "deal_share", "audit_open",
         "bet_action", "hand_void", "session_end", "timeout_proposal",
-        "peer_lost",
+        "peer_lost", "hand_settled",
     })
 
 

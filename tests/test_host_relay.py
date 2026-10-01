@@ -241,7 +241,7 @@ def test_only_the_host_relays():
 @pytest.mark.parametrize("mtype", [
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end", "timeout_proposal",
-    "peer_lost",
+    "peer_lost", "hand_settled",
 ])
 def test_every_hostless_type_is_relayed(mtype):
     """All of them, not the six originally noticed.
