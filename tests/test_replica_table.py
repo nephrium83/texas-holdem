@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.engine import Card, FULL_DECK
 from holdem.p2p.replica_table import (
-    ReplicaTable, PHASE_BETTING, PHASE_STREET_OVER, PHASE_SHOWDOWN,
-    PHASE_HAND_OVER, PHASE_SETTLED)
+    ReplicaTable, ChipConservationError, PHASE_BETTING, PHASE_STREET_OVER,
+    PHASE_SHOWDOWN, PHASE_HAND_OVER, PHASE_SETTLED)
 
 
 def make_replicas(n_replicas, names, stacks, sb=5, bb=10, hand=1, button=0):
@@ -221,6 +221,26 @@ def test_settle_requires_complete_board():
     assert r.phase == PHASE_STREET_OVER
     with pytest.raises(RuntimeError):
         r.finish()                                  # board incomplete
+
+
+def test_settle_that_does_not_conserve_chips_is_refused():
+    """finish() counts the chips after settling. A chip that appeared from
+    nowhere mid-hand (or one an engine defect lost) must not be paid out:
+    the hand stays unsettled so the session can void it and redeal from
+    the stacks it was dealt with."""
+    (r,) = make_replicas(1, ["A", "B", "C"], [500, 500, 500])
+    assert r.start_total == 1500
+    seq = 0
+    while r.phase == PHASE_BETTING:
+        assert r.apply_action(seq, r.actor, "fold") == "applied"
+        seq += 1
+    assert r.phase == PHASE_HAND_OVER
+    r.engine.players[0].stack += 1                  # a chip from nowhere
+    with pytest.raises(ChipConservationError,
+                       match="settled to 1501 chips but was dealt with 1500"):
+        r.finish()
+    assert r.result is None
+    assert r.phase == PHASE_HAND_OVER
 
 
 # ------------------------------------------------------------- the fuzz

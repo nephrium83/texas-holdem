@@ -160,6 +160,35 @@ def test_desync_is_detected_and_voids():
     assert all(sessions[cid].hand_voided for cid in order)
 
 
+def test_settlement_that_breaks_chip_conservation_voids_the_hand():
+    """A settle that does not hand back every chip the hand was dealt with
+    takes the void path on that replica instead of paying out: nothing
+    settles, the reason is on the hand record, and the redeal inputs are
+    the stacks the hand started from."""
+    bus, sessions, order = make_table(3)
+    faulty = sessions[order[1]]
+    engine = faulty.replica.engine
+    real_settle = engine.settle
+
+    def leaky_settle(*args, **kwargs):
+        out = real_settle(*args, **kwargs)
+        engine.players[0].stack -= 1                 # one chip goes missing
+        return out
+
+    engine.settle = leaky_settle
+    while faulty.replica.phase == PHASE_BETTING:
+        seat = faulty.replica.actor
+        assert sessions[order[seat]].send_bet_action("fold") == "applied"
+        bus.drain()
+
+    assert faulty.hand_result is None
+    assert faulty.hand_voided
+    assert "chip conservation failed" in faulty.void_reason
+    assert "settled to 1499 chips but was dealt with 1500" in \
+        faulty.hand_record.reason
+    assert faulty._hand_stacks == [500, 500, 500]    # what the redeal deals
+
+
 def test_bet_action_seat_spoof_dropped():
     bus, sessions, order = make_table(3)
     actor = sessions[order[0]].replica.actor

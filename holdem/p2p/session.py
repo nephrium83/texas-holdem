@@ -2319,7 +2319,8 @@ class Session:
     def _step_hand(self) -> bool:
         """One orchestration step. Returns True iff progress was made."""
         from holdem.p2p.replica_table import (
-            PHASE_STREET_OVER, PHASE_SHOWDOWN, PHASE_HAND_OVER)
+            PHASE_STREET_OVER, PHASE_SHOWDOWN, PHASE_HAND_OVER,
+            ChipConservationError)
         r = self._replica
         # 1. local hole cards -> replica, as soon as the deal recovers them
         if not self._own_hole_set:
@@ -2351,8 +2352,15 @@ class Session:
             holes = self._deal_driver.all_hole_cards()
             if r.phase == PHASE_SHOWDOWN and holes:
                 r.set_all_holes(holes)
-            self.hand_result = r.finish(
-                force_tabled=(r.phase == PHASE_SHOWDOWN))
+            try:
+                result = r.finish(force_tabled=(r.phase == PHASE_SHOWDOWN))
+            except ChipConservationError as exc:
+                # The existing void path: nothing is paid, and the redeal
+                # starts from the stacks this hand was dealt with. The
+                # reason lands in the hand record.
+                self._void_hand(str(exc))
+                return False
+            self.hand_result = result
             if self.on_hand_settled:
                 self.on_hand_settled(self.hand_result)
             return False               # settled: terminal state
