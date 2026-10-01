@@ -36,13 +36,18 @@ order, with nothing shortcut:
           host filed it under -- production assigns random UUIDs, so a joiner
           cannot know its own id any other way), broadcasts player_list
   host    start_game() -> game_start carries seat_order to every peer
-  all     start_p2p_hand() -> the hostless deal begins
+  all     start_p2p_hand() -> the hostless deal begins (start_hand, or from
+          on_game_start once armed, as the sidecar starts it)
+  all     act / next drive betting and continuous play hand after hand
 
 Protocol, newline-JSON on stdin/stdout:
 
   in   {"op": "connect", "addr": "host:port"}
        {"op": "start_game"}                  -- host only
        {"op": "start_hand", "args": {...}}
+       {"op": "arm_hand", "args": {...}}     -- start_hand on game_start
+       {"op": "act", "action": "fold"|"call"|"raise", "amount": N}
+       {"op": "next"}                        -- next_p2p_hand()
        {"op": "graph"}                       -- my conn_ids
        {"op": "status"}                      -- session/deal state
        {"op": "broadcast", "msg": {...}}     -- raw, for topology probes
@@ -54,7 +59,7 @@ Protocol, newline-JSON on stdin/stdout:
                              "author_seq": N}
        {"type": "graph",     "peers": [...]}
        {"type": "status",    ...}
-       {"type": "ack",       "op": "..."}
+       {"type": "ack",       "op": "...", "verdict": "..."}  -- act/next
        {"type": "error",     "msg": "..."}
 """
 from __future__ import annotations
@@ -86,7 +91,17 @@ def _emit(obj: dict) -> None:
 
 
 def _status(sess: Session, host_admission=None) -> dict:
-    """Everything a three-process assertion might need to see."""
+    """Everything a three-process assertion might need to see.
+
+    Read as the session owner: the dispatch consumer mutates the replica
+    while this runs on the stdin thread, and a digest taken halfway through
+    an action would report a state no peer was ever in.
+    """
+    with sess._owner:
+        return _status_owned(sess, host_admission)
+
+
+def _status_owned(sess: Session, host_admission) -> dict:
     driver = getattr(sess, "_deal_driver", None)
     deal = getattr(driver, "deal", None)
     replica = getattr(sess, "_replica", None)
@@ -125,6 +140,23 @@ def _status(sess: Session, host_admission=None) -> dict:
         "replica_phase": getattr(replica, "phase", None),
         "hand_voided":   bool(getattr(sess, "hand_voided", False)),
         "void_reason":   getattr(sess, "void_reason", None),
+        # Betting and settlement, for driving and comparing whole hands.
+        # legal is this seat's own menu, present only while it is to act.
+        "seq":           getattr(replica, "next_seq", None),
+        "actor":         replica.actor if replica is not None else None,
+        "button":        replica.button if replica is not None else None,
+        "stacks":        replica.stacks if replica is not None else None,
+        "digest":        (replica.state_digest() if replica is not None
+                          else None),
+        "legal":         (replica.engine.legal(local_seat)
+                          if replica is not None
+                          and replica.phase == "betting"
+                          and replica.actor == local_seat else None),
+        "settled":       sess.hand_result is not None,
+        "result":        sess.hand_result,
+        "last_settled_stacks": sess.last_settled_stacks,
+        "terminal":      sess.terminal_state,
+        "terminal_reason": sess.terminal_reason,
     }
 
 
@@ -256,6 +288,24 @@ def main() -> None:
             elif op == "start_hand":
                 sess.start_p2p_hand(**cmd["args"])
                 _emit({"type": "ack", "op": "start_hand"})
+            elif op == "arm_hand":
+                # Deal the first hand from on_game_start, as the sidecar
+                # does (_wire_hand_start): game_start is handled before any
+                # later frame from the host, so seat keys are bound before
+                # the first deal message can arrive. A first hand started
+                # from stdin races it, and a hostless message that beats
+                # the binding is refused rather than buffered.
+                def _deal(payload, _args=dict(cmd["args"])):
+                    sess.start_p2p_hand(**_args)
+                sess.on_game_start = _deal
+                _emit({"type": "ack", "op": "arm_hand"})
+            elif op == "act":
+                verdict = sess.send_bet_action(cmd["action"],
+                                               int(cmd.get("amount", 0)))
+                _emit({"type": "ack", "op": "act", "verdict": verdict})
+            elif op == "next":
+                _emit({"type": "ack", "op": "next",
+                       "verdict": sess.next_p2p_hand()})
             elif op == "graph":
                 with transport._writers_lock:
                     peers = sorted(transport._writers.keys())
