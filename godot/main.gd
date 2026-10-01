@@ -41,7 +41,7 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 	_betting_controls.apply_legal(you.get("legal", {}))
 	var turn: Dictionary = snapshot.get("turn", {})
 	var turn_state := str(turn.get("state", "lobby"))
-	_next_hand_control.apply_turn_state(turn_state)
+	_next_hand_control.apply_turn_state(turn_state, int(snapshot.get("hand_num", 0)))
 	_lobby_control.apply_turn_state(turn_state)
 
 
@@ -70,10 +70,16 @@ func _on_start_game_pressed() -> void:
 
 
 func _on_command_result_received(result: Dictionary) -> void:
-	if str(result.get("command", "")) != "start_game":
+	var command := str(result.get("command", ""))
+	var ok := bool(result.get("ok", false))
+	if command == "start_game":
+		if not ok:
+			_lobby_control.start_failed(_start_failure_text(result))
 		return
-	if not bool(result.get("ok", false)):
-		_lobby_control.start_failed(_start_failure_text(result))
+	# The Next Hand button latched on press; a refusal (not_ready) means the
+	# table is not moving on, so nothing else would ever release it.
+	if command == "next_hand" and not ok:
+		_next_hand_control.release()
 
 
 ## The sidecar going away mid-start is the one failure that produces no

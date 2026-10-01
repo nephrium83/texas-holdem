@@ -55,3 +55,59 @@ func test_button_press_emits_next_hand_pressed():
 	control.apply_turn_state("hand_complete")
 	control.get_node("%NextHandButton").pressed.emit()
 	assert_signal_emitted(control, "next_hand_pressed")
+
+
+# ------------------------------------------------------------- the latch
+# Every human presses Next Hand. One who presses first waits for the rest
+# while snapshots of the same settled hand keep arriving.
+
+func test_a_press_latches_the_button_and_says_it_is_waiting():
+	var control := _control()
+	control.apply_turn_state("hand_complete", 3)
+	control.get_node("%NextHandButton").pressed.emit()
+	assert_true(control.get_node("%NextHandButton").disabled)
+	assert_eq(control.get_node("%MessageLabel").text, "Waiting for other players")
+
+
+func test_snapshots_of_the_same_hand_keep_the_latch():
+	var control := _control()
+	control.apply_turn_state("hand_complete", 3)
+	control.get_node("%NextHandButton").pressed.emit()
+	control.apply_turn_state("hand_complete", 3)
+	control.get_node("%NextHandButton").pressed.emit()
+	assert_true(control.get_node("%NextHandButton").disabled,
+		"a snapshot re-enabled a latched Next Hand")
+	assert_eq(control.get_node("%MessageLabel").text, "Waiting for other players")
+	assert_signal_emit_count(control, "next_hand_pressed", 1)
+
+
+func test_leaving_the_settled_state_clears_the_latch():
+	var control := _control()
+	control.apply_turn_state("hand_complete", 3)
+	control.get_node("%NextHandButton").pressed.emit()
+	control.apply_turn_state("dealing", 4)
+	control.apply_turn_state("hand_complete", 4)
+	assert_false(control.get_node("%NextHandButton").disabled)
+	assert_eq(control.get_node("%MessageLabel").text, "Hand complete")
+
+
+func test_a_redeal_that_voids_again_offers_the_button_again():
+	## No other state is seen between the two voids, so only the new hand
+	## number says the table moved on.
+	var control := _control()
+	control.apply_turn_state("voided", 3)
+	control.get_node("%NextHandButton").pressed.emit()
+	control.apply_turn_state("voided", 4)
+	assert_false(control.get_node("%NextHandButton").disabled)
+	assert_eq(control.get_node("%MessageLabel").text, "Hand voided")
+
+
+func test_release_after_a_refusal_lets_the_player_press_again():
+	var control := _control()
+	control.apply_turn_state("hand_complete", 3)
+	control.get_node("%NextHandButton").pressed.emit()
+	control.release()
+	assert_false(control.get_node("%NextHandButton").disabled)
+	assert_eq(control.get_node("%MessageLabel").text, "Hand complete")
+	control.get_node("%NextHandButton").pressed.emit()
+	assert_signal_emit_count(control, "next_hand_pressed", 2)

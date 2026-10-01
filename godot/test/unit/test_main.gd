@@ -147,6 +147,41 @@ func test_next_hand_pressed_calls_sidecar_next_hand():
 	assert_eq(fake.calls, [["next_hand"]])
 
 
+func test_a_not_ready_next_hand_result_releases_the_latch():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	main._on_snapshot_received(snapshot)
+	var button: Button = main.get_node("%NextHandControl/Margin/Content/NextHandButton")
+	button.pressed.emit()
+	assert_true(button.disabled)
+
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "next_hand",
+		"ok": false, "verdict": "not_ready",
+	})
+	assert_false(button.disabled, "a refused next_hand left the button latched")
+
+
+func test_a_started_next_hand_result_keeps_the_latch_until_the_hand_moves():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	main._on_snapshot_received(snapshot)
+	var button: Button = main.get_node("%NextHandControl/Margin/Content/NextHandButton")
+	button.pressed.emit()
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "next_hand",
+		"ok": true, "verdict": "started",
+	})
+	main._on_snapshot_received(snapshot)
+	assert_true(button.disabled)
+
+
 # ---------------------------------------------------------------- lobby start
 # The edge that was missing entirely: Main must route the lobby control's
 # press to the sidecar. Everything below the socket was already proven by
