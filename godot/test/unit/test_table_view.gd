@@ -46,6 +46,29 @@ func test_populates_occupied_seats():
 	assert_eq(table.get_node("%Seat0/Content/TurnIndicator").text, "")
 
 
+func test_own_hole_cards_render_face_up():
+	## The sidecar sends the local cards only in you.hole. Every snapshot of
+	## a live run carried them while the local seat still showed card backs.
+	var table := _table()
+	var snapshot := _heads_up_snapshot()
+	snapshot["you"] = {"hole": ["Ah", "Kd"]}
+	table.apply_snapshot(snapshot)
+	assert_true(table.get_node("%Seat0/Content/HoleCards/CardA/CardLabel").visible)
+	assert_eq(table.get_node("%Seat0/Content/HoleCards/CardA/CardLabel").text, "A♥")
+	assert_eq(table.get_node("%Seat0/Content/HoleCards/CardB/CardLabel").text, "K♦")
+
+
+func test_own_hole_cards_go_to_no_other_seat():
+	var table := _table()
+	var snapshot := _heads_up_snapshot()
+	snapshot["you"] = {"hole": ["Ah", "Kd"]}
+	table.apply_snapshot(snapshot)
+	assert_true(table.get_node("%Seat1/Content/HoleCards/CardA").visible)
+	assert_false(table.get_node("%Seat1/Content/HoleCards/CardA/CardLabel").visible,
+		"the opponent's seat showed a face")
+	assert_false(snapshot["seats"][0].has("hole"), "the snapshot itself was altered")
+
+
 func test_unused_seat_slots_are_cleared():
 	var table := _table()
 	table.apply_snapshot(_heads_up_snapshot())
