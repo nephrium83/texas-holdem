@@ -2346,6 +2346,14 @@ class Session:
             # Compare only when we applied exactly that action (a buffered
             # later action draining in the same call would legitimately
             # move our digest past the sender's snapshot).
+            #
+            # A desync at action 0 voids too, rather than ending the table,
+            # even though a redeal cannot cure peers dealt from different
+            # stacks. After the first hand those cannot arise unnoticed:
+            # hand_settled ends the table at the settlement where they
+            # diverged. What is left at action 0 is a replica corrupted
+            # before it acted, which a redeal does cure, or a first hand
+            # started from different arguments on different peers.
             theirs = msg.get("digest")
             if (theirs is not None
                     and self._replica.next_seq == seq + 1
