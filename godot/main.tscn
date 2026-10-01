@@ -36,3 +36,12 @@ position = Vector2(750, 710)
 unique_name_in_owner = true
 position = Vector2(750, 640)
 visible = false
+
+[node name="CommandStatusLabel" type="Label" parent="."]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 0)
+position = Vector2(750, 780)
+theme_override_colors/font_color = Color(0.94, 0.44, 0.45, 1)
+theme_override_font_sizes/font_size = 13
+autowrap_mode = 2
+text = ""

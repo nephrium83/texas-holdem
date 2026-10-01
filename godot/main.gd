@@ -13,12 +13,29 @@ extends Control
 @onready var _player_info_panel: PlayerInfoPanel = %PlayerInfoPanel
 @onready var _next_hand_control: NextHandControl = %NextHandControl
 @onready var _lobby_control: LobbyControl = %LobbyControl
+@onready var _command_status: Label = %CommandStatusLabel
+
+## The player's commands whose refusals are shown, with the name each is
+## shown under. start_game has its own feedback in the lobby control.
+const _PLAYER_COMMANDS := {
+	"fold": "Fold",
+	"check_call": "Check/Call",
+	"raise_to": "Raise",
+	"next_hand": "Next hand",
+}
 
 ## Untyped on purpose: production wiring points this at the real
 ## %SidecarClient child, but tests substitute a lightweight fake --
 ## anything duck-typing fold()/check_call()/raise_to()/next_hand() --
 ## to verify outgoing commands without a live socket.
 var _sidecar
+
+## The snapshot a shown refusal refers to. The sidecar answers every command
+## with its result and then a fresh snapshot, so the first snapshot after a
+## refusal is the unchanged table it was refused on; the message stays until
+## a later snapshot differs from it.
+var _refused_on: Dictionary = {}
+var _refusal_awaits_snapshot := false
 
 
 func _ready() -> void:
@@ -35,6 +52,7 @@ func _ready() -> void:
 
 
 func _on_snapshot_received(snapshot: Dictionary) -> void:
+	_expire_refusal(snapshot)
 	_table_view.apply_snapshot(snapshot)
 	_player_info_panel.apply_snapshot(snapshot)
 	var you: Dictionary = snapshot.get("you", {})
@@ -80,6 +98,41 @@ func _on_command_result_received(result: Dictionary) -> void:
 	# table is not moving on, so nothing else would ever release it.
 	if command == "next_hand" and not ok:
 		_next_hand_control.release()
+	# Without this a rejected, stale or failed action vanished: the buttons
+	# simply stayed as they were and nothing said the click had not counted.
+	if not ok and _PLAYER_COMMANDS.has(command):
+		_command_status.text = _refusal_text(command, result)
+		_refusal_awaits_snapshot = true
+
+
+func _expire_refusal(snapshot: Dictionary) -> void:
+	if _command_status.text.is_empty():
+		return
+	if _refusal_awaits_snapshot:
+		_refusal_awaits_snapshot = false
+		_refused_on = snapshot
+	elif snapshot != _refused_on:
+		_command_status.text = ""
+
+
+## Names the command and gives the sidecar's reason in its own terms
+## (GODOT_PROTOCOL.md section 4 verdicts, or the error string).
+func _refusal_text(command: String, result: Dictionary) -> String:
+	var action: String = _PLAYER_COMMANDS[command]
+	if result.has("error"):
+		return "%s failed: %s" % [action, str(result["error"])]
+	var verdict := str(result.get("verdict", ""))
+	match verdict:
+		"rejected":
+			return "%s refused: not your turn, or not a legal action" % action
+		"not_ready":
+			return "%s refused: the hand is not finished" % action
+		"stale":
+			return "%s ignored: already applied" % action
+		"buffered":
+			return "%s queued behind an earlier action" % action
+		_:
+			return "%s not applied (%s)" % [action, verdict]
 
 
 ## The sidecar going away mid-start is the one failure that produces no

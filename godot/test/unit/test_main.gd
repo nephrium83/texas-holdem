@@ -53,12 +53,15 @@ func test_every_control_fits_the_window_the_project_opens():
 		ProjectSettings.get_setting("display/window/size/viewport_width"),
 		ProjectSettings.get_setting("display/window/size/viewport_height"))
 	var main := _main()
+	# The longest message this label shows.
+	main.get_node("%CommandStatusLabel").text = (
+		"Check/Call refused: not your turn, or not a legal action")
 	# Measured after layout: before the first frame an autowrapping label
 	# has no width yet and reports a height for wrapping at zero.
 	await wait_process_frames(2)
 	for path in [
 		"%TableView", "%BettingControls", "%PlayerInfoPanel",
-		"%NextHandControl", "%LobbyControl",
+		"%NextHandControl", "%LobbyControl", "%CommandStatusLabel",
 	]:
 		var control: Control = main.get_node(path)
 		assert_true(window.encloses(control.get_rect()),
@@ -145,6 +148,81 @@ func test_next_hand_pressed_calls_sidecar_next_hand():
 	main._on_snapshot_received(snapshot)
 	main.get_node("%NextHandControl").next_hand_pressed.emit()
 	assert_eq(fake.calls, [["next_hand"]])
+
+
+# ------------------------------------------------------- refused commands
+# Every command is answered with a command_result and then a fresh snapshot
+# (GODOT_PROTOCOL.md section 4). A refusal used to be dropped here, so a
+# click that did not count looked exactly like one that did.
+
+func _refuse(main: Main, command: String, verdict: String) -> void:
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": command,
+		"ok": false, "verdict": verdict,
+	})
+
+
+func test_a_rejected_action_is_shown():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())
+	_refuse(main, "fold", "rejected")
+	assert_eq(main.get_node("%CommandStatusLabel").text,
+		"Fold refused: not your turn, or not a legal action")
+
+
+func test_every_player_command_reports_its_refusal():
+	for command in ["fold", "check_call", "raise_to", "next_hand"]:
+		var main := _main()
+		main._on_snapshot_received(_heads_up_snapshot())
+		_refuse(main, command, "not_ready" if command == "next_hand" else "rejected")
+		assert_ne(main.get_node("%CommandStatusLabel").text, "",
+			"no feedback for a refused %s" % command)
+
+
+func test_an_error_result_shows_the_error():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "raise_to",
+		"ok": false, "error": "invalid literal for int()",
+	})
+	assert_eq(main.get_node("%CommandStatusLabel").text,
+		"Raise failed: invalid literal for int()")
+
+
+func test_an_applied_action_shows_nothing():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())
+	main.get_node("%SidecarClient").command_result_received.emit({
+		"type": "command_result", "command": "fold",
+		"ok": true, "verdict": "applied",
+	})
+	assert_eq(main.get_node("%CommandStatusLabel").text, "")
+
+
+func test_the_refusal_survives_the_snapshot_that_answers_it():
+	## The answering snapshot shows the same table; clearing on it would
+	## erase the message the moment it appeared.
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	main._on_snapshot_received(snapshot)
+	_refuse(main, "check_call", "rejected")
+	main._on_snapshot_received(snapshot.duplicate(true))
+	main._on_snapshot_received(snapshot.duplicate(true))
+	assert_ne(main.get_node("%CommandStatusLabel").text, "")
+
+
+func test_the_refusal_clears_when_the_table_moves_on():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	main._on_snapshot_received(snapshot)
+	_refuse(main, "check_call", "rejected")
+	main._on_snapshot_received(snapshot.duplicate(true))
+	var moved := snapshot.duplicate(true)
+	moved["action_on"] = 1
+	moved["turn"]["state"] = "waiting"
+	main._on_snapshot_received(moved)
+	assert_eq(main.get_node("%CommandStatusLabel").text, "")
 
 
 func test_a_not_ready_next_hand_result_releases_the_latch():
