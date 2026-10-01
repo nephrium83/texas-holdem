@@ -292,3 +292,22 @@ def test_a_replayed_peer_lost_is_not_relayed_twice():
     s["A"].handle_message("B", dict(env))
     s["A"].handle_message("B", dict(env))
     assert len(_received_by(bus, "C", "peer_lost")) == 1
+
+
+# --------------------------------------------------------- hand_settled
+
+def test_a_hand_settled_counts_only_from_the_seat_that_signed_it():
+    """A settlement report can end the table, so it takes the same ingress
+    as every hostless type: held for comparison when signed by the key of
+    the seat it names, dropped when signed by a stranger or by a seat
+    speaking for another."""
+    bus, s = _table()
+    digest = "ab" * 32
+    s["C"].handle_message("A", _env(KEY_X, seat=1, mtype="hand_settled",
+                                    digest=digest))
+    s["C"].handle_message("A", _env("B", seat=2, mtype="hand_settled",
+                                    digest=digest))
+    assert s["C"]._early_settled == {}
+    s["C"].handle_message("A", _env("B", seat=1, mtype="hand_settled",
+                                    digest=digest))
+    assert s["C"]._early_settled == {1: digest}
