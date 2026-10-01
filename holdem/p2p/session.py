@@ -340,6 +340,11 @@ class Session:
     #: PLAYING is one of them; it is NOT a fold, a timeout, or grounds for
     #: electing a host.
     HOST_LOST = "HOST_LOST"
+    #: A seated peer's connection dropped while the table still needed that
+    #: seat to finish or deal a hand. The deal is n-of-n and there is no
+    #: reconnect, so the hand can never complete: the table ends, and chips
+    #: stand at last_settled_stacks.
+    PEER_LOST = "PEER_LOST"
     ENDED_NORMAL = "ENDED_NORMAL"
     ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
     LOCAL_SHUTDOWN = "LOCAL_SHUTDOWN"
@@ -2849,6 +2854,13 @@ class Session:
         hand host-only authority over an in-flight cryptographic protocol
         to a peer that inherited none of its state, with no authenticated
         transfer of that authority. So it terminates instead.
+
+        Any other seated peer is just as irreplaceable once the table is in
+        play: every hand's deal and audit need a share from every dealt
+        seat, and nothing reconnects or times it out, so without this the
+        table waited on that seat forever. Losing a seat the table still
+        needs (see _seat_in_play) terminates with PEER_LOST. A seat that has
+        busted out is not needed, and may leave.
         """
         # Admission is connection-scoped, so it dies with the connection --
         # cleared even on a terminal session, because conn_ids can be reused
@@ -2861,6 +2873,15 @@ class Session:
 
         if self.terminal_state is not None:
             return                          # already terminal; late event
+
+        # Decided, and the seat named, before the roster entry goes.
+        seat = (self._seat_order.index(conn_id)
+                if conn_id != self._host_conn_id
+                and conn_id in self._seat_order else None)
+        in_play = (seat is not None
+                   and (self._replica is not None or self.state == "PLAYING")
+                   and self._seat_in_play(seat))
+        label = self._seat_label(seat) if in_play else ""
 
         with self._lock:
             self.players.pop(conn_id, None)
@@ -2876,12 +2897,40 @@ class Session:
                 return
             # LOBBY only.
             self._elect_new_host()
+        elif in_play:
+            self.terminate(self.PEER_LOST, f"{label} disconnected",
+                           conn_id=conn_id, seat=seat)
         else:
             # A non-host peer dropped
             if self.is_host:
                 self._broadcast_player_list()
             if self.on_player_list_changed:
                 self.on_player_list_changed(list(self.players.values()))
+
+    def _seat_in_play(self, seat: int) -> bool:
+        """Does the table still need ``seat`` to finish or deal a hand?
+
+        Before the first hand every seat is needed. During a hand, or after
+        a void (the redeal deals the same seats), the seats dealt in. After
+        a settle, the seats with chips, which the next hand will deal. A
+        busted spectator answers from the hand it busted in, the last one
+        it followed.
+        """
+        r = self._replica
+        if r is None:
+            return True
+        if self.hand_result is not None:
+            return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
+        return seat in r.seats_dealt
+
+    def _seat_label(self, seat: int) -> str:
+        """'seat 2 (Cara)' -- the seat as a player would recognise it."""
+        cid = self._seat_order[seat] if 0 <= seat < len(self._seat_order) \
+            else None
+        player = self.players.get(cid) if isinstance(cid, str) else None
+        if player is None or not player.nickname:
+            return f"seat {seat}"
+        return f"seat {seat} ({str(player.nickname)[:32]})"
 
     def _elect_new_host(self) -> None:
         """Lowest-join-order peer becomes the new host. LOBBY only.
@@ -3181,6 +3230,37 @@ class Session:
     def replica(self):
         """The ReplicaTable for the current hand, or None between hands."""
         return self._replica
+
+    @property
+    def last_settled_stacks(self) -> Optional[list]:
+        """Each seat's chips, by seat index, as of the last settlement.
+
+        What the table owes its players if it stops now: the pot of a hand
+        that has not settled is discarded, so chips committed to it count
+        where they stood before that hand was dealt. This is the figure to
+        show once a session has terminated mid-hand (PEER_LOST, HOST_LOST,
+        a protocol abort), and it is equally valid while play continues.
+
+          * match over:                       the final stacks
+          * current hand settled:             its settled stacks
+          * hand in progress, or voided:      the stacks it was dealt from,
+                                              i.e. the previous settlement
+                                              or the opening stacks
+          * no hand begun yet:                None
+
+        Derived on every read, never stored. It is this replica's own
+        settlement; hand_settled is what checks that every seat agrees. A
+        busted spectator's figure stops at the hand it busted in until
+        session_end brings the final stacks.
+        """
+        if self._final_stacks is not None:
+            return list(self._final_stacks)
+        r = self._replica
+        if r is not None and self.hand_result is not None:
+            return list(r.stacks)
+        if self._hand_stacks:
+            return list(self._hand_stacks)
+        return None
 
     @owned
     def configure_seats(self, order: list[str]) -> None:
