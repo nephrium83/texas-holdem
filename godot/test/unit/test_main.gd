@@ -41,6 +41,30 @@ func _heads_up_snapshot() -> Dictionary:
 	}
 
 
+func test_every_control_fits_the_window_the_project_opens():
+	## Godot's default 1152x648 window with stretch disabled cropped the
+	## 1370x850 layout, which put Start, the betting controls and Next Hand
+	## below the bottom edge: a player could not start or act at all.
+	## canvas_items + keep scales the whole layout into whatever window the
+	## player has instead of cropping it.
+	assert_eq(ProjectSettings.get_setting("display/window/stretch/mode"), "canvas_items")
+	assert_eq(ProjectSettings.get_setting("display/window/stretch/aspect"), "keep")
+	var window := Rect2(0, 0,
+		ProjectSettings.get_setting("display/window/size/viewport_width"),
+		ProjectSettings.get_setting("display/window/size/viewport_height"))
+	var main := _main()
+	# Measured after layout: before the first frame an autowrapping label
+	# has no width yet and reports a height for wrapping at zero.
+	await wait_process_frames(2)
+	for path in [
+		"%TableView", "%BettingControls", "%PlayerInfoPanel",
+		"%NextHandControl", "%LobbyControl",
+	]:
+		var control: Control = main.get_node(path)
+		assert_true(window.encloses(control.get_rect()),
+			"%s at %s falls outside the %s window" % [path, control.get_rect(), window.size])
+
+
 func test_snapshot_fans_out_to_table_view():
 	var main := _main()
 	main._on_snapshot_received(_heads_up_snapshot())
