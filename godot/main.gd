@@ -14,6 +14,9 @@ extends Control
 @onready var _next_hand_control: NextHandControl = %NextHandControl
 @onready var _lobby_control: LobbyControl = %LobbyControl
 @onready var _command_status: Label = %CommandStatusLabel
+@onready var _connection_banner: Label = %ConnectionBanner
+
+const CONNECTION_LOST_TEXT := "Connection lost — close and relaunch"
 
 ## The player's commands whose refusals are shown, with the name each is
 ## shown under. start_game has its own feedback in the lobby control.
@@ -37,6 +40,10 @@ var _sidecar
 var _refused_on: Dictionary = {}
 var _refusal_awaits_snapshot := false
 
+## Set once the sidecar is gone. Nothing in this client reconnects, so the
+## table on screen is frozen at its last state and no control may act on it.
+var _connection_lost := false
+
 
 func _ready() -> void:
 	_sidecar = %SidecarClient
@@ -52,6 +59,8 @@ func _ready() -> void:
 
 
 func _on_snapshot_received(snapshot: Dictionary) -> void:
+	if _connection_lost:
+		return
 	_expire_refusal(snapshot)
 	_table_view.apply_snapshot(snapshot)
 	_player_info_panel.apply_snapshot(snapshot)
@@ -64,26 +73,30 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 
 
 func _on_fold_pressed() -> void:
-	_sidecar.fold()
+	if not _connection_lost:
+		_sidecar.fold()
 
 
 func _on_check_call_pressed() -> void:
-	_sidecar.check_call()
+	if not _connection_lost:
+		_sidecar.check_call()
 
 
 func _on_raise_pressed(amount: int) -> void:
-	_sidecar.raise_to(amount)
+	if not _connection_lost:
+		_sidecar.raise_to(amount)
 
 
 func _on_next_hand_pressed() -> void:
-	_sidecar.next_hand()
+	if not _connection_lost:
+		_sidecar.next_hand()
 
 
 ## The lobby control latches on press so a second press cannot fire
 ## during the deal. Anything that means "no reply is coming" has to
 ## release it, or the panel sits on "Starting..." forever.
 func _on_start_game_pressed() -> void:
-	if not _sidecar.start_game():
+	if _connection_lost or not _sidecar.start_game():
 		_lobby_control.start_failed("Not connected")
 
 
@@ -139,8 +152,19 @@ func _refusal_text(command: String, result: Dictionary) -> String:
 ## command_result at all: the deal holds the round-trip open for about a
 ## second at three seats, and a crash in that window means no reply is
 ## ever coming. Without this the panel waits on "Starting..." forever.
+##
+## Mid-hand the loss was invisible: the badge kept saying "your turn", the
+## betting buttons stayed live, and a click only logged a warning. There is
+## no reconnect, so the client says so and leaves nothing to press.
 func _on_sidecar_disconnected() -> void:
 	_lobby_control.start_failed("Sidecar disconnected")
+	_connection_lost = true
+	_connection_banner.text = CONNECTION_LOST_TEXT
+	_connection_banner.visible = true
+	_betting_controls.apply_legal({})
+	_next_hand_control.visible = false
+	_lobby_control.visible = false
+	_command_status.text = ""
 
 
 func _start_failure_text(result: Dictionary) -> String:

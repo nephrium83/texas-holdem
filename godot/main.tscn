@@ -45,3 +45,13 @@ theme_override_colors/font_color = Color(0.94, 0.44, 0.45, 1)
 theme_override_font_sizes/font_size = 13
 autowrap_mode = 2
 text = ""
+
+[node name="ConnectionBanner" type="Label" parent="."]
+unique_name_in_owner = true
+visible = false
+custom_minimum_size = Vector2(760, 0)
+position = Vector2(250, 720)
+theme_override_colors/font_color = Color(0.94, 0.44, 0.45, 1)
+theme_override_font_sizes/font_size = 20
+horizontal_alignment = 1
+text = ""

@@ -53,15 +53,17 @@ func test_every_control_fits_the_window_the_project_opens():
 		ProjectSettings.get_setting("display/window/size/viewport_width"),
 		ProjectSettings.get_setting("display/window/size/viewport_height"))
 	var main := _main()
-	# The longest message this label shows.
+	# The longest message each label shows.
 	main.get_node("%CommandStatusLabel").text = (
 		"Check/Call refused: not your turn, or not a legal action")
+	main.get_node("%ConnectionBanner").text = Main.CONNECTION_LOST_TEXT
 	# Measured after layout: before the first frame an autowrapping label
 	# has no width yet and reports a height for wrapping at zero.
 	await wait_process_frames(2)
 	for path in [
 		"%TableView", "%BettingControls", "%PlayerInfoPanel",
 		"%NextHandControl", "%LobbyControl", "%CommandStatusLabel",
+		"%ConnectionBanner",
 	]:
 		var control: Control = main.get_node(path)
 		assert_true(window.encloses(control.get_rect()),
@@ -386,6 +388,64 @@ func test_a_command_result_for_another_command_is_ignored():
 		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
 		"a fold result cleared the start latch"
 	)
+
+
+# ------------------------------------------------------- lost sidecar
+# Killing the sidecar mid-hand used to leave "your turn" on screen with live
+# betting buttons whose clicks only logged a warning.
+
+func test_losing_the_sidecar_shows_a_persistent_banner():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+	assert_true(main.get_node("%ConnectionBanner").visible)
+	assert_eq(main.get_node("%ConnectionBanner").text,
+		"Connection lost — close and relaunch")
+	main._on_snapshot_received(_heads_up_snapshot())
+	assert_true(main.get_node("%ConnectionBanner").visible, "the banner went away")
+
+
+func test_losing_the_sidecar_on_your_turn_disables_betting():
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())  # you.legal present
+	assert_true(main.get_node("%BettingControls").visible)
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_true(main.get_node(
+		"%BettingControls/Margin/Content/ActionRow/FoldButton").disabled)
+	assert_true(main.get_node(
+		"%BettingControls/Margin/Content/ActionRow/RaiseButton").disabled)
+
+
+func test_losing_the_sidecar_hides_next_hand():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	main._on_snapshot_received(snapshot)
+	assert_true(main.get_node("%NextHandControl").visible)
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+	assert_false(main.get_node("%NextHandControl").visible)
+
+
+func test_no_command_reaches_the_sidecar_after_the_loss():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	main._on_snapshot_received(_heads_up_snapshot())
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+	main.get_node("%BettingControls").fold_pressed.emit()
+	main.get_node("%BettingControls").check_call_pressed.emit()
+	main.get_node("%BettingControls").raise_pressed.emit(120)
+	main.get_node("%NextHandControl").next_hand_pressed.emit()
+	main.get_node("%LobbyControl").start_game_pressed.emit()
+	assert_eq(fake.calls, [])
+
+
+func test_a_late_snapshot_does_not_reopen_a_lost_table():
+	var main := _main()
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+	main._on_snapshot_received(_heads_up_snapshot())  # your_turn, legal
+	assert_false(main.get_node("%BettingControls").visible)
 
 
 func test_losing_the_sidecar_mid_start_releases_the_lobby_control():
