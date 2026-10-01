@@ -342,7 +342,7 @@ Public, per-seat, **never contains hole cards during play**.
 | `last_action` | string        | e.g. `"CALL 20"`, `"RAISE 60"`, `"CHECK"`, `""`   |
 | `pos`         | string \| null| `"BTN"` `"SB"` `"BB"` or null                      |
 | `is_you`      | bool          | true for the local seat                           |
-| `hole`        | array of card | **present only at a contested showdown** (§6)     |
+| `hole`        | array of card | **present only at a contested showdown**, for seats in `result.shown`, never your own (§6) |
 
 ### `you`
 
@@ -450,22 +450,27 @@ value 2–14, suit index 0–3). Shape (fields the client will use most):
   "pots": [ { "amount": 120, "eligible": [0, 1, 2] } ],
   "winners": [0],
   "runs": [ { "board": [...], "scores": {...}, "best": {...} } ],
+  "shown": [0, 1],
   "refund": null,
   "tabled": true
 }
 ```
 
 - `winners`: seat indices that won chips.
+- `shown`: seat indices tabled at a contested showdown; empty for a fold-out.
 - `pots`: each pot with its amount and eligible seats (main pot first, then
   side pots).
 - `runs`: non-empty for a **contested showdown** (two or more players saw it
   through); empty for a fold-out.
 
-**Showdown reveals.** At a contested showdown (`result.runs` non-empty) the
-post-hand audit has already made every player's cards public, so each entry
-in `seats` for a still-in player carries its `hole`. Table those cards. A
-hand that ended by folds (`result.runs` empty) reveals **no** `hole` fields —
-the winner is not shown, exactly as at a real table.
+**Showdown reveals.** At a contested showdown (`result.runs` non-empty) each
+entry in `seats` for a seat listed in `result.shown` — the seats that reached
+the showdown — carries its `hole`. Table those cards. A seat that folded on an
+earlier street never carries `hole`, even though the post-hand audit opened it
+(`POKER_RULES_PROFILE.md` D-M1-1c; a display convention, not secrecy). A hand
+that ended by folds (`result.runs` empty) reveals **no** `hole` fields — the
+winner is not shown, exactly as at a real table. Your own cards stay in
+`you.hole` and are never copied into your `seats` entry.
 
 ### Display-ready `settlement`
 

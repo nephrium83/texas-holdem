@@ -127,15 +127,22 @@ def snapshot(session) -> dict:
     )
 
     # Showdown reveals: at a contested showdown (result carries scored runs)
-    # the audit has made every hole public, so the client can table them.
+    # the seats that reached it are tabled, so the client can show them.
     # A hand that ended by folds has no runs and reveals nothing.
+    #
+    # Only the seats the engine recorded as shown. The audit opens every
+    # dealt seat, including ones that folded on an earlier street, but a
+    # folded hand is never rendered to another player (POKER_RULES_PROFILE
+    # D-M1-1c). That is display convention, not secrecy: any peer can still
+    # compute those cards from the audit.
     result = session.hand_result
     if (phase == "settled" and result and result.get("runs")
             and session._deal_driver is not None):
         revealed = session._deal_driver.all_hole_cards()
+        shown = {int(s) for s in result.get("shown", [])}
         if revealed:
             by_seat = {s: [contract.card_str(c) for c in cards]
-                       for s, cards in revealed.items()}
+                       for s, cards in revealed.items() if s in shown}
             for sv in snap["seats"]:
                 if sv["seat"] in by_seat and not sv["is_you"]:
                     sv["hole"] = by_seat[sv["seat"]]

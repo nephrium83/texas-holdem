@@ -185,6 +185,27 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
     assert len(snap["board"]) == 5                       # full board too
 
 
+def test_showdown_never_reveals_a_seat_that_folded_earlier():
+    """Gap C1 (POKER_RULES_PROFILE D-M1-1c): the audit opens every dealt
+    seat, but only the seats that reached the showdown are tabled. A seat
+    that folded on an earlier street must not appear in anyone's snapshot."""
+    bus, sessions, order = make_table(3)
+    folder = sessions[order[0]].replica.actor
+    client_view.apply_command(sessions[order[folder]], "fold")
+    bus.drain()
+    _checkdown(bus, sessions, order)
+    folded_hole = client_view.snapshot(sessions[order[folder]])["you"]["hole"]
+
+    for i, cid in enumerate(order):
+        snap = json_safe(client_view.snapshot(sessions[cid]))
+        assert snap["phase"] == "settled" and snap["result"]["runs"]
+        assert folder not in snap["result"]["shown"]
+        tabled = {sv["seat"] for sv in snap["seats"] if "hole" in sv}
+        assert tabled == {s for s in range(3) if s not in (i, folder)}
+        if i != folder:
+            assert not set(folded_hole) & set(all_card_strings(snap))
+
+
 def test_foldout_settled_snapshot_reveals_nothing():
     bus, sessions, order = make_table(3)
     while sessions[order[0]].replica.phase == "betting":
