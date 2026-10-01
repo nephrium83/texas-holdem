@@ -138,6 +138,12 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 	var lines := PackedStringArray([turn_headline])
 	if summary_headline != turn_headline:
 		lines.append(summary_headline)
+	# The settlement view has always carried the showdown hands and any
+	# refund; the panel dropped both, so the hands that decided a showdown
+	# and an uncalled bet coming back appeared nowhere a player could read.
+	for raw_show in summary.get("showdown", []):
+		if raw_show is Dictionary:
+			lines.append(_showdown_line(raw_show))
 	for raw_pot in summary.get("pots", []):
 		if raw_pot is not Dictionary:
 			continue
@@ -157,6 +163,12 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 				str(pot.get("label", "Pot")),
 				", ".join(paid),
 			])
+	var refund: Variant = summary.get("refund")
+	if refund is Dictionary:
+		lines.append("%d returned to %s (uncalled)" % [
+			int(refund.get("amount", 0)),
+			str(refund.get("name", "Seat")),
+		])
 	var you: Dictionary = summary.get("you", {})
 	if you.get("net") != null:
 		var net := int(you.get("net", 0))
@@ -168,3 +180,16 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 			]
 		)
 	result_text.text = "\n".join(lines)
+
+
+## One settlement.showdown entry: the seat's exact hand description for each
+## run, read from the settlement rather than decoded from score tuples.
+func _showdown_line(show: Dictionary) -> String:
+	var name := str(show.get("name", "Seat"))
+	if bool(show.get("mucked", false)):
+		return "%s mucks" % name
+	var hands := PackedStringArray()
+	for raw_hand in show.get("hands", []):
+		if raw_hand is Dictionary:
+			hands.append(str(raw_hand.get("description", "")))
+	return "%s shows %s" % [name, " / ".join(hands)]

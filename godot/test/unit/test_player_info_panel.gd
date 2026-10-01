@@ -115,6 +115,53 @@ func test_settled_hand_replaces_decision_card_with_result():
 	assert_eq(panel.deal_progress_label.text, "Hand settled")
 
 
+func _settled_snapshot(settlement: Dictionary) -> Dictionary:
+	var snapshot := _turn_snapshot()
+	snapshot["turn"] = {
+		"state": "hand_complete",
+		"headline": "You won 120",
+		"street_label": "Idle",
+		"pot": 0,
+	}
+	snapshot["settlement"] = settlement
+	return snapshot
+
+
+func test_a_refund_is_listed():
+	## The shape player_info.settlement_view gives an uncalled bet.
+	var panel: Variant = _panel()
+	panel.apply_snapshot(_settled_snapshot({
+		"headline": "You won 120",
+		"pots": [],
+		"refund": {"seat": 1, "name": "Maya", "amount": 40},
+		"showdown": [],
+		"you": {"net": 60, "stack": 560},
+	}))
+	assert_string_contains(panel.result_text.text, "40 returned to Maya (uncalled)")
+
+
+func test_each_showdown_seat_gets_its_hand_description():
+	var panel: Variant = _panel()
+	panel.apply_snapshot(_settled_snapshot({
+		"headline": "You won 120",
+		"pots": [],
+		"refund": null,
+		"showdown": [
+			{"seat": 0, "name": "You", "shown": true, "mucked": false, "won": 120,
+				"hands": [{"run": 1, "name": "Pair",
+					"description": "Pair of Kings, Ace-Queen-Four kickers"}]},
+			{"seat": 1, "name": "Maya", "shown": true, "mucked": false, "won": 0,
+				"hands": [{"run": 1, "name": "High Card",
+					"description": "Ace-high, Jack-Nine-Six-Two kickers"}]},
+		],
+		"you": {"net": 60, "stack": 560},
+	}))
+	assert_string_contains(panel.result_text.text,
+		"You shows Pair of Kings, Ace-Queen-Four kickers")
+	assert_string_contains(panel.result_text.text,
+		"Maya shows Ace-high, Jack-Nine-Six-Two kickers")
+
+
 func test_match_complete_has_no_next_turn_decision():
 	var panel: Variant = _panel()
 	var snapshot := _turn_snapshot()
