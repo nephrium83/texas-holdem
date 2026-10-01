@@ -390,6 +390,26 @@ func test_a_command_result_for_another_command_is_ignored():
 	)
 
 
+func test_a_closed_table_offers_no_action_buttons():
+	## client_view's table_closed: the session ended abnormally, so the
+	## snapshot carries no you.legal and turn.state names the closure.
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["you"] = {}
+	snapshot["turn"]["state"] = "table_closed"
+	snapshot["turn"]["headline"] = "seat 1 disconnected"
+	snapshot["terminal"] = {
+		"state": "ABORTED_PROTOCOL", "reason": "seat 1 disconnected",
+		"last_settled_stacks": [500, 500],
+	}
+	main._on_snapshot_received(snapshot)
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_false(main.get_node("%NextHandControl/Margin/Content/NextHandButton").visible)
+	assert_false(main.get_node("%LobbyControl").visible)
+	assert_eq(main.get_node("%PlayerInfoPanel/Margin/Content/StatusLabel").text,
+		"seat 1 disconnected")
+
+
 # ------------------------------------------------------- lost sidecar
 # Killing the sidecar mid-hand used to leave "your turn" on screen with live
 # betting buttons whose clicks only logged a warning.

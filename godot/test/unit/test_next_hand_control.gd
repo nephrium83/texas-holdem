@@ -43,6 +43,14 @@ func test_match_complete_shows_message_with_no_button():
 	assert_eq(control.get_node("%MessageLabel").text, "Match complete")
 
 
+func test_table_closed_shows_message_with_no_button():
+	var control := _control()
+	control.apply_turn_state("table_closed")
+	assert_true(control.visible)
+	assert_false(control.get_node("%NextHandButton").visible)
+	assert_eq(control.get_node("%MessageLabel").text, "Table closed")
+
+
 func test_mid_hand_states_hide_entirely():
 	var control := _control()
 	for state in ["your_turn", "waiting", "folded_waiting", "all_in_waiting", "resolving", "dealing", "lobby"]:

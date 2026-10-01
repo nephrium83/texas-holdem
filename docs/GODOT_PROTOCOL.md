@@ -292,6 +292,7 @@ the latest snapshot; it never advances state on its own.
 | `session_winner` | int \| null  | winning seat when `session_over`; null for no winner          |
 | `eliminated`  | bool            | local seat is busted and excluded from later deals            |
 | `final_stacks`| array \| null   | final stack by seat once `session_over`                       |
+| `terminal`    | object \| null  | how the session ended (see below); `null` while it is live. Present in the lobby shape too |
 | `seats`       | array           | one entry per seat, in seat order                            |
 | `you`         | object          | data private to the local seat                               |
 
@@ -324,6 +325,28 @@ message; every current participant enters `phase: "void"` and uses the same
 redeal inputs. In an n-of-n protocol, a malicious peer can already halt by
 disconnecting, so v1 favors safety and attribution over trying to continue a
 possibly divergent hand.
+
+### `terminal`: the session has ended
+
+`terminal` is `null` while the session is live. Once the session reaches a
+terminal state — which is permanent — every snapshot built afterwards
+carries:
+
+| field                 | type          | notes                                                       |
+|-----------------------|---------------|-------------------------------------------------------------|
+| `state`               | string        | `ENDED_NORMAL` for a finished match; otherwise why the table stopped, e.g. `HOST_LOST`, `ABORTED_PROTOCOL`, `LOCAL_SHUTDOWN` |
+| `reason`              | string        | human-readable cause                                        |
+| `last_settled_stacks` | array \| null | stack by seat after the last **fully settled** hand; `null` if no hand ever began |
+
+A hand cut off before it settled never paid out: its pot is discarded, and
+`last_settled_stacks` are the stacks that hand was dealt from. The seats'
+own `stack` fields still show the cut-off hand's live stacks, so render
+`last_settled_stacks` as the outcome.
+
+`ENDED_NORMAL` is presented through `turn.state` `match_complete` as before.
+Any other terminal state replaces `turn.state` with `table_closed`, sets
+`turn.headline` to `reason`, and removes `turn.decision` and `you.legal`:
+the table offers nothing further.
 
 ### `seats[i]`
 
@@ -390,6 +413,7 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 | `voided` | show `void_reason` and that stacks were restored |
 | `eliminated` | spectator state; no betting or next-hand control |
 | `match_complete` | terminal winner/final-stack presentation |
+| `table_closed` | the session ended abnormally (`terminal`); show `headline` and `terminal.last_settled_stacks`; no betting, next-hand or start control |
 
 `turn.decision` is present only for `your_turn`. It includes display-ready
 pot odds, pot after calling, stack after calling, effective stack, and the

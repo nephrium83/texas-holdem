@@ -162,6 +162,38 @@ func test_each_showdown_seat_gets_its_hand_description():
 		"Maya shows Ace-high, Jack-Nine-Six-Two kickers")
 
 
+func test_a_closed_table_shows_the_reason_and_the_last_settled_chips():
+	## The shape client_view sends when the session ends abnormally: the
+	## seats still hold the cut-off hand's live stacks, terminal holds the
+	## stacks the last settled hand left.
+	var panel: Variant = _panel()
+	var snapshot := _turn_snapshot()
+	snapshot["turn"] = {
+		"state": "table_closed",
+		"headline": "host connection peer0 dropped during play",
+		"street_label": "Flop",
+		"pot": 100,
+	}
+	snapshot["seats"] = [
+		{"name": "You", "stack": 950}, {"name": "Maya", "stack": 950},
+	]
+	snapshot["terminal"] = {
+		"state": "HOST_LOST",
+		"reason": "host connection peer0 dropped during play",
+		"last_settled_stacks": [970, 1030],
+	}
+	panel.apply_snapshot(snapshot)
+
+	assert_eq(panel.state_badge.text, "TABLE CLOSED")
+	assert_eq(panel.status_label.text, "host connection peer0 dropped during play")
+	assert_false(panel.decision_card.visible)
+	assert_true(panel.result_card.visible)
+	assert_string_contains(panel.result_text.text, "You: 970")
+	assert_string_contains(panel.result_text.text, "Maya: 1030")
+	assert_false(panel.result_text.text.contains("950"),
+		"showed the cut-off hand's stacks")
+
+
 func test_match_complete_has_no_next_turn_decision():
 	var panel: Variant = _panel()
 	var snapshot := _turn_snapshot()

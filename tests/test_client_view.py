@@ -335,6 +335,96 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     assert snap["turn"]["headline"] == "P2 won the match"
 
 
+# ------------------------------------------------------ terminal contract
+
+def _lobby_session():
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(InMemoryBus(), "peer0"))
+    s.local_conn_id = "peer0"
+    s.configure_seats(["peer0", "peer1"])
+    return s
+
+
+def test_a_live_session_has_no_terminal_in_either_snapshot_shape():
+    _, sessions, order = make_table(2)
+    assert json_safe(client_view.snapshot(sessions[order[0]]))["terminal"] is None
+    assert json_safe(client_view.snapshot(_lobby_session()))["terminal"] is None
+
+
+def test_a_table_closed_mid_hand_reports_the_last_settlement_not_the_pot():
+    """The in-flight pot is discarded: the stacks to show are the ones the
+    previous hand settled, not the live hand's partly-bet ones."""
+    bus, sessions, order = make_table(2)
+    _checkdown(bus, sessions, order)
+    settled = sessions[order[0]].replica.stacks
+    for cid in order:
+        client_view.apply_command(sessions[cid], "next_hand")
+    bus.drain()
+    actor = sessions[order[0]].replica.actor
+    legal = sessions[order[actor]].replica.engine.legal(actor)
+    client_view.apply_command(sessions[order[actor]], "raise_to",
+                              {"amount": legal["min_to"]})
+    bus.drain()
+    me = sessions[order[sessions[order[0]].replica.actor]]
+    assert "legal" in client_view.snapshot(me)["you"]          # my turn
+
+    me.terminate(Session.ABORTED_PROTOCOL, "seat 1 disconnected")
+    snap = json_safe(client_view.snapshot(me))
+
+    assert snap["terminal"] == {"state": Session.ABORTED_PROTOCOL,
+                                "reason": "seat 1 disconnected",
+                                "last_settled_stacks": settled}
+    assert sum(sv["stack"] for sv in snap["seats"]) < sum(settled)
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == "seat 1 disconnected"
+    assert "decision" not in snap["turn"]
+    assert "legal" not in snap["you"]
+
+
+def test_a_table_closed_after_a_settled_hand_reports_that_settlement():
+    bus, sessions, order = make_table(2)
+    _checkdown(bus, sessions, order)
+    me = sessions[order[0]]
+    assert me.replica.stacks != [500, 500]       # the hand moved chips
+    me.terminate(Session.HOST_LOST, "host connection dropped during play")
+    snap = json_safe(client_view.snapshot(me))
+    assert snap["terminal"]["last_settled_stacks"] == me.replica.stacks
+    assert snap["turn"]["state"] == "table_closed"
+
+
+def test_a_table_closed_on_a_voided_hand_reports_its_carry_in():
+    bus, sessions, order = make_table(3)
+    victim = sessions[order[0]]
+    victim.handle_message("peer2", {
+        "type": "deal_share", "position": 0, "seat_from": 2, "hand": 1,
+        "D_hex": "00" * 32, "dleq_hex": "11" * 64})
+    assert victim.hand_voided
+    victim.terminate(Session.ABORTED_PROTOCOL, "deal failed")
+    snap = json_safe(client_view.snapshot(victim))
+    assert snap["terminal"]["last_settled_stacks"] == [500, 500, 500]
+
+
+def test_a_lobby_that_ends_closes_the_table_with_no_stacks():
+    s = _lobby_session()
+    s.terminate(Session.HOST_LOST, "host lost in lobby")
+    snap = json_safe(client_view.snapshot(s))
+    assert snap["phase"] == "lobby"
+    assert snap["terminal"] == {"state": Session.HOST_LOST,
+                                "reason": "host lost in lobby",
+                                "last_settled_stacks": None}
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == "host lost in lobby"
+
+
+def test_a_finished_match_is_reported_but_is_not_a_closed_table():
+    _, sessions, order = make_table(2)
+    me = sessions[order[0]]
+    me.terminate(Session.ENDED_NORMAL, "match complete; winner seat 0")
+    snap = json_safe(client_view.snapshot(me))
+    assert snap["terminal"]["state"] == Session.ENDED_NORMAL
+    assert snap["turn"]["state"] != "table_closed"
+
+
 def test_start_game_command_invokes_the_controller_callable():
     """start_game routes to the controller's callable and echoes its verdict.
 

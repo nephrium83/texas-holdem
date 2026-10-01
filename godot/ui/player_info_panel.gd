@@ -49,7 +49,7 @@ func _apply_state_color(state: String) -> void:
 			state_badge.modulate = Color("#efb76f")
 		"hand_complete", "match_complete":
 			state_badge.modulate = Color("#6fd5a7")
-		"voided":
+		"voided", "table_closed":
 			state_badge.modulate = Color("#ef6f72")
 		_:
 			state_badge.modulate = Color("#9ab8aa")
@@ -112,6 +112,9 @@ func _apply_events(raw_events: Variant) -> void:
 
 
 func _apply_result(snapshot: Dictionary, state: String) -> void:
+	if state == "table_closed":
+		_apply_closed(snapshot)
+		return
 	var settlement: Variant = snapshot.get("settlement")
 	result_card.visible = settlement is Dictionary or state == "match_complete"
 	if settlement is not Dictionary:
@@ -121,12 +124,7 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 		var final_stacks: Variant = snapshot.get("final_stacks")
 		var seats: Variant = snapshot.get("seats", [])
 		if final_stacks is Array and seats is Array:
-			for index in range(min(final_stacks.size(), seats.size())):
-				var seat: Variant = seats[index]
-				var name := "Seat %d" % index
-				if seat is Dictionary:
-					name = str(seat.get("name", name))
-				final_lines.append("%s: %d" % [name, int(final_stacks[index])])
+			final_lines.append_array(_stack_lines(final_stacks, seats))
 		result_text.text = "\n".join(final_lines)
 		return
 
@@ -180,6 +178,37 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 			]
 		)
 	result_text.text = "\n".join(lines)
+
+
+## A closed table (snapshot.terminal, GODOT_PROTOCOL.md section 5) has no
+## next hand. Shows why, and the chips as the last settled hand left them: a
+## hand cut off mid-play never paid out, so the seats' own stacks still have
+## its pot taken out of them.
+func _apply_closed(snapshot: Dictionary) -> void:
+	result_card.visible = true
+	var lines := PackedStringArray([
+		str(snapshot.get("turn", {}).get("headline", "Table closed")),
+	])
+	var terminal: Variant = snapshot.get("terminal")
+	var stacks: Variant = (
+		terminal.get("last_settled_stacks") if terminal is Dictionary else null
+	)
+	var seats: Variant = snapshot.get("seats", [])
+	if stacks is Array and seats is Array:
+		lines.append("Chips after the last settled hand:")
+		lines.append_array(_stack_lines(stacks, seats))
+	result_text.text = "\n".join(lines)
+
+
+func _stack_lines(stacks: Array, seats: Array) -> PackedStringArray:
+	var lines := PackedStringArray()
+	for index in range(min(stacks.size(), seats.size())):
+		var seat: Variant = seats[index]
+		var name := "Seat %d" % index
+		if seat is Dictionary:
+			name = str(seat.get("name", name))
+		lines.append("%s: %d" % [name, int(stacks[index])])
+	return lines
 
 
 ## One settlement.showdown entry: the seat's exact hand description for each

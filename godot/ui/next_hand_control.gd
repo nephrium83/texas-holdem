@@ -33,8 +33,8 @@ func _ready() -> void:
 
 ## state is turn.state from a snapshot (section 5's turn-state table), and
 ## hand_num the snapshot's hand_num. Only "hand_complete" and "voided" leave
-## a next_hand command to send; "eliminated" and "match_complete" are
-## terminal-for-this-seat spectator states shown without a control, and
+## a next_hand command to send; "eliminated", "match_complete" and
+## "table_closed" are terminal states shown without a control, and
 ## every mid-hand state (your_turn, waiting, dealing, lobby, ...) hides this
 ## entirely. Leaving the settled state, or a new hand, clears the latch.
 func apply_turn_state(state: String, hand_num: int = 0) -> void:
@@ -57,6 +57,11 @@ func apply_turn_state(state: String, hand_num: int = 0) -> void:
 			visible = true
 			_button.visible = false
 			_message_label.text = "Match complete"
+		"table_closed":
+			# The session ended under the table; there is no next hand.
+			visible = true
+			_button.visible = false
+			_message_label.text = "Table closed"
 		_:
 			visible = false
 
