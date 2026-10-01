@@ -227,6 +227,30 @@ func test_the_refusal_clears_when_the_table_moves_on():
 	assert_eq(main.get_node("%CommandStatusLabel").text, "")
 
 
+func test_a_refused_click_is_reported_until_the_table_moves_on():
+	## The whole round trip as the player meets it: a real button press
+	## reaches the sidecar, the sidecar refuses it and answers with the
+	## unchanged table, and the message lasts until the table changes.
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	main._on_snapshot_received(snapshot)
+	main.get_node("%BettingControls/Margin/Content/ActionRow/FoldButton").pressed.emit()
+	assert_eq(fake.calls, [["fold"]])
+
+	_refuse(main, "fold", "rejected")
+	main._on_snapshot_received(snapshot.duplicate(true))
+	assert_eq(main.get_node("%CommandStatusLabel").text,
+		"Fold refused: not your turn, or not a legal action")
+
+	var moved := snapshot.duplicate(true)
+	moved["action_on"] = 1
+	moved["turn"]["state"] = "waiting"
+	main._on_snapshot_received(moved)
+	assert_eq(main.get_node("%CommandStatusLabel").text, "")
+
+
 func test_a_not_ready_next_hand_result_releases_the_latch():
 	var main := _main()
 	var fake: FakeSidecar = FakeSidecarScript.new()
@@ -408,6 +432,39 @@ func test_a_closed_table_offers_no_action_buttons():
 	assert_false(main.get_node("%LobbyControl").visible)
 	assert_eq(main.get_node("%PlayerInfoPanel/Margin/Content/StatusLabel").text,
 		"seat 1 disconnected")
+
+
+func test_a_table_closed_in_the_lobby_takes_the_start_button_away():
+	## A session that ends before its first hand still sends the lobby shape,
+	## and used to keep turn.state "lobby": Start stayed on offer for a table
+	## that no longer existed. client_view now sends table_closed instead.
+	var main := _main()
+	var lobby := {
+		"type": "snapshot", "phase": "lobby", "hand_num": 0,
+		"seats": [
+			{"seat": 0, "conn_id": "seat0", "name": "Ada", "is_you": true},
+			{"seat": 1, "conn_id": "seat1", "name": "Ben", "is_you": false},
+		],
+		"you": {"seat": 0},
+		"turn": {"state": "lobby", "headline": "Waiting for players"},
+		"terminal": null,
+	}
+	main._on_snapshot_received(lobby)
+	var start: Button = main.get_node("%LobbyControl/Margin/Content/StartGameButton")
+	assert_true(start.is_visible_in_tree())
+
+	var closed := lobby.duplicate(true)
+	closed["turn"] = {"state": "table_closed", "headline": "host lost in lobby"}
+	closed["terminal"] = {
+		"state": "HOST_LOST", "reason": "host lost in lobby",
+		"last_settled_stacks": null,
+	}
+	main._on_snapshot_received(closed)
+	assert_false(start.is_visible_in_tree(), "Start is still offered")
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_false(main.get_node("%NextHandControl/Margin/Content/NextHandButton").visible)
+	assert_eq(main.get_node("%PlayerInfoPanel/Margin/Content/StatusLabel").text,
+		"host lost in lobby")
 
 
 # ------------------------------------------------------- lost sidecar
