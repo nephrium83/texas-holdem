@@ -106,7 +106,7 @@ AUTHOR_MODE_COMPAT = "compat"   # unsigned flat dicts; conn_id stands in
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
-    "timeout_proposal",
+    "timeout_proposal", "peer_lost",
 })
 
 
@@ -749,7 +749,7 @@ class Session:
         body = msg
         if t in _HOSTLESS_PAYLOAD_TYPES:
             # The peer-authored, host-relayed ingress pipeline. Every step
-            # runs exactly once, in this order, for all eight types:
+            # runs exactly once, in this order, for every hostless type:
             #
             #   normalize -> author/seat -> authorize -> sequence -> relay
             #
@@ -802,6 +802,8 @@ class Session:
             self._on_session_end(conn_id, body)
         elif t == "timeout_proposal":
             self._on_timeout_proposal(conn_id, body)
+        elif t == "peer_lost":
+            self._on_peer_lost(conn_id, body)
 
     @staticmethod
     def _hostless_projection(msg: dict):
@@ -1169,10 +1171,10 @@ class Session:
     def _send_hostless(self, m: dict) -> None:
         """The ONE place a local hostless message leaves this peer.
 
-        Eight types are broadcast from five call sites. Stamping author
-        identity and sequence at each would let them drift, and a type
-        that forgot to stamp would be indistinguishable, to a receiver,
-        from one that had been suppressed.
+        Every hostless type is broadcast through here, from several call
+        sites. Stamping author identity and sequence at each would let them
+        drift, and a type that forgot to stamp would be indistinguishable,
+        to a receiver, from one that had been suppressed.
 
         Stamped BEFORE the transport signs, so (hand, seat, author_seq) is
         covered by the Ed25519 signature and a relaying host cannot
@@ -1564,8 +1566,8 @@ class Session:
         to, and consuming one on an unauthorized message would let a stranger
         desynchronise a real seat.
 
-        Checked for all eight types together, because the counter that
-        produces it is stamped for all eight in one place (_send_hostless).
+        Checked for every hostless type together, because the counter that
+        produces it is stamped for all of them in one place (_send_hostless).
         Validating a subset is worse than validating none -- the sender
         advances on every hostless send, so a receiver watching only some
         types reads the others as gaps.
@@ -1838,7 +1840,7 @@ class Session:
         if self._deal_driver is None or self.hand_voided:
             return                              # no active hand yet
         # Author authorization is NOT repeated here: _admit_hostless settled
-        # it at ingress for all eight types. An unattributable message (no
+        # it at ingress for every hostless type. An unattributable message (no
         # integer seat) still has to go, though -- ingress lets it through
         # for its type's own handler to judge, and the deal driver routes by
         # seat, so it cannot route this.
@@ -1892,6 +1894,39 @@ class Session:
         if len(alive) > 1 or winner != expected_winner:
             return
         self._finish_session(stacks, announce=False)
+
+    def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
+        """Another seat saw a seated peer's connection drop: end the table.
+
+        The production topology is a star, so when a joiner drops only the
+        host's socket closes. Without this the other joiners kept waiting
+        on a seat that would never act again, with nothing to tell them the
+        host had already ended the table.
+
+        Chosen over having the host stop its transport, which would also
+        reach them: that reports HOST_LOST, naming the wrong peer and the
+        wrong cause, and stopping the transport is not the session's to do.
+        This is an ordinary hostless message instead. It reaches the
+        handler only after ingress has checked it is signed by the key
+        bound to the reporting seat and is not a replay or an equivocation,
+        and the host relays it like any other.
+
+        Accepted from any authorized seat. That grants nothing new: a seated
+        peer can already end the table by dropping its own connection. It
+        is not hand-scoped, because the reporter and this peer can be a hand
+        apart around next_p2p_hand and the table is over either way; and it
+        is accepted on a busted spectator for the same reason session_end
+        is.
+        """
+        reporter, lost = msg.get("seat"), msg.get("lost_seat")
+        if not _is_seat(reporter) or not _is_seat(lost):
+            return
+        if not 0 <= lost < len(self._seat_order):
+            return
+        self.terminate(self.PEER_LOST,
+                       f"{self._seat_label(lost)} disconnected "
+                       f"(reported by seat {reporter})",
+                       conn_id=conn_id, seat=lost)
 
     def _flush_deal(self) -> None:
         """Route buffered driver emissions. Each is broadcast to the OTHER
@@ -2898,6 +2933,12 @@ class Session:
             # LOBBY only.
             self._elect_new_host()
         elif in_play:
+            # Under the star only the host sees a joiner's socket close, so
+            # the other joiners learn of it from this notice or not at all.
+            # Sent BEFORE terminating, so a teardown in on_session_terminated
+            # cannot swallow it.
+            self._send_hostless({"type": "peer_lost", "hand": self._hand_no,
+                                 "lost_seat": seat})
             self.terminate(self.PEER_LOST, f"{label} disconnected",
                            conn_id=conn_id, seat=seat)
         else:

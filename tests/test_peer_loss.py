@@ -172,3 +172,71 @@ def test_a_lobby_drop_is_a_roster_change():
     host.handle_disconnect("peer2")
     assert host.terminal_state is None
     assert "peer2" not in host.players
+
+
+# ------------------------------------------------- every survivor learns it
+
+def test_every_survivor_ends_when_one_seat_drops():
+    """Only the host's socket closes when a joiner drops (the production
+    graph is a star). The host's signed peer_lost notice is how the other
+    joiner finds out; without it that joiner waits forever."""
+    bus, sessions, order = table(3)
+    host, other = sessions["peer0"], sessions["peer1"]
+    act(bus, sessions, order)
+    bus.unregister("peer2")                      # the process is gone
+
+    host.handle_disconnect("peer2")
+    bus.drain()
+
+    assert other.terminal_state == Session.PEER_LOST
+    assert other.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0)")
+    assert other.terminal_record.initiating_seat == 2
+    assert other.last_settled_stacks == host.last_settled_stacks \
+        == [500, 500, 500]
+
+
+def test_a_survivor_a_hand_ahead_still_ends():
+    """Hands begin when each peer calls next_p2p_hand, so the reporter can
+    still be on the last hand while a survivor has dealt the next one. The
+    notice is not hand-scoped: the table is over either way."""
+    bus, sessions, order = table(3)
+    settle_by_checkdown(bus, sessions, order)
+    settled = sessions["peer0"].replica.stacks
+    ahead = sessions["peer1"]
+    assert ahead.next_p2p_hand() == "started"
+    bus.drain()
+    assert ahead._hand_no == 2 and sessions["peer0"]._hand_no == 1
+    bus.unregister("peer2")
+
+    sessions["peer0"].handle_disconnect("peer2")
+    bus.drain()
+
+    assert ahead.terminal_state == Session.PEER_LOST
+    assert ahead.last_settled_stacks == settled
+
+
+def test_a_busted_spectator_learns_the_table_ended():
+    bus, sessions, order = table(3)
+    spectator = sessions["peer1"]
+    spectator._p2p_spectator = True
+    bus.unregister("peer2")
+    sessions["peer0"].handle_disconnect("peer2")
+    bus.drain()
+    assert spectator.terminal_state == Session.PEER_LOST
+
+
+@pytest.mark.parametrize("msg", [
+    # peer2 does not hold seat 0, so it cannot report as seat 0
+    {"type": "peer_lost", "hand": 1, "seat": 0, "lost_seat": 1},
+    # unattributable: no reporting seat at all
+    {"type": "peer_lost", "hand": 1, "lost_seat": 1},
+    # attributable, but names no seat at this table
+    {"type": "peer_lost", "hand": 1, "seat": 2, "lost_seat": 7},
+    {"type": "peer_lost", "hand": 1, "seat": 2, "lost_seat": True},
+], ids=["seat-not-held", "no-reporter", "no-such-seat", "bool-seat"])
+def test_a_notice_that_fails_ingress_or_names_no_seat_is_dropped(msg):
+    bus, sessions, order = table(3)
+    target = sessions["peer1"]
+    target.handle_message("peer2", dict(msg))
+    assert target.terminal_state is None
