@@ -161,6 +161,15 @@ def _last_settled_stacks(session) -> Optional[list]:
     the stacks it was dealt from -- the carry-in, which is what the previous
     settlement left -- are the last settled ones.
     """
+    # A busted player keeps the replica of the hand that eliminated them so
+    # their client can continue rendering the table.  When the match later
+    # ends, that retained replica is no longer the latest settlement; the
+    # session_end payload's final stacks are authoritative for every peer.
+    if getattr(session, "terminal_state", None) == _ENDED_NORMAL:
+        final_stacks = getattr(session, "_final_stacks", None)
+        if final_stacks is not None:
+            return list(final_stacks)
+
     replica = session.replica
     if replica is not None and session.hand_result is not None:
         return list(replica.stacks)

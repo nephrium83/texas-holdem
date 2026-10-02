@@ -325,12 +325,14 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     session._session_over = True
     session._session_winner = 2
     session._final_stacks = [0, 0, 1500]
+    session.terminate(Session.ENDED_NORMAL, "match complete; winner seat 2")
 
     snap = json_safe(client_view.snapshot(session))
     assert snap["eliminated"] is True
     assert snap["session_over"] is True
     assert snap["session_winner"] == 2
     assert snap["final_stacks"] == [0, 0, 1500]
+    assert snap["terminal"]["last_settled_stacks"] == [0, 0, 1500]
     assert snap["turn"]["state"] == "match_complete"
     assert snap["turn"]["headline"] == "P2 won the match"
 
