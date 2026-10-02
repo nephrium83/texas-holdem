@@ -213,3 +213,37 @@ func test_match_complete_has_no_next_turn_decision():
 	assert_string_contains(panel.result_text.text, "You won the match")
 	assert_string_contains(panel.result_text.text, "You: 1000")
 	assert_string_contains(panel.result_text.text, "Maya: 0")
+
+
+func test_a_seat_out_before_the_end_sees_the_final_chips():
+	## The shape client_view sends a seat eliminated before the match ended:
+	## its settlement and seats still describe the hand it busted in, while
+	## final_stacks holds what the match ended with.
+	var panel: Variant = _panel()
+	var snapshot := _settled_snapshot({
+		"headline": "Hand complete",
+		"pots": [],
+		"refund": null,
+		"showdown": [],
+		"you": {"net": -20, "stack": 0},
+	})
+	snapshot["turn"] = {
+		"state": "match_complete",
+		"headline": "Ravi won the match",
+		"street_label": "Idle",
+		"pot": 0,
+	}
+	snapshot["seats"] = [
+		{"name": "You", "stack": 0},
+		{"name": "Maya", "stack": 1040},
+		{"name": "Ravi", "stack": 980},
+	]
+	snapshot["final_stacks"] = [0, 0, 2020]
+	panel.apply_snapshot(snapshot)
+
+	assert_true(panel.result_card.visible)
+	assert_string_contains(panel.result_text.text, "Ravi won the match")
+	assert_string_contains(panel.result_text.text, "Your net: -20 | stack 0")
+	assert_string_contains(panel.result_text.text, "Final chips:\nYou: 0\nMaya: 0\nRavi: 2020")
+	assert_false(panel.result_text.text.contains("1040"),
+		"showed the busting hand's stacks as the outcome")

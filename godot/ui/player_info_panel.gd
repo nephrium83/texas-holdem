@@ -121,10 +121,7 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 		var final_lines := PackedStringArray([
 			str(snapshot.get("turn", {}).get("headline", "Match complete")),
 		])
-		var final_stacks: Variant = snapshot.get("final_stacks")
-		var seats: Variant = snapshot.get("seats", [])
-		if final_stacks is Array and seats is Array:
-			final_lines.append_array(_stack_lines(final_stacks, seats))
+		final_lines.append_array(_final_stack_lines(snapshot))
 		result_text.text = "\n".join(final_lines)
 		return
 
@@ -177,7 +174,25 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 				int(you.get("stack", 0)),
 			]
 		)
+	if state == "match_complete":
+		lines.append_array(_final_stack_lines(snapshot))
 	result_text.text = "\n".join(lines)
+
+
+## The match's outcome. A finished match still carries the settlement of the
+## last hand this seat played, and for a seat eliminated earlier that hand --
+## like the seats' own stacks -- is the one it busted in, not the match's last.
+## Only final_stacks are the chips the match ended with (GODOT_PROTOCOL.md
+## section 5), and they were shown only when no settlement was present, which
+## a finished match almost never has.
+func _final_stack_lines(snapshot: Dictionary) -> PackedStringArray:
+	var lines := PackedStringArray()
+	var final_stacks: Variant = snapshot.get("final_stacks")
+	var seats: Variant = snapshot.get("seats", [])
+	if final_stacks is Array and seats is Array:
+		lines.append("Final chips:")
+		lines.append_array(_stack_lines(final_stacks, seats))
+	return lines
 
 
 ## A closed table (snapshot.terminal, GODOT_PROTOCOL.md section 5) has no
