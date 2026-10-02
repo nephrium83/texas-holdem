@@ -211,6 +211,12 @@ class TestGodotClientPlays:
         previous command was answered. Every hand is a real mental-poker
         deal, so this needs libsodium; the sidecar logs at INFO into a file.
 
+        That INFO run does not reproduce the stall an undrained stderr pipe
+        causes: two seats write about 120 bytes of stderr over ten hands at
+        any level, and the run passes with the pipe put back (three seats is
+        where it stalls; see _start_sidecar). The regression control for the
+        redirect is the ``sidecar.stderr is None`` assertion.
+
         The deep stack keeps nine hands of calling from busting the player
         before the all-in, which comes last because it can end the match.
         """
