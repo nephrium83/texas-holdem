@@ -245,6 +245,12 @@ class TestGodotClientPlays:
             assert summary["error"] == "", context
             assert godot_proc.returncode == 0, context
             assert summary["hands_settled"] >= 10, context
+            assert summary["hands_voided"] == 0, context
+            assert summary["settled_hand_numbers"] == list(
+                range(1, summary["hands_settled"] + 1)
+            ), context
+            assert summary["stack_carry_checks"] >= 9, context
+            assert summary["stack_carry_failures"] == [], context
             assert summary["refused"] == [], context
             for action in ("check_call", "fold", "raise", "all_in"):
                 assert summary["actions"][action] >= 1, \

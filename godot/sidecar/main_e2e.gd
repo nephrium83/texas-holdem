@@ -43,6 +43,10 @@ var _state := ""
 var _hand_num := 0
 var _settled := {}
 var _voided := {}
+var _carry_in_stacks := {}
+var _settled_stacks := {}
+var _stack_carry_checks := 0
+var _stack_carry_failures := []
 var _results := []
 var _refused := []
 var _actions := {"check_call": 0, "fold": 0, "raise": 0, "all_in": 0}
@@ -170,8 +174,23 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 	_state = str(snapshot.get("turn", {}).get("state", ""))
 	_hand_num = int(snapshot.get("hand_num", 0))
 	var phase := str(snapshot.get("phase", ""))
+	# The first snapshot of a hand arrives before the driver presses a betting
+	# button.  Stacks plus posted bets are therefore that hand's carry-in and
+	# must equal the preceding settlement.  This proves that ten successful
+	# button-driven hands are one continuous match, not ten isolated deals.
+	if _hand_num > 0 and phase != "lobby" and not _carry_in_stacks.has(_hand_num):
+		var carry_in := _stack_vector(snapshot, true)
+		_carry_in_stacks[_hand_num] = carry_in
+		if _settled_stacks.has(_hand_num - 1):
+			_stack_carry_checks += 1
+			var previous: Array = _settled_stacks[_hand_num - 1]
+			if carry_in != previous:
+				_stack_carry_failures.append(
+					"hand %d carried %s after hand %d settled %s" % [
+						_hand_num, str(carry_in), _hand_num - 1, str(previous)])
 	if phase == "settled" and not _settled.has(_hand_num):
 		_settled[_hand_num] = true
+		_settled_stacks[_hand_num] = _stack_vector(snapshot, false)
 		print("E2E_HAND_SETTLED hand=%d state=%s" % [_hand_num, _state])
 	elif phase == "void":
 		_voided[_hand_num] = true
@@ -186,6 +205,16 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 	if _reply_seen:
 		_awaiting_reply = false
 		_reply_seen = false
+
+
+func _stack_vector(snapshot: Dictionary, include_bets: bool) -> Array:
+	var stacks := []
+	for seat: Dictionary in snapshot.get("seats", []):
+		var amount := int(seat.get("stack", 0))
+		if include_bets:
+			amount += int(seat.get("bet", 0))
+		stacks.append(amount)
+	return stacks
 
 
 ## Whenever the snapshot carries the player's own cards, the player's seat
@@ -229,6 +258,8 @@ func _report() -> void:
 		"hands_settled": _settled.size(),
 		"settled_hand_numbers": settled,
 		"hands_voided": _voided.size(),
+		"stack_carry_checks": _stack_carry_checks,
+		"stack_carry_failures": _stack_carry_failures,
 		"command_results": _results.size(),
 		"refused": _refused,
 		"actions": _actions,
