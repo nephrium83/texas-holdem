@@ -343,6 +343,15 @@ A hand cut off before it settled never paid out: its pot is discarded, and
 own `stack` fields still show the cut-off hand's live stacks, so render
 `last_settled_stacks` as the outcome.
 
+An eliminated seat keeps the hand it busted in and drops every later hand, so
+its `seats` and `settlement` still describe that hand while the others play
+on. When the match ends, `session_end` brings it the final stacks: for
+`ENDED_NORMAL`, on every seat, `last_settled_stacks` equals `final_stacks`,
+and that is the outcome to render. If the table instead closes abnormally
+after the seat busted, the last settlement it saw is its own last hand, so
+`last_settled_stacks` are the stacks that hand left — the latest it knows,
+not necessarily the table's.
+
 `ENDED_NORMAL` is presented through `turn.state` `match_complete` as before.
 Any other terminal state replaces `turn.state` with `table_closed`, sets
 `turn.headline` to `reason`, and removes `turn.decision` and `you.legal`:

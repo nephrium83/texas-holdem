@@ -337,6 +337,66 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     assert snap["turn"]["headline"] == "P2 won the match"
 
 
+def _play_hand(bus, sessions, order, alive, shovers):
+    """Play one hand through client commands: seats in ``shovers`` move all
+    in whenever they may raise, everyone else checks or calls."""
+    from holdem.p2p.replica_table import PHASE_BETTING
+    ref = sessions[order[alive[0]]]
+    while ref.replica.phase == PHASE_BETTING:
+        seat = ref.replica.actor
+        legal = ref.replica.engine.legal(seat)
+        if seat in shovers and legal["can_raise"]:
+            res = client_view.apply_command(sessions[order[seat]], "raise_to",
+                                            {"amount": legal["max_to"]})
+        else:
+            res = client_view.apply_command(sessions[order[seat]], "check_call")
+        assert res["verdict"] == "applied", res
+        bus.drain()
+
+
+def test_a_seat_busted_before_the_end_reports_the_match_final_stacks():
+    """The retained-replica case, played for real. A busted seat keeps the
+    hand that eliminated it and drops every later hand, so when the match
+    ends its replica is stale; session_end brings it the final stacks, and
+    those are the last settlement its terminal reports."""
+    bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
+    # The short seat shoves and the others only call, so seat 1 is the one
+    # to bust -- in whichever hand the cards decide.
+    for _ in range(40):
+        _play_hand(bus, sessions, order, [0, 1, 2], shovers={1})
+        verdicts = [client_view.apply_command(sessions[cid], "next_hand")
+                    for cid in order]
+        bus.drain()
+        if verdicts[1]["verdict"] == "eliminated":
+            break
+    else:
+        pytest.fail("the short seat never busted")
+    assert [v["verdict"] for v in verdicts] == ["started", "eliminated",
+                                                "started"]
+    spectator = sessions[order[1]]
+    retained = list(spectator.replica.stacks)
+
+    # Heads-up shoves until one survivor holds every chip (a chop replays).
+    survivors = [sessions[order[0]], sessions[order[2]]]
+    for _ in range(40):
+        _play_hand(bus, sessions, order, [0, 2], shovers={0, 2})
+        final = list(survivors[0].replica.stacks)
+        verdicts = [client_view.apply_command(s, "next_hand")
+                    for s in survivors]
+        bus.drain()
+        if verdicts[0]["verdict"] == "session_over":
+            break
+    else:
+        pytest.fail("the heads-up match never ended")
+
+    assert retained != final                      # the table moved on
+    snap = json_safe(client_view.snapshot(spectator))
+    assert snap["eliminated"] is True and snap["session_over"] is True
+    assert snap["final_stacks"] == final
+    assert snap["terminal"]["state"] == Session.ENDED_NORMAL
+    assert snap["terminal"]["last_settled_stacks"] == final
+
+
 # ------------------------------------------------------ terminal contract
 
 def _lobby_session():
