@@ -19,8 +19,8 @@
 ##
 ## Prints E2E_* progress lines, then one machine-readable line:
 ##   E2E_SUMMARY <json>
-## and exits 0, or 1 on a timeout or a driver error. The Python test
-## (tests/test_godot_sidecar.py) asserts on the summary.
+## and exits 0, or 1 on a timeout, a lost sidecar or a driver error. The
+## Python test (tests/test_godot_sidecar.py) asserts on the summary.
 
 extends SceneTree
 
@@ -33,6 +33,7 @@ var _main: Main
 var _target_hands := 10
 var _deadline_ms := 0
 var _finished := false
+var _reported := false
 var _error := ""
 
 var _awaiting_reply := false
@@ -76,13 +77,14 @@ func _initialize() -> void:
 
 
 func _process(_delta: float) -> bool:
-	if _finished:
-		return false
-	if Time.get_ticks_msec() > _deadline_ms:
-		_fail("timed out")
-	elif not _awaiting_reply:
-		_step()
-	if _finished:
+	if not _finished:
+		if Time.get_ticks_msec() > _deadline_ms:
+			_fail("timed out")
+		elif not _awaiting_reply:
+			_step()
+	# A run can also finish between frames -- a lost sidecar fails it from a
+	# deferred signal -- so every finished run reports and quits here.
+	if _finished and not _reported:
 		_report()
 	return false
 
@@ -266,6 +268,7 @@ func _fail(message: String) -> void:
 
 
 func _report() -> void:
+	_reported = true
 	var settled := _settled.keys()
 	settled.sort()
 	var summary := {

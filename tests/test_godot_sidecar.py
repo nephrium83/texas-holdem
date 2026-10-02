@@ -51,6 +51,9 @@ _GODOT_TIMEOUT   = 30.0   # time to see GODOT_DONE on Godot stdout
 # with room for sidecar startup, so a stuck run fails here with its output
 # rather than being killed by pytest-timeout without it.
 _E2E_TIMEOUT     = 45.0
+# From killing the sidecar to the client's exit: the driver's own deadline is
+# 40 s, so an exit within this bound is the driver reacting to the loss.
+_LOST_SIDECAR_EXIT = 10.0
 
 # ---------------------------------------------------------------------------
 # Helpers (shared with test_sidecar_integration but kept self-contained)
@@ -73,6 +76,15 @@ def _start_sidecar(log_path: Path, *extra_args: str) -> subprocess.Popen:
             stderr=log,
             text=True,
         )
+
+
+def _e2e_command(port: int) -> list[str]:
+    return [
+        _GODOT_BIN, "--headless",
+        "--path", str(_GODOT_PROJECT),
+        "-s", _E2E_GD,
+        "--", f"--sidecar-port={port}", "--hands=10",
+    ]
 
 
 def _tail(path: Path, lines: int = 30) -> str:
@@ -213,12 +225,7 @@ class TestGodotClientPlays:
             port = _read_port(sidecar)
             with open(godot_log, "w", encoding="utf-8") as err:
                 godot_proc = subprocess.Popen(
-                    [
-                        _GODOT_BIN, "--headless",
-                        "--path", str(_GODOT_PROJECT),
-                        "-s", _E2E_GD,
-                        "--", f"--sidecar-port={port}", "--hands=10",
-                    ],
+                    _e2e_command(port),
                     stdout=subprocess.PIPE,
                     stderr=err,
                     text=True, encoding="utf-8", errors="replace",
@@ -264,3 +271,63 @@ class TestGodotClientPlays:
                 godot_proc.wait(timeout=5)
             sidecar.terminate()
             sidecar.wait(timeout=5)
+
+    def test_a_sidecar_lost_mid_run_ends_the_run_with_that_error(self, tmp_path):
+        """However a run ends, the driver reports and quits. A lost sidecar
+        is noticed in a deferred signal, between frames, and the driver used
+        to mark itself finished there and then return from every later frame
+        before reporting: Godot printed no summary and never exited, so a
+        crashed sidecar showed up only as the 45 s timeout, and a harness
+        that never killed Godot leaked a process that spun forever.
+
+        The sidecar is killed once the first hand has settled; the client
+        must exit 1 within seconds with the loss as its summary's error.
+        """
+        require_crypto()
+        sidecar_log = tmp_path / "sidecar.log"
+        godot_out = tmp_path / "godot.stdout.log"
+        godot_err = tmp_path / "godot.stderr.log"
+        sidecar = _start_sidecar(sidecar_log, "--seats", "2", "--stack",
+                                 "100000", "--seed", "7")
+        godot_proc = None
+        try:
+            port = _read_port(sidecar)
+            with open(godot_out, "w", encoding="utf-8") as out, \
+                    open(godot_err, "w", encoding="utf-8") as err:
+                godot_proc = subprocess.Popen(_e2e_command(port),
+                                              stdout=out, stderr=err)
+
+            def output() -> str:
+                return godot_out.read_text(encoding="utf-8", errors="replace")
+
+            deadline = time.monotonic() + _E2E_TIMEOUT
+            while "E2E_HAND_SETTLED" not in output():
+                if godot_proc.poll() is not None or time.monotonic() > deadline:
+                    pytest.fail(f"no hand settled before the kill.\nstdout:\n"
+                                f"{output()}\nsidecar log:\n{_tail(sidecar_log)}")
+                time.sleep(0.05)
+            sidecar.kill()
+            sidecar.wait(timeout=5)
+
+            try:
+                godot_proc.wait(timeout=_LOST_SIDECAR_EXIT)
+            except subprocess.TimeoutExpired:
+                pytest.fail(f"the client was still running {_LOST_SIDECAR_EXIT}s "
+                            f"after the sidecar died.\nstdout:\n{output()}")
+
+            summaries = [line for line in output().splitlines()
+                         if line.startswith("E2E_SUMMARY ")]
+            context = (f"Godot exited {godot_proc.returncode}.\nstdout:\n"
+                       f"{output()}\nGodot stderr:\n{_tail(godot_err)}")
+            assert summaries, f"no E2E_SUMMARY line. {context}"
+            summary = json.loads(summaries[-1].split(" ", 1)[1])
+            assert summary["error"] == "sidecar disconnected", context
+            assert summary["hands_settled"] >= 1, context
+            assert godot_proc.returncode == 1, context
+        finally:
+            if godot_proc and godot_proc.poll() is None:
+                godot_proc.kill()
+                godot_proc.wait(timeout=5)
+            if sidecar.poll() is None:
+                sidecar.kill()
+                sidecar.wait(timeout=5)
