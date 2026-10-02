@@ -335,7 +335,7 @@ carries:
 | field                 | type          | notes                                                       |
 |-----------------------|---------------|-------------------------------------------------------------|
 | `state`               | string        | `ENDED_NORMAL` for a finished match; otherwise why the table stopped, e.g. `HOST_LOST`, `ABORTED_PROTOCOL`, `LOCAL_SHUTDOWN` |
-| `reason`              | string        | human-readable cause                                        |
+| `reason`              | string        | human-readable cause, at most 512 characters. It can quote a peer (a refused deal policy is quoted as the host declared it): render it as plain text only |
 | `last_settled_stacks` | array \| null | stack by seat after the last **fully settled** hand; `null` if no hand ever began |
 
 A hand cut off before it settled never paid out: its pot is discarded, and
@@ -354,8 +354,9 @@ not necessarily the table's.
 
 `ENDED_NORMAL` is presented through `turn.state` `match_complete` as before.
 Any other terminal state replaces `turn.state` with `table_closed`, sets
-`turn.headline` to `reason`, and removes `turn.decision` and `you.legal`:
-the table offers nothing further.
+`turn.headline` to `reason` — the same bounded text, which may quote a
+peer — and removes `turn.decision` and `you.legal`: the table offers
+nothing further.
 
 ### `seats[i]`
 

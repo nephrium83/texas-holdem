@@ -478,6 +478,29 @@ def test_a_lobby_that_ends_closes_the_table_with_no_stacks():
     assert snap["turn"]["headline"] == "host lost in lobby"
 
 
+def test_a_reason_quoting_the_host_is_cut_before_it_reaches_the_client():
+    """POLICY_REFUSED quotes the deal policy the host declared, whatever it
+    was. Session keeps that reason whole; the snapshot -- the headline the
+    client shows and terminal.reason -- carries 512 characters of it."""
+    s = Session(is_host=False, nickname="P1", avatar_b64="",
+                transport=InMemoryTransport(InMemoryBus(), "peer1"))
+    s.local_conn_id = "peer1"
+    s._host_conn_id = "peer0"
+    declared = ("Your opponent forfeited. Claim your winnings at "
+                "http://example.invalid/claim " + "X" * 200_000)
+    s.handle_message("peer0", {"type": "game_start", "payload": {
+        "seat_order": ["peer0", "peer1"],
+        "table_settings": {Session.DEAL_POLICY_SETTING: declared}}})
+    assert s.terminal_state == Session.POLICY_REFUSED
+    assert len(s.terminal_reason) > 200_000
+
+    snap = json_safe(client_view.snapshot(s))
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == s.terminal_reason[:512]
+    assert snap["terminal"]["reason"] == s.terminal_reason[:512]
+    assert len(json.dumps(snap)) < 4096
+
+
 def test_a_finished_match_is_reported_but_is_not_a_closed_table():
     _, sessions, order = make_table(2)
     me = sessions[order[0]]

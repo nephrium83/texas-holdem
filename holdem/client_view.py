@@ -28,6 +28,13 @@ from holdem import contract, player_info
 # keeps importing nothing from the p2p stack.
 _ENDED_NORMAL = "ENDED_NORMAL"
 
+# The most of terminal_reason a snapshot carries. The reason can quote a
+# peer -- POLICY_REFUSED embeds the deal policy the host's game_start
+# declared -- and Session keeps it whole, so one hostile game_start would
+# otherwise put up to a frame's worth of text into the headline of every
+# snapshot that follows. 512 is the cap Session puts on a peer's void reason.
+_MAX_REASON = 512
+
 
 def _holes_recovered(session) -> bool:
     hole = session.deal_hole_cards
@@ -193,6 +200,8 @@ def _with_terminal(session, snap: dict) -> dict:
         snap["terminal"] = None
         return snap
     reason = getattr(session, "terminal_reason", None)
+    if reason is not None:
+        reason = str(reason)[:_MAX_REASON]
     snap["terminal"] = {
         "state": state,
         "reason": reason,
