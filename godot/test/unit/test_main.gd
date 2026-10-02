@@ -417,6 +417,10 @@ func test_a_command_result_for_another_command_is_ignored():
 func test_a_closed_table_offers_no_action_buttons():
 	## client_view's table_closed: the session ended abnormally, so the
 	## snapshot carries no you.legal and turn.state names the closure.
+	## Main has no table_closed case for betting; it follows you.legal, so
+	## the hidden betting controls below rest on client_view dropping it
+	## (pinned by test_a_table_closed_mid_hand_reports_the_last_settlement_
+	## not_the_pot in tests/test_client_view.py).
 	var main := _main()
 	var snapshot := _heads_up_snapshot()
 	snapshot["you"] = {}
@@ -484,14 +488,23 @@ func test_losing_the_sidecar_shows_a_persistent_banner():
 
 func test_losing_the_sidecar_on_your_turn_disables_betting():
 	var main := _main()
-	main._on_snapshot_received(_heads_up_snapshot())  # you.legal present
+	var snapshot := _heads_up_snapshot()                # you.legal present
+	snapshot["turn"]["decision"] = {"action_label": "Call 20", "pot_now": 90}
+	main._on_snapshot_received(snapshot)
+	var panel: PlayerInfoPanel = main.get_node("%PlayerInfoPanel")
 	assert_true(main.get_node("%BettingControls").visible)
+	assert_eq(panel.state_badge.text, "YOUR TURN")
+	assert_true(panel.decision_card.visible)
 	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
 	assert_false(main.get_node("%BettingControls").visible)
 	assert_true(main.get_node(
 		"%BettingControls/Margin/Content/ActionRow/FoldButton").disabled)
 	assert_true(main.get_node(
 		"%BettingControls/Margin/Content/ActionRow/RaiseButton").disabled)
+	# The panel must not go on telling the player it is their turn.
+	assert_eq(panel.state_badge.text, "CONNECTION LOST")
+	assert_eq(panel.status_label.text, "Connection lost")
+	assert_false(panel.decision_card.visible, "the decision card is still offered")
 
 
 func test_losing_the_sidecar_hides_next_hand():
@@ -502,6 +515,17 @@ func test_losing_the_sidecar_hides_next_hand():
 	assert_true(main.get_node("%NextHandControl").visible)
 	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
 	assert_false(main.get_node("%NextHandControl").visible)
+
+
+func test_losing_the_sidecar_clears_a_shown_refusal():
+	## A refusal is about a table that no longer exists once the sidecar is
+	## gone; the banner says what matters now.
+	var main := _main()
+	main._on_snapshot_received(_heads_up_snapshot())
+	_refuse(main, "fold", "rejected")
+	assert_ne(main.get_node("%CommandStatusLabel").text, "")
+	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
+	assert_eq(main.get_node("%CommandStatusLabel").text, "")
 
 
 func test_no_command_reaches_the_sidecar_after_the_loss():
@@ -525,11 +549,11 @@ func test_a_late_snapshot_does_not_reopen_a_lost_table():
 	assert_false(main.get_node("%BettingControls").visible)
 
 
-func test_losing_the_sidecar_mid_start_releases_the_lobby_control():
+func test_losing_the_sidecar_mid_start_takes_the_lobby_away():
 	## The one failure that produces no command_result at all. The deal
 	## holds the round-trip open for ~1s at three seats; a sidecar that
-	## dies in that window means no reply is ever coming, and nothing else
-	## would clear the latch.
+	## dies in that window means no reply is ever coming, and the panel
+	## would wait on "Starting..." forever. It is taken away instead.
 	var main := _main()
 	var fake: FakeSidecar = FakeSidecarScript.new()
 	main._sidecar = fake
@@ -543,7 +567,13 @@ func test_losing_the_sidecar_mid_start_releases_the_lobby_control():
 
 	main.get_node("%SidecarClient").disconnected_from_sidecar.emit()
 
+	# What the player sees: no lobby panel left to wait on, and the banner
+	# saying why. (No command can be sent after the loss either; see
+	# test_no_command_reaches_the_sidecar_after_the_loss.)
+	assert_false(main.get_node("%LobbyControl").visible,
+		"the lobby panel stayed up after the loss")
 	assert_false(
-		main.get_node("%LobbyControl/Margin/Content/StartGameButton").disabled,
-		"a dead sidecar left the start button wedged"
+		main.get_node("%LobbyControl/Margin/Content/StartGameButton").is_visible_in_tree(),
+		"a dead sidecar left Start on screen"
 	)
+	assert_true(main.get_node("%ConnectionBanner").visible)

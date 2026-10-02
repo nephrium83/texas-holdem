@@ -162,6 +162,7 @@ func _on_sidecar_disconnected() -> void:
 	_connection_banner.text = CONNECTION_LOST_TEXT
 	_connection_banner.visible = true
 	_betting_controls.apply_legal({})
+	_player_info_panel.apply_connection_lost()
 	_next_hand_control.visible = false
 	_lobby_control.visible = false
 	_command_status.text = ""

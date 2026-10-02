@@ -49,10 +49,20 @@ func _apply_state_color(state: String) -> void:
 			state_badge.modulate = Color("#efb76f")
 		"hand_complete", "match_complete":
 			state_badge.modulate = Color("#6fd5a7")
-		"voided", "table_closed":
+		"voided", "table_closed", "connection_lost":
 			state_badge.modulate = Color("#ef6f72")
 		_:
 			state_badge.modulate = Color("#9ab8aa")
+
+
+## The sidecar is gone and nothing reconnects. No later snapshot will come
+## to replace the last one, whose badge and decision card would otherwise go
+## on offering a turn that can no longer be taken.
+func apply_connection_lost() -> void:
+	state_badge.text = "CONNECTION LOST"
+	status_label.text = "Connection lost"
+	_apply_state_color("connection_lost")
+	decision_card.visible = false
 
 
 func _apply_decision(turn: Dictionary) -> void:
