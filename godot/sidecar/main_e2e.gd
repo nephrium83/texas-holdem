@@ -43,7 +43,6 @@ var _state := ""
 var _hand_num := 0
 var _settled := {}
 var _voided := {}
-var _carry_in_stacks := {}
 var _settled_stacks := {}
 var _stack_carry_checks := 0
 var _stack_carry_failures := []
@@ -174,23 +173,9 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 	_state = str(snapshot.get("turn", {}).get("state", ""))
 	_hand_num = int(snapshot.get("hand_num", 0))
 	var phase := str(snapshot.get("phase", ""))
-	# The first snapshot of a hand arrives before the driver presses a betting
-	# button.  Stacks plus posted bets are therefore that hand's carry-in and
-	# must equal the preceding settlement.  This proves that ten successful
-	# button-driven hands are one continuous match, not ten isolated deals.
-	if _hand_num > 0 and phase != "lobby" and not _carry_in_stacks.has(_hand_num):
-		var carry_in := _stack_vector(snapshot, true)
-		_carry_in_stacks[_hand_num] = carry_in
-		if _settled_stacks.has(_hand_num - 1):
-			_stack_carry_checks += 1
-			var previous: Array = _settled_stacks[_hand_num - 1]
-			if carry_in != previous:
-				_stack_carry_failures.append(
-					"hand %d carried %s after hand %d settled %s" % [
-						_hand_num, str(carry_in), _hand_num - 1, str(previous)])
 	if phase == "settled" and not _settled.has(_hand_num):
 		_settled[_hand_num] = true
-		_settled_stacks[_hand_num] = _stack_vector(snapshot, false)
+		_check_stack_carry(snapshot)
 		print("E2E_HAND_SETTLED hand=%d state=%s" % [_hand_num, _state])
 	elif phase == "void":
 		_voided[_hand_num] = true
@@ -207,14 +192,43 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 		_reply_seen = false
 
 
-func _stack_vector(snapshot: Dictionary, include_bets: bool) -> Array:
+## Ten successful button-driven hands must be one continuous match, not ten
+## isolated deals: each hand is dealt from the stacks the one before settled.
+## A hand's first snapshot cannot show that. The bot may act first -- even fold
+## and end the hand -- before the client is shown the hand at all, so stacks
+## plus bets on that snapshot are not always the carry-in.
+##
+## The settlement states the player's net against the stacks its hand was
+## dealt from, so stack minus net is the player's carry-in, which must equal
+## what the previous hand settled them. The table's chip total must not
+## change either; with two seats, the two together fix every seat's carry-in.
+func _check_stack_carry(snapshot: Dictionary) -> void:
 	var stacks := []
 	for seat: Dictionary in snapshot.get("seats", []):
-		var amount := int(seat.get("stack", 0))
-		if include_bets:
-			amount += int(seat.get("bet", 0))
-		stacks.append(amount)
-	return stacks
+		stacks.append(int(seat.get("stack", 0)))
+	_settled_stacks[_hand_num] = stacks
+	if not _settled_stacks.has(_hand_num - 1):
+		return
+	_stack_carry_checks += 1
+	var previous: Array = _settled_stacks[_hand_num - 1]
+	var settlement: Variant = snapshot.get("settlement")
+	var you: Dictionary = settlement.get("you", {}) if settlement is Dictionary else {}
+	var seat := int(you.get("seat", -1))
+	if you.get("net") == null or seat < 0 or seat >= previous.size():
+		_stack_carry_failures.append("hand %d settled without the player's net" % _hand_num)
+		return
+	var carry_in := int(you.get("stack", 0)) - int(you.get("net"))
+	if carry_in != int(previous[seat]):
+		_stack_carry_failures.append("hand %d dealt the player %d after hand %d settled them %d" % [
+			_hand_num, carry_in, _hand_num - 1, int(previous[seat])])
+	var total := _sum(stacks)
+	if total != _sum(previous):
+		_stack_carry_failures.append("hand %d settled %d chips after hand %d settled %d" % [
+			_hand_num, total, _hand_num - 1, _sum(previous)])
+
+
+func _sum(values: Array) -> int:
+	return values.reduce(func(acc: int, value: int) -> int: return acc + value, 0)
 
 
 ## Whenever the snapshot carries the player's own cards, the player's seat
