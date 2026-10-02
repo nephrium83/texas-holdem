@@ -499,7 +499,8 @@ seat's hole even when every share happens to be present
 **Client boundary — narrower, and inconsistent with itself.**
 
 * A fold-win reveals nothing: the settled result carries no scored `runs`, so
-  the reveal block never runs (`client_view.py:129-142`).
+  the reveal block never runs (`client_view.py`, showdown-reveal block of
+  `snapshot()`).
 * A contested showdown reveals the hole cards of **every dealt seat in the
   map** — including seats that folded on an earlier street (same loop, which
   filters only on `is_you`).
@@ -763,10 +764,10 @@ and `holdem/contract.py` at `c69a4bf`. **Nothing was changed.**
 | One board per hand on the P2P path | §3.1 (house ruling — no TDA rule requires it) | `replica_table.py:29-31` pins `runs=1` |
 | Hidden information during play | §4.1 | `contract.py:46-85`, `mental_deal.py:741-762` |
 | No burn cards | §3.2, R38 | `deal_map.py:13` |
-| Fold-win reveals nothing at the client | §4.2 D-M1-1a | `client_view.py:129-142` |
+| Fold-win reveals nothing at the client | §4.2 D-M1-1a | `client_view.py`, showdown-reveal block of `snapshot()` |
 | No straddle on the P2P path (by omission, not refusal — C5) | §3.2 (house ruling — no TDA rule requires it) | `replica_table.py:111` |
 
-### 7.2 Gaps — all owned by M7 (**C6** also needs M2), none fixed here
+### 7.2 Gaps — owned by M7 (**C6** also needs M2), except **C1**, which the Godot beta (B1) closed; none fixed here
 
 | ID | Gap | Profile rule violated | Site |
 |---|---|---|---|

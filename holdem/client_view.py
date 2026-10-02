@@ -14,9 +14,11 @@ reveals.
 
 Hidden-information invariant (inherited and preserved): during play a
 snapshot carries hole cards for the LOCAL seat only. Other seats' cards
-appear solely in a contested-showdown 'settled' snapshot, where the
-post-hand audit has already made them public. A client physically cannot
-leak what it was never sent. Every snapshot is plain JSON-serialisable.
+appear solely in a contested-showdown 'settled' snapshot, and only for the
+seats in result['shown'] -- the ones that reached the showdown. A seat that
+folded is never tabled (POKER_RULES_PROFILE D-M1-1c), although the post-hand
+audit has opened its cards too. A client physically cannot leak what it was
+never sent. Every snapshot is plain JSON-serialisable.
 """
 from __future__ import annotations
 
