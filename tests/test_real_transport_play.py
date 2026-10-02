@@ -33,8 +33,14 @@ def _needs_crypto():
     crypto_gate.require_crypto()
 
 
-def _until(peer, pred, what, timeout=60.0):
-    """Poll status until pred holds; a stall names the state it stalled in."""
+def _until(peer, pred, what, timeout=10.0):
+    """Poll status until pred holds; a stall names the state it stalled in.
+
+    Each wait is one step -- a deal, an action, a settlement -- which takes
+    about a second here. The default sits inside the tests' own timeouts so
+    a stall fails here, naming its state, rather than as a bare pytest
+    timeout (which on Windows ends the whole run).
+    """
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -199,8 +205,10 @@ TEN_HANDS = [_checkdown, _fold_at_once, _raise_called, _all_in_folded_to,
              _all_in_folded_to, _raise_called, _checkdown]
 
 
-# Timeouts are about 3x each test's measured runtime on a 16-core dev
-# machine (17 s, 2.7 s, 3.7 s and 5.5 s including the table set-up).
+# Timeouts are about 3x each test's runtime over three runs on a 16-thread
+# dev machine (17.7-18.0 s, 2.8 s, 3.6 s and 5.7 s, table set-up and
+# teardown included), inside CI's 60 s per test. The runs are bound by
+# message round trips, not CPU: pinned to two CPUs they took the same time.
 @pytest.mark.timeout(55)
 def test_two_seats_play_ten_hands_and_agree_on_every_one(table):
     """Fold, call, raise and all-in over ten consecutive hands.
@@ -220,7 +228,13 @@ def test_two_seats_play_ten_hands_and_agree_on_every_one(table):
             # Chips carried: the hand was dealt from the last settlement.
             if settled is not None:
                 assert st["last_settled_stacks"] == settled
+        start = st["last_settled_stacks"]
         ref = _assert_agreed(_play_hand(seated, choose), total=2000)
+        if choose is _all_in_folded_to:
+            # Heads-up the button acts first. It shoved its whole stack, so
+            # everything but the big blind it was folded to comes back.
+            btn = ref["button"]
+            assert ref["result"]["refund"] == [btn, start[btn] - BB], ref
         settled = ref["stacks"]
         buttons.append(ref["button"])
         if hand < len(TEN_HANDS):
@@ -279,7 +293,11 @@ def test_a_joiner_killed_mid_hand_ends_the_table_for_every_survivor(
     victim.proc.wait(timeout=10)
 
     for p in survivors:
-        st = _until(p, lambda s: s["terminal"] is not None, "a terminal state")
+        # The host's socket closes at once on loopback, and its notice to
+        # the other joiner is one message; without either, a survivor
+        # waits forever.
+        st = _until(p, lambda s: s["terminal"] is not None,
+                    "a terminal state", timeout=5.0)
         assert st["terminal"] == "PEER_LOST", st["terminal_reason"]
         assert st["terminal_reason"].startswith(
             f"seat {n - 1} ({victim.label}) disconnected"), \
