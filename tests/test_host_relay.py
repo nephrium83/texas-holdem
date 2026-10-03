@@ -269,7 +269,7 @@ def test_a_host_signed_peer_lost_ends_the_table_for_a_joiner():
     like any other hostless message."""
     bus, s = _table()
     s["B"].handle_message("A", _env("A", seat=0, mtype="peer_lost",
-                                    lost_seat=2))
+                                    lost_seat=2, ended=True))
     assert s["B"].terminal_state == Session.PEER_LOST
     assert s["B"].terminal_reason == "seat 2 (C) disconnected (reported by seat 0)"
 
@@ -279,7 +279,7 @@ def test_a_peer_lost_signed_by_a_stranger_is_refused():
     a key that holds no seat cannot report one lost."""
     bus, s = _table()
     s["B"].handle_message("A", _env(KEY_X, seat=0, mtype="peer_lost",
-                                    lost_seat=2))
+                                    lost_seat=2, ended=True))
     assert s["B"].terminal_state is None
 
 
@@ -291,7 +291,7 @@ def test_a_pinned_joiner_knows_the_host_seat_by_its_key():
     s["B"]._host_conn_id = "conn-to-host"
     s["B"]._pinned_host_pubkey = KEY["A"]
     s["B"].handle_message("conn-to-host", _env("A", seat=0, mtype="peer_lost",
-                                               lost_seat=2))
+                                               lost_seat=2, ended=True))
     assert s["B"].terminal_state == Session.PEER_LOST
 
 
@@ -303,7 +303,7 @@ def test_a_peer_lost_signed_by_a_joiner_is_dropped(lost):
     could not have observed, and C must not end on it."""
     bus, s = _table()
     s["C"].handle_message("A", _env("B", seat=1, mtype="peer_lost",
-                                    lost_seat=lost))
+                                    lost_seat=lost, ended=True))
     assert s["C"].terminal_state is None
 
 

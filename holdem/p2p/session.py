@@ -643,6 +643,9 @@ class Session:
         self._ended_from: list | None = None
         self._agreed_stacks: list | None = None
         self._early_settled: dict[int, str] = {}
+        # Seats the host reported dropped while it could not judge whether
+        # the table still needed them (a busted host); see _on_peer_lost.
+        self._reported_lost: set[int] = set()
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
         self.on_state_changed: Optional[Callable[[], None]] = None
@@ -2028,7 +2031,7 @@ class Session:
             seat=seat)
 
     def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
-        """The host saw a seated peer's connection drop: end the table.
+        """The host saw a seated peer's connection drop.
 
         The production topology is a star, so when a joiner drops only the
         host's socket closes. Without this the other joiners kept waiting
@@ -2042,27 +2045,56 @@ class Session:
         handler only after ingress has checked it is signed by the key
         bound to the reporting seat and is not a replay or an equivocation.
 
-        Accepted from the host's seat only. Under the star only the host
-        can see a joiner's socket close, so from any other seat the notice
-        claims something its sender could not have observed: a connected
-        joiner could otherwise end the table and pin the blame on another
-        seat, and a busted or never-dealt one could end a table it is not
-        part of. The host is still trusted to name the right seat. That is
-        no new power -- the host can end the table by leaving -- but the
+        Reported by the host's seat. Under the star only the host can see a
+        joiner's socket close, so from any other seat a report claims
+        something its sender could not have observed: a connected joiner
+        could otherwise end the table and pin the blame on another seat,
+        and a busted or never-dealt one could end a table it is not part
+        of. The host is still trusted to name the right seat. That is no
+        new power -- the host can end the table by leaving -- but the
         blame is the host's word.
 
-        Not checked against this peer's own view of the seat: the host has
-        ended the table and relays nothing further, so a peer that ignored
-        the notice would wait forever. For the same reason it is not
-        hand-scoped (the host and this peer can be a hand apart around
-        next_p2p_hand), and a busted spectator accepts it too.
+        Two kinds, by "ended":
+
+          True    the host judged the seat needed and has ended the table.
+                  It relays nothing further, so a peer that weighed the
+                  notice against its own view and ignored it would wait
+                  forever: every peer ends, busted spectators included. Not
+                  hand-scoped either, since the host and this peer can be a
+                  hand apart around next_p2p_hand.
+          False   the host has busted and cannot judge: its replica stopped
+                  at the hand it busted in (see handle_disconnect). It
+                  keeps relaying, and the seats still playing decide. One
+                  that still needs the seat ends the table and says so in
+                  a notice of its own, "ended" and naming the same seat.
+                  That confirmation is the one peer_lost a seat other than
+                  the host may send, and it counts only for a seat the host
+                  has reported; it is how the busted host and any busted
+                  joiner, which cannot judge either, learn the table is
+                  over. If no seat still playing needs the leaver, it had
+                  busted too, and play goes on.
+
+        So a seat other than the host can end the table only after the host
+        has seen the seat it names drop. A seat still playing could end it
+        anyway, by leaving; a busted one could not, though it can already
+        stall the table by voiding every hand, which hand_void does not
+        limit to the seats dealt in.
         """
         reporter, lost = msg.get("seat"), msg.get("lost_seat")
         if not _is_seat(reporter) or not _is_seat(lost):
             return
         if not 0 <= lost < len(self._seat_order):
             return
-        if reporter != self._host_seat():
+        if reporter == self._host_seat():
+            if msg.get("ended") is not True:
+                self._reported_lost.add(lost)
+                if self._eliminated() or not self._seat_in_play(lost):
+                    return
+                # Sent BEFORE terminating, as in handle_disconnect.
+                self._send_hostless({"type": "peer_lost",
+                                     "hand": self._hand_no,
+                                     "lost_seat": lost, "ended": True})
+        elif msg.get("ended") is not True or lost not in self._reported_lost:
             _log.warning("session: ignoring peer_lost from seat %s -- only "
                          "the host can see a seat's connection drop",
                          reporter)
@@ -3056,6 +3088,11 @@ class Session:
         table waited on that seat forever. Losing a seat the table still
         needs (see _seat_in_play) terminates with PEER_LOST. A seat that has
         busted out is not needed, and may leave.
+
+        A busted host cannot tell which: its replica stopped at the hand it
+        busted in, so a seat that has busted since would still look needed.
+        It reports the drop instead, keeps relaying, and leaves the verdict
+        to the seats still playing (see _on_peer_lost).
         """
         # Admission is connection-scoped, so it dies with the connection --
         # cleared even on a terminal session, because conn_ids can be reused
@@ -3073,7 +3110,7 @@ class Session:
         seat = (self._seat_order.index(conn_id)
                 if conn_id != self._host_conn_id
                 and conn_id in self._seat_order else None)
-        in_play = (seat is not None
+        in_play = (seat is not None and not self._eliminated()
                    and (self._replica is not None or self.state == "PLAYING")
                    and self._seat_in_play(seat))
         label = self._seat_label(seat) if in_play else ""
@@ -3096,13 +3133,23 @@ class Session:
             # Under the star only the host sees a joiner's socket close, so
             # the other joiners learn of it from this notice or not at all.
             # Sent BEFORE terminating, so a teardown in on_session_terminated
-            # cannot swallow it.
-            self._send_hostless({"type": "peer_lost", "hand": self._hand_no,
-                                 "lost_seat": seat})
+            # cannot swallow it. "ended": this host has ended the table and
+            # relays nothing further, so the notice binds every peer.
+            if self.is_host:
+                self._send_hostless({"type": "peer_lost",
+                                     "hand": self._hand_no,
+                                     "lost_seat": seat, "ended": True})
             self.terminate(self.PEER_LOST, f"{label} disconnected",
                            conn_id=conn_id, seat=seat)
         else:
             # A non-host peer dropped
+            if self.is_host and seat is not None and self._eliminated():
+                # A report, not an end: this host cannot judge the seat,
+                # and keeps relaying for a table that may play on.
+                self._reported_lost.add(seat)
+                self._send_hostless({"type": "peer_lost",
+                                     "hand": self._hand_no,
+                                     "lost_seat": seat, "ended": False})
             if self.is_host:
                 self._broadcast_player_list()
             if self.on_player_list_changed:
@@ -3115,9 +3162,11 @@ class Session:
         a void (the redeal deals the same seats), the seats dealt in. After
         a settle, the seats with chips, which the next hand will deal --
         if there is one: with at most one seat holding chips the match is
-        over, and next_p2p_hand ends it normally whoever has left. A busted
-        spectator answers from the hand it busted in, the last one it
-        followed.
+        over, and next_p2p_hand ends it normally whoever has left.
+
+        Only a peer still playing can answer. A busted one's replica stopped
+        at the hand it busted in, so seats that have busted since would
+        still look needed (see _eliminated); callers do not ask it.
         """
         r = self._replica
         if r is None:

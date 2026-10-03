@@ -17,6 +17,9 @@ Policy enforced here:
 
 Chips stand at last_settled_stacks: an unsettled hand's pot is discarded,
 not paid out.
+
+A busted host cannot judge a drop -- its replica stopped at the hand it
+busted in -- so it only reports one, and the seats still playing decide.
 """
 import sys
 from pathlib import Path
@@ -303,14 +306,154 @@ def test_a_notice_from_any_seat_but_the_host_is_dropped(reporter, lost,
                                                        stacks):
     """Only the host sees a joiner's socket close. A notice signed by any
     other seat passes ingress -- it is that seat's own -- but claims what
-    its sender could not have observed, so it ends nobody's table."""
+    its sender could not have observed, so it ends nobody's table. Not
+    even shaped as a confirmation: the host reported no seat lost."""
     bus, sessions, order = table(3, stacks=stacks)
     for cid in order:
         if cid != order[reporter]:
             sessions[cid].handle_message(order[reporter], {
                 "type": "peer_lost", "hand": 1, "seat": reporter,
-                "lost_seat": lost})
+                "lost_seat": lost, "ended": True})
     assert [sessions[c].terminal_state for c in order] == [None] * 3
+
+
+# ------------------------------------------------- a busted host reports
+
+def busted_host_table(monkeypatch):
+    """Four seats. The host busts in hand 1 and seat 3 in hand 2, while
+    seats 1 and 2 play on. The host's replica stays at hand 1, where seat
+    3 still had chips: the stale view it must not judge a drop from."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 0, 2, 3)
+    bus, sessions, order = table(4, stacks=[20, 500, 500, 100])
+    # Hand 1: the host shoves 20, seat 1 covers it and the blinds fold;
+    # seat 1's aces take 20 + 20 + 5 + 10.
+    play(bus, sessions, order, folds(2, 3))
+    assert sessions["peer1"].replica.stacks == [0, 535, 495, 90]
+    assert [sessions[c].next_p2p_hand() for c in order] == [
+        "eliminated", "started", "started", "started"]
+    bus.drain()
+    # Hand 2: seat 2 folds, seat 3 shoves its 90 from the small blind and
+    # seat 1 covers it from the big; aces again take 90 + 90.
+    rank(1, 3, 2, 0)
+    play(bus, sessions, order, folds(2), ref=1)
+    assert sessions["peer1"].replica.stacks == [0, 625, 495, 0]
+    assert sessions["peer0"].replica.stacks == [0, 535, 495, 90]
+    return bus, sessions, order
+
+
+def test_a_busted_host_lets_a_seat_that_busted_since_leave(monkeypatch):
+    """Seat 3 leaves before Next. The host's stale replica says it holds
+    90 chips; the seats still playing know it holds none. The host only
+    reports the drop, they see no need for the seat, and play goes on."""
+    bus, sessions, order = busted_host_table(monkeypatch)
+    bus.unregister("peer3")
+
+    sessions["peer0"].handle_disconnect("peer3")
+    bus.drain()
+
+    assert [sessions[c].terminal_state for c in order[:3]] == [None] * 3
+    assert {sessions[c].next_p2p_hand() for c in order[1:3]} == {"started"}
+    bus.drain()
+    for c in order[1:3]:
+        assert sessions[c].replica.seats_dealt == [1, 2]
+        assert None not in sessions[c].deal_hole_cards
+    assert sessions["peer0"].terminal_state is None      # still the relay
+
+
+def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
+        monkeypatch):
+    """Seat 3 has busted too and stays to watch. Seat 2 drops mid-hand.
+    The host cannot judge it, so it only reports; seat 1 still needs seat
+    2, ends the table and confirms. The confirmation is how the busted
+    host and seat 3, neither of which can judge, learn the table is over.
+    """
+    bus, sessions, order = busted_host_table(monkeypatch)
+    assert [sessions[c].next_p2p_hand() for c in order[1:]] == [
+        "started", "started", "eliminated"]
+    bus.drain()
+    actor = sessions["peer1"].replica.actor
+    assert sessions[order[actor]].send_bet_action("call") == "applied"
+    bus.drain()
+    bus.unregister("peer2")
+
+    sessions["peer0"].handle_disconnect("peer2")
+    bus.drain()
+
+    for c in ("peer0", "peer1", "peer3"):
+        assert sessions[c].terminal_state == Session.PEER_LOST, c
+        assert sessions[c].terminal_record.initiating_seat == 2
+    assert sessions["peer1"].terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0)")
+    # The host dropped seat 2 from its roster when the socket closed, so
+    # by the time the confirmation names it, it has no nickname there.
+    assert sessions["peer0"].terminal_reason == (
+        "seat 2 disconnected (reported by seat 1)")
+    assert sessions["peer3"].terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 1)")
+    assert sessions["peer1"].last_settled_stacks == [0, 625, 495, 0]
+
+
+def test_a_busted_host_lets_the_winner_end_the_match_normally(monkeypatch):
+    """Three seats. The host busts in hand 1, seat 2 in hand 2, and seat 2
+    leaves before the winner presses Next. The host's stale replica still
+    gives seat 2 chips; the winner knows the match is decided."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 0, 2)
+    bus, sessions, order = table(3, stacks=[20, 500, 500])
+    # Seat 1 shoves, seat 2 folds its small blind and the host calls all
+    # in for 20 from the big blind: seat 1's aces take 20 + 20 + 5.
+    play(bus, sessions, order, folds(2))
+    assert sessions["peer1"].replica.stacks == [0, 525, 495]
+    assert [sessions[c].next_p2p_hand() for c in order] == [
+        "eliminated", "started", "started"]
+    bus.drain()
+    rank(1, 2, 0)
+    play(bus, sessions, order, shove, ref=1)
+    assert sessions["peer1"].replica.stacks == [0, 1020, 0]
+    bus.unregister("peer2")
+
+    sessions["peer0"].handle_disconnect("peer2")
+    bus.drain()
+
+    assert [sessions[c].terminal_state for c in order[:2]] == [None, None]
+    assert sessions["peer1"].next_p2p_hand() == "session_over"
+    bus.drain()
+    for c in order[:2]:
+        assert sessions[c].terminal_state == Session.ENDED_NORMAL, c
+        assert sessions[c].last_settled_stacks == [0, 1020, 0]
+
+
+def test_a_busted_joiner_does_not_judge_the_drop_either(monkeypatch):
+    """The host and seat 2 both bust in hand 1, seat 3 in hand 2, and seat
+    3 leaves before the winner presses Next. Seat 2's replica stopped at
+    hand 1, where seat 3 held 490: were it to judge the host's report it
+    would confirm the drop and end a match that is already decided."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 0, 2, 3)
+    bus, sessions, order = table(4, stacks=[20, 500, 20, 500])
+    # The host shoves 20, seat 1 shoves over it, seat 2 calls all in for
+    # 20 from the small blind and seat 3 folds its big blind: seat 1's
+    # aces take 20 + 20 + 20 + 10.
+    play(bus, sessions, order, folds(3))
+    assert sessions["peer1"].replica.stacks == [0, 550, 0, 490]
+    assert [sessions[c].next_p2p_hand() for c in order] == [
+        "eliminated", "started", "eliminated", "started"]
+    bus.drain()
+    rank(1, 3, 0, 2)
+    play(bus, sessions, order, shove, ref=1)
+    assert sessions["peer1"].replica.stacks == [0, 1040, 0, 0]
+    bus.unregister("peer3")
+
+    sessions["peer0"].handle_disconnect("peer3")
+    bus.drain()
+
+    assert [sessions[c].terminal_state for c in order[:3]] == [None] * 3
+    assert sessions["peer1"].next_p2p_hand() == "session_over"
+    bus.drain()
+    for c in order[:3]:
+        assert sessions[c].terminal_state == Session.ENDED_NORMAL, c
+        assert sessions[c].last_settled_stacks == [0, 1040, 0, 0]
 
 
 @pytest.mark.parametrize("msg", [
