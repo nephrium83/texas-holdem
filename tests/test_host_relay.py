@@ -298,16 +298,18 @@ def test_a_replayed_peer_lost_is_not_relayed_twice():
 
 def test_a_hand_settled_counts_only_from_the_seat_that_signed_it():
     """A settlement report can end the table, so it takes the same ingress
-    as every hostless type: held for comparison when signed by the key of
-    the seat it names, dropped when signed by a stranger or by a seat
+    as every hostless type: handed on for comparison when signed by the key
+    of the seat it names, dropped when signed by a stranger or by a seat
     speaking for another."""
     bus, s = _table()
     digest = "ab" * 32
+    judged = []
+    s["C"]._on_hand_settled = lambda cid, body: judged.append(body["seat"])
     s["C"].handle_message("A", _env(KEY_X, seat=1, mtype="hand_settled",
                                     digest=digest))
     s["C"].handle_message("A", _env("B", seat=2, mtype="hand_settled",
                                     digest=digest))
-    assert s["C"]._early_settled == {}
+    assert judged == []
     s["C"].handle_message("A", _env("B", seat=1, mtype="hand_settled",
                                     digest=digest))
-    assert s["C"]._early_settled == {1: digest}
+    assert judged == [1]

@@ -43,7 +43,9 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]
     stacks = list(stacks) if stacks else [500] * n
-    for cid in order:
+    for i, cid in enumerate(order):
+        if stacks[i] == 0:
+            continue                  # never dealt: it has no hand to start
         sessions[cid].start_p2p_hand(hand_no=hand, names=names,
                                      stacks=stacks, sb=sb, bb=bb,
                                      button=button)
@@ -702,6 +704,29 @@ def test_an_early_settlement_report_is_held_until_this_peer_ends_the_hand():
     target._void_hand("deal failure", announce=False)
     assert target.terminal_state == Session.ABORTED_PROTOCOL
     assert "seat 2 settled it as cdcdcdcdcdcdcdcd" in target.terminal_reason
+
+
+def test_a_seat_not_dealt_in_cannot_dispute_the_settlement():
+    """Seat 2 holds no chips, so no hand deals it. Ingress still admits
+    what it signs -- it does own seat 2 -- but it settled and voided
+    nothing, so no report of its can end the table: not one held from
+    before the settle, not one after it, and not a late void."""
+    bus, sessions, order = make_table(3, stacks=[500, 500, 0])
+    live = [sessions[order[0]], sessions[order[1]]]
+    assert live[0].replica.seats_dealt == [0, 1]
+    bogus = {"type": "hand_settled", "hand": 1, "seat": 2,
+             "digest": "ee" * 32}
+    for s in live:
+        s.handle_message(order[2], dict(bogus))      # held until the settle?
+    checkdown(bus, sessions, order, alive=[0, 1])
+    for s in live:
+        assert s.hand_result is not None
+        assert s.terminal_state is None, s.terminal_reason
+        s.handle_message(order[2], dict(bogus))      # compared after it?
+        assert s.terminal_state is None, s.terminal_reason
+        s.handle_message(order[2], {"type": "hand_void", "hand": 1,
+                                    "seat": 2, "reason": "late"})
+        assert s.terminal_state is None, s.terminal_reason
 
 
 def test_a_matching_report_after_settling_changes_nothing():

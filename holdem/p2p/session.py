@@ -631,11 +631,12 @@ class Session:
         self._session_end_announced = False
         self._p2p_spectator = False
         # Settlement agreement (hand_settled): how this replica ended its
-        # most recent hand -- the hand number, and its settled digest or
-        # None for a void -- and the digests peers reported for the CURRENT
-        # hand before it ended here, by seat.
+        # most recent hand -- the hand number, its settled digest or None
+        # for a void, and the seats dealt into it -- and the digests peers
+        # reported for the CURRENT hand before it ended here, by seat.
         self._ended_hand: int | None = None
         self._ended_digest: str | None = None
+        self._ended_seats: frozenset = frozenset()
         self._early_settled: dict[int, str] = {}
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
@@ -1869,12 +1870,14 @@ class Session:
         table: the voiding side redealt the hand while this side carried
         the payout forward, and no later hand could agree. Checked before
         the hand-scope filter, because the void may arrive after this peer
-        has already dealt the next hand.
+        has already dealt the next hand. As with hand_settled, only a seat
+        dealt into that hand can disagree about it.
         """
         hand = msg.get("hand", self._hand_no)
         if (self._ended_digest is not None and hand == self._ended_hand
                 and not isinstance(hand, bool) and _is_seat(msg.get("seat"))):
-            self._settlement_disagrees(msg["seat"], hand, None)
+            if msg["seat"] in self._ended_seats:
+                self._settlement_disagrees(msg["seat"], hand, None)
             return
         if not self._hand_msg_ok(conn_id, msg):
             return
@@ -1958,6 +1961,11 @@ class Session:
         (the sender may be slower). If not, held in _early_settled until it
         does; see _hand_ended. Authorized and replay-checked at ingress like
         every hostless type.
+
+        Counted only from a seat dealt into that hand. Ingress proves who
+        signed it, not that the signer played: a busted seat, or one never
+        dealt, settled nothing and could otherwise end a table it is no
+        part of.
         """
         seat, digest, hand = msg.get("seat"), msg.get("digest"), msg.get("hand")
         if not _is_seat(seat) or not isinstance(digest, str):
@@ -1965,12 +1973,13 @@ class Session:
         if not isinstance(hand, int) or isinstance(hand, bool):
             return
         if hand == self._ended_hand:
-            if digest != self._ended_digest:
+            if seat in self._ended_seats and digest != self._ended_digest:
                 self._settlement_disagrees(seat, hand, digest)
             return
         if not self._hand_msg_ok(conn_id, msg):
             return                       # a later hand buffers; older drops
-        self._early_settled[seat] = digest
+        if self._replica is not None and seat in self._replica.seats_dealt:
+            self._early_settled[seat] = digest
 
     def _hand_ended(self, digest: Optional[str]) -> None:
         """Record how this replica ended the current hand -- its settled
@@ -1979,6 +1988,8 @@ class Session:
         disagrees just as much as one that settled it differently."""
         self._ended_hand = self._hand_no
         self._ended_digest = digest
+        self._ended_seats = (frozenset(self._replica.seats_dealt)
+                             if self._replica is not None else frozenset())
         early, self._early_settled = self._early_settled, {}
         for seat in sorted(early):
             if early[seat] != digest:
