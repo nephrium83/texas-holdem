@@ -65,7 +65,7 @@ octets        70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
 Wherever the identifier enters a hashed pre-image it is carried in exactly one
 form: **a 4-octet big-endian length followed by the UTF-8 octets**, which is
 the length-prefixed idiom `Session._deal_context_bytes` already uses for the
-deal policy and for every seat id (`holdem/p2p/session.py:924-937`).
+deal policy and for every seat id (`holdem/p2p/session.py:933-946`).
 
 ```
 encoded form  00 00 00 16 | 70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
@@ -74,14 +74,14 @@ encoded form  00 00 00 16 | 70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
 
 The length prefix is not decoration. The pre-image it will join is injective
 precisely because every variable-length field is length-prefixed; a bare
-concatenation of two profile-adjacent strings is not (`session.py:892-919`
+concatenation of two profile-adjacent strings is not (`session.py:901-928`
 records what a non-injective encoding cost the first time).
 
 ### 1.3 What "frozen" means
 
 Frozen means **this string and this encoding are now the definition**. They may
 not be edited in place. A change to either is a new identifier *and* a deal-context
-layout version bump (`_DEAL_CTX_VERSION`, `session.py:890`, currently `2`; M2
+layout version bump (`_DEAL_CTX_VERSION`, `session.py:899`, currently `2`; M2
 takes it to `3`).
 
 | Change | Consequence |
@@ -277,10 +277,10 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Area | TDA 2024 | Class | Ruling | Evidence |
 |---|---|---|---|---|
 | Cards speak | 12 [V] `src:78` | ADOPT | *"Cards speak to determine the winner. Verbal declarations of hand value are not binding at showdown…"* The verified cards plus the evaluator determine the result; no UI text, chat, or declaration alters settlement | `engine.py:910-915` scores from `evaluate(p.hole + b)` |
-| All-in hands tabled | 16 [V] `src:100`, addendum `src:552-572` | ADOPT | *"All hands will be tabled without delay once a player is all-in and all betting action by all other players in the hand is complete. No player who is either all-in or has called all betting action may muck their hand without tabling."* Adopted in **both** its parts, and the addendum makes the second part a timing rule, not a settlement rule: *"Do not wait for the showdown to turn the cards up… if betting action is finalized on any street prior to the showdown, turn the cards up at that point and then run out the remaining cards"* `src:552`. **No card is unmucked and no pot is awarded differently — but the exposure is late.** `must_show` is true for every seat whenever `tabled`, so nothing is concealed at settlement (`engine.py:1000-1002`); on the P2P path, however, the hole cards do not *exist* for other peers until the hand-end audit, so a hand that goes all-in on the turn is run out with the cards still face down. That is a timing deviation from `src:552` and Examples 1–2, recorded as gap **C6** | `engine.py:1000-1002`; late-exposure path `session.py:2567-2591`, `replica_table.py:220-231`; gap **C6** |
+| All-in hands tabled | 16 [V] `src:100`, addendum `src:552-572` | ADOPT | *"All hands will be tabled without delay once a player is all-in and all betting action by all other players in the hand is complete. No player who is either all-in or has called all betting action may muck their hand without tabling."* Adopted in **both** its parts, and the addendum makes the second part a timing rule, not a settlement rule: *"Do not wait for the showdown to turn the cards up… if betting action is finalized on any street prior to the showdown, turn the cards up at that point and then run out the remaining cards"* `src:552`. **No card is unmucked and no pot is awarded differently — but the exposure is late.** `must_show` is true for every seat whenever `tabled`, so nothing is concealed at settlement (`engine.py:1000-1002`); on the P2P path, however, the hole cards do not *exist* for other peers until the hand-end audit, so a hand that goes all-in on the turn is run out with the cards still face down. That is a timing deviation from `src:552` and Examples 1–2, recorded as gap **C6** | `engine.py:1000-1002`; late-exposure path `session.py:2617-2641`, `replica_table.py:220-231`; gap **C6** |
 | Showdown order | 17-A [V] `src:104` | ADOPT | *"The last aggressive player on the final betting round (final street) must table first. If there was no final round bet, the player who would act first in a final betting round must table first (i.e. first seat left of the button in flop games…)"* | `engine.py:984-995` |
-| Beaten hand may muck | 17-B [V] `src:106`; 13-B `src:84`; 14 `src:90` | **OVERRIDE (a)** | The right is verbatim: *"A non all-in showdown is uncontested if all but one player mucks face down without tabling. The last player with live cards wins and is not required to table the cards."* In the P2P game every contested seat is tabled and **there is no muck right** — the deck is opened at hand end regardless, so a muck would conceal nothing (§4.2b). The engine's muck path still exists and still runs in the single-process game, where the deck is not opened | `session.py:2591` passes `force_tabled=True` for every P2P showdown; `engine.py:1000-1019`; §4 |
-| Asking to see a hand | 18-B [V] `src:112` | DIGITALIZE | the **consequence** — *"If there was a river bet, any caller has an inalienable right to have the last aggressor's hand tabled on request ('the hand they paid to see')"* — is adopted and then some: every contested seat is tabled unconditionally, so the right is satisfied without a request, and without TDA's conditions on it. The **mechanism** (a request, and TD discretion over every other request) is replaced, because both the request channel and the discretion require a floor (§3.0). 18-A, which strips the right from a player who mucked, is moot for the same reason | `session.py:2591`; §4.2 D-M1-1c |
+| Beaten hand may muck | 17-B [V] `src:106`; 13-B `src:84`; 14 `src:90` | **OVERRIDE (a)** | The right is verbatim: *"A non all-in showdown is uncontested if all but one player mucks face down without tabling. The last player with live cards wins and is not required to table the cards."* In the P2P game every contested seat is tabled and **there is no muck right** — the deck is opened at hand end regardless, so a muck would conceal nothing (§4.2b). The engine's muck path still exists and still runs in the single-process game, where the deck is not opened | `session.py:2641` passes `force_tabled=True` for every P2P showdown; `engine.py:1000-1019`; §4 |
+| Asking to see a hand | 18-B [V] `src:112` | DIGITALIZE | the **consequence** — *"If there was a river bet, any caller has an inalienable right to have the last aggressor's hand tabled on request ('the hand they paid to see')"* — is adopted and then some: every contested seat is tabled unconditionally, so the right is satisfied without a request, and without TDA's conditions on it. The **mechanism** (a request, and TD discretion over every other request) is replaced, because both the request channel and the discretion require a floor (§3.0). 18-A, which strips the right from a player who mucked, is moot for the same reason | `session.py:2641`; §4.2 D-M1-1c |
 | Playing the board | 19 [V] `src:116` | **N/A** | *"To play the board, players must table all hole cards to get part of the pot."* The rule polices a player's choice of what to reveal; no such choice exists — the audit reveals the cards and the evaluator uses the best five from seven whether or not the player would have shown them | `engine.py:910-915` |
 | Odd chips | 20-A [V] `src:120` | ADOPT | *"the odd chip goes to the first seat left of the button"*, walking forward to the first winner. **Consensus-critical** — every replica must award the same chip | `engine.py:969-977` |
 | Uncalled bet returned | 15-B [V] `src:96`; 65-A [V] `src:370` | ADOPT | both provisions state the return as settled background even in the two *adverse* cases — a hand mucked by mistake and a hand killed by the dealer: *"If cards are mucked and the player initiated a bet or raise not yet called, the uncalled amount will be returned"* (15-B), *"If the player initiated a bet or raise and hasn't been called, the uncalled amount will be returned"* (65-A). **[D]:** a rule that returns the uncalled amount even to a player whose hand is dead returns it a fortiori in the ordinary case, and TDA 2024 contains no provision anywhere that keeps an uncalled wager in the pot. The engine's condition — a *single* seat strictly above the second-highest live total — is that rule and an arithmetic identity: when two seats share the top total each was called by the other, so no amount is uncalled | `engine.py:861-877` |
@@ -315,7 +315,7 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Accepted action | 49 [V] `src:286` | **N/A** | *"It is the caller's responsibility to determine the correct amount of an opponent's bet before calling, regardless of what is stated by others."* The rule allocates the cost of a miscount; the amount to call is replicated state, computed identically on every replica, and no dealer or player announces it | `engine.py:664-668` `legal()` derives `to_call` from state |
 | Oversized chips, multi-chip bets, prior-bet chips, over-betting for change | 44 [V] `src:258`; 45 [V] `src:262-264`; 46 [V] `src:268-272`; 61 [V] `src:352` | **N/A** | four rules, one physical cause: chips of fixed denomination pushed across a table. No chips are pushed |
 | String bets, verbal-vs-chip conflict, gestures, invalid and conditional declarations, non-standard folds | 3 [V] `src:22`; 40 [V] `src:236-240`; 55 [V] `src:326`; 56 [V] `src:330`; 57 [V] `src:334`; 58 [V] `src:338`; 59 [V] `src:342-344` | **N/A** | the whole class is eliminated by typed actions: no gesture to interpret, no moment between two chips leaving a hand, no unofficial term to construe, no way to declare a future action. Each of these rules resolves an ambiguity at TD's discretion, so each would have needed a floor we do not have (§3.0) | `client_view.py:244-251` |
-| Count of an opponent's stack | 60 [V] `src:348` | **N/A** | every stack is replicated state, exact and continuously visible; there is nothing to request and nothing to estimate | `replica_table.py:273-294` |
+| Count of an opponent's stack | 60 [V] `src:348` | **N/A** | every stack is replicated state, exact and continuously visible; there is nothing to request and nothing to estimate | `replica_table.py:276-297` |
 
 ### 3.4 Clock and absence
 
@@ -338,7 +338,7 @@ leaving the number to the table: `T` is a table parameter, and a
 | Area | TDA 2024 | Class | Ruling | Evidence |
 |---|---|---|---|---|
 | Misdeals | 35-A–D [V] `src:200-206` | **N/A** | boxed cards, cards dealt to the wrong seat, the wrong number of cards — every listed cause is a hand mishandling physical objects. There is no physical dealing. Explicitly **not** the home for cryptographic failures — §6 |
-| Fouled deck | 35-E [V] `src:208` | DIGITALIZE | *"If 2 or more cards of the same suit and rank are found, the deck is fouled… If a fouled deck is discovered, regardless of SA, play will stop and all bets will be returned."* **The one professional provision that does treat deck integrity as a stop-and-unwind event**, and it is the analogue our void-and-redeal implements: the **consequence** — halt regardless of how far the hand went, restore the chips — is adopted; the **mechanism** is replaced, because the detector is a multiset and proof check rather than an eye, and the remedy restores the pre-hand chain state rather than pushing chips back across felt. Note that TDA itself, in 35-D, carves the fouled deck out of "play on": *"a misdeal cannot be declared; the hand must proceed **unless the deck is fouled**"* — so the distinction §6 draws is the ruleset's own, not an invention of ours | `session.py:2292-2302` redeals the same seats at the same button from the pre-hand chain state; §6 |
+| Fouled deck | 35-E [V] `src:208` | DIGITALIZE | *"If 2 or more cards of the same suit and rank are found, the deck is fouled… If a fouled deck is discovered, regardless of SA, play will stop and all bets will be returned."* **The one professional provision that does treat deck integrity as a stop-and-unwind event**, and it is the analogue our void-and-redeal implements: the **consequence** — halt regardless of how far the hand went, restore the chips — is adopted; the **mechanism** is replaced, because the detector is a multiset and proof check rather than an eye, and the remedy restores the pre-hand chain state rather than pushing chips back across felt. Note that TDA itself, in 35-D, carves the fouled deck out of "play on": *"a misdeal cannot be declared; the hand must proceed **unless the deck is fouled**"* — so the distinction §6 draws is the ruleset's own, not an invention of ours | `session.py:2336-2346` redeals the same seats at the same button from the pre-hand chain state; §6 |
 | Substantial action | 36 [V] `src:212` | **N/A** | exists to bound the correction of physical errors; "substantial action occurred, play on" must never be applied to an integrity failure — §6, and 35-E above |
 | Exposed cards, dropped cards, accidentally killed hands | 65 [V] `src:370-372`; 68 [V] `src:394` | **N/A** | eliminated by a cryptographic deck: no card has a physical face to expose and no seat holds one. (The *post-hand* exposure this protocol does have is a different matter entirely, and is ruled on in §4) | `mental_deal.py:741-762` |
 | Disputed hands and pots | 22 [V] `src:128` | **N/A** | *"The reading of a tabled hand may be disputed until the next hand begins… Accounting errors… may be disputed until substantial action occurs on the next hand."* Both windows exist because a human read the hand and a human pushed the chips. Settlement here is a deterministic function of replicated state, so a reading dispute has no object; an accounting disagreement between peers is a **desync**, detected by digest comparison rather than argued and ruled on | `replica_table.py:42-45`, `state_digest()` |
@@ -481,7 +481,7 @@ every completed hand.**
 
 * Settlement is gated on the audit. `_step_hand` opens the audit and refuses to
   settle until it completes for `PHASE_HAND_OVER` — the folds case — exactly as
-  for `PHASE_SHOWDOWN` (`session.py:2582-2586`).
+  for `PHASE_SHOWDOWN` (`session.py:2632-2636`).
 * The audit is a full-deck opening: every seat publishes a DLEQ-proven
   decryption share for **all 52 positions** (`mental_deal.py:766-788`,
   `deck_audit.py:55-69`). Both docstrings state the consequence in terms —
@@ -621,7 +621,7 @@ Why each is out of reach:
 * **Identity is not distinctness.** A complete, legal seat→key map does not
   establish that two seats are two people. The roster is the host's assertion,
   and admission proves possession of the invite, which everyone invited holds
-  (`docs/AUDIT-M0-D1-D4.md:57-67`; `session.py:1698-1705`). One human can hold
+  (`docs/AUDIT-M0-D1-D4.md:57-67`; `session.py:1707-1714`). One human can hold
   two seats, and the protocol will authorize both correctly.
 * **TDA's remedy does not exist here.** Rule 71 [V] `src:406-412` is the whole
   enforcement estate — warnings, missed-hand and missed-round penalties,
@@ -632,7 +632,7 @@ Why each is out of reach:
 
 What the protocol *does* guarantee, and which must not be confused with the
 above: chips are conserved and the arithmetic is replicated
-(`session.py:1957-1964`, `replica_table.py:273-294`), and cryptographic
+(`session.py:1970-1977`, `replica_table.py:276-297`), and cryptographic
 evidence that fails to verify is **detected**, and attributed to the seat that
 authored it wherever the evidence identifies one (`mental_deal.py:813-834`;
 §6). Cheating the *deck* is caught — though catching it is not always the same
@@ -718,12 +718,12 @@ code rather than merely editorial:
 | What the failure establishes | the facts are known; only the procedure went wrong | the state cannot be verified; the failure alone does not determine the cause (defect, skew, corruption, or attack) |
 | Remedy | correct and continue; substantial action bounds the correction | fail closed, no skip-and-continue (`mental_deal.py:37-41`) |
 | Attribution | not at issue; no author is in question | the seat that authored the unverifiable evidence, **where the evidence identifies one**; otherwise none (`mental_deal.py:826-834`) |
-| Record | table talk | a `HandRecord` with an outcome and a `blamed_seat` (`session.py:2473-2516`) |
-| Outcome vocabulary | "misdeal" | `VOID_PROTOCOL`, `VOID_EQUIVOCATION` (`session.py:1284-1287`, `session.py:2518-2528`) |
+| Record | table talk | a `HandRecord` with an outcome and a `blamed_seat` (`session.py:2523-2566`) |
+| Outcome vocabulary | "misdeal" | `VOID_PROTOCOL`, `VOID_EQUIVOCATION` (`session.py:1293-1296`, `session.py:2568-2578`) |
 
 **The mechanical remedy resembles a live room's, and now we know which one.** A
 voided hand redeals the same seats at the same button from the same pre-hand
-chain state (`session.py:2292-2302`). That is not misdeal handling borrowed by
+chain state (`session.py:2336-2346`). That is not misdeal handling borrowed by
 analogy — it is 35-E's *"play will stop and all bets will be returned"*, which
 is the correct precedent and the one §3.5 adopts. What differs is that the void
 is classified, recorded, announced, and attributed where the evidence allows,
@@ -775,7 +775,7 @@ and `holdem/contract.py` at `c69a4bf`. **Nothing was changed.**
 | **C3** | `Engine.act(i, ...)` never checks `i == self.actor`. The replica layer gates it today, so the P2P path is safe; the engine itself is not | §3.3, Rule 53 | `engine.py:709`, gated at `replica_table.py:185-186` |
 | **C4** | `contract.apply_command` sends the action string `"check"`, which `Engine.act` does not name. It matches no branch, so it silently discards the actor from `need_to_act` and advances the turn with no event and no `last_action`. Single-process path only — the P2P client sends `"call"` (`client_view.py:246-248`) | §3.3 "one canonical typed action, validated once" | `contract.py:106-107` vs `engine.py:713-747` |
 | **C5** | nothing *asserts* that a P2P hand cannot contain a straddle. §3.2's ruling holds today only because `ReplicaTable.start_hand` omits `straddle_fn` — an omission, not a refusal. A future caller could pass one and no test would object, and straddle enablement is not a bound table parameter, so two replicas could disagree about it. Sharpening the point: the lobby already forwards a `straddles` flag from the stored table settings into the `game_start` payload (`onboarding.py:842`), and `ReplicaTable` has no parameter that could receive it (`replica_table.py:76-89`). The flag is inert, which is why the ruling holds — and nothing tells a host who set it that it was ignored | §3.2 (house) | `replica_table.py:120`, `replica_table.py:76-89`, `engine.py:585-600`, `onboarding.py:842` |
-| **C6** | **all-in hands are not tabled until the board is complete.** Rule 16's addendum requires the cards up *"at that point"* — the moment betting is finalised on any street — *"and then run out the remaining cards"* `src:552`. On the P2P path the replica sees betting close with more than one seat contested and simply moves to `PHASE_STREET_OVER`, revealing the turn and river one street at a time (`replica_table.py:220-231`, `session.py:2567-2580`); no seat's hole cards exist for anyone else until the hand-end audit runs and `set_all_holes` injects them (`session.py:2582-2591`). Every hand is settled on exactly the cards it would have been, so this is a **spectator-visibility** deviation, not a settlement one. It is also the most expensive gap in this table to close: tabling early means each all-in seat publishing its **own** withheld share for its own hole positions — the one thing `_enter_deal` deliberately never sends (`mental_deal.py:663-692`) and `_try_complete` deliberately never combines for another seat (`mental_deal.py:741-762`) — so it needs a new authorised reveal step alongside `reveal_street` (`mental_deal.py:694-713`), and, because the deal is n-of-n, an answer for a seat that goes quiet at exactly that moment (**B1**, M2) | §3.1, Rule 16 addendum | `replica_table.py:220-231`, `session.py:2567-2591`, `mental_deal.py:663-713` |
+| **C6** | **all-in hands are not tabled until the board is complete.** Rule 16's addendum requires the cards up *"at that point"* — the moment betting is finalised on any street — *"and then run out the remaining cards"* `src:552`. On the P2P path the replica sees betting close with more than one seat contested and simply moves to `PHASE_STREET_OVER`, revealing the turn and river one street at a time (`replica_table.py:220-231`, `session.py:2617-2630`); no seat's hole cards exist for anyone else until the hand-end audit runs and `set_all_holes` injects them (`session.py:2632-2641`). Every hand is settled on exactly the cards it would have been, so this is a **spectator-visibility** deviation, not a settlement one. It is also the most expensive gap in this table to close: tabling early means each all-in seat publishing its **own** withheld share for its own hole positions — the one thing `_enter_deal` deliberately never sends (`mental_deal.py:663-692`) and `_try_complete` deliberately never combines for another seat (`mental_deal.py:741-762`) — so it needs a new authorised reveal step alongside `reveal_street` (`mental_deal.py:694-713`), and, because the deal is n-of-n, an answer for a seat that goes quiet at exactly that moment (**B1**, M2) | §3.1, Rule 16 addendum | `replica_table.py:220-231`, `session.py:2617-2641`, `mental_deal.py:663-713` |
 
 C4 is new in this document; it was not in the research note. It is the same
 class as C2 — an action outside the closed set is absorbed rather than refused
@@ -812,7 +812,7 @@ list the profile requires it to carry.
 | `T`, `delta`, `L` | **yes, M2** | timeout parameters; `T` is table policy, not a fixed rule (§3.4) |
 | `G`, `E` | **no** | strictly derived (`G = L + Δ`, `E = T + G`). Transmitting them would let two peers disagree about values that have no independent existence |
 | `timeout_policy_version` | **yes, M2** | so a future change is a clean wire break, not a silent split |
-| deal policy | already bound | `session.py:928-929` |
+| deal policy | already bound | `session.py:937-938` |
 | `seats_in`, button | already bound | frozen participant set and deal map |
 | straddle enablement | **no — and not offered** | §3.2's house ruling is that no P2P hand contains a straddle, so there is nothing to bind. The `straddles` flag the lobby already ships inside `table_settings` (`onboarding.py:842`) is **not** a binding of this field and must not be read as one — nothing consumes it (C5). If straddles are ever enabled here it becomes consensus-critical the moment they are, and must be bound in the same pre-image: replicas that disagree about it differ in blinds, in `min_raise` and in the first actor |
 | big-blind ante order | **no — fixed by this profile** | not a parameter: §3.2 adopts RP-11's big-blind-first calculation for every table. It is listed because it is consensus-critical and someone will eventually want the alternative (ante-first) as an option; providing it would be a ruling change and a revision bump, not a table option |
