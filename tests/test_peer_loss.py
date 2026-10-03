@@ -388,6 +388,27 @@ def test_a_busted_host_lets_a_seat_that_busted_since_leave(monkeypatch):
     assert sessions["peer0"].terminal_state is None      # still the relay
 
 
+def test_a_confirmation_counts_only_for_the_seat_the_host_reported(
+        monkeypatch):
+    """The host has reported seat 3, which nobody needed, and play goes on.
+    Seat 1 then sends a confirmation naming seat 2, which is connected and
+    which the host never reported. A report of one seat must not let a
+    joiner end the table on another and pin the blame on it."""
+    bus, sessions, order = busted_host_table(monkeypatch)
+    bus.unregister("peer3")
+    sessions["peer0"].handle_disconnect("peer3")
+    bus.drain()
+    assert [sessions[c].terminal_state for c in order[:3]] == [None] * 3
+
+    sessions["peer1"]._send_hostless({"type": "peer_lost",
+                                      "hand": sessions["peer1"]._hand_no,
+                                      "lost_seat": 2, "ended": True})
+    bus.drain()
+
+    assert [sessions[c].terminal_state for c in order[:3]] == [None] * 3
+    assert {sessions[c].next_p2p_hand() for c in order[1:3]} == {"started"}
+
+
 def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
         monkeypatch):
     """Seat 3 has busted too and stays to watch. Seat 2 drops mid-hand.
