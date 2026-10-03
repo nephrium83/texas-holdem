@@ -2636,8 +2636,10 @@ class Session:
                 result = r.finish(force_tabled=(r.phase == PHASE_SHOWDOWN))
             except ChipConservationError as exc:
                 # The existing void path: the payout the replica computed is
-                # discarded, and the redeal starts from the stacks this hand
-                # was dealt with. The reason lands in the hand record.
+                # discarded, and the reason lands in the hand record. Peers
+                # that settled the hand end the table over the void (see
+                # _on_hand_void); only if every replica failed alike is the
+                # hand redealt from the stacks it was dealt with.
                 self._void_hand(str(exc))
                 return False
             self.hand_result = result

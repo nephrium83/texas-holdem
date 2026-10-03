@@ -249,10 +249,13 @@ class ReplicaTable:
         Chips are counted after settling: every pot and refund must land
         back in a stack, so the stacks sum to start_total. A mismatch raises
         ChipConservationError with no result recorded and the phase
-        unchanged, so the session can void the hand and redeal from the
-        stacks it started with. The engine has already paid out by then:
-        this replica's stacks and state_digest() show the non-conserving
-        chips and mean nothing. Read the session's last_settled_stacks."""
+        unchanged, and the session voids the hand. If every replica fails
+        the same way, it is redealt from the stacks it started with. If the
+        others settled it, the table ends instead, because the settlements
+        disagree (Session._settlement_disagrees). The engine has already
+        paid out by then: this replica's stacks and state_digest() show the
+        non-conserving chips and mean nothing. Read the session's
+        last_settled_stacks."""
         if self.phase not in (PHASE_SHOWDOWN, PHASE_HAND_OVER):
             raise RuntimeError(f"cannot settle in phase {self.phase}")
         if len(self.engine.contested()) > 1 and len(self.engine.board) < 5:

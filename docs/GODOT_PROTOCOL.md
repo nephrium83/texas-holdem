@@ -324,10 +324,17 @@ clients alike, including a seat that busted and has not yet sent `next_hand`.
 Any authenticated peer may fail the current hand closed. A locally detected
 deal failure, replica desync, or settlement that does not add up to the chips
 the hand was dealt with broadcasts an idempotent signed hand-void message;
-every current participant enters `phase: "void"` and uses the same redeal
-inputs. In an n-of-n protocol, a malicious peer can already halt by
-disconnecting, so v1 favors safety and attribution over trying to continue a
-possibly divergent hand.
+every current participant that has not settled the hand enters
+`phase: "void"` and uses the same redeal inputs. In an n-of-n protocol, a
+malicious peer can already halt by disconnecting, so v1 favors safety and
+attribution over trying to continue a possibly divergent hand.
+
+A settlement that does not add up is usually found on one replica only, after
+the others have settled the hand. The two sides then disagree about the
+settlement, and the table ends with `ABORTED_PROTOCOL` (below) at the stacks
+the hand was dealt from; nothing is redealt. Only a failure every replica
+shares, such as a deterministic engine bug, voids the hand everywhere and
+redeals it.
 
 Two failures end the table rather than the hand. The session reaches a
 terminal state on every peer and no further hand is dealt. Chips stand at the
