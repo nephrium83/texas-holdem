@@ -12,9 +12,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem import client_view
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
+from tests.showdown_rig import rig_showdowns
 
 import importlib
 try:
@@ -343,6 +345,40 @@ def test_a_seated_peer_ignores_a_session_end_unlike_its_settlement(change):
     assert not s._session_over
 
 
+def test_a_seat_busted_before_pressing_next_accepts_the_later_end(
+        monkeypatch):
+    """Seat 2 busts in hand 1 and never presses Next. Seats 0 and 1 play
+    hand 2 to a winner, whose session_end names hand 2 -- a hand seat 2
+    was never dealt. It stopped following hands at its bust, as a
+    spectator does, so it checks the notice as one does. Ignoring it, as a
+    seat still playing would, left it waiting for good: the notice is
+    sent once, and Next would only report it eliminated."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 2, 0)
+    bus, sessions, order = make_table(3, stacks=[500, 500, 20])
+    _shove_hand(bus, sessions, order, alive=[0, 1, 2], folding=[0])
+    # Seat 1 opens all in, seat 2 calls all in for 20 and seat 0 folds its
+    # big blind: seat 1's aces take 20 + 20 + 10.
+    assert sessions[order[0]].replica.stacks == [490, 530, 0]
+    busted = sessions[order[2]]
+    assert {sessions[c].next_p2p_hand() for c in order[:2]} == {"started"}
+    bus.drain()
+    rank(1, 0, 2)
+    _shove_hand(bus, sessions, order, alive=[0, 1])
+    assert sessions[order[0]].replica.stacks == [0, 1020, 0]
+    assert busted.terminal_state is None
+
+    assert sessions[order[1]].next_p2p_hand() == "session_over"
+    bus.drain()
+
+    for s in (busted, sessions[order[0]]):
+        assert s.terminal_state == Session.ENDED_NORMAL
+        assert s._final_stacks == [0, 1020, 0]
+        assert s._session_winner == 1
+    assert client_view.snapshot(busted)["turn"]["state"] == "match_complete"
+    assert busted.next_p2p_hand() == "session_over"
+
+
 def test_heads_up_positions_and_play():
     """Down to two seats: the engine's heads-up override (button = SB,
     acts first preflop) holds, and a heads-up hand plays to settle across
@@ -490,14 +526,17 @@ def test_replica_desync_void_propagates_and_redeals():
     assert_synced(sessions, order)
 
 
-def _shove_hand(bus, sessions, order, alive):
-    """Everyone still alive goes all-in; returns the settled result."""
+def _shove_hand(bus, sessions, order, alive, folding=()):
+    """Everyone still alive goes all-in, except that the seats folding
+    fold; returns the settled result."""
     ref = alive[0]
     while sessions[order[ref]].replica.phase == PHASE_BETTING:
         r = sessions[order[ref]].replica
         seat = r.actor
         lg = r.engine.legal(seat)
         a = ("raise", lg["max_to"]) if lg["can_raise"] else ("call", 0)
+        if seat in folding:
+            a = ("fold", 0)
         assert sessions[order[seat]].send_bet_action(*a) == "applied"
         bus.drain()
     return sessions[order[ref]].hand_result

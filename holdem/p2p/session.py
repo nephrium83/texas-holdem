@@ -1913,8 +1913,10 @@ class Session:
         disagreement about the settled stacks is hand_settled's to catch,
         with the digest that proves it.
 
-        A busted spectator stopped following hands, so it has nothing to
-        compare and keeps the shape and total checks alone.
+        A seat that busted while others play on stopped following hands at
+        its bust, whether or not it has pressed Next yet (see _eliminated),
+        so it has nothing to compare and keeps the shape and total checks
+        alone. The later-hand notice is the only one it will ever get.
         """
         # Authorized at ingress; see _admit_hostless. The seat is checked for
         # shape only, and NOT coerced -- ingress declines to authorize a
@@ -1930,7 +1932,7 @@ class Session:
             return
         if hand < self._hand_no or len(stacks) != len(self._seat_order):
             return
-        if not self._p2p_spectator:
+        if not self._eliminated():
             r = self._replica
             if (hand != self._hand_no or self.hand_result is None
                     or r is None or stacks != r.stacks):
@@ -3113,6 +3115,22 @@ class Session:
                 return False
             return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
         return seat in r.seats_dealt
+
+    def _eliminated(self) -> bool:
+        """Is the local seat out while the match goes on without it?
+
+        True once next_p2p_hand has said "eliminated", and already from the
+        settle that busted it: the seats with chips deal on without it
+        whether or not it has pressed Next, so either way its replica stops
+        at that hand and soon goes stale.
+        """
+        if self._p2p_spectator:
+            return True
+        r = self._replica
+        if r is None or self.hand_result is None:
+            return False
+        return (r.stacks[self.local_seat] == 0
+                and sum(1 for stack in r.stacks if stack > 0) >= 2)
 
     def _seat_label(self, seat: int) -> str:
         """'seat 2 (Cara)' -- the seat as a player would recognise it."""
