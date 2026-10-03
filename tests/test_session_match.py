@@ -655,6 +655,9 @@ def test_a_settlement_that_differs_ends_the_table_instead_of_looping():
         assert s.terminal_reason.startswith(
             "table state disagrees on hand 1: seat ")
         assert s.next_p2p_hand() == "session_over"
+        # Not each peer's own side of the dispute: the stacks the hand was
+        # dealt from, which every seat agreed on.
+        assert s.last_settled_stacks == [500, 500, 500], cid
 
 
 def test_a_void_of_a_hand_this_peer_settled_ends_the_table():
@@ -679,6 +682,9 @@ def test_a_late_void_of_the_previous_hand_still_ends_the_table():
     target.handle_message(order[2], {"type": "hand_void", "hand": 1,
                                      "seat": 2, "reason": "late"})
     assert target.terminal_state == Session.ABORTED_PROTOCOL
+    # Hand 2 was dealt from this peer's settlement of hand 1, the one in
+    # dispute; the figure goes back to what hand 1 was dealt from.
+    assert target.last_settled_stacks == [500, 500, 500]
 
 
 def test_a_seat_that_settled_a_hand_this_peer_voided_ends_the_table():

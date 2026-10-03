@@ -632,11 +632,16 @@ class Session:
         self._p2p_spectator = False
         # Settlement agreement (hand_settled): how this replica ended its
         # most recent hand -- the hand number, its settled digest or None
-        # for a void, and the seats dealt into it -- and the digests peers
-        # reported for the CURRENT hand before it ended here, by seat.
+        # for a void, the seats dealt into it and the stacks it was dealt
+        # from -- and the digests peers reported for the CURRENT hand
+        # before it ended here, by seat. Once a disagreement ends the
+        # table, _agreed_stacks holds that hand's carry-in: the last
+        # settlement the table agreed on.
         self._ended_hand: int | None = None
         self._ended_digest: str | None = None
         self._ended_seats: frozenset = frozenset()
+        self._ended_from: list | None = None
+        self._agreed_stacks: list | None = None
         self._early_settled: dict[int, str] = {}
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
@@ -1990,6 +1995,8 @@ class Session:
         self._ended_digest = digest
         self._ended_seats = (frozenset(self._replica.seats_dealt)
                              if self._replica is not None else frozenset())
+        self._ended_from = (list(self._hand_stacks)
+                            if self._hand_stacks else None)
         early, self._early_settled = self._early_settled, {}
         for seat in sorted(early):
             if early[seat] != digest:
@@ -2005,8 +2012,11 @@ class Session:
         for good, and a peer that already settled ignores the void anyway.
         Nothing at the table can say which side is right. Every seat that
         sees the other side's message reaches this too, so the table ends
-        everywhere rather than splitting.
+        everywhere rather than splitting, and every seat then reports the
+        stacks that hand was dealt from (see last_settled_stacks) rather
+        than its own side of the dispute.
         """
+        self._agreed_stacks = self._ended_from
         def ended(d):
             return "voided it" if d is None else f"settled it as {d[:16]}"
         self.terminate(
@@ -3419,6 +3429,10 @@ class Session:
         a protocol abort), and it is equally valid while play continues.
 
           * match over:                       the final stacks
+          * ended over a disputed settlement: the stacks that hand was
+                                              dealt from, the last
+                                              settlement the table agreed
+                                              on (see hand_settled)
           * current hand settled:             its settled stacks
           * hand in progress, or voided:      the stacks it was dealt from,
                                               i.e. the previous settlement
@@ -3426,10 +3440,14 @@ class Session:
           * no hand begun yet:                None
 
         Derived on every read, never stored. It is this replica's own
-        settlement; hand_settled is what checks that every seat agrees. A
+        settlement; hand_settled is what checks that every seat agrees,
+        and once it finds they do not, the figure falls back to the one
+        they last agreed on, so no seat reports its side of the dispute. A
         busted spectator's figure stops at the hand it busted in until
         session_end brings the final stacks.
         """
+        if self._agreed_stacks is not None:
+            return list(self._agreed_stacks)
         if self._final_stacks is not None:
             return list(self._final_stacks)
         r = self._replica
