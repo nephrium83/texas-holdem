@@ -17,11 +17,14 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem import client_view
+from holdem.engine import Brain
 from holdem.p2p.inmemory_transport import InMemoryBus
+from holdem.p2p.session import Session
 from holdem.sidecar_launcher import (
     BotDriver, _deal_first_hand, _make_sessions, _make_start_table,
     _wire_hand_start, _wrap_with_drain,
 )
+from tests.showdown_rig import rig_showdowns
 
 import importlib
 try:
@@ -88,6 +91,38 @@ def test_next_hand_advances_after_bots_have_already_auto_advanced():
     assert verdict == "started"
     snapshot = client_view.snapshot(human_session)
     assert snapshot["hand_num"] == 2
+
+
+def test_a_busted_human_sees_the_match_end_without_pressing_next(
+        monkeypatch):
+    """The human shoves its short stack, loses, and never presses Next
+    Hand. The bots play on without it to a winner, all inside the drain of
+    the human's one action. The winner's session_end names a hand the human
+    was never dealt, and it is the only notice the human gets, so the
+    client must end on the match result from it.
+
+    The cards and the bots are pinned: seat 1 wins every showdown and both
+    bots only check or call, so seat 2 bleeds 50 a hand until it is out.
+    """
+    rig_showdowns(monkeypatch)(1, 2, 0)
+    monkeypatch.setattr(Brain, "decide", lambda self, engine, seat:
+                        ("call", 0))
+    bus, sessions, order, human = _build_table(seats=3)
+    for cid in order:
+        sessions[cid]._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        sessions[cid].start_p2p_hand(hand_no=1, names=list(order),
+                                     stacks=[100, 300, 300], sb=25, bb=50)
+    bus.drain()
+    assert human.replica.actor == HUMAN_SEAT       # the bots have called
+
+    human.send_bet_action("raise", 100)
+
+    assert human._hand_no == 1                     # it never pressed Next
+    assert human.replica.stacks == [0, 500, 200]   # aces took 3 x 100
+    assert human.terminal_state == Session.ENDED_NORMAL
+    snapshot = client_view.snapshot(human)
+    assert snapshot["turn"]["state"] == "match_complete"
+    assert snapshot["final_stacks"] == [0, 700, 0]
 
 
 def test_bot_driver_is_a_no_op_for_a_session_with_nothing_to_do():
