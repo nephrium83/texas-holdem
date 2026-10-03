@@ -352,6 +352,13 @@ class Session:
     #: disconnect must never pay) and 4 (committed chips stay committed)
     #: forbid exactly that. The approved beta plan asks for it, and the
     #: exception is not yet recorded as a dated ROADMAP decision.
+    #:
+    #: ABORTED_PROTOCOL over a disputed settlement has the same refund. A
+    #: seat whose first hand_settled report lies about a hand it lost
+    #: ends the table at that hand's carry-in, undoing the hand. It must
+    #: lie before the next hand is dealt, which waits on its report, and a
+    #: seat that contradicts a settlement it already reported gets no
+    #: rollback (see last_settled_stacks).
     PEER_LOST = "PEER_LOST"
     ENDED_NORMAL = "ENDED_NORMAL"
     ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
@@ -640,15 +647,17 @@ class Session:
         self._p2p_spectator = False
         # Settlement agreement (hand_settled): how this replica ended its
         # most recent hand -- the hand number, its settled digest or None
-        # for a void, the seats dealt into it and the stacks it was dealt
-        # from -- and the digests peers reported for the CURRENT hand
-        # before it ended here, by seat. Once a disagreement ends the
-        # table, _agreed_stacks holds that hand's carry-in: the last
-        # settlement the table agreed on.
+        # for a void, the seats dealt into it, the stacks it was dealt
+        # from, and the seats that have reported that same settlement, this
+        # one included -- and the digests peers reported for the CURRENT
+        # hand before it ended here, by seat. Once a seat's first report
+        # disagrees and ends the table, _agreed_stacks holds that hand's
+        # carry-in: the last settlement the table agreed on.
         self._ended_hand: int | None = None
         self._ended_digest: str | None = None
         self._ended_seats: frozenset = frozenset()
         self._ended_from: list | None = None
+        self._ended_agreed: set[int] = set()
         self._agreed_stacks: list | None = None
         self._early_settled: dict[int, str] = {}
         # Seats the host reported dropped while it could not judge whether
@@ -1984,6 +1993,12 @@ class Session:
         signed it, not that the signer played: a busted seat, or one never
         dealt, settled nothing and could otherwise end a table it is no
         part of.
+
+        A matching report is recorded, and the next hand waits until every
+        seat dealt into this one has sent one (see next_p2p_hand), so a
+        seat cannot hold its report back and dispute the hand once the
+        next is underway. The client is told when one arrives: Next may
+        now go through.
         """
         seat, digest, hand = msg.get("seat"), msg.get("digest"), msg.get("hand")
         if not _is_seat(seat) or not isinstance(digest, str):
@@ -1991,8 +2006,13 @@ class Session:
         if not isinstance(hand, int) or isinstance(hand, bool):
             return
         if hand == self._ended_hand:
-            if seat in self._ended_seats and digest != self._ended_digest:
+            if seat not in self._ended_seats:
+                return
+            if digest != self._ended_digest:
                 self._settlement_disagrees(seat, hand, digest)
+            elif seat not in self._ended_agreed:
+                self._ended_agreed.add(seat)
+                self._notify_state_changed()
             return
         if not self._hand_msg_ok(conn_id, msg):
             return                       # a later hand buffers; older drops
@@ -2010,11 +2030,13 @@ class Session:
                              if self._replica is not None else frozenset())
         self._ended_from = (list(self._hand_stacks)
                             if self._hand_stacks else None)
+        self._ended_agreed = {self.local_seat} if digest is not None else set()
         early, self._early_settled = self._early_settled, {}
         for seat in sorted(early):
             if early[seat] != digest:
                 self._settlement_disagrees(seat, self._hand_no, early[seat])
                 return
+            self._ended_agreed.add(seat)
 
     def _settlement_disagrees(self, seat: int, hand: int,
                               theirs: Optional[str]) -> None:
@@ -2028,14 +2050,25 @@ class Session:
         everywhere rather than splitting, and every seat then reports the
         stacks that hand was dealt from (see last_settled_stacks) rather
         than its own side of the dispute.
+
+        Unless the seat had already reported this peer's settlement. Then
+        it is contradicting itself, not this peer, and the hand it agreed
+        to stands: the table still ends, on that seat, but rolling back to
+        the carry-in would let a seat that lost the hand undo it, and keep
+        a better figure than leaving the table gets it. A non-host seat's
+        messages reach every peer in the order it sent them, through the
+        host, so every peer judges the retraction the same way.
         """
-        self._agreed_stacks = self._ended_from
+        retracted = seat in self._ended_agreed
+        if not retracted:
+            self._agreed_stacks = self._ended_from
         def ended(d):
             return "voided it" if d is None else f"settled it as {d[:16]}"
         self.terminate(
             self.ABORTED_PROTOCOL,
             f"table state disagrees on hand {hand}: seat {seat} "
-            f"{ended(theirs)}, this peer {ended(self._ended_digest)}",
+            f"{ended(theirs)}, this peer {ended(self._ended_digest)}"
+            + (f", as seat {seat} itself had reported" if retracted else ""),
             seat=seat)
 
     def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
@@ -2276,7 +2309,9 @@ class Session:
           "eliminated"   -- the LOCAL seat busted: this session stops
                             playing and drops later hands' gameplay messages;
                             final lifecycle updates are still accepted
-          "not_ready"    -- the previous hand is still in progress
+          "not_ready"    -- the previous hand is still in progress, or it
+                            settled and a seat dealt into it has not yet
+                            reported the same settlement (hand_settled)
         """
         if self.terminal_state is not None:
             # A terminated session has no next hand. Reported as
@@ -2315,6 +2350,12 @@ class Session:
             self._msg_buffer.clear()
             self._notify_state_changed()
             return "eliminated"
+        if not voided and self._ended_agreed != self._ended_seats:
+            # No hand is dealt on a settlement a dealt seat has not
+            # confirmed. Otherwise that seat could hold its report back,
+            # watch the next hand, and dispute the last one if it went
+            # badly. A match that is over deals nothing, so it does not wait.
+            return "not_ready"
         started = self._begin_p2p_hand(hand_no=self._hand_no + 1,
                                        stacks=stacks, positions=positions)
         return "started" if started else "session_over"
@@ -3169,9 +3210,11 @@ class Session:
 
         Before the first hand every seat is needed. During a hand, or after
         a void (the redeal deals the same seats), the seats dealt in. After
-        a settle, the seats with chips, which the next hand will deal --
-        if there is one: with at most one seat holding chips the match is
-        over, and next_p2p_hand ends it normally whoever has left.
+        a settle, the seats with chips, which the next hand will deal, and
+        any seat dealt in whose settlement report has not arrived, which
+        the next hand waits on (see next_p2p_hand) -- if there is a next
+        hand: with at most one seat holding chips the match is over, and
+        next_p2p_hand ends it normally whoever has left.
 
         Only a peer still playing can answer. A busted one's replica stopped
         at the hand it busted in, so seats that have busted since would
@@ -3183,6 +3226,8 @@ class Session:
         if self.hand_result is not None:
             if sum(1 for stack in r.stacks if stack > 0) < 2:
                 return False
+            if seat in self._ended_seats and seat not in self._ended_agreed:
+                return True
             return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
         return seat in r.seats_dealt
 
@@ -3545,7 +3590,10 @@ class Session:
           * ended over a disputed settlement: the stacks that hand was
                                               dealt from, the last
                                               settlement the table agreed
-                                              on (see hand_settled)
+                                              on (see hand_settled) --
+                                              unless the disputing seat
+                                              had reported this peer's
+                                              settlement itself: then that
           * current hand settled:             its settled stacks
           * hand in progress, or voided:      the stacks it was dealt from,
                                               i.e. the previous settlement
@@ -3554,10 +3602,15 @@ class Session:
 
         Derived on every read, never stored. It is this replica's own
         settlement; hand_settled is what checks that every seat agrees,
-        and once it finds they do not, the figure falls back to the one
-        they last agreed on, so no seat reports its side of the dispute. A
-        busted spectator's figure stops at the hand it busted in until
-        session_end brings the final stacks.
+        and once a seat's first report finds they do not, the figure falls
+        back to the one they last agreed on, so no seat reports its side of
+        the dispute. That rollback hands back the disputed hand's pot, as
+        PEER_LOST does, so a seat that would lose a hand can lie in its
+        first report to undo it. A seat that contradicts a settlement it
+        has already reported cannot: the figure stays at the settlement it
+        reported (see _settlement_disagrees). A busted
+        spectator's figure stops at the hand it busted in until session_end
+        brings the final stacks.
 
         Read it as the session owner (``with session._owner``). It combines
         several fields that the owner thread rewrites together -- starting

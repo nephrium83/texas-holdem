@@ -173,7 +173,10 @@ For `start_game`, `verdict` is one of:
 For `next_hand`, `verdict` is one of:
 
 - `"started"` — the next hand is underway.
-- `"not_ready"` — the current hand has not settled or voided.
+- `"not_ready"` — the current hand has not settled or voided, or it settled
+  and a seat dealt into it has not yet reported the same settlement (see the
+  lifecycle section). A fresh snapshot is pushed when each report arrives, so
+  the client can send `next_hand` again.
 - `"eliminated"` — this seat is busted and no longer participates in deals.
 - `"session_over"` — the match has ended.
 
@@ -344,12 +347,18 @@ paid.
   `docs/ROADMAP.md` forbid it, and no dated decision records the exception
   yet.
 - **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
-  broadcasts a signed digest of the table it settled (`hand_settled`). The
-  table ends with the reason "table state disagrees" when a seat dealt into
-  that hand reports a different digest, or voids a hand this peer settled.
-  A void cannot cure it, because each side would redeal from its own stacks.
-  Chips then stand where that hand was dealt from, the last settlement the
-  table agreed on.
+  broadcasts a signed digest of the table it settled (`hand_settled`), and
+  no seat deals the next hand until every seat dealt into the last one has
+  reported the same digest. The table ends with the reason "table state
+  disagrees" when a seat dealt into that hand reports a different digest, or
+  voids a hand this peer settled. A void cannot cure it, because each side
+  would redeal from its own stacks. If that is the seat's first report on the
+  hand, nothing at the table can say which side is right, so chips stand where
+  that hand was dealt from, the last settlement the table agreed on. That
+  hands back the hand's pot, as `PEER_LOST` does, so a seat can undo a hand it
+  lost by lying in its first report. A seat that contradicts a digest it has
+  already reported is contradicting itself: the table ends on that seat, and
+  the settlement it reported stands.
 
 A seat still playing accepts the signed `session_end` only when it names that
 seat's own settled hand and exactly its settled stacks. Anything else is

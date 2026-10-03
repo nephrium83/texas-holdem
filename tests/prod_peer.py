@@ -154,6 +154,13 @@ def _status_owned(sess: Session, host_admission) -> dict:
                           and replica.actor == local_seat else None),
         "settled":       sess.hand_result is not None,
         "result":        sess.hand_result,
+        # Seats whose matching hand_settled this peer has admitted for the
+        # current hand, itself included: counted only after ingress checked
+        # the signature and seat and the digest compared equal. The next
+        # hand waits for every dealt seat.
+        "agreed":        (sorted(getattr(sess, "_ended_agreed", ()))
+                          if getattr(sess, "_ended_hand", None)
+                          == getattr(sess, "_hand_no", None) else []),
         "last_settled_stacks": sess.last_settled_stacks,
         "terminal":      sess.terminal_state,
         "terminal_reason": sess.terminal_reason,

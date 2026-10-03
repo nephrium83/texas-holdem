@@ -9,8 +9,9 @@ Policy enforced here:
 
   in play   a seat the current or next hand needs -- every seat before the
             first hand, the dealt seats during a hand or after a void, the
-            seats with chips after a settle -- ends the table with
-            PEER_LOST and a reason naming the seat.
+            seats with chips after a settle and any dealt seat whose
+            settlement report the next hand still waits on -- ends the
+            table with PEER_LOST and a reason naming the seat.
   not       a seat that has busted out, any seat once a settle leaves at
             most one seat with chips (the match is decided), or any drop in
             the lobby, is just a roster change.
@@ -210,6 +211,32 @@ def test_a_seat_that_busts_may_leave_before_the_next_hand(monkeypatch):
         assert sessions[c].terminal_state is None
         assert sessions[c].replica.seats_dealt == [0, 1]
         assert None not in sessions[c].deal_hole_cards
+
+
+def test_a_seat_that_busts_and_leaves_before_reporting_ends_the_table(
+        monkeypatch):
+    """As above, except seat 2 goes before its settlement report does. The
+    next hand waits on that report, which can no longer come, so the seat
+    is still needed: the table ends rather than waiting for it forever.
+    The hand settled everywhere, so it stands."""
+    rig_showdowns(monkeypatch)(1, 2, 0)
+    bus, sessions, order = table(3, stacks=[500, 500, 20])
+    leaver = sessions["peer2"]
+    send = leaver._transport.broadcast
+    leaver._transport.broadcast = lambda msg: (
+        None if msg.get("type") == "hand_settled" else send(msg))
+    play(bus, sessions, order, folds(0))
+    host = sessions["peer0"]
+    assert host.replica.stacks == [490, 530, 0]
+    assert host.next_p2p_hand() == "not_ready"
+    bus.unregister("peer2")
+
+    host.handle_disconnect("peer2")
+    bus.drain()
+
+    for c in order[:2]:
+        assert sessions[c].terminal_state == Session.PEER_LOST, c
+        assert sessions[c].last_settled_stacks == [490, 530, 0]
 
 
 @pytest.mark.parametrize("leaver", ["winner", "loser"])

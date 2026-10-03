@@ -655,12 +655,49 @@ def test_long_session_conserves_chips_and_stays_synced():
 # can never agree.
 
 def test_every_seat_reports_the_same_settlement():
+    """Every seat holds a matching report from each of the others: the
+    broadcast reached it and was compared, not merely sent."""
     bus, sessions, order = make_table(3)
     checkdown(bus, sessions, order)
     digests = {sessions[c]._ended_digest for c in order}
     assert len(digests) == 1 and None not in digests
     assert digests == {sessions[order[0]].replica.state_digest()}
     assert all(sessions[c].terminal_state is None for c in order)
+    assert all(sessions[c]._ended_agreed == {0, 1, 2} for c in order)
+
+
+def _hold_settlement_reports(session):
+    """Keep session's hand_settled broadcasts back; returns the release."""
+    transport = session._transport
+    send, held = transport.broadcast, []
+
+    def broadcast(msg):
+        if msg.get("type") == "hand_settled":
+            held.append(msg)
+        else:
+            send(msg)
+    transport.broadcast = broadcast
+
+    def release():
+        transport.broadcast = send
+        for msg in held:
+            send(msg)
+    return release
+
+
+def test_the_next_hand_waits_for_every_seats_settlement_report():
+    """Seat 2's report is late. Dealing hand 2 before it arrives would let
+    seat 2 watch hand 2 and then dispute hand 1, so nobody deals it yet."""
+    bus, sessions, order = make_table(3)
+    release = _hold_settlement_reports(sessions[order[2]])
+    checkdown(bus, sessions, order)
+    for cid in order[:2]:
+        assert sessions[cid].hand_result is not None
+        assert sessions[cid].next_p2p_hand() == "not_ready"
+    release()
+    bus.drain()
+    assert set(next_all(bus, sessions, order).values()) == {"started"}
+    assert_synced(sessions, order)
 
 
 def test_a_settlement_that_differs_ends_the_table_instead_of_looping():
@@ -711,19 +748,56 @@ def test_a_void_of_a_hand_this_peer_settled_ends_the_table():
         "settled it as ")
 
 
-def test_a_late_void_of_the_previous_hand_still_ends_the_table():
-    """The void may arrive after this peer has dealt the next hand."""
+def test_a_late_void_of_the_previous_hand_still_ends_the_table(monkeypatch):
+    """The void may arrive after this peer has dealt the next hand. Seat 2
+    had reported the settlement it now voids, so it is seat 2 that is
+    contradicting itself: the table ends, and hand 1 stands."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
     bus, sessions, order = make_table(3)
     checkdown(bus, sessions, order)
     target = sessions[order[0]]
+    settled = target.replica.stacks
+    assert settled == [520, 490, 490]                # seat 0 took 3 x 10
     assert target.next_p2p_hand() == "started"
     assert target._hand_no == 2
     target.handle_message(order[2], {"type": "hand_void", "hand": 1,
                                      "seat": 2, "reason": "late"})
     assert target.terminal_state == Session.ABORTED_PROTOCOL
-    # Hand 2 was dealt from this peer's settlement of hand 1, the one in
-    # dispute; the figure goes back to what hand 1 was dealt from.
-    assert target.last_settled_stacks == [500, 500, 500]
+    assert target.terminal_reason.endswith(", as seat 2 itself had reported")
+    assert target.last_settled_stacks == settled
+
+
+@pytest.mark.parametrize("retraction", [
+    {"type": "hand_void", "hand": 1, "reason": "late"},
+    {"type": "hand_settled", "hand": 1, "digest": "ab" * 32},
+], ids=["void", "other-digest"])
+def test_a_seat_cannot_take_back_a_settlement_every_seat_reported(
+        monkeypatch, retraction):
+    """Seat 2 loses hand 1 and every seat reports the same digest. In hand
+    2 seat 2 signs a fresh message disputing hand 1. Rolling back to hand
+    1's carry-in would erase a hand the whole table agreed on, and pay
+    seat 2 better than leaving does: a disconnect here ends PEER_LOST at
+    hand 1's settlement (test_peer_loss). It gets that figure and no
+    better, with the blame."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
+    bus, sessions, order = make_table(3)
+    checkdown(bus, sessions, order)
+    settled = sessions[order[0]].replica.stacks
+    assert settled == [520, 490, 490]                # seat 0 took 3 x 10
+    assert all(sessions[c]._ended_agreed == {0, 1, 2} for c in order)
+    assert set(next_all(bus, sessions, order).values()) == {"started"}
+    act(bus, sessions, order, "call")
+
+    sessions[order[2]]._send_hostless(dict(retraction))
+    bus.drain()
+
+    for cid in order[:2]:
+        s = sessions[cid]
+        assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
+        assert s.terminal_record.initiating_seat == 2
+        assert s.terminal_reason.startswith(
+            "table state disagrees on hand 1: seat 2 ")
+        assert s.last_settled_stacks == settled, cid
 
 
 def test_a_seat_that_settled_a_hand_this_peer_voided_ends_the_table():

@@ -189,26 +189,20 @@ def _assert_agreed(statuses, total):
     return ref
 
 
-def _heard_every_settlement(seated, hand):
-    """Each peer received hand hand's hand_settled from every other seat,
-    over the signed wire.
+def _agreed_by_every_seat(seated, hand):
+    """Each peer admitted hand hand's hand_settled from every other seat,
+    over the signed wire, and found it matched its own settlement.
 
-    The agreement check is otherwise invisible here: peers that never
-    exchanged a report still agree, so every other assertion passes with
-    the broadcast removed. Every seat in these tests is dealt every hand.
+    Read from each peer's own status, which counts a report only once
+    ingress has checked who signed it and the handler has compared it.
+    Counting arrivals instead still passed with the comparison removed.
+    Every seat in these tests is dealt every hand, and the next hand waits
+    for all of their reports, so Next is pressed only after this.
     """
-    for me, p in enumerate(seated):
-        want = set(range(len(seated))) - {me}
-        deadline = time.monotonic() + _left(10.0)
-        while True:
-            heard = {e["seat"] for e in p.all_of("recv")
-                     if e.get("mtype") == "hand_settled"
-                     and e.get("hand") == hand}
-            if heard >= want or time.monotonic() >= deadline:
-                break
-            time.sleep(0.02)
-        assert heard == want, \
-            f"{p.label} heard hand {hand} settled by {sorted(heard)}"
+    want = list(range(len(seated)))
+    for p in seated:
+        _until(p, lambda s: s["hand_no"] == hand and s["agreed"] == want,
+               f"every seat's matching report on hand {hand}")
 
 
 def _next_hand(seated):
@@ -279,7 +273,7 @@ def test_two_seats_play_ten_hands_and_agree_on_every_one(table):
                 assert st["last_settled_stacks"] == settled
         start = st["last_settled_stacks"]
         ref = _assert_agreed(_play_hand(seated, choose), total=2000)
-        _heard_every_settlement(seated, hand)
+        _agreed_by_every_seat(seated, hand)
         if choose is _all_in_folded_to:
             # Heads-up the button acts first. It shoved its whole stack, so
             # everything but the big blind it was folded to comes back.
@@ -307,7 +301,7 @@ def test_three_unequal_stacks_all_in_build_side_pots(table):
     """
     seated = table([100, 300, 500])
     ref = _assert_agreed(_play_hand(seated, _all_in), total=900)
-    _heard_every_settlement(seated, 1)
+    _agreed_by_every_seat(seated, 1)
     pots = ref["result"]["pots"]
     assert len(pots) >= 2
     assert [(p["amount"], p["eligible"]) for p in pots] == \
@@ -330,6 +324,7 @@ def test_a_joiner_killed_mid_hand_ends_the_table_for_every_survivor(
     seated = table([1000] * n)
     hand1 = _assert_agreed(_play_hand(seated, _raise_called),
                            total=1000 * n)["stacks"]
+    _agreed_by_every_seat(seated, 1)
     assert _next_hand(seated) == {"started"}
     for p in seated:
         _until(p, lambda s: s["hand_no"] == 2 and s["hole_complete"],
