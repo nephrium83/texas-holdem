@@ -284,7 +284,7 @@ the latest snapshot; it never advances state on its own.
 | `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` until a table is accepted |
 | `proofs_verified`| int         | shuffle proofs THIS seat has verified in the current hand      |
 | `events`      | array           | sequenced, append-only events for the current hand              |
-| `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
+| `voided`      | bool            | hand was voided (cheat/desync/chip count); chips reverted    |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
 | `result`      | object \| null  | settlement result when `phase` is `settled` (see §6)         |
 | `settlement`  | object \| null  | display-ready pot, payout, hand, refund, and local-net summary |
@@ -316,14 +316,46 @@ A busted sidecar becomes a lightweight spectator. It no longer participates in
 the mental-poker deal and ignores later hand traffic, but remains subscribed to
 the signed match lifecycle. When the final hand ends, `session_over`,
 `session_winner`, and `final_stacks` are pushed to active and eliminated
-clients alike.
+clients alike, including a seat that busted and has not yet sent `next_hand`.
 
 Any authenticated peer may fail the current hand closed. A locally detected
-deal failure or replica desync broadcasts an idempotent signed hand-void
-message; every current participant enters `phase: "void"` and uses the same
-redeal inputs. In an n-of-n protocol, a malicious peer can already halt by
+deal failure, replica desync, or settlement that does not add up to the chips
+the hand was dealt with broadcasts an idempotent signed hand-void message;
+every current participant enters `phase: "void"` and uses the same redeal
+inputs. In an n-of-n protocol, a malicious peer can already halt by
 disconnecting, so v1 favors safety and attribution over trying to continue a
 possibly divergent hand.
+
+Two failures end the table rather than the hand. The session reaches a
+terminal state on every peer and no further hand is dealt. Chips stand at the
+last settlement: the pot of a hand that had not settled is discarded, not
+paid.
+
+- **A seated peer is lost (`PEER_LOST`).** A seat's connection drops while the
+  table still needs it: it is dealt into the current hand, or, after a settle,
+  it still has chips. Only the host sees a joiner's socket close. The host ends
+  the table and tells the other seats with a signed notice, and the reason
+  names the seat. A host that has busted cannot judge the seat, so it only
+  reports the drop. A seat still playing that needs the leaver then ends the
+  table and confirms it, for the peers that cannot judge. A seat that has
+  busted may leave, and so may any seat once the match is decided. Discarding
+  the pot hands back what every seat had committed to it, the leaver's
+  included. This is a beta policy: standing invariants 1 and 4 in
+  `docs/ROADMAP.md` forbid it, and no dated decision records the exception
+  yet.
+- **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
+  broadcasts a signed digest of the table it settled (`hand_settled`). The
+  table ends with the reason "table state disagrees" when a seat dealt into
+  that hand reports a different digest, or voids a hand this peer settled.
+  A void cannot cure it, because each side would redeal from its own stacks.
+  Chips then stand where that hand was dealt from, the last settlement the
+  table agreed on.
+
+A seat still playing accepts the signed `session_end` only when it names that
+seat's own settled hand and exactly its settled stacks. Anything else is
+ignored. A seat that busted while others play on stopped following hands, so
+it checks only that the stacks add up to the table's chips and that the winner
+is the one seat with chips.
 
 ### `seats[i]`
 

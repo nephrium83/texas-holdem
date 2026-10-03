@@ -344,6 +344,14 @@ class Session:
     #: seat to finish or deal a hand. The deal is n-of-n and there is no
     #: reconnect, so the hand can never complete: the table ends, and chips
     #: stand at last_settled_stacks.
+    #:
+    #: That figure is a BETA POLICY, not neutral accounting. It hands back
+    #: the chips every seat committed to the unfinished hand, the leaver's
+    #: included, so a seat about to lose a hand can kill its process and
+    #: keep what it bet. docs/ROADMAP.md standing invariants 1 (a
+    #: disconnect must never pay) and 4 (committed chips stay committed)
+    #: forbid exactly that. The approved beta plan asks for it, and the
+    #: exception is not yet recorded as a dated ROADMAP decision.
     PEER_LOST = "PEER_LOST"
     ENDED_NORMAL = "ENDED_NORMAL"
     ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
@@ -2285,10 +2293,11 @@ class Session:
         if not voided and self.hand_result is None:
             return "not_ready"
         if voided:
-            # Chips reverted (settle never ran); redeal the same seats
-            # with the same button, a live room's misdeal rule: re-running
-            # the position advance from the SAME previous chain state
-            # reproduces the voided hand's positions exactly.
+            # Chips go back to the hand's carry-in (settle never ran, or its
+            # payout broke chip conservation and is discarded); redeal the
+            # same seats with the same button, a live room's misdeal rule:
+            # re-running the position advance from the SAME previous chain
+            # state reproduces the voided hand's positions exactly.
             stacks = list(self._hand_stacks)
             positions = self._hand_positions
         else:
@@ -2581,9 +2590,9 @@ class Session:
             try:
                 result = r.finish(force_tabled=(r.phase == PHASE_SHOWDOWN))
             except ChipConservationError as exc:
-                # The existing void path: nothing is paid, and the redeal
-                # starts from the stacks this hand was dealt with. The
-                # reason lands in the hand record.
+                # The existing void path: the payout the replica computed is
+                # discarded, and the redeal starts from the stacks this hand
+                # was dealt with. The reason lands in the hand record.
                 self._void_hand(str(exc))
                 return False
             self.hand_result = result
@@ -3524,11 +3533,13 @@ class Session:
     def last_settled_stacks(self) -> Optional[list]:
         """Each seat's chips, by seat index, as of the last settlement.
 
-        What the table owes its players if it stops now: the pot of a hand
-        that has not settled is discarded, so chips committed to it count
-        where they stood before that hand was dealt. This is the figure to
-        show once a session has terminated mid-hand (PEER_LOST, HOST_LOST,
-        a protocol abort), and it is equally valid while play continues.
+        The beta's answer to what the table owes its players if it stops
+        now: the pot of a hand that has not settled is discarded, so chips
+        committed to it count where they stood before that hand was dealt.
+        That refunds committed chips, which ROADMAP invariants 1 and 4
+        forbid; see PEER_LOST. This is the figure to show once a session
+        has terminated mid-hand (PEER_LOST, HOST_LOST, a protocol abort),
+        and it is equally valid while play continues.
 
           * match over:                       the final stacks
           * ended over a disputed settlement: the stacks that hand was
@@ -3547,6 +3558,12 @@ class Session:
         they last agreed on, so no seat reports its side of the dispute. A
         busted spectator's figure stops at the hand it busted in until
         session_end brings the final stacks.
+
+        Read it as the session owner (``with session._owner``). It combines
+        several fields that the owner thread rewrites together -- starting
+        a hand clears hand_result before it records the new hand's stacks
+        -- so a read from another thread can return a figure one settlement
+        stale.
         """
         if self._agreed_stacks is not None:
             return list(self._agreed_stacks)
