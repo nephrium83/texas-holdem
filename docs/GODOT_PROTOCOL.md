@@ -339,18 +339,22 @@ redeals it.
 Two failures end the table rather than the hand. The session reaches a
 terminal state on every peer and no further hand is dealt. Chips stand at the
 last settlement: the pot of a hand that had not settled is discarded, not
-paid.
+paid. Neither state is in the snapshot yet: a table that ended mid-hand can
+still show `you.legal`, and a betting command then returns `rejected`. A planned
+snapshot field, `terminal: {state, reason, last_settled_stacks}`, will carry
+them.
 
 - **A seated peer is lost (`PEER_LOST`).** A seat's connection drops while the
   table still needs it: it is dealt into the current hand, or, after a settle,
-  it still has chips. Only the host sees a joiner's socket close. The host ends
+  it still has chips or has not yet reported the settlement. Only the host sees a joiner's socket close. The host ends
   the table and tells the other seats with a signed notice, and the reason
   names the seat. A host that has busted cannot judge the seat, so it only
   reports the drop. A seat still playing that needs the leaver then ends the
-  table and confirms it, for the peers that cannot judge. A seat that has
-  busted may leave, and so may any seat once the match is decided. Discarding
-  the pot hands back what every seat had committed to it, the leaver's
-  included. This is a beta policy: standing invariants 1 and 4 in
+  table and confirms it, for the peers that cannot judge. Receivers accept any
+  seat's confirmation of a drop the host reported, a busted seat's included,
+  even if no seat still playing needed the leaver. A seat that has busted may
+  leave, and so may any seat once the match is decided. Discarding the pot
+  hands back what every seat had committed to it, the leaver's included. This is a beta policy: standing invariants 1 and 4 in
   `docs/ROADMAP.md` forbid it, and no dated decision records the exception
   yet.
 - **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat

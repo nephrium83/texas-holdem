@@ -1,7 +1,7 @@
 """Signed per-author, per-hand sequencing of hostless messages.
 
 Every hostless message carries ``author_seq``: a number the author stamps,
-counted per (hand, seat), covering all eight hostless types from one place
+counted per (hand, seat), covering every hostless type from one place
 on the send path and validated in one place on the receive path.
 
 What it is for

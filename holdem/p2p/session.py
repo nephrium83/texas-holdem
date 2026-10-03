@@ -2121,9 +2121,14 @@ class Session:
 
         So a seat other than the host can end the table only after the host
         has seen the seat it names drop. A seat still playing could end it
-        anyway, by leaving; a busted one could not, though it can already
-        stall the table by voiding every hand, which hand_void does not
-        limit to the seats dealt in.
+        anyway, by leaving. A busted one can too, but only this way: once
+        the host has reported a drop it can confirm it, and the table ends
+        even if no seat still playing needed the leaver. Receivers do not
+        weigh a confirmation against their own view, because a confirmer
+        still playing may be a hand away from them; a receiver that
+        ignored it would deal on with a seat that has already ended. A
+        busted seat can already stall the table by voiding every hand,
+        which hand_void does not limit to the seats dealt in.
         """
         reporter, lost = msg.get("seat"), msg.get("lost_seat")
         if not _is_seat(reporter) or not _is_seat(lost):
