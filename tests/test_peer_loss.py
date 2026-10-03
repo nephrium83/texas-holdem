@@ -11,8 +11,9 @@ Policy enforced here:
             first hand, the dealt seats during a hand or after a void, the
             seats with chips after a settle -- ends the table with
             PEER_LOST and a reason naming the seat.
-  not       a seat that has busted out, or any drop in the lobby, is just a
-            roster change.
+  not       a seat that has busted out, any seat once a settle leaves at
+            most one seat with chips (the match is decided), or any drop in
+            the lobby, is just a roster change.
 
 Chips stand at last_settled_stacks: an unsettled hand's pot is discarded,
 not paid out.
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
 from holdem.p2p.session import Player, Session
+from tests.showdown_rig import rig_showdowns
 
 import importlib
 try:
@@ -77,6 +79,27 @@ def settle_by_checkdown(bus, sessions, order):
     while sessions[order[0]].replica.phase == PHASE_BETTING:
         act(bus, sessions, order)
     assert all(sessions[c].hand_result is not None for c in order)
+
+
+def shove(r, seat):
+    lg = r.engine.legal(seat)
+    return ("raise", lg["max_to"]) if lg["can_raise"] else ("call", 0)
+
+
+def folds(*seats):
+    """Shove, except that the given seats fold."""
+    return lambda r, seat: ("fold", 0) if seat in seats else shove(r, seat)
+
+
+def play(bus, sessions, order, choose, ref=0):
+    """Play the hand out, choose(replica, seat) -> (action, amount), read
+    from seat ref's replica (one still dealt in)."""
+    while sessions[order[ref]].replica.phase == PHASE_BETTING:
+        r = sessions[order[ref]].replica
+        seat = r.actor
+        verdict = sessions[order[seat]].send_bet_action(*choose(r, seat))
+        assert verdict == "applied"
+        bus.drain()
 
 
 # --------------------------------------------------------------- in play
@@ -161,6 +184,52 @@ def test_a_seat_that_was_never_dealt_may_leave():
     settle_by_checkdown(bus, {c: sessions[c] for c in order[:2]}, order[:2])
     host.handle_disconnect("peer2")              # still not needed
     assert host.terminal_state is None
+
+
+def test_a_seat_that_busts_may_leave_before_the_next_hand(monkeypatch):
+    """Seat 2 settles with nothing and leaves before Next. The next hand
+    deals seats 0 and 1 only, so nobody waits on it and play goes on."""
+    rig_showdowns(monkeypatch)(1, 2, 0)
+    bus, sessions, order = table(3, stacks=[500, 500, 20])
+    play(bus, sessions, order, folds(0))
+    host = sessions["peer0"]
+    # Seat 1 opens all in, seat 2 calls all in for 20 and seat 0 folds its
+    # big blind: seat 1's aces take 20 + 20 + 10.
+    assert host.replica.stacks == [490, 530, 0]
+    bus.unregister("peer2")
+
+    host.handle_disconnect("peer2")
+
+    assert host.terminal_state is None
+    assert {sessions[c].next_p2p_hand() for c in order[:2]} == {"started"}
+    bus.drain()
+    for c in order[:2]:
+        assert sessions[c].terminal_state is None
+        assert sessions[c].replica.seats_dealt == [0, 1]
+        assert None not in sessions[c].deal_hole_cards
+
+
+@pytest.mark.parametrize("leaver", ["winner", "loser"])
+def test_a_decided_match_ends_normally_whoever_leaves_first(monkeypatch,
+                                                            leaver):
+    """A heads-up all-in busts one seat, and the joiner closes its client
+    before the host presses Next. Nothing is left to deal, so its leaving
+    costs the table nothing: the match ends normally, not as a lost peer.
+    """
+    rig_showdowns(monkeypatch)(*((1, 0) if leaver == "winner" else (0, 1)))
+    bus, sessions, order = table(2, stacks=[500, 500])
+    play(bus, sessions, order, shove)
+    host = sessions["peer0"]
+    final = [0, 1000] if leaver == "winner" else [1000, 0]
+    assert host.replica.stacks == final
+    bus.unregister("peer1")
+
+    host.handle_disconnect("peer1")
+
+    assert host.terminal_state is None
+    assert host.next_p2p_hand() == "session_over"
+    assert host.terminal_state == Session.ENDED_NORMAL
+    assert host.last_settled_stacks == final
 
 
 def test_a_lobby_drop_is_a_roster_change():

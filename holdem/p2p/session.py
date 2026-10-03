@@ -3099,14 +3099,18 @@ class Session:
 
         Before the first hand every seat is needed. During a hand, or after
         a void (the redeal deals the same seats), the seats dealt in. After
-        a settle, the seats with chips, which the next hand will deal. A
-        busted spectator answers from the hand it busted in, the last one
-        it followed.
+        a settle, the seats with chips, which the next hand will deal --
+        if there is one: with at most one seat holding chips the match is
+        over, and next_p2p_hand ends it normally whoever has left. A busted
+        spectator answers from the hand it busted in, the last one it
+        followed.
         """
         r = self._replica
         if r is None:
             return True
         if self.hand_result is not None:
+            if sum(1 for stack in r.stacks if stack > 0) < 2:
+                return False
             return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
         return seat in r.seats_dealt
 
