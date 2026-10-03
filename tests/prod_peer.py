@@ -56,7 +56,7 @@ Protocol, newline-JSON on stdin/stdout:
        {"type": "connected", "conn_id": "..."}
        {"type": "admission", "conn_id": "...", "admitted": bool}  -- joiner
        {"type": "recv",      "from": "...", "mtype": "...", "seat": N,
-                             "author_seq": N}
+                             "hand": N, "author_seq": N}
        {"type": "graph",     "peers": [...]}
        {"type": "status",    ...}
        {"type": "ack",       "op": "...", "verdict": "..."}  -- act/next
@@ -225,6 +225,7 @@ def main() -> None:
         body = payload if isinstance(payload, dict) else {}
         _emit({"type": "recv", "from": conn_id, "mtype": msg.get("type"),
                "seat": body.get("seat", body.get("seat_from")),
+               "hand": body.get("hand"),
                "author_seq": body.get("author_seq")})
         try:
             if authenticator is not None:

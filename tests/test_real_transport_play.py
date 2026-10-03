@@ -33,18 +33,41 @@ def _needs_crypto():
     crypto_gate.require_crypto()
 
 
+#: When the running test's own pytest timeout fires, less a margin.
+_deadline = [float("inf")]
+
+
+@pytest.fixture(autouse=True)
+def _stall_deadline(request):
+    """Cut every wait short of the test's own timeout (see _left).
+
+    A stall must fail in _until or _ask, naming what it waited for. A bare
+    pytest timeout says nothing, and on Windows it ends the whole run.
+    """
+    marker = request.node.get_closest_marker("timeout")
+    if marker is not None:
+        _deadline[0] = time.monotonic() + marker.args[0] - 2.0
+    yield
+    _deadline[0] = float("inf")
+
+
+def _left(timeout):
+    """timeout, or less if the test's deadline comes first."""
+    return max(0.0, min(timeout, _deadline[0] - time.monotonic()))
+
+
 def _until(peer, pred, what, timeout=10.0):
     """Poll status until pred holds; a stall names the state it stalled in.
 
     Each wait is one step -- a deal, an action, a settlement -- which takes
-    about a second here. The default sits inside the tests' own timeouts so
-    a stall fails here, naming its state, rather than as a bare pytest
-    timeout (which on Windows ends the whole run).
+    about a second here. It ends before the test's own timeout would, so
+    the failure says what it was waiting for. A status request answers in
+    milliseconds; its half-second floor stays inside the deadline's margin.
     """
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + _left(timeout)
     last = None
     while time.monotonic() < deadline:
-        last = _status(peer, timeout=10.0)
+        last = _status(peer, timeout=max(0.5, _left(10.0)))
         if pred(last):
             return last
         time.sleep(0.02)
@@ -63,7 +86,7 @@ def _ask(peer, op, **fields):
     n_ack, n_err = len(acks()), len(errors())
     peer.send({"op": op, **fields})
     got = peer.wait_for(lambda e: len(acks()) > n_ack
-                        or len(errors()) > n_err, timeout=30.0)
+                        or len(errors()) > n_err, timeout=_left(30.0))
     assert got is not None, f"{peer.label} never answered {op}"
     assert len(errors()) == n_err, f"{peer.label} {op}: {errors()[-1]}"
     return acks()[-1]
@@ -82,17 +105,19 @@ def table(tmp_path):
         n = len(stacks)
         host = Peer("host", "A", tmp_path / "A")
         made.append(host)
-        ready = host.wait_for(lambda e: e.get("type") == "ready")
+        ready = host.wait_for(lambda e: e.get("type") == "ready",
+                              timeout=_left(20.0))
         assert ready and ready.get("addr") and ready.get("invite"), \
             f"host never became ready; stderr={host.stderr[-8:]}"
         for label in "BC"[:n - 1]:
             p = Peer("joiner", label, tmp_path / label,
                      invite=ready["invite"])
             made.append(p)
-            assert p.wait_for(lambda e: e.get("type") == "ready")
+            assert p.wait_for(lambda e: e.get("type") == "ready",
+                              timeout=_left(20.0)), f"{label} never ready"
             _ask(p, "connect", addr=ready["addr"])
             got = p.wait_for(lambda e: e.get("type") == "admission",
-                             timeout=30.0)
+                             timeout=_left(30.0))
             assert got and got.get("admitted"), \
                 f"{label} was not admitted: {got}; stderr={p.stderr[-8:]}"
         _until(host, lambda s: len(s["players"]) == n, "a full roster")
@@ -164,6 +189,28 @@ def _assert_agreed(statuses, total):
     return ref
 
 
+def _heard_every_settlement(seated, hand):
+    """Each peer received hand hand's hand_settled from every other seat,
+    over the signed wire.
+
+    The agreement check is otherwise invisible here: peers that never
+    exchanged a report still agree, so every other assertion passes with
+    the broadcast removed. Every seat in these tests is dealt every hand.
+    """
+    for me, p in enumerate(seated):
+        want = set(range(len(seated))) - {me}
+        deadline = time.monotonic() + _left(10.0)
+        while True:
+            heard = {e["seat"] for e in p.all_of("recv")
+                     if e.get("mtype") == "hand_settled"
+                     and e.get("hand") == hand}
+            if heard >= want or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        assert heard == want, \
+            f"{p.label} heard hand {hand} settled by {sorted(heard)}"
+
+
 def _next_hand(seated):
     """Every peer calls next_p2p_hand, as each human presses Next Hand."""
     return {_ask(p, "next")["verdict"] for p in seated}
@@ -209,6 +256,8 @@ TEN_HANDS = [_checkdown, _fold_at_once, _raise_called, _all_in_folded_to,
 # dev machine (17.7-18.0 s, 2.8 s, 3.6 s and 5.7 s, table set-up and
 # teardown included), inside CI's 60 s per test. The runs are bound by
 # message round trips, not CPU: pinned to two CPUs they took the same time.
+# Every wait ends two seconds short of them (_stall_deadline), so a slow
+# or stalled run fails naming the step it was on.
 @pytest.mark.timeout(55)
 def test_two_seats_play_ten_hands_and_agree_on_every_one(table):
     """Fold, call, raise and all-in over ten consecutive hands.
@@ -230,6 +279,7 @@ def test_two_seats_play_ten_hands_and_agree_on_every_one(table):
                 assert st["last_settled_stacks"] == settled
         start = st["last_settled_stacks"]
         ref = _assert_agreed(_play_hand(seated, choose), total=2000)
+        _heard_every_settlement(seated, hand)
         if choose is _all_in_folded_to:
             # Heads-up the button acts first. It shoved its whole stack, so
             # everything but the big blind it was folded to comes back.
@@ -257,6 +307,7 @@ def test_three_unequal_stacks_all_in_build_side_pots(table):
     """
     seated = table([100, 300, 500])
     ref = _assert_agreed(_play_hand(seated, _all_in), total=900)
+    _heard_every_settlement(seated, 1)
     pots = ref["result"]["pots"]
     assert len(pots) >= 2
     assert [(p["amount"], p["eligible"]) for p in pots] == \
