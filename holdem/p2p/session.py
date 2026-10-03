@@ -2028,7 +2028,7 @@ class Session:
             seat=seat)
 
     def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
-        """Another seat saw a seated peer's connection drop: end the table.
+        """The host saw a seated peer's connection drop: end the table.
 
         The production topology is a star, so when a joiner drops only the
         host's socket closes. Without this the other joiners kept waiting
@@ -2040,20 +2040,32 @@ class Session:
         wrong cause, and stopping the transport is not the session's to do.
         This is an ordinary hostless message instead. It reaches the
         handler only after ingress has checked it is signed by the key
-        bound to the reporting seat and is not a replay or an equivocation,
-        and the host relays it like any other.
+        bound to the reporting seat and is not a replay or an equivocation.
 
-        Accepted from any authorized seat. That grants nothing new: a seated
-        peer can already end the table by dropping its own connection. It
-        is not hand-scoped, because the reporter and this peer can be a hand
-        apart around next_p2p_hand and the table is over either way; and it
-        is accepted on a busted spectator for the same reason session_end
-        is.
+        Accepted from the host's seat only. Under the star only the host
+        can see a joiner's socket close, so from any other seat the notice
+        claims something its sender could not have observed: a connected
+        joiner could otherwise end the table and pin the blame on another
+        seat, and a busted or never-dealt one could end a table it is not
+        part of. The host is still trusted to name the right seat. That is
+        no new power -- the host can end the table by leaving -- but the
+        blame is the host's word.
+
+        Not checked against this peer's own view of the seat: the host has
+        ended the table and relays nothing further, so a peer that ignored
+        the notice would wait forever. For the same reason it is not
+        hand-scoped (the host and this peer can be a hand apart around
+        next_p2p_hand), and a busted spectator accepts it too.
         """
         reporter, lost = msg.get("seat"), msg.get("lost_seat")
         if not _is_seat(reporter) or not _is_seat(lost):
             return
         if not 0 <= lost < len(self._seat_order):
+            return
+        if reporter != self._host_seat():
+            _log.warning("session: ignoring peer_lost from seat %s -- only "
+                         "the host can see a seat's connection drop",
+                         reporter)
             return
         self.terminate(self.PEER_LOST,
                        f"{self._seat_label(lost)} disconnected "
@@ -3115,6 +3127,25 @@ class Session:
                 return False
             return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
         return seat in r.seats_dealt
+
+    def _host_seat(self) -> Optional[int]:
+        """The host's seat, or None if this peer cannot name it.
+
+        A joiner that pinned the host from its invite goes by that key: the
+        seat bound to it. Its own conn_id for the host is a local name the
+        seat order never contains. Otherwise the seat of the host's conn_id
+        -- the host's own, or the one a harness joiner was given.
+        """
+        if self.is_host:
+            cid = self.local_conn_id
+        elif self._pinned_host_pubkey is not None:
+            for seat, key in sorted(self._seat_keys.items()):
+                if key == self._pinned_host_pubkey:
+                    return seat
+            return None
+        else:
+            cid = self._host_conn_id
+        return self._seat_order.index(cid) if cid in self._seat_order else None
 
     def _eliminated(self) -> bool:
         """Is the local seat out while the match goes on without it?

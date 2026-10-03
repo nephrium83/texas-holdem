@@ -283,6 +283,30 @@ def test_a_peer_lost_signed_by_a_stranger_is_refused():
     assert s["B"].terminal_state is None
 
 
+def test_a_pinned_joiner_knows_the_host_seat_by_its_key():
+    """A production joiner reaches the host under a local conn_id that the
+    seat order never contains; it names the host's seat by the key its
+    invite pinned instead."""
+    bus, s = _table()
+    s["B"]._host_conn_id = "conn-to-host"
+    s["B"]._pinned_host_pubkey = KEY["A"]
+    s["B"].handle_message("conn-to-host", _env("A", seat=0, mtype="peer_lost",
+                                               lost_seat=2))
+    assert s["B"].terminal_state == Session.PEER_LOST
+
+
+@pytest.mark.parametrize("lost", [0, 2], ids=["blames-the-host",
+                                              "blames-the-other-joiner"])
+def test_a_peer_lost_signed_by_a_joiner_is_dropped(lost):
+    """Signed by B for B's own seat, so ingress admits it, and relayed.
+    But only the host sees a joiner's socket close, so B claims a drop it
+    could not have observed, and C must not end on it."""
+    bus, s = _table()
+    s["C"].handle_message("A", _env("B", seat=1, mtype="peer_lost",
+                                    lost_seat=lost))
+    assert s["C"].terminal_state is None
+
+
 def test_a_replayed_peer_lost_is_not_relayed_twice():
     """Same author, same author_seq, same envelope: the replay gate drops
     the second copy before the relay, as for every hostless type."""

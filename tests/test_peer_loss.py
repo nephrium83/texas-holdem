@@ -295,6 +295,24 @@ def test_a_busted_spectator_learns_the_table_ended():
     assert spectator.terminal_state == Session.PEER_LOST
 
 
+@pytest.mark.parametrize("reporter,lost,stacks", [
+    (1, 2, [500, 500, 500]),
+    (2, 1, [500, 500, 0]),
+], ids=["a-joiner-blaming-a-connected-seat", "a-seat-never-dealt"])
+def test_a_notice_from_any_seat_but_the_host_is_dropped(reporter, lost,
+                                                       stacks):
+    """Only the host sees a joiner's socket close. A notice signed by any
+    other seat passes ingress -- it is that seat's own -- but claims what
+    its sender could not have observed, so it ends nobody's table."""
+    bus, sessions, order = table(3, stacks=stacks)
+    for cid in order:
+        if cid != order[reporter]:
+            sessions[cid].handle_message(order[reporter], {
+                "type": "peer_lost", "hand": 1, "seat": reporter,
+                "lost_seat": lost})
+    assert [sessions[c].terminal_state for c in order] == [None] * 3
+
+
 @pytest.mark.parametrize("msg", [
     # peer2 does not hold seat 0, so it cannot report as seat 0
     {"type": "peer_lost", "hand": 1, "seat": 0, "lost_seat": 1},
