@@ -1935,8 +1935,12 @@ class Session:
 
         A seat that busted while others play on stopped following hands at
         its bust, whether or not it has pressed Next yet (see _eliminated),
-        so it has nothing to compare and keeps the shape and total checks
-        alone. The later-hand notice is the only one it will ever get.
+        so a notice about a later hand is one it has nothing to compare,
+        and it keeps the shape and total checks alone. That notice is the
+        only one it will ever get. A notice naming the hand it busted in
+        gets the full check, which it cannot pass: that settlement left at
+        least two seats with chips, which is how it busted while others
+        play on.
         """
         # Authorized at ingress; see _admit_hostless. The seat is checked for
         # shape only, and NOT coerced -- ingress declines to authorize a
@@ -1952,7 +1956,7 @@ class Session:
             return
         if hand < self._hand_no or len(stacks) != len(self._seat_order):
             return
-        if not self._eliminated():
+        if not self._eliminated() or hand == self._hand_no:
             r = self._replica
             if (hand != self._hand_no or self.hand_result is None
                     or r is None or stacks != r.stacks):

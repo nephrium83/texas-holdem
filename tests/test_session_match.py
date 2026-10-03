@@ -264,13 +264,15 @@ def test_elimination_drops_seat_and_shrinks_next_deal():
 
 
 def test_eliminated_spectator_accepts_signed_session_end_envelope():
+    """The match ends in a hand after the spectator's last, the one hand
+    a session_end can name for it (see the test below)."""
     bus, sessions, order = make_table(3)
     spectator = sessions[order[0]]
     spectator._p2p_spectator = True
     spectator.handle_message(order[1], {
         "type": "session_end",
         "payload": {
-            "hand": spectator._hand_no,
+            "hand": spectator._hand_no + 1,
             "seat": 1,
             "winner": 1,
             "stacks": [0, 1500, 0],
@@ -377,6 +379,28 @@ def test_a_seat_busted_before_pressing_next_accepts_the_later_end(
         assert s._session_winner == 1
     assert client_view.snapshot(busted)["turn"]["state"] == "match_complete"
     assert busted.next_p2p_hand() == "session_over"
+
+
+@pytest.mark.parametrize("pressed_next", [False, True])
+def test_a_busted_seat_ignores_a_session_end_for_the_hand_it_busted_in(
+        monkeypatch, pressed_next):
+    """Seat 2 busts in hand 1 while seats 0 and 1 keep chips, so hand 1
+    ended no match. Seat 0 nonetheless claims it won it all in hand 1.
+    Seat 2 settled hand 1 itself and can see the claim is false, so its
+    relaxed check for later hands does not apply."""
+    rig_showdowns(monkeypatch)(1, 2, 0)
+    bus, sessions, order = make_table(3, stacks=[500, 500, 20])
+    _shove_hand(bus, sessions, order, alive=[0, 1, 2], folding=[0])
+    busted = sessions[order[2]]
+    assert busted.replica.stacks == [490, 530, 0]
+    if pressed_next:
+        assert busted.next_p2p_hand() == "eliminated"
+    claim = {"type": "session_end", "hand": 1, "seat": 0, "winner": 0,
+             "stacks": [1020, 0, 0]}
+    for cid in order[1:]:
+        sessions[cid].handle_message(order[0], dict(claim))
+        assert sessions[cid].terminal_state is None, cid
+        assert not sessions[cid]._session_over
 
 
 def test_heads_up_positions_and_play():

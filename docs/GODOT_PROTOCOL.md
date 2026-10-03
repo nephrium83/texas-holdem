@@ -363,8 +363,10 @@ paid.
 A seat still playing accepts the signed `session_end` only when it names that
 seat's own settled hand and exactly its settled stacks. Anything else is
 ignored. A seat that busted while others play on stopped following hands, so
-it checks only that the stacks add up to the table's chips and that the winner
-is the one seat with chips.
+for a notice about a later hand it checks only that the stacks add up to the
+table's chips and that the winner is the one seat with chips. A notice naming
+the hand it busted in is ignored, because that hand left at least two seats
+with chips.
 
 ### `seats[i]`
 
