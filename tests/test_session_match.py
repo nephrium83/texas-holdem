@@ -706,6 +706,22 @@ def test_an_early_settlement_report_is_held_until_this_peer_ends_the_hand():
     assert "seat 2 settled it as cdcdcdcdcdcdcdcd" in target.terminal_reason
 
 
+def test_a_settlement_the_table_aborted_over_is_not_announced():
+    """An early report disagrees, so this peer's own settle ends the table.
+    The client must not then be told the hand settled and paid out."""
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    settled = []
+    target.on_hand_settled = settled.append
+    target.handle_message(order[2], {"type": "hand_settled", "hand": 1,
+                                     "seat": 2, "digest": "cd" * 32})
+    checkdown(bus, sessions, order)
+    assert target.hand_result is not None
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert settled == []
+    assert sessions[order[1]].terminal_state is None   # it never saw the lie
+
+
 def test_a_seat_not_dealt_in_cannot_dispute_the_settlement():
     """Seat 2 holds no chips, so no hand deals it. Ingress still admits
     what it signs -- it does own seat 2 -- but it settled and voided

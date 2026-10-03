@@ -2535,7 +2535,9 @@ class Session:
             self._send_hostless({"type": "hand_settled",
                                  "hand": self._hand_no, "digest": digest})
             self._hand_ended(digest)
-            if self.on_hand_settled:
+            # Not when an earlier report disagreed: the table has just
+            # aborted over this very settlement.
+            if self.on_hand_settled and self.terminal_state is None:
                 self.on_hand_settled(self.hand_result)
             return False               # settled: terminal state
         return False
