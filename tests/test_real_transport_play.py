@@ -132,9 +132,14 @@ def table(tmp_path):
         for p in made:
             st = _until(p, lambda s: s["state"] == "PLAYING"
                         and len(s["seat_order"]) == n
-                        and s["local_conn_id"] in s["seat_order"],
-                        "PLAYING with its own seat")
+                        and s["local_conn_id"] in s["seat_order"]
+                        and len(s["seat_keys"]) == n,
+                        "PLAYING with its own seat and every seat's key")
             by_seat[st["seat_order"].index(st["local_conn_id"])] = p
+            # One key per seat. Peers sharing a config directory share a
+            # key, and every play test here still passed that way.
+            keys = st["seat_keys"]
+            assert len(set(keys.values())) == n, keys
         return [by_seat[i] for i in range(n)]
 
     yield make
