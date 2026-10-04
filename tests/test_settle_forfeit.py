@@ -235,6 +235,11 @@ def test_dropper_alone_in_the_hand_is_refused():
     dict(in_hand=[0, 2]),
     dict(dropped=2),
     dict(button=-1),
+    dict(dropped=0.5),                         # would settle with no dropper
+    dict(dropped=True),
+    dict(button=0.5),                          # an odd chip would never land
+    dict(in_hand=[0, 1.0]),
+    dict(in_hand=[0, True]),
 ])
 def test_malformed_tables_are_refused(bad):
     args = dict(stacks=[490, 480], committed=[10, 20], in_hand=[0, 1],

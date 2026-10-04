@@ -1096,8 +1096,11 @@ def settle_forfeit(*, stacks, committed, in_hand, dropped, button):
         raise ValueError("chip counts must be whole numbers")
     if any(c < 0 for c in chips):
         raise ValueError("chip counts cannot be negative")
-    if not (0 <= dropped < n and 0 <= button < n
-            and all(0 <= i < n for i in in_hand)):
+    seats = [dropped, button, *in_hand]
+    # a button of 0.5 would send the odd-chip walk round for ever
+    if not all(isinstance(i, int) and not isinstance(i, bool) for i in seats):
+        raise ValueError("seats must be whole numbers")
+    if not all(0 <= i < n for i in seats):
         raise ValueError("seat out of range")
     left = sorted(set(in_hand) - {dropped})
     if not left:
