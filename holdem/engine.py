@@ -1083,12 +1083,18 @@ def settle_forfeit(*, stacks, committed, in_hand, dropped, button):
     "eligible", "payouts"}, ...]}. The new stacks hold every chip in
     `stacks` and `committed`. Raises ValueError if the dropper is the only
     seat in the hand: betting has already decided that hand, and settle()
-    pays it.
+    pays it. Raises ValueError on a malformed table too, a chip count that
+    is not a whole number among them.
     """
     n = len(stacks)
     if len(committed) != n:
         raise ValueError("stacks and committed must cover the same seats")
-    if any(c < 0 for c in list(stacks) + list(committed)):
+    chips = list(stacks) + list(committed)
+    # the odd-chip walk below pays whole chips, so a count of 1.5 would
+    # come out as 2; True is an int to Python but not a chip count
+    if not all(isinstance(c, int) and not isinstance(c, bool) for c in chips):
+        raise ValueError("chip counts must be whole numbers")
+    if any(c < 0 for c in chips):
         raise ValueError("chip counts cannot be negative")
     if not (0 <= dropped < n and 0 <= button < n
             and all(0 <= i < n for i in in_hand)):

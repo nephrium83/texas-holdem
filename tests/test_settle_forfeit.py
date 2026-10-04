@@ -12,6 +12,8 @@ checks the same function against settle() itself over random hands.
 import copy
 import random
 import sys
+from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -239,6 +241,22 @@ def test_malformed_tables_are_refused(bad):
                 dropped=0, button=0)
     args.update(bad)
     with pytest.raises(ValueError):
+        settle_forfeit(**args)
+
+
+@pytest.mark.parametrize("count", [
+    1.5, 2.0, float("nan"), float("inf"), True, Decimal("1.5"),
+    Fraction(3, 2), "7",
+])
+@pytest.mark.parametrize("where", ["stacks", "committed"])
+def test_chip_counts_that_are_not_whole_numbers_are_refused(where, count):
+    # the odd-chip walk pays whole chips: 1.5 committed and shared by two
+    # seats came out as 1 each, 2 chips from a bank of 1.5, and a NaN
+    # matched no pot and vanished
+    args = dict(stacks=[0, 0, 0], committed=[0, 0, 0], in_hand=[0, 1, 2],
+                dropped=0, button=0)
+    args[where] = [count, 0, 0]
+    with pytest.raises(ValueError, match="whole numbers"):
         settle_forfeit(**args)
 
 
