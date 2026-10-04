@@ -1051,6 +1051,97 @@ class Engine:
         return result
 
 
+# ---------------------------------------------------------------- forfeit
+
+def settle_forfeit(*, stacks, committed, in_hand, dropped, button):
+    """Settle a hand that stops because the player in seat `dropped` left.
+
+    Under the casual table's rules whoever drops folds, and every chip they
+    put in stays in the pot, a raise nobody called included. settle() cannot
+    do this: it hands an uncalled raise back even to a folded seat (step
+    1), so marking the dropper folded and settling would repay it. If one
+    seat is left in the hand, it wins every pot. If more are left, the
+    hand cannot finish without the dropper's key, so each pot is shared
+    equally by the seats left in it, as if they tied. The pots are
+    settle()'s layers (step 4) and odd chips follow its rule (step 5), so
+    a short all-in seat shares only the pots it matched. An all-in dropper
+    forfeits too. A dropper that had folded is just another folded seat.
+
+    Pure: it does no I/O, reads no globals and changes none of its
+    arguments, so every replica, front end and server that passes the
+    same table gets the same answer.
+
+      stacks     chips each seat has behind, by seat index
+      committed  chips each seat has put in this hand, live and dead
+                 (Player.total)
+      in_hand    seats dealt in that have not folded, the dropper
+                 included unless it had folded
+      dropped    the seat that left
+      button     the button seat; odd chips walk forward from it
+
+    Returns {"stacks": the stacks after the hand, "pots": [{"amount",
+    "eligible", "payouts"}, ...]}. The new stacks hold every chip in
+    `stacks` and `committed`. Raises ValueError if the dropper is the only
+    seat in the hand: betting has already decided that hand, and settle()
+    pays it.
+    """
+    n = len(stacks)
+    if len(committed) != n:
+        raise ValueError("stacks and committed must cover the same seats")
+    if any(c < 0 for c in list(stacks) + list(committed)):
+        raise ValueError("chip counts cannot be negative")
+    if not (0 <= dropped < n and 0 <= button < n
+            and all(0 <= i < n for i in in_hand)):
+        raise ValueError("seat out of range")
+    left = sorted(set(in_hand) - {dropped})
+    if not left:
+        raise ValueError(f"no seat but {dropped} is in the hand; settle() "
+                         "pays a hand betting has already decided")
+
+    # settle() step 4, with the dropper eligible for nothing
+    pots = []
+    prev = 0
+    for lvl in sorted({c for c in committed if c > 0}):
+        amount = sum(min(c, lvl) - min(c, prev) for c in committed)
+        eligible = [i for i in left if committed[i] >= lvl]
+        prev = lvl
+        if amount <= 0 or not eligible:
+            continue
+        if pots and pots[-1]["eligible"] == eligible:
+            pots[-1]["amount"] += amount
+        else:
+            pots.append({"amount": amount, "eligible": eligible})
+
+    # chips above every stake a seat left has matched (the dropper's
+    # uncalled raise, say) have no eligible layer of their own; like
+    # settle()'s residual dead money they join the top pot. If no seat
+    # left has put a chip in, there is no pot to join, and they share all.
+    total = sum(committed)
+    built = sum(pot["amount"] for pot in pots)
+    if total > built:
+        if pots:
+            pots[-1]["amount"] += total - built
+        else:
+            pots.append({"amount": total, "eligible": left})
+
+    # settle() step 5: equal shares, odd chips to the first seat left of
+    # the button
+    after = list(stacks)
+    for pot in pots:
+        share, rem = divmod(pot["amount"], len(pot["eligible"]))
+        payouts = {i: share for i in pot["eligible"]}
+        j = button
+        while rem > 0:
+            j = (j + 1) % n
+            if j in payouts:
+                payouts[j] += 1
+                rem -= 1
+        for i, amt in payouts.items():
+            after[i] += amt
+        pot["payouts"] = payouts
+    return {"stacks": after, "pots": pots}
+
+
 class Brain:
     """Decides for one AI seat. Returns ('fold'|'call'|'raise', amount)."""
 
