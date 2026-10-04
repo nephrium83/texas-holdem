@@ -2,30 +2,40 @@
 
 The core library -- the rules, the crypto and the protocol -- has to embed
 in someone else's process. The host decides which files, sockets and
-threads exist, so importing a core module must create none of them.
+threads exist, so importing a core module must create none of them, and the
+core must never reach into the host layer that does.
 
-Each core module is imported in a fresh interpreter, with HOLDEM_CONFIG_DIR
-and the working directory pointing at empty folders. Afterwards nothing was
-written, there is still one thread, and tkinter, socket and asyncio are not
-loaded. A fresh process, because this one has already imported whatever the
-rest of the suite needed; an empty config folder, because a module that
-creates its file on first launch writes nothing when the file is already
-there.
+Two checks, because each sees what the other cannot:
+
+* Each core module is imported in a fresh interpreter, with
+  HOLDEM_CONFIG_DIR and the working directory pointing at empty folders.
+  Afterwards nothing was written, there is still one thread, and tkinter,
+  socket and asyncio are not loaded. A fresh process, because this one has
+  already imported whatever the rest of the suite needed; an empty config
+  folder, because a module that creates its file on first launch writes
+  nothing when the file is already there.
+
+* No core module imports a host module anywhere in its source. This is read
+  from the source rather than observed, so it also sees imports inside
+  functions, which do not run at import time: session.py's fallback to the
+  global transport is one.
 
 Today's violations are allowlisted below with where each comes from, and
-later increments remove the entries. The list can only shrink: an entry
+later increments remove the entries. The lists can only shrink: an entry
 whose violation has gone fails as well, so the change that removes a
 violation removes its entry, and nothing can quietly bring it back.
 
 DELIBERATE-BREAK CONTROLS
 
-``test_control_each_check_sees_its_break`` runs the checks against small
-modules written to break them, on every run. A check that stops seeing its
-break -- an audit event that changes shape between Python versions, say --
-fails there instead of letting the real modules pass.
+``test_control_each_check_sees_its_break`` and
+``test_control_the_scan_sees_every_import_form`` run the checks against
+small modules written to break them, on every run. A check that stops
+seeing its break -- an audit event that changes shape between Python
+versions, say -- fails there instead of letting the real modules pass.
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -94,6 +104,22 @@ IMPORT_ALLOWLIST = {
     "holdem.p2p.wire": {
         "writes config/identity.json": "wire.py:25, " + _IDENTITY,
     },
+}
+
+# Every core module that imports a host module today, and from where.
+GRAPH_ALLOWLIST = {
+    ("holdem.p2p.invite", "holdem.p2p.identity"):
+        "invite.py:62, the process-wide key in every invite",
+    ("holdem.p2p.join_auth", "holdem.p2p.identity"):
+        "join_auth.py:38, the joiner's public key",
+    ("holdem.p2p.wire", "holdem.p2p.identity"):
+        "wire.py:25, signs and verifies every message",
+    ("holdem.p2p.session", "holdem.p2p.transport"):
+        "session.py:431, the global transport when none is given",
+    ("holdem.p2p.session", "holdem.p2p.device_secret"):
+        "session.py:972, the device secret read from disk",
+    ("holdem.p2p.session", "holdem.p2p.identity"):
+        "session.py:2993, add_local_player",
 }
 
 # Runs in the fresh interpreter. The audit hook goes in before the import,
@@ -171,6 +197,43 @@ def _violations(report: dict, tmp_path: Path) -> set:
     return found
 
 
+def _source(module: str) -> Path:
+    path = REPO.joinpath(*module.split("."))
+    return path / "__init__.py" if path.is_dir() else path.with_suffix(".py")
+
+
+def _imports(source: str, package: str):
+    """Yield (name, line) for every name an import in *source* could load.
+
+    ``from holdem.p2p import identity`` yields both ``holdem.p2p`` and
+    ``holdem.p2p.identity``, because the second is a module; names that are
+    not modules simply match nothing.
+    """
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                yield alias.name, node.lineno
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parent = package.rsplit(".", node.level - 1)[0]
+                base = f"{parent}.{base}" if base else parent
+            yield base, node.lineno
+            for alias in node.names:
+                yield f"{base}.{alias.name}", node.lineno
+
+
+def _host_imports(module: str) -> dict:
+    path = _source(module)
+    package = (module if path.name == "__init__.py"
+               else module.rpartition(".")[0])
+    found = {}
+    for name, line in _imports(path.read_text(encoding="utf-8"), package):
+        if name in HOST:
+            found.setdefault(name, []).append(f"{path.name}:{line}")
+    return found
+
+
 @pytest.mark.parametrize("module", sorted(CORE))
 def test_importing_a_core_module_does_nothing(module, tmp_path):
     report = _fresh_import(module, tmp_path)
@@ -187,8 +250,19 @@ def test_importing_a_core_module_does_nothing(module, tmp_path):
                       f"IMPORT_ALLOWLIST so they cannot come back")
 
 
+@pytest.mark.parametrize("module", sorted(CORE))
+def test_the_core_never_imports_the_host_layer(module):
+    found = _host_imports(module)
+    allowed = {host for core, host in GRAPH_ALLOWLIST if core == module}
+    new = {host: where for host, where in found.items() if host not in allowed}
+    gone = sorted(allowed - set(found))
+    assert not new, f"core module {module} imports the host layer: {new}"
+    assert not gone, (f"{module} no longer imports {gone}: remove them from "
+                      f"GRAPH_ALLOWLIST so they cannot come back")
+
+
 def test_every_module_is_core_or_host():
-    """A new module is placed on one side before it can escape the check."""
+    """A new module is placed on one side before it can escape both checks."""
     on_disk = set()
     for path in (REPO / "holdem").rglob("*.py"):
         parts = path.relative_to(REPO).with_suffix("").parts
@@ -198,9 +272,10 @@ def test_every_module_is_core_or_host():
     assert not (CORE | HOST) - on_disk, "classified modules that do not exist"
 
 
-def test_allowlist_names_only_core_modules():
-    """An entry for a module the check never visits could never be gone."""
+def test_allowlists_name_only_core_modules():
+    """An entry for a module the checks never visit could never be gone."""
     assert set(IMPORT_ALLOWLIST) <= CORE
+    assert {core for core, _ in GRAPH_ALLOWLIST} <= CORE
 
 
 @pytest.mark.parametrize("code, violation", [
@@ -227,3 +302,15 @@ def test_control_each_check_sees_its_break(code, violation, tmp_path):
         f"ELSEWHERE = {str(elsewhere)!r}\n{code}\n", encoding="utf-8")
     report = _fresh_import("boundary_break", tmp_path, lib)
     assert violation in _violations(report, tmp_path)
+
+
+def test_control_the_scan_sees_every_import_form():
+    source = (
+        "import holdem.p2p.transport\n"
+        "from holdem.p2p import identity as _id\n"
+        "from ..settings import config_dir\n"
+        "def later():\n"
+        "    from .device_secret import load_or_create\n")
+    found = {name for name, _ in _imports(source, "holdem.p2p")} & HOST
+    assert found == {"holdem.p2p.transport", "holdem.p2p.identity",
+                     "holdem.settings", "holdem.p2p.device_secret"}
