@@ -21,7 +21,8 @@ Two checks, because each sees what the other cannot:
 * No core module imports a host module anywhere in its source. This is read
   from the source rather than observed, so it also sees imports inside
   functions, which do not run at import time: session.py's fallback to the
-  global transport is one.
+  global transport is one. __import__ and importlib.import_module are not
+  used at all, because what they load is not in the source to read.
 
 Today's violations are allowlisted below with where each comes from, and
 later increments remove the entries. The lists can only shrink: an entry
@@ -90,6 +91,12 @@ HOST = frozenset({
 })
 
 FORBIDDEN_MODULES = ("tkinter", "socket", "asyncio")
+
+# The import functions. A call to one loads whatever name it is given when
+# it runs, which the source scan cannot know, so the core does not use them:
+# any mention of one is reported as importing DYNAMIC.
+IMPORTERS = frozenset({"__import__", "import_module"})
+DYNAMIC = "a module named at run time"
 
 _IDENTITY = "through identity, which creates it at import (identity.py:83-85)"
 
@@ -251,6 +258,12 @@ def _imports(source: str, package: str):
                 yield base, place, child.lineno
                 for alias in child.names:
                     yield f"{base}.{alias.name}", place, child.lineno
+                    if alias.name in IMPORTERS:     # renamed, then called
+                        yield DYNAMIC, place, child.lineno
+            elif (isinstance(child, ast.Name) and child.id in IMPORTERS
+                  or isinstance(child, ast.Attribute)
+                  and child.attr in IMPORTERS):
+                yield DYNAMIC, place, child.lineno
             yield from walk(child, inner)
 
     yield from walk(ast.parse(source), "<module>")
@@ -263,7 +276,7 @@ def _check_graph(module: str, source: str) -> None:
                else module.rpartition(".")[0])
     found, lines = Counter(), {}
     for name, place, line in _imports(source, package):
-        if name in HOST:
+        if name in HOST or name == DYNAMIC:
             found[name, place] += 1
             lines.setdefault((name, place), []).append(f"{path.name}:{line}")
     allowed = Counter((host, place) for core, host, place in GRAPH_ALLOWLIST
@@ -406,6 +419,19 @@ def test_control_the_scan_sees_every_import_form():
     found = {name for name, *_ in _imports(source, "holdem.p2p")} & HOST
     assert found == {"holdem.p2p.transport", "holdem.p2p.identity",
                      "holdem.settings", "holdem.p2p.device_secret"}
+
+
+@pytest.mark.parametrize("source", [
+    "import importlib\n"
+    "def later(name):\n    return importlib.import_module(name)",
+    "def later():\n    return __import__('holdem.p2p.transport')",
+    "from importlib import import_module as load\n"
+    "def later(name):\n    return load(name)",
+], ids=["import_module", "__import__", "renamed"])
+def test_control_the_scan_sees_dynamic_imports(source):
+    """Imports that run only when called, which the fresh import never sees."""
+    with pytest.raises(AssertionError, match=f"{DYNAMIC} in "):
+        _check_graph("holdem.p2p.timeout", source)
 
 
 @pytest.mark.parametrize("module, extra, place", [
