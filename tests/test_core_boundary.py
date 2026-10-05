@@ -13,7 +13,10 @@ Two checks, because each sees what the other cannot:
   socket and asyncio are not loaded. A fresh process, because this one has
   already imported whatever the rest of the suite needed; an empty config
   folder, because a module that creates its file on first launch writes
-  nothing when the file is already there.
+  nothing when the file is already there. Without libsodium, a crypto-backed
+  import stops where ristretto loads it: what it did up to there is still
+  checked, and then it skips or fails under the crypto-gated suites' policy
+  (tests/crypto_gate.py). Any other import error fails.
 
 * No core module imports a host module anywhere in its source. This is read
   from the source rather than observed, so it also sees imports inside
@@ -27,7 +30,7 @@ violation removes its entry, and nothing can quietly bring it back.
 
 DELIBERATE-BREAK CONTROLS
 
-``test_control_each_check_sees_its_break`` and
+``test_control_each_check_sees_its_break``, the import-error controls and
 ``test_control_the_scan_sees_every_import_form`` run the checks against
 small modules written to break them, on every run. A check that stops
 seeing its break -- an audit event that changes shape between Python
@@ -148,17 +151,21 @@ def audit(event, args):
 
 sys.addaudithook(audit)
 
-import importlib, json, threading
+import importlib, json, threading, traceback
 
+failed = None
 try:
     importlib.import_module(sys.argv[1])
-except RuntimeError as exc:          # libsodium did not load
-    print(json.dumps({"unloadable": str(exc)}))
-    sys.exit()
+except BaseException as exc:         # what it did before failing still counts
+    where = traceback.extract_tb(exc.__traceback__)[-1]
+    failed = {"error": type(exc).__name__,
+              "raised_in": [where.filename, where.name],
+              "traceback": traceback.format_exc()}
 print(json.dumps({
     "writes": writes,
     "threads": threading.active_count(),
     "loaded": [m for m in sys.argv[2:] if m in sys.modules],
+    "failed": failed,
 }))
 """
 
@@ -181,9 +188,21 @@ def _fresh_import(module: str, tmp_path: Path, *path: Path) -> dict:
     assert proc.returncode == 0, f"importing {module} crashed:\n{proc.stderr}"
     report = json.loads(proc.stdout.splitlines()[-1])
     # Whatever reached the empty folders, however it was written.
-    report.setdefault("writes", []).extend(
+    report["writes"].extend(
         str(p) for d in (config, cwd) for p in d.rglob("*"))
     return report
+
+
+def _libsodium_missing(failed: dict) -> bool:
+    """Did the import stop because ristretto's loader found no libsodium?
+
+    Only that one raise counts. Any other error, a RuntimeError with the
+    same message included, is the import going wrong.
+    """
+    file, function = failed["raised_in"]
+    return (failed["error"] == "RuntimeError"
+            and function == "_load_libsodium" and os.path.exists(file)
+            and os.path.samefile(file, _source("holdem.p2p.ristretto")))
 
 
 def _violations(report: dict, tmp_path: Path) -> set:
@@ -234,20 +253,32 @@ def _host_imports(module: str) -> dict:
     return found
 
 
-@pytest.mark.parametrize("module", sorted(CORE))
-def test_importing_a_core_module_does_nothing(module, tmp_path):
-    report = _fresh_import(module, tmp_path)
-    if "unloadable" in report:
-        if crypto_gate.crypto_status().available:
-            pytest.fail(f"{module} did not import: {report['unloadable']}")
-        crypto_gate.require_crypto()       # skips, or fails where required
+def _check_import(module: str, tmp_path: Path, *path: Path) -> None:
+    report = _fresh_import(module, tmp_path, *path)
     found = _violations(report, tmp_path)
     allowed = set(IMPORT_ALLOWLIST.get(module, {}))
     new = sorted(found - allowed)
-    gone = sorted(allowed - found)
+    # Before anything about how the import ended: a module that writes and
+    # then fails has still written.
     assert not new, f"importing {module} must do nothing, but it: {new}"
+    failed = report["failed"]
+    if failed:
+        assert _libsodium_missing(failed), (
+            f"importing {module} failed:\n{failed['traceback']}")
+        if crypto_gate.crypto_status().available:
+            pytest.fail(f"{module} did not find the libsodium this process "
+                        f"loads:\n{failed['traceback']}")
+        # The rest of the import went unseen, and with it any allowlisted
+        # violation, so it is not passed either.
+        crypto_gate.require_crypto()       # skips, or fails where required
+    gone = sorted(allowed - found)
     assert not gone, (f"{module} no longer does {gone}: remove them from "
                       f"IMPORT_ALLOWLIST so they cannot come back")
+
+
+@pytest.mark.parametrize("module", sorted(CORE))
+def test_importing_a_core_module_does_nothing(module, tmp_path):
+    _check_import(module, tmp_path)
 
 
 @pytest.mark.parametrize("module", sorted(CORE))
@@ -278,6 +309,20 @@ def test_allowlists_name_only_core_modules():
     assert {core for core, _ in GRAPH_ALLOWLIST} <= CORE
 
 
+def _break_module(tmp_path: Path, code: str) -> Path:
+    """Write boundary_break.py running *code*; return the folder it is in."""
+    lib = tmp_path / "lib"
+    elsewhere = tmp_path / "elsewhere"
+    lib.mkdir()
+    elsewhere.mkdir()
+    (lib / "boundary_break.py").write_text(
+        "import os, pathlib, threading\n"
+        "CONFIG = os.environ['HOLDEM_CONFIG_DIR']\n"
+        "NEVER = threading.Event()\n"
+        f"ELSEWHERE = {str(elsewhere)!r}\n{code}\n", encoding="utf-8")
+    return lib
+
+
 @pytest.mark.parametrize("code, violation", [
     ("open(os.path.join(CONFIG, 'x'), 'w').close()", "writes config/x"),
     ("pathlib.Path(ELSEWHERE, 'x').write_text('')", "writes elsewhere/x"),
@@ -291,17 +336,47 @@ def test_allowlists_name_only_core_modules():
         "mkdir-elsewhere", "thread", "socket"])
 def test_control_each_check_sees_its_break(code, violation, tmp_path):
     """ELSEWHERE is outside both empty folders, so only the hook sees it."""
-    lib = tmp_path / "lib"
-    elsewhere = tmp_path / "elsewhere"
-    lib.mkdir()
-    elsewhere.mkdir()
-    (lib / "boundary_break.py").write_text(
-        "import os, pathlib, threading\n"
-        "CONFIG = os.environ['HOLDEM_CONFIG_DIR']\n"
-        "NEVER = threading.Event()\n"
-        f"ELSEWHERE = {str(elsewhere)!r}\n{code}\n", encoding="utf-8")
-    report = _fresh_import("boundary_break", tmp_path, lib)
+    report = _fresh_import("boundary_break", tmp_path,
+                           _break_module(tmp_path, code))
     assert violation in _violations(report, tmp_path)
+
+
+# The real loader, failing as it does on a machine without the library.
+NO_LIBSODIUM = (
+    "import ctypes\n"
+    "def absent(name, *args, **kwargs): raise OSError(f'{name}: not here')\n"
+    "ctypes.CDLL = absent\n"
+    "import holdem.p2p.ristretto\n")
+
+
+@pytest.mark.parametrize("code, missing", [
+    (NO_LIBSODIUM, True),
+    ("def _load_libsodium():\n"
+     "    raise RuntimeError('libsodium with Ristretto255 support could not "
+     "be loaded.')\n"
+     "_load_libsodium()", False),
+], ids=["loader", "lookalike"])
+def test_control_only_the_loader_reads_as_libsodium_missing(
+        code, missing, tmp_path):
+    report = _fresh_import("boundary_break", tmp_path,
+                           _break_module(tmp_path, code))
+    assert _libsodium_missing(report["failed"]) is missing
+
+
+def test_control_a_write_before_libsodium_fails_still_fails(tmp_path):
+    """Whether or not libsodium loads here, the write is the failure."""
+    lib = _break_module(
+        tmp_path,
+        f"pathlib.Path(ELSEWHERE, 'x').write_text('')\n{NO_LIBSODIUM}")
+    with pytest.raises(AssertionError, match="writes elsewhere/x"):
+        _check_import("boundary_break", tmp_path, lib)
+
+
+def test_control_any_other_import_error_fails(tmp_path):
+    """Whether or not libsodium loads here, it fails rather than skips."""
+    lib = _break_module(tmp_path, "raise RuntimeError('boom')")
+    with pytest.raises(AssertionError, match="importing boundary_break failed"):
+        _check_import("boundary_break", tmp_path, lib)
 
 
 def test_control_the_scan_sees_every_import_form():
