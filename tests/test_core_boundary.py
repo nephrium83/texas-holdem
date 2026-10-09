@@ -447,17 +447,23 @@ def test_control_the_scan_sees_dynamic_imports(source):
         _check_graph("holdem.p2p.timeout", source)
 
 
-@pytest.mark.parametrize("module, extra, place", [
-    ("holdem.p2p.wire", "from holdem.p2p import identity as again",
-     "<module>"),
-    ("holdem.p2p.session",
-     "class Elsewhere:\n    def later(self):\n"
-     "        from holdem.p2p import identity",
-     "Elsewhere.later"),
-], ids=["same-place", "another-place"])
-def test_control_a_second_import_of_an_allowed_host_is_new(
-        module, extra, place):
-    """Both modules already import identity, allowlisted, once each."""
-    source = f"{_source(module).read_text(encoding='utf-8')}\n{extra}\n"
-    with pytest.raises(AssertionError, match=f"identity in {place}"):
-        _check_graph(module, source)
+# An allowlist entry of the controls' own, so they keep their meaning as the
+# boundary work removes the real ones: identity, imported once in later().
+ALLOWED_ONCE = ("holdem.p2p.timeout", "holdem.p2p.identity", "later")
+LATER = "def later():\n    from holdem.p2p import identity\n"
+
+
+@pytest.mark.parametrize("source, failure", [
+    (LATER + "    from holdem.p2p import identity as again\n",
+     r"host layer: .*identity in later'"),
+    (LATER + "class Elsewhere:\n    def later(self):\n"
+     "        from holdem.p2p import identity\n",
+     r"host layer: .*identity in Elsewhere\.later'"),
+    ("def later():\n    pass\n", r"no longer imports .*identity in later'"),
+], ids=["same-place", "another-place", "gone"])
+def test_control_each_allowed_import_is_one_import_in_one_place(
+        source, failure, monkeypatch):
+    monkeypatch.setitem(GRAPH_ALLOWLIST, ALLOWED_ONCE, "a control")
+    _check_graph(ALLOWED_ONCE[0], LATER)        # the allowed import passes
+    with pytest.raises(AssertionError, match=failure):
+        _check_graph(ALLOWED_ONCE[0], source)
