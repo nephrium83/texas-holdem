@@ -445,8 +445,13 @@ def test_a_table_closed_mid_hand_reports_the_last_settlement_not_the_pot():
 
 def test_a_table_closed_after_a_settled_hand_reports_that_settlement():
     bus, sessions, order = make_table(2)
-    _checkdown(bus, sessions, order)
+    # A fold settles the same way every run. A checkdown can tie and split
+    # the pot, leaving both stacks where they started.
+    folder = sessions[order[0]].replica.actor
+    client_view.apply_command(sessions[order[folder]], "fold")
+    bus.drain()
     me = sessions[order[0]]
+    assert me.hand_result is not None
     assert me.replica.stacks != [500, 500]       # the hand moved chips
     me.terminate(Session.HOST_LOST, "host connection dropped during play")
     snap = json_safe(client_view.snapshot(me))
