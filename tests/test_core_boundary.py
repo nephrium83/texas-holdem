@@ -393,8 +393,21 @@ def test_control_only_the_loader_reads_as_libsodium_missing(
     assert _libsodium_missing(report["failed"]) is missing
 
 
-def test_control_a_write_before_libsodium_fails_still_fails(tmp_path):
-    """Whether or not libsodium loads here, the write is the failure."""
+@pytest.fixture
+def skip_allowed(monkeypatch):
+    """The machine a failed import once passed on: no libsodium, and the
+    crypto-gated suites allowed to skip. Reaching that skip fails instead,
+    so these controls are red on every machine, not only where libsodium
+    loads or is required."""
+    monkeypatch.setattr(crypto_gate, "crypto_status",
+                        lambda: crypto_gate.CryptoStatus(False, "not here"))
+    monkeypatch.setattr(crypto_gate, "require_crypto",
+                        lambda: pytest.fail("skipped instead of failing"))
+
+
+def test_control_a_write_before_libsodium_fails_still_fails(
+        tmp_path, skip_allowed):
+    """The write is the failure, not a reason to skip."""
     lib = _break_module(
         tmp_path,
         f"pathlib.Path(ELSEWHERE, 'x').write_text('')\n{NO_LIBSODIUM}")
@@ -402,8 +415,8 @@ def test_control_a_write_before_libsodium_fails_still_fails(tmp_path):
         _check_import("boundary_break", tmp_path, lib)
 
 
-def test_control_any_other_import_error_fails(tmp_path):
-    """Whether or not libsodium loads here, it fails rather than skips."""
+def test_control_any_other_import_error_fails(tmp_path, skip_allowed):
+    """It fails rather than skips."""
     lib = _break_module(tmp_path, "raise RuntimeError('boom')")
     with pytest.raises(AssertionError, match="importing boundary_break failed"):
         _check_import("boundary_break", tmp_path, lib)
