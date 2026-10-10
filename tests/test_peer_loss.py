@@ -455,6 +455,63 @@ def test_a_survivor_a_hand_ahead_cancels_the_hand_it_is_shuffling():
     assert ahead.last_settled_stacks == settled
 
 
+@pytest.mark.parametrize("stage,disputed", [
+    ({"dealt": True, "settled": True}, ""),
+    ({"dealt": False, "settled": False}, ""),
+    ({"dealt": True, "settled": False},
+     "; disputed: seat 0 had applied 3 actions in hand 1, this game not "
+     "dealt hand 2"),
+], ids=["settled", "voided", "not-settled"])
+def test_a_survivor_a_hand_ahead_of_a_notice_checks_it_had_ended(stage,
+                                                                 disputed):
+    """The survivor has settled hand 1 and begun hand 2. A notice from
+    hand 1 agrees if the host had ended that hand too, settled or voided
+    (a void is redealt as a new hand). One that says hand 1 was still
+    being played does not: the survivor cancels hand 2 as before, and
+    marks its result disputed (rule 11)."""
+    bus, sessions, order = table(3)
+    settle_by_checkdown(bus, sessions, order)
+    ahead = sessions["peer1"]
+    assert ahead.next_p2p_hand() == "started"
+    bus.drain()
+    assert ahead._hand_no == 2
+
+    ahead.handle_message("peer0", {"type": "peer_lost", "hand": 1,
+                                   "seat": 0, "lost_seat": 2,
+                                   "ended": True, "actions": 3, **stage})
+
+    assert ahead.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0); hand 2 was "
+        "cancelled before the deal and its blinds go back" + disputed)
+
+
+@pytest.mark.parametrize("settle,dealt,disputed", [
+    (True, False, ""),
+    (True, True, "; disputed: seat 0 had applied 0 actions in hand 2, "
+                 "this game settled hand 1"),
+    (False, False, "; it forfeits hand 1; disputed: seat 0 had not dealt "
+                   "hand 2, this game applied 0 actions in hand 1"),
+], ids=["settled-and-shuffling", "dealt-ahead", "ahead-of-a-live-hand"])
+def test_a_survivor_a_hand_behind_a_notice_checks_it_had_ended(settle,
+                                                               dealt,
+                                                               disputed):
+    """The host has begun hand 2. This game agrees only if it had ended
+    hand 1 and the host's hand 2 had not been dealt, since dealing it
+    needs this seat's shuffle round. Otherwise its result is disputed."""
+    bus, sessions, order = table(3)
+    if settle:
+        settle_by_checkdown(bus, sessions, order)
+    behind = sessions["peer1"]
+
+    behind.handle_message("peer0", {"type": "peer_lost", "hand": 2,
+                                    "seat": 0, "lost_seat": 2,
+                                    "ended": True, "dealt": dealt,
+                                    "settled": False, "actions": 0})
+
+    assert behind.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0)" + disputed)
+
+
 def test_a_drop_while_the_next_hand_is_shuffled_cancels_it(monkeypatch):
     """Hand 1 settles with seat 2 ahead. Seats 0 and 1 press Next, post
     hand 2's blinds and start shuffling it. Seat 2 drops before it
