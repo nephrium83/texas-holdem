@@ -9,14 +9,15 @@ Two checks, because each sees what the other cannot:
 
 * Each core module is imported in a fresh interpreter, with
   HOLDEM_CONFIG_DIR and the working directory pointing at empty folders.
-  Afterwards nothing was written, there is still one thread, and tkinter,
-  socket and asyncio are not loaded. A fresh process, because this one has
-  already imported whatever the rest of the suite needed; an empty config
-  folder, because a module that creates its file on first launch writes
-  nothing when the file is already there. Without libsodium, a crypto-backed
-  import stops where ristretto loads it: what it did up to there is still
-  checked, and then it skips or fails under the crypto-gated suites' policy
-  (tests/crypto_gate.py). Any other import error fails.
+  Afterwards nothing was written, no thread was started, even one that has
+  finished, and tkinter, socket and asyncio are not loaded. A fresh
+  process, because this one has already imported whatever the rest of the
+  suite needed; an empty config folder, because a module that creates its
+  file on first launch writes nothing when the file is already there.
+  Without libsodium, a crypto-backed import stops where ristretto loads it:
+  what it did up to there is still checked, and then it skips or fails
+  under the crypto-gated suites' policy (tests/crypto_gate.py). Any other
+  import error fails.
 
 * No core module imports a host module anywhere in its source. This is read
   from the source rather than observed, so it also sees imports inside
@@ -141,7 +142,26 @@ GRAPH_ALLOWLIST = {
 # so it sees every write the import attempts wherever it points; the empty
 # folders only catch writes that land in them.
 PROBE = r"""
-import os, sys
+import _thread, os, sys, threading
+
+started = 0
+
+def counted(start):
+    def start_counted(*args, **kwargs):
+        global started
+        started += 1
+        return start(*args, **kwargs)
+    return start_counted
+
+# Every thread start, not the count left at the end, which a thread joined
+# during the import is already gone from. threading keeps its own name for
+# the start it calls.
+for name in ("start_new_thread", "start_joinable_thread", "start_new"):
+    if hasattr(_thread, name):
+        start = counted(getattr(_thread, name))
+        setattr(_thread, name, start)
+        if hasattr(threading, "_" + name):
+            setattr(threading, "_" + name, start)
 
 writes = []
 WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
@@ -168,7 +188,7 @@ def audit(event, args):
 
 sys.addaudithook(audit)
 
-import importlib, json, threading, traceback
+import importlib, json, traceback
 
 failed = None
 try:
@@ -180,7 +200,7 @@ except BaseException as exc:         # what it did before failing still counts
               "traceback": traceback.format_exc()}
 print(json.dumps({
     "writes": writes,
-    "threads": threading.active_count(),
+    "threads": started,
     "loaded": [m for m in sys.argv[2:] if m in sys.modules],
     "failed": failed,
 }))
@@ -224,8 +244,8 @@ def _libsodium_missing(failed: dict) -> bool:
 def _violations(report: dict, tmp_path: Path) -> Counter:
     """Each violation, as often as the import did it."""
     found = Counter(f"loads {name}" for name in report["loaded"])
-    if report["threads"] != 1:
-        found["starts a thread"] += 1
+    if report["threads"]:
+        found["starts a thread"] = report["threads"]
     # Every write the hook saw counts, and a file on disk only once more if
     # the hook missed how it got there.
     writes = [Path(w) for w in report["writes"]]
@@ -372,9 +392,11 @@ def _break_module(tmp_path: Path, code: str) -> Path:
     ("os.mkdir(os.path.join(ELSEWHERE, 'x'))", "writes elsewhere/x"),
     ("threading.Thread(target=NEVER.wait, daemon=True).start()",
      "starts a thread"),
+    ("t = threading.Thread(target=lambda: None)\nt.start()\nt.join()",
+     "starts a thread"),
     ("import socket", "loads socket"),
 ], ids=["config-folder", "write-text-elsewhere", "os-open-elsewhere",
-        "mkdir-elsewhere", "thread", "socket"])
+        "mkdir-elsewhere", "thread", "finished-thread", "socket"])
 def test_control_each_check_sees_its_break(code, violation, tmp_path):
     """ELSEWHERE is outside both empty folders, so only the hook sees it."""
     report = _fresh_import("boundary_break", tmp_path,
