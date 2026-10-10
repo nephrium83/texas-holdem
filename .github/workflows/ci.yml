@@ -136,3 +136,13 @@ jobs:
           }
           pytest -q @($files.FullName)
           exit $LASTEXITCODE
+      - name: Run core boundary test
+        # Importing the game core must do nothing on Windows too. Until the
+        # sidecar build ships libsodium (plan increment 14), modules that need
+        # it are reported as permitted skips; every other check still runs.
+        shell: pwsh
+        env:
+          HOLDEM_REQUIRE_CRYPTO: "0"
+        run: |
+          pytest -q tests/test_core_boundary.py
+          exit $LASTEXITCODE
