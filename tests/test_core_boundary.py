@@ -101,7 +101,8 @@ DYNAMIC = "a module named at run time"
 _IDENTITY = "through identity, which creates it at import (identity.py:83-85)"
 
 # What a fresh import of each core module does today that it must not. A
-# write names its file, so a second file from one of these is still new.
+# write names its file, so a second file from one of these is still new, and
+# each entry allows it once, so a second write to the same file is new too.
 IMPORT_ALLOWLIST = {
     "holdem.p2p.invite": {
         "writes config/identity.json": "invite.py:62, " + _IDENTITY,
@@ -147,6 +148,11 @@ WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 WRITE_EVENTS = {"os.mkdir", "os.rename", "os.remove", "os.rmdir",
                 "os.truncate", "os.symlink", "os.link"}
 
+def where(path):
+    # Absolute, so a relative write matches the file found on disk.
+    return str(path if isinstance(path, int)
+               else os.path.abspath(os.fsdecode(path)))
+
 def audit(event, args):
     if event == "open":
         path, mode, flags = args
@@ -154,11 +160,11 @@ def audit(event, args):
         writing = (any(c in mode for c in "wax+") if mode
                    else flags & WRITE_FLAGS)
         if writing:
-            writes.append(str(path))
+            writes.append(where(path))
     elif event == "os.mkdir" and os.path.isdir(args[0]):
         pass                     # exist_ok on a folder already there
     elif event in WRITE_EVENTS:
-        writes.append(str(args[0]))
+        writes.append(where(args[0]))
 
 sys.addaudithook(audit)
 
@@ -199,8 +205,7 @@ def _fresh_import(module: str, tmp_path: Path, *path: Path) -> dict:
     assert proc.returncode == 0, f"importing {module} crashed:\n{proc.stderr}"
     report = json.loads(proc.stdout.splitlines()[-1])
     # Whatever reached the empty folders, however it was written.
-    report["writes"].extend(
-        str(p) for d in (config, cwd) for p in d.rglob("*"))
+    report["files"] = [str(p) for d in (config, cwd) for p in d.rglob("*")]
     return report
 
 
@@ -216,14 +221,19 @@ def _libsodium_missing(failed: dict) -> bool:
             and os.path.samefile(file, _source("holdem.p2p.ristretto")))
 
 
-def _violations(report: dict, tmp_path: Path) -> set:
-    found = {f"loads {name}" for name in report["loaded"]}
+def _violations(report: dict, tmp_path: Path) -> Counter:
+    """Each violation, as often as the import did it."""
+    found = Counter(f"loads {name}" for name in report["loaded"])
     if report["threads"] != 1:
-        found.add("starts a thread")
-    for written in map(Path, report["writes"]):
+        found["starts a thread"] += 1
+    # Every write the hook saw counts, and a file on disk only once more if
+    # the hook missed how it got there.
+    writes = [Path(w) for w in report["writes"]]
+    for written in writes + [Path(f) for f in report["files"]
+                             if Path(f) not in writes]:
         if written.is_relative_to(tmp_path):
             written = written.relative_to(tmp_path)
-        found.add(f"writes {written.as_posix()}")
+        found[f"writes {written.as_posix()}"] += 1
     return found
 
 
@@ -292,8 +302,9 @@ def _check_graph(module: str, source: str) -> None:
 def _check_import(module: str, tmp_path: Path, *path: Path) -> None:
     report = _fresh_import(module, tmp_path, *path)
     found = _violations(report, tmp_path)
-    allowed = set(IMPORT_ALLOWLIST.get(module, {}))
-    new = sorted(found - allowed)
+    allowed = Counter(IMPORT_ALLOWLIST.get(module, {}).keys())
+    new = sorted(f"{v} x{found[v]}" if found[v] > 1 else v
+                 for v in found - allowed)
     # Before anything about how the import ended: a module that writes and
     # then fails has still written.
     assert not new, f"importing {module} must do nothing, but it: {new}"
@@ -369,6 +380,28 @@ def test_control_each_check_sees_its_break(code, violation, tmp_path):
     report = _fresh_import("boundary_break", tmp_path,
                            _break_module(tmp_path, code))
     assert violation in _violations(report, tmp_path)
+
+
+CONFIG_X = "open(os.path.join(CONFIG, 'x'), 'w').close()\n"
+ELSEWHERE_X = "pathlib.Path(ELSEWHERE, 'x').write_text('')\n"
+
+
+@pytest.mark.parametrize("code, allowed, failure", [
+    (CONFIG_X, "writes config/x", None),
+    (CONFIG_X * 2, "writes config/x", "writes config/x x2"),
+    (ELSEWHERE_X * 2, "writes elsewhere/x", "writes elsewhere/x x2"),
+], ids=["once", "twice", "twice-elsewhere"])
+def test_control_an_allowed_write_is_allowed_once(
+        code, allowed, failure, tmp_path, monkeypatch):
+    """A second write to an allowed file is new, not the same one again."""
+    monkeypatch.setitem(IMPORT_ALLOWLIST, "boundary_break",
+                        {allowed: "a control"})
+    lib = _break_module(tmp_path, code)
+    if failure is None:
+        _check_import("boundary_break", tmp_path, lib)
+    else:
+        with pytest.raises(AssertionError, match=failure):
+            _check_import("boundary_break", tmp_path, lib)
 
 
 # The real loader, failing as it does on a machine without the library.
