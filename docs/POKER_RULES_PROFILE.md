@@ -499,7 +499,8 @@ seat's hole even when every share happens to be present
 **Client boundary — narrower, and inconsistent with itself.**
 
 * A fold-win reveals nothing: the settled result carries no scored `runs`, so
-  the reveal block never runs (`client_view.py:138-151`).
+  the reveal block never runs (`client_view.py`, showdown-reveal block of
+  `snapshot()`).
 * A contested showdown reveals the hole cards of **every dealt seat in the
   map** — including seats that folded on an earlier street (same loop, which
   filters only on `is_you`).
@@ -553,8 +554,9 @@ a modified peer can compute, because D-M1-1b already concedes that. The two are
 consistent: we conform to the convention where conforming is honest, and we
 refuse to imply the convention is enforced.
 
-Current behaviour deviates. It is recorded as gap **C1** in §7 and fixed in
-**M7** — this document does not change engine or client behaviour.
+The behaviour this document was read against deviated. It is recorded as gap
+**C1** in §7, now closed by the Godot beta's client work rather than M7 — this
+document itself does not change engine or client behaviour.
 
 ### 4.3 What the product must say
 
@@ -762,15 +764,15 @@ and `holdem/contract.py` at `c69a4bf`. **Nothing was changed.**
 | One board per hand on the P2P path | §3.1 (house ruling — no TDA rule requires it) | `replica_table.py:29-31` pins `runs=1` |
 | Hidden information during play | §4.1 | `contract.py:46-85`, `mental_deal.py:741-762` |
 | No burn cards | §3.2, R38 | `deal_map.py:13` |
-| Fold-win reveals nothing at the client | §4.2 D-M1-1a | `client_view.py:138-151` |
+| Fold-win reveals nothing at the client | §4.2 D-M1-1a | `client_view.py`, showdown-reveal block of `snapshot()` |
 | No straddle on the P2P path (by omission, not refusal — C5) | §3.2 (house ruling — no TDA rule requires it) | `replica_table.py:120` |
 
-### 7.2 Gaps — all owned by M7 (**C6** also needs M2), none fixed here
+### 7.2 Gaps — owned by M7 (**C6** also needs M2), except **C1**, which the Godot beta (B1) closed; none fixed here
 
 | ID | Gap | Profile rule violated | Site |
 |---|---|---|---|
 | **B6** | cumulative short all-ins do not reopen betting; each all-in is judged alone against `min_raise` and never accumulated | §3.3, Rule 47 | `engine.py:756-776` |
-| **C1** | at a contested showdown the client renders the hole cards of seats that **folded earlier**, not only the seats that reached showdown | §4.2 D-M1-1c | `client_view.py:138-151` |
+| **C1** | **Closed** (Godot beta, B1). At a contested showdown the client rendered the hole cards of seats that **folded earlier**, not only the seats that reached showdown. `client_view.snapshot` now tables only the seats in `result["shown"]`; control: `tests/test_client_view.py::test_showdown_never_reveals_a_seat_that_folded_earlier` | §4.2 D-M1-1c | `client_view.py`, showdown-reveal block of `snapshot()` |
 | **C2** | a sub-minimum raise is silently coerced up to `min_to` instead of being rejected. Deterministic, so replicas converge — and it is close to TDA's own correction remedy (52-A), which is why the gap is a **decision** rather than a defect. The profile still says reject: a repair rule is safe for a human at a table, not for arbitrary bytes from a hostile peer | §3.3, Rules 43-A and 52-A | `engine.py:747-750` |
 | **C3** | `Engine.act(i, ...)` never checks `i == self.actor`. The replica layer gates it today, so the P2P path is safe; the engine itself is not | §3.3, Rule 53 | `engine.py:709`, gated at `replica_table.py:185-186` |
 | **C4** | `contract.apply_command` sends the action string `"check"`, which `Engine.act` does not name. It matches no branch, so it silently discards the actor from `need_to_act` and advances the turn with no event and no `last_action`. Single-process path only — the P2P client sends `"call"` (`client_view.py:255-257`) | §3.3 "one canonical typed action, validated once" | `contract.py:106-107` vs `engine.py:713-747` |

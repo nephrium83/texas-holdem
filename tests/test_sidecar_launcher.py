@@ -52,6 +52,19 @@ def test_make_sessions_reserves_seat_zero_for_the_human():
     assert sessions[order[0]].local_seat == 0
 
 
+def test_the_lobby_roster_names_every_seat_the_client_renders():
+    """The Godot lobby renders seats[i].name for each member (SeatView's
+    apply_lobby_seat); it showed "Empty seat" for every one of these. This
+    pins the other half: the shipped launcher's lobby snapshot names each
+    seat, marks the human's, and lists them in seat order."""
+    bus, sessions, order = _make_sessions(3, nickname="Ada")
+    snap = client_view.snapshot(sessions[order[HUMAN_SEAT]])
+    assert snap["phase"] == "lobby"
+    assert [(s["seat"], s["name"], s["is_you"]) for s in snap["seats"]] == [
+        (0, "Ada", True), (1, "Bot 1", False), (2, "Bot 2", False)]
+    assert snap["you"]["seat"] == HUMAN_SEAT
+
+
 def test_deal_deals_and_bots_act_up_to_the_humans_turn():
     """4-max, button=0 (the human): preflop order is UTG (seat 3) then
     the button, so exactly one bot acts automatically before it becomes

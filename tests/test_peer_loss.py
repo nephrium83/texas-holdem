@@ -137,7 +137,10 @@ def test_seated_peer_lost_mid_hand_ends_the_table():
     assert host.last_settled_stacks == [510, 490]
     # The client is not told its chips were restored: they were not.
     snap = client_view.snapshot(host)
-    assert snap["turn"]["headline"] == "Hand stopped | P1 dropped and forfeits"
+    # A table that ends abnormally is shown as closed, headed by the reason
+    # (the terminal contract from the client work merged in #53).
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == host.terminal_reason
     assert snap["void_reason"] == "seat 1 (P1) dropped and forfeits hand 1"
 
 
