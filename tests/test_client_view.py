@@ -185,6 +185,27 @@ def test_settled_snapshot_tables_all_holes_at_showdown():
     assert len(snap["board"]) == 5                       # full board too
 
 
+def test_showdown_never_reveals_a_seat_that_folded_earlier():
+    """Gap C1 (POKER_RULES_PROFILE D-M1-1c): the audit opens every dealt
+    seat, but only the seats that reached the showdown are tabled. A seat
+    that folded on an earlier street must not appear in anyone's snapshot."""
+    bus, sessions, order = make_table(3)
+    folder = sessions[order[0]].replica.actor
+    client_view.apply_command(sessions[order[folder]], "fold")
+    bus.drain()
+    _checkdown(bus, sessions, order)
+    folded_hole = client_view.snapshot(sessions[order[folder]])["you"]["hole"]
+
+    for i, cid in enumerate(order):
+        snap = json_safe(client_view.snapshot(sessions[cid]))
+        assert snap["phase"] == "settled" and snap["result"]["runs"]
+        assert folder not in snap["result"]["shown"]
+        tabled = {sv["seat"] for sv in snap["seats"] if "hole" in sv}
+        assert tabled == {s for s in range(3) if s not in (i, folder)}
+        if i != folder:
+            assert not set(folded_hole) & set(all_card_strings(snap))
+
+
 def test_foldout_settled_snapshot_reveals_nothing():
     bus, sessions, order = make_table(3)
     while sessions[order[0]].replica.phase == "betting":
@@ -304,14 +325,194 @@ def test_eliminated_snapshot_receives_terminal_match_state():
     session._session_over = True
     session._session_winner = 2
     session._final_stacks = [0, 0, 1500]
+    session.terminate(Session.ENDED_NORMAL, "match complete; winner seat 2")
 
     snap = json_safe(client_view.snapshot(session))
     assert snap["eliminated"] is True
     assert snap["session_over"] is True
     assert snap["session_winner"] == 2
     assert snap["final_stacks"] == [0, 0, 1500]
+    assert snap["terminal"]["last_settled_stacks"] == [0, 0, 1500]
     assert snap["turn"]["state"] == "match_complete"
     assert snap["turn"]["headline"] == "P2 won the match"
+
+
+def _play_hand(bus, sessions, order, alive, shovers):
+    """Play one hand through client commands: seats in ``shovers`` move all
+    in whenever they may raise, everyone else checks or calls."""
+    from holdem.p2p.replica_table import PHASE_BETTING
+    ref = sessions[order[alive[0]]]
+    while ref.replica.phase == PHASE_BETTING:
+        seat = ref.replica.actor
+        legal = ref.replica.engine.legal(seat)
+        if seat in shovers and legal["can_raise"]:
+            res = client_view.apply_command(sessions[order[seat]], "raise_to",
+                                            {"amount": legal["max_to"]})
+        else:
+            res = client_view.apply_command(sessions[order[seat]], "check_call")
+        assert res["verdict"] == "applied", res
+        bus.drain()
+
+
+def test_a_seat_busted_before_the_end_reports_the_match_final_stacks():
+    """The retained-replica case, played for real. A busted seat keeps the
+    hand that eliminated it and drops every later hand, so when the match
+    ends its replica is stale; session_end brings it the final stacks, and
+    those are the last settlement its terminal reports."""
+    bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
+    # The short seat shoves and the others only call, so seat 1 is the one
+    # to bust -- in whichever hand the cards decide.
+    for _ in range(40):
+        _play_hand(bus, sessions, order, [0, 1, 2], shovers={1})
+        verdicts = [client_view.apply_command(sessions[cid], "next_hand")
+                    for cid in order]
+        bus.drain()
+        if verdicts[1]["verdict"] == "eliminated":
+            break
+    else:
+        pytest.fail("the short seat never busted")
+    assert [v["verdict"] for v in verdicts] == ["started", "eliminated",
+                                                "started"]
+    spectator = sessions[order[1]]
+    retained = list(spectator.replica.stacks)
+
+    # Heads-up shoves until one survivor holds every chip (a chop replays).
+    survivors = [sessions[order[0]], sessions[order[2]]]
+    for _ in range(40):
+        _play_hand(bus, sessions, order, [0, 2], shovers={0, 2})
+        final = list(survivors[0].replica.stacks)
+        verdicts = [client_view.apply_command(s, "next_hand")
+                    for s in survivors]
+        bus.drain()
+        if verdicts[0]["verdict"] == "session_over":
+            break
+    else:
+        pytest.fail("the heads-up match never ended")
+
+    assert retained != final                      # the table moved on
+    snap = json_safe(client_view.snapshot(spectator))
+    assert snap["eliminated"] is True and snap["session_over"] is True
+    assert snap["final_stacks"] == final
+    assert snap["terminal"]["state"] == Session.ENDED_NORMAL
+    assert snap["terminal"]["last_settled_stacks"] == final
+
+
+# ------------------------------------------------------ terminal contract
+
+def _lobby_session():
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(InMemoryBus(), "peer0"))
+    s.local_conn_id = "peer0"
+    s.configure_seats(["peer0", "peer1"])
+    return s
+
+
+def test_a_live_session_has_no_terminal_in_either_snapshot_shape():
+    _, sessions, order = make_table(2)
+    assert json_safe(client_view.snapshot(sessions[order[0]]))["terminal"] is None
+    assert json_safe(client_view.snapshot(_lobby_session()))["terminal"] is None
+
+
+def test_a_table_closed_mid_hand_reports_the_last_settlement_not_the_pot():
+    """The in-flight pot is discarded: the stacks to show are the ones the
+    previous hand settled, not the live hand's partly-bet ones."""
+    bus, sessions, order = make_table(2)
+    _checkdown(bus, sessions, order)
+    settled = sessions[order[0]].replica.stacks
+    for cid in order:
+        client_view.apply_command(sessions[cid], "next_hand")
+    bus.drain()
+    actor = sessions[order[0]].replica.actor
+    legal = sessions[order[actor]].replica.engine.legal(actor)
+    client_view.apply_command(sessions[order[actor]], "raise_to",
+                              {"amount": legal["min_to"]})
+    bus.drain()
+    me = sessions[order[sessions[order[0]].replica.actor]]
+    assert "legal" in client_view.snapshot(me)["you"]          # my turn
+
+    me.terminate(Session.ABORTED_PROTOCOL, "seat 1 disconnected")
+    snap = json_safe(client_view.snapshot(me))
+
+    assert snap["terminal"] == {"state": Session.ABORTED_PROTOCOL,
+                                "reason": "seat 1 disconnected",
+                                "last_settled_stacks": settled}
+    assert sum(sv["stack"] for sv in snap["seats"]) < sum(settled)
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == "seat 1 disconnected"
+    assert "decision" not in snap["turn"]
+    assert "legal" not in snap["you"]
+
+
+def test_a_table_closed_after_a_settled_hand_reports_that_settlement():
+    bus, sessions, order = make_table(2)
+    # A fold settles the same way every run. A checkdown can tie and split
+    # the pot, leaving both stacks where they started.
+    folder = sessions[order[0]].replica.actor
+    client_view.apply_command(sessions[order[folder]], "fold")
+    bus.drain()
+    me = sessions[order[0]]
+    assert me.hand_result is not None
+    assert me.replica.stacks != [500, 500]       # the hand moved chips
+    me.terminate(Session.HOST_LOST, "host connection dropped during play")
+    snap = json_safe(client_view.snapshot(me))
+    assert snap["terminal"]["last_settled_stacks"] == me.replica.stacks
+    assert snap["turn"]["state"] == "table_closed"
+
+
+def test_a_table_closed_on_a_voided_hand_reports_its_carry_in():
+    bus, sessions, order = make_table(3)
+    victim = sessions[order[0]]
+    victim.handle_message("peer2", {
+        "type": "deal_share", "position": 0, "seat_from": 2, "hand": 1,
+        "D_hex": "00" * 32, "dleq_hex": "11" * 64})
+    assert victim.hand_voided
+    victim.terminate(Session.ABORTED_PROTOCOL, "deal failed")
+    snap = json_safe(client_view.snapshot(victim))
+    assert snap["terminal"]["last_settled_stacks"] == [500, 500, 500]
+
+
+def test_a_lobby_that_ends_closes_the_table_with_no_stacks():
+    s = _lobby_session()
+    s.terminate(Session.HOST_LOST, "host lost in lobby")
+    snap = json_safe(client_view.snapshot(s))
+    assert snap["phase"] == "lobby"
+    assert snap["terminal"] == {"state": Session.HOST_LOST,
+                                "reason": "host lost in lobby",
+                                "last_settled_stacks": None}
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == "host lost in lobby"
+
+
+def test_a_reason_quoting_the_host_is_cut_before_it_reaches_the_client():
+    """POLICY_REFUSED quotes the deal policy the host declared, whatever it
+    was. Session keeps that reason whole; the snapshot -- the headline the
+    client shows and terminal.reason -- carries 512 characters of it."""
+    s = Session(is_host=False, nickname="P1", avatar_b64="",
+                transport=InMemoryTransport(InMemoryBus(), "peer1"))
+    s.local_conn_id = "peer1"
+    s._host_conn_id = "peer0"
+    declared = ("Your opponent forfeited. Claim your winnings at "
+                "http://example.invalid/claim " + "X" * 200_000)
+    s.handle_message("peer0", {"type": "game_start", "payload": {
+        "seat_order": ["peer0", "peer1"],
+        "table_settings": {Session.DEAL_POLICY_SETTING: declared}}})
+    assert s.terminal_state == Session.POLICY_REFUSED
+    assert len(s.terminal_reason) > 200_000
+
+    snap = json_safe(client_view.snapshot(s))
+    assert snap["turn"]["state"] == "table_closed"
+    assert snap["turn"]["headline"] == s.terminal_reason[:512]
+    assert snap["terminal"]["reason"] == s.terminal_reason[:512]
+    assert len(json.dumps(snap)) < 4096
+
+
+def test_a_finished_match_is_reported_but_is_not_a_closed_table():
+    _, sessions, order = make_table(2)
+    me = sessions[order[0]]
+    me.terminate(Session.ENDED_NORMAL, "match complete; winner seat 0")
+    snap = json_safe(client_view.snapshot(me))
+    assert snap["terminal"]["state"] == Session.ENDED_NORMAL
+    assert snap["turn"]["state"] != "table_closed"
 
 
 def test_start_game_command_invokes_the_controller_callable():

@@ -20,9 +20,16 @@ const MAX_SEATS := 9
 func apply_snapshot(snapshot: Dictionary) -> void:
 	var seats: Array = snapshot.get("seats", [])
 	var action_on := int(snapshot.get("action_on", -1))
+	var you: Dictionary = snapshot.get("you", {})
+	var in_lobby := str(snapshot.get("phase", "")) == "lobby"
 	for i in range(MAX_SEATS):
 		if i < seats.size() and seats[i] is Dictionary:
 			var seat: Dictionary = seats[i]
+			if in_lobby:
+				_seat_views[i].apply_lobby_seat(seat)
+				continue
+			if bool(seat.get("is_you", false)):
+				seat = _with_own_hole(seat, you.get("hole"))
 			var is_action_on := int(seat.get("seat", i)) == action_on
 			_seat_views[i].apply_seat(seat, is_action_on)
 		else:
@@ -33,3 +40,15 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 
 	var hand_num := int(snapshot.get("hand_num", 0))
 	_hand_label.text = ("Hand #%d" % hand_num) if hand_num > 0 else ""
+
+
+## The sidecar sends the local seat's cards only in you.hole, never in that
+## seat's public entry (GODOT_PROTOCOL.md section 5), so rendering seats[i]
+## alone showed the player their own hand face down. Copied into the is_you
+## seat only, on a duplicate so the snapshot itself is not altered.
+func _with_own_hole(seat: Dictionary, hole: Variant) -> Dictionary:
+	if not (hole is Array) or seat.has("hole"):
+		return seat
+	var own := seat.duplicate()
+	own["hole"] = hole
+	return own
