@@ -31,8 +31,6 @@ from .p2p import identity as _identity
 from .p2p import transport as _transport
 from .p2p import wire as _wire
 from .p2p import session as _session_mod
-from .p2p import _session  # noqa: F401 -- re-exported for callers
-import holdem.p2p as _p2p_pkg
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -631,7 +629,6 @@ class OnboardingFlow:
             avatar_b64 = getattr(self, "avatar_b64", ""),
             admission  = host_admission,
         )
-        _p2p_pkg._session = sess
 
         # H-12: register the host under a stable local ID derived from the
         # Ed25519 public key — NOT inside an on_connect callback (which fires
@@ -820,7 +817,6 @@ class OnboardingFlow:
 
         def _close():
             _transport.stop()
-            _p2p_pkg._session = None
             win.destroy()
 
         def _start_game():
@@ -1000,7 +996,6 @@ class OnboardingFlow:
                 avatar_b64 = getattr(self, "avatar_b64", ""),
                 joiner_admission = joiner_admission,
             )
-            _p2p_pkg._session = sess
             _sess_ref[0] = sess              # C-2: expose to _handle_start
 
             def _on_game_start(payload):
