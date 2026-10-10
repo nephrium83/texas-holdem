@@ -322,9 +322,15 @@ def test_a_joiner_killed_mid_hand_ends_the_table_for_every_survivor(
         table, n):
     """Hand 1 settles, hand 2 has chips in the pot, then the last joiner's
     process dies. Only the host's socket sees it go; at three seats the
-    other joiner learns from the host's signed peer_lost notice. Every
-    survivor ends PEER_LOST with chips at hand 1's settlement -- hand 2's
-    pot is discarded, not paid.
+    other joiner learns from the host's signed peer_lost notice. The
+    leaver folds: every survivor ends PEER_LOST having settled its own
+    copy of hand 2, with the leaver's chips in the pot forfeit
+    (docs/CASUAL_P2P_RULES.md).
+
+    The leaver had called the big blind of 20. Heads-up the other seat
+    had 20 in too and takes the 40. At three seats seat 0 had the small
+    blind of 10 and seat 1 the big: 10 from each seat makes 30, shared by
+    seats 0 and 1, and the other 10 from seats 1 and 2 is seat 1's alone.
     """
     seated = table([1000] * n)
     hand1 = _assert_agreed(_play_hand(seated, _raise_called),
@@ -337,7 +343,10 @@ def test_a_joiner_killed_mid_hand_ends_the_table_for_every_survivor(
     assert _take_action(seated, 0, _checkdown)
     in_pot = [_until(p, lambda s: s["seq"] == 1, "action 0 applied")
               for p in seated]
-    assert all(sum(st["stacks"]) < sum(hand1) for st in in_pot)
+    put_in = [a - b for a, b in zip(hand1, in_pot[0]["stacks"])]
+    won = {2: [20, -20], 3: [5, 15, -20]}[n]
+    assert put_in == {2: [20, 20], 3: [10, 20, 20]}[n], in_pot[0]
+    forfeit = [a + b for a, b in zip(hand1, won)]
 
     victim, survivors = seated[-1], seated[:-1]
     victim.proc.kill()
@@ -353,4 +362,6 @@ def test_a_joiner_killed_mid_hand_ends_the_table_for_every_survivor(
         assert st["terminal_reason"].startswith(
             f"seat {n - 1} ({victim.label}) disconnected"), \
             st["terminal_reason"]
-        assert st["last_settled_stacks"] == hand1
+        assert st["terminal_reason"].endswith("; it forfeits hand 2"), \
+            st["terminal_reason"]
+        assert st["last_settled_stacks"] == forfeit

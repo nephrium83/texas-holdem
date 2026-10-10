@@ -800,9 +800,11 @@ def test_a_seat_cannot_take_back_a_settlement_every_seat_reported(
     """Seat 2 loses hand 1 and every seat reports the same digest. In hand
     2 seat 2 signs a fresh message disputing hand 1. Rolling back to hand
     1's carry-in would erase a hand the whole table agreed on, and pay
-    seat 2 better than leaving does: a disconnect here ends PEER_LOST at
-    hand 1's settlement (test_peer_loss). It gets that figure and no
-    better, with the blame."""
+    seat 2 better than leaving does: a disconnect here ends PEER_LOST with
+    seat 2 forfeiting what it has put into hand 2 (test_peer_loss). It
+    gets hand 1's settlement and no better, with the blame. Hand 2's pot
+    is still discarded, so the 10 seat 2 called there comes back to it,
+    which leaving would not do."""
     rig_showdowns(monkeypatch)(0, 1, 2)
     bus, sessions, order = make_table(3)
     checkdown(bus, sessions, order)

@@ -16,8 +16,13 @@ Policy enforced here:
             most one seat with chips (the match is decided), or any drop in
             the lobby, is just a roster change.
 
-Chips stand at last_settled_stacks: an unsettled hand's pot is discarded,
-not paid out.
+The leaver folds (docs/CASUAL_P2P_RULES.md). A hand it was dealt into
+stops, and every game still playing settles its own copy with
+settle_forfeit: the leaver forfeits what it put in and the seats left
+share each pot. A hand not yet dealt is cancelled and its blinds go back.
+The tables here run Bayer-Groth, as every networked table does, because a
+hand settles without its end-of-hand card check only on proofs. Chips
+stand at last_settled_stacks.
 
 A busted host cannot judge a drop -- its replica stopped at the hand it
 busted in -- so it only reports one, and the seats still playing decide.
@@ -42,7 +47,7 @@ except RuntimeError as exc:
                 allow_module_level=True)
 
 
-def table(n=3, stacks=None, start=True):
+def table(n=3, stacks=None, start=True, policy=Session.DEAL_POLICY_BG):
     """n seated sessions on one bus, peer0 the host, game started."""
     bus = InMemoryBus()
     order = [f"peer{i}" for i in range(n)]
@@ -58,7 +63,7 @@ def table(n=3, stacks=None, start=True):
             s.players[c] = Player(conn_id=c, peer_id=c, nickname=f"P{j}",
                                   avatar_b64="")
         s.configure_seats(list(order))
-        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_deal_policy(policy)
         s.state = "PLAYING"
         bus.register(cid, s)
         sessions[cid] = s
@@ -109,40 +114,53 @@ def play(bus, sessions, order, choose, ref=0):
 # --------------------------------------------------------------- in play
 
 def test_seated_peer_lost_mid_hand_ends_the_table():
+    """Heads-up, seat 1 completes its small blind to 10 and drops. It
+    folds: its 10 stays in the pot, and seat 0 takes the 20."""
     bus, sessions, order = table(2)
     host = sessions["peer0"]
     act(bus, sessions, order)                    # chips into the pot
-    assert host.replica.stacks != [500, 500]
+    assert host.replica.stacks == [490, 490]
     seen = []
     host.on_session_terminated = seen.append
 
     host.handle_disconnect("peer1")
 
     assert host.terminal_state == Session.PEER_LOST
-    assert host.terminal_reason == "seat 1 (P1) disconnected"
+    assert host.terminal_reason == (
+        "seat 1 (P1) disconnected; it forfeits hand 1")
     assert host.terminal_record.initiating_seat == 1
     assert host.terminal_record.conn_id == "peer1"
+    assert host.hand_record.outcome == Session.HAND_FORFEIT
+    assert host.hand_record.blamed_seat == 1
     assert len(seen) == 1
-    # The in-flight pot is discarded: chips stand where the hand began.
-    assert host.last_settled_stacks == [500, 500]
+    assert host.last_settled_stacks == [510, 490]
 
 
-def test_peer_lost_in_a_later_hand_reverts_to_that_hands_settlement():
+def test_peer_lost_in_a_later_hand_forfeits_that_hand(monkeypatch):
+    """Hand 1 settles with seat 0 ahead. In hand 2 seat 0 posts the small
+    blind, seat 1 the big, and seat 2 calls 10 from the button, then
+    drops. Its 10 is forfeit: seat 0's 5 and 5 from each other seat make
+    15, shared by seats 0 and 1 with the odd chip to seat 0, first left
+    of the button; seat 1's other 5 and seat 2's make 10, seat 1's alone.
+    """
+    rig_showdowns(monkeypatch)(0, 1, 2)
     bus, sessions, order = table(3)
     host = sessions["peer0"]
     settle_by_checkdown(bus, sessions, order)
     settled = host.replica.stacks
+    assert settled == [520, 490, 490]            # seat 0 took 3 x 10
     assert host.last_settled_stacks == settled
     assert {sessions[c].next_p2p_hand() for c in order} == {"started"}
     bus.drain()
     act(bus, sessions, order)
-    assert host.replica.stacks != settled        # hand 2's blinds and call
+    assert host.replica.stacks == [515, 480, 480]
 
     host.handle_disconnect("peer2")
 
     assert host.terminal_state == Session.PEER_LOST
-    assert host.terminal_reason == "seat 2 (P2) disconnected"
-    assert host.last_settled_stacks == settled
+    assert host.terminal_reason == (
+        "seat 2 (P2) disconnected; it forfeits hand 2")
+    assert host.last_settled_stacks == [523, 497, 480]
 
 
 def test_a_seat_with_chips_lost_between_hands_ends_the_table():
@@ -164,15 +182,67 @@ def test_a_seated_peer_lost_before_the_first_hand_ends_the_table():
     assert host.last_settled_stacks is None      # nothing was ever dealt
 
 
+def test_a_drop_from_a_table_without_proofs_settles_nothing():
+    """A hand settled on a drop skips its end-of-hand card check, so it
+    needs Bayer-Groth proofs. A detection-only table has none, and the
+    transport is not asked: it is compat here, as on the sidecar. The
+    hand is not settled, and chips stand where it was dealt from."""
+    bus, sessions, order = table(2, policy=Session.DEAL_POLICY_DETECTION)
+    host = sessions["peer0"]
+    act(bus, sessions, order)
+    assert host.replica.stacks == [490, 490]
+
+    host.handle_disconnect("peer1")
+
+    assert host.terminal_state == Session.PEER_LOST
+    assert host.terminal_reason == (
+        "seat 1 (P1) disconnected; hand 1 was not settled: this table runs "
+        "no Bayer-Groth shuffle proofs")
+    assert host.hand_record is None
+    assert host.last_settled_stacks == [500, 500]
+
+
+def test_a_game_that_did_not_verify_every_proof_settles_nothing():
+    """The deal aborts on a shuffle round without a valid proof, so a
+    dealt Bayer-Groth hand has one per seat. The drop path counts them
+    itself rather than lean on that: this game is made to have verified
+    one fewer than the hand's three rounds, and it settles nothing, while
+    the seat that verified all three forfeits the leaver."""
+    bus, sessions, order = table(3)
+    host, other = sessions["peer0"], sessions["peer1"]
+    act(bus, sessions, order)
+    assert host.proofs_verified == other.proofs_verified == 3
+    host._deal_driver.deal._proofs_verified -= 1
+    bus.unregister("peer2")
+
+    host.handle_disconnect("peer2")
+    bus.drain()
+
+    assert host.terminal_reason == (
+        "seat 2 (P2) disconnected; hand 1 was not settled: this game "
+        "verified 2 of its 3 shuffle proofs")
+    assert host.last_settled_stacks == [500, 500, 500]
+    assert other.terminal_reason.endswith("; it forfeits hand 1")
+    assert other.last_settled_stacks == [503, 502, 495]
+
+
 def test_a_voided_hands_seats_are_still_needed_for_the_redeal():
     bus, sessions, order = table(3)
     host = sessions["peer0"]
     for cid in order:
         sessions[cid]._void_hand("protocol failure")
     bus.drain()
+    bus.unregister("peer1")
     host.handle_disconnect("peer1")
+    bus.drain()
     assert host.terminal_state == Session.PEER_LOST
     assert host.last_settled_stacks == [500, 500, 500]
+    # A voided hand is redealt from where it was dealt from, as a
+    # cancelled one is, so the notice calls it not dealt and the other
+    # survivor, which voided it too, agrees.
+    assert sessions["peer2"].terminal_reason == (
+        "seat 1 (P1) disconnected (reported by seat 0)")
+    assert sessions["peer2"].last_settled_stacks == [500, 500, 500]
 
 
 # ----------------------------------------------------------- not in play
@@ -275,30 +345,90 @@ def test_a_lobby_drop_is_a_roster_change():
 
 # ------------------------------------------------- every survivor learns it
 
+def peer_lost_sent(session):
+    """Record the peer_lost notices ``session`` sends, as sent."""
+    sent = []
+    broadcast = session._transport.broadcast
+
+    def record(msg):
+        if msg.get("type") == "peer_lost":
+            sent.append({k: msg.get(k) for k in (
+                "hand", "lost_seat", "ended", "dealt", "settled", "actions")})
+        broadcast(msg)
+    session._transport.broadcast = record
+    return sent
+
+
 def test_every_survivor_ends_when_one_seat_drops():
     """Only the host's socket closes when a joiner drops (the production
     graph is a star). The host's signed peer_lost notice is how the other
-    joiner finds out; without it that joiner waits forever."""
+    joiner finds out; without it that joiner waits forever. The notice
+    carries no figures, only where the host's hand stood, and the joiner
+    settles its own copy of the table. Seat 2 forfeits its small blind:
+    seats 0 and 1 share it, the odd chip to seat 0, first left of the
+    button."""
     bus, sessions, order = table(3)
     host, other = sessions["peer0"], sessions["peer1"]
     act(bus, sessions, order)
+    assert host.replica.stacks == [490, 490, 495]
+    sent = peer_lost_sent(host)
     bus.unregister("peer2")                      # the process is gone
 
     host.handle_disconnect("peer2")
     bus.drain()
 
+    assert sent == [{"hand": 1, "lost_seat": 2, "ended": True,
+                     "dealt": True, "settled": False, "actions": 1}]
     assert other.terminal_state == Session.PEER_LOST
     assert other.terminal_reason == (
-        "seat 2 (P2) disconnected (reported by seat 0)")
+        "seat 2 (P2) disconnected (reported by seat 0); it forfeits hand 1")
     assert other.terminal_record.initiating_seat == 2
     assert other.last_settled_stacks == host.last_settled_stacks \
-        == [500, 500, 500]
+        == [503, 502, 495]
 
 
-def test_a_survivor_a_hand_ahead_still_ends():
+def test_an_action_that_races_the_drop_is_disputed():
+    """Seat 2 folds its small blind, and on the flop seat 0 bets 20. Seat
+    1 folds in the same instant as seat 2 drops: the fold is on its way
+    to the host when the host ends the table, so the host never applies
+    it. Seat 1's game has applied one action more than the notice says.
+    Each game shows its own result: the host's has seats 0 and 1 share
+    the pot, seat 1's has seat 0 win it, and seat 1's is marked disputed
+    (rule 11) rather than guess at the host's."""
+    bus, sessions, order = table(3)
+    host, other = sessions["peer0"], sessions["peer1"]
+    act(bus, sessions, order)                    # seat 1 calls
+    act(bus, sessions, order, "fold")            # seat 2 folds
+    act(bus, sessions, order)                    # seat 0 checks
+    assert host.replica.engine.street == "flop"
+    assert host.replica.actor == 0
+    assert host.send_bet_action("raise", 20) == "applied"
+    bus.drain()
+    assert other.send_bet_action("fold") == "applied"   # still in flight
+    bus.unregister("peer2")
+
+    host.handle_disconnect("peer2")
+    bus.drain()
+
+    # Seat 0's uncalled 20 comes back; the 25 left is shared.
+    assert host.terminal_reason == (
+        "seat 2 (P2) disconnected; it forfeits hand 1")
+    assert host.last_settled_stacks == [503, 502, 495]
+    assert other.terminal_state == Session.PEER_LOST
+    assert other.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0); it forfeits hand 1; "
+        "disputed: seat 0 had applied 4 actions in hand 1, this game "
+        "applied 5 actions in hand 1")
+    assert other.last_settled_stacks == [515, 490, 495]
+
+
+def test_a_survivor_a_hand_ahead_cancels_the_hand_it_is_shuffling():
     """Hands begin when each peer calls next_p2p_hand, so the reporter can
-    still be on the last hand while a survivor has dealt the next one. The
-    notice is not hand-scoped: the table is over either way."""
+    still be on the last hand while a survivor has begun the next one. The
+    notice is not hand-scoped: the table is over either way. That hand
+    cannot have been dealt, since the reporter's shuffle round is missing,
+    so the survivor cancels it and the blinds it posted go back (rule 5).
+    """
     bus, sessions, order = table(3)
     settle_by_checkdown(bus, sessions, order)
     settled = sessions["peer0"].replica.stacks
@@ -306,13 +436,174 @@ def test_a_survivor_a_hand_ahead_still_ends():
     assert ahead.next_p2p_hand() == "started"
     bus.drain()
     assert ahead._hand_no == 2 and sessions["peer0"]._hand_no == 1
+    assert ahead.replica.stacks != settled       # hand 2's blinds
     bus.unregister("peer2")
 
     sessions["peer0"].handle_disconnect("peer2")
     bus.drain()
 
     assert ahead.terminal_state == Session.PEER_LOST
+    assert ahead.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0); hand 2 was "
+        "cancelled before the deal and its blinds go back")
+    assert ahead.hand_record.outcome == Session.VOID_PEER_LOST
     assert ahead.last_settled_stacks == settled
+
+
+def test_a_drop_while_the_next_hand_is_shuffled_cancels_it(monkeypatch):
+    """Hand 1 settles with seat 2 ahead. Seats 0 and 1 press Next, post
+    hand 2's blinds and start shuffling it. Seat 2 drops before it
+    presses Next, so the shuffle never finishes and nobody has seen a
+    card. The hand is cancelled, not forfeit: the blinds go back (rule 5),
+    and seat 2 keeps what it won in hand 1."""
+    rig_showdowns(monkeypatch)(2, 0, 1)
+    bus, sessions, order = table(3)
+    settle_by_checkdown(bus, sessions, order)
+    settled = sessions["peer0"].replica.stacks
+    assert settled == [490, 490, 520]
+    for c in order[:2]:
+        assert sessions[c].next_p2p_hand() == "started"
+    bus.drain()
+    host = sessions["peer0"]
+    assert host.replica.stacks == [485, 480, 520]
+    assert not host._deal_driver.deal.is_shuffle_complete()
+    sent = peer_lost_sent(host)
+    bus.unregister("peer2")
+
+    host.handle_disconnect("peer2")
+    bus.drain()
+
+    assert sent == [{"hand": 2, "lost_seat": 2, "ended": True,
+                     "dealt": False, "settled": False, "actions": 0}]
+    for c in order[:2]:
+        s = sessions[c]
+        assert s.terminal_state == Session.PEER_LOST, c
+        assert s.terminal_reason.endswith(
+            "; hand 2 was cancelled before the deal and its blinds go "
+            "back"), c
+        assert s.hand_record.outcome == Session.VOID_PEER_LOST, c
+        assert s.last_settled_stacks == settled, c
+
+
+def test_a_deal_one_game_finished_alone_is_cancelled_with_the_rest():
+    """Seat 2 shuffles last. Its own round finishes the shuffle in its own
+    game at once, but the round is still on its way when seat 1 drops, so
+    the host's notice says the hand was not dealt. Seat 2 follows the
+    notice and cancels the hand as the host does, rather than forfeit
+    seat 1's blind on a deal no other game ever saw finish."""
+    bus, sessions, order = table(3, start=False)
+    last = sessions["peer2"]
+    held = []
+    broadcast = last._transport.broadcast
+    last._transport.broadcast = lambda msg: (
+        held.append(msg) if msg.get("type") == "deck_round"
+        and msg.get("round") == 3 else broadcast(msg))
+    for cid in order:
+        sessions[cid].start_p2p_hand(
+            hand_no=1, names=["P0", "P1", "P2"], stacks=[500] * 3,
+            sb=5, bb=10, button=0)
+    bus.drain()
+    host = sessions["peer0"]
+    assert len(held) == 1
+    assert last._deal_driver.deal.is_shuffle_complete()
+    assert last.proofs_verified == 3
+    assert not host._deal_driver.deal.is_shuffle_complete()
+    bus.unregister("peer1")
+
+    host.handle_disconnect("peer1")
+    bus.drain()
+
+    assert last.terminal_reason == (
+        "seat 1 (P1) disconnected (reported by seat 0); hand 1 was "
+        "cancelled before the deal and its blinds go back")
+    assert last.last_settled_stacks == host.last_settled_stacks \
+        == [500, 500, 500]
+
+
+def test_a_hand_the_reporter_voided_is_cancelled_by_a_game_that_did_not():
+    """The host has voided hand 1, which redeals it from the stacks it was
+    dealt from, as cancelling it would; seat 2 has not heard. The host's
+    notice calls a voided hand not dealt, so seat 2 cancels it too and
+    both games end on the same stacks, instead of seat 2 forfeiting seat
+    1's blind on a hand the host had already given up."""
+    bus, sessions, order = table(3)
+    host, last = sessions["peer0"], sessions["peer2"]
+    act(bus, sessions, order)
+    host._void_hand("protocol failure", announce=False)
+    bus.unregister("peer1")
+
+    host.handle_disconnect("peer1")
+    bus.drain()
+
+    assert host.last_settled_stacks == [500, 500, 500]
+    assert last.terminal_reason == (
+        "seat 1 (P1) disconnected (reported by seat 0); hand 1 was "
+        "cancelled before the deal and its blinds go back")
+    assert last.last_settled_stacks == [500, 500, 500]
+
+
+def test_a_settlement_report_that_crosses_the_drop_is_disputed():
+    """Seat 2's report that it settled hand 1 reaches seat 1 before seat
+    1 has settled it, and then seat 2 drops. The report is the race rule
+    11 covers: seat 1 keeps its own result, the forfeit, and marks it
+    disputed, rather than end the table over the report and roll the
+    hand back."""
+    bus, sessions, order = table(3)
+    other = sessions["peer1"]
+    act(bus, sessions, order)
+    other.handle_message("peer2", {"type": "hand_settled", "hand": 1,
+                                   "seat": 2, "digest": "ab" * 32})
+    assert other.terminal_state is None
+    bus.unregister("peer2")
+
+    sessions["peer0"].handle_disconnect("peer2")
+    bus.drain()
+
+    assert other.terminal_state == Session.PEER_LOST
+    assert other.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0); it forfeits hand 1; "
+        "disputed: seat 2 had settled hand 1, this game had not")
+    assert other.last_settled_stacks == [503, 502, 495]
+
+
+def test_a_winner_everyone_folded_to_is_paid_when_it_drops():
+    """Seat 1 completes its small blind and seat 0 folds its big blind.
+    The hand is over, waiting only on the end-of-hand card check, when
+    seat 1 drops without sending its share. Betting has decided the hand,
+    so seat 1 is paid the pot (decision 1 of the approved plan) rather
+    than forfeiting it."""
+    bus, sessions, order = table(2)
+    host = sessions["peer0"]
+    act(bus, sessions, order)                    # seat 1 calls
+    bus.unregister("peer1")                      # it never sees the fold
+    assert host.send_bet_action("fold") == "applied"
+    bus.drain()
+    assert host.hand_result is None              # the check waits on seat 1
+
+    host.handle_disconnect("peer1")
+
+    assert host.terminal_reason == (
+        "seat 1 (P1) disconnected; everyone else had folded hand 1, so it "
+        "is paid the pot")
+    assert host.hand_result is not None
+    assert host.last_settled_stacks == [490, 510]
+
+
+def test_a_notice_that_does_not_say_where_its_hand_stood_is_disputed():
+    """A host-signed notice without the hand's place still ends the table,
+    since the host relays nothing more, but no game can tell whether it is
+    where the host was. Each settles its own copy and marks it disputed."""
+    bus, sessions, order = table(3)
+    other = sessions["peer1"]
+    act(bus, sessions, order)
+    other.handle_message("peer0", {"type": "peer_lost", "hand": 1,
+                                   "seat": 0, "lost_seat": 2,
+                                   "ended": True})
+    assert other.terminal_state == Session.PEER_LOST
+    assert other.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0); it forfeits hand 1; "
+        "disputed: seat 0's notice did not say where its hand stood")
+    assert other.last_settled_stacks == [503, 502, 495]
 
 
 def test_a_busted_spectator_learns_the_table_ended():
@@ -423,6 +714,7 @@ def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
     actor = sessions["peer1"].replica.actor
     assert sessions[order[actor]].send_bet_action("call") == "applied"
     bus.drain()
+    confirmed = peer_lost_sent(sessions["peer1"])
     bus.unregister("peer2")
 
     sessions["peer0"].handle_disconnect("peer2")
@@ -431,15 +723,25 @@ def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
     for c in ("peer0", "peer1", "peer3"):
         assert sessions[c].terminal_state == Session.PEER_LOST, c
         assert sessions[c].terminal_record.initiating_seat == 2
+    # The confirmation says where seat 1's hand stood, as the host's own
+    # notice would have.
+    assert confirmed == [{"hand": 3, "lost_seat": 2, "ended": True,
+                          "dealt": True, "settled": False, "actions": 1}]
+    # Seat 1 settles its own copy: heads-up with seat 2 in hand 3, both
+    # had 10 in, and seat 2's is forfeit.
     assert sessions["peer1"].terminal_reason == (
-        "seat 2 (P2) disconnected (reported by seat 0)")
+        "seat 2 (P2) disconnected (reported by seat 0); it forfeits hand 3")
     # The host dropped seat 2 from its roster when the socket closed, so
     # by the time the confirmation names it, it has no nickname there.
     assert sessions["peer0"].terminal_reason == (
         "seat 2 disconnected (reported by seat 1)")
     assert sessions["peer3"].terminal_reason == (
         "seat 2 (P2) disconnected (reported by seat 1)")
-    assert sessions["peer1"].last_settled_stacks == [0, 625, 495, 0]
+    assert sessions["peer1"].last_settled_stacks == [0, 635, 485, 0]
+    # The busted seats stopped following hands, so they settle nothing
+    # and keep the figure they busted with.
+    assert sessions["peer0"].last_settled_stacks == [0, 535, 495, 90]
+    assert sessions["peer3"].last_settled_stacks == [0, 625, 495, 0]
 
 
 def test_a_busted_host_lets_the_winner_end_the_match_normally(monkeypatch):
