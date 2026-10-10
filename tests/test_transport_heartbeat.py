@@ -140,6 +140,65 @@ def test_heartbeat_task_is_tracked_and_cancelled_with_the_connection():
         "the heartbeat outlived the connection it was proving alive"
 
 
+def test_a_heartbeat_that_cannot_be_sent_closes_the_connection(monkeypatch):
+    """A failed beat fails closed, and only through the normal path.
+
+    The failure injected here is a signing error, so no OSError and no dead
+    socket is involved: the socket stays perfectly writable and the silence
+    timeout is off, which leaves the heartbeat as the only thing that can
+    end this connection. An end that cannot emit a beat cannot prove it is
+    alive, so it must close rather than carry on looking healthy -- and the
+    read loop's ``finally`` must remain the single reporter, so the drop is
+    one ordinary on_disconnect and not a background task failure.
+    """
+    monkeypatch.setattr(T, "HEARTBEAT_INTERVAL", 0.2)
+    monkeypatch.setattr(T, "SILENCE_TIMEOUT", None)
+    # A fresh list, restored by monkeypatch, so this test's recorder cannot
+    # outlive it on the module-level registry.
+    monkeypatch.setattr(T, "_task_error_callbacks", [])
+    real_sign = T._sign_frame
+
+    def _explode(msg: dict) -> bytes:
+        # Only the beat is broken; everything else still signs normally, so
+        # the drop cannot be blamed on the injection reaching other traffic.
+        if msg.get("type") == T.HEARTBEAT_TYPE:
+            raise RuntimeError("heartbeat signing failed")
+        return real_sign(msg)
+
+    monkeypatch.setattr(T, "_sign_frame", _explode)
+    opened: list = []
+    dropped: list = []
+    failures: list = []
+    # The conn_id comes from on_connect rather than peer_ids(): this drop
+    # lands within one shrunk interval of the connect, and both callbacks
+    # run on the one dispatch consumer, so the open is recorded before the
+    # drop however the two races.
+    T.on_connect(lambda cid, addr: opened.append(cid))
+    T.on_disconnect(dropped.append)
+    T.on_task_error(failures.append)
+    port = _host_port()
+    client = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        assert wait_until(lambda: opened, timeout=3.0), \
+            "the connection was never registered"
+        conn_id = opened[0]
+        assert wait_until(lambda: dropped, timeout=5.0), \
+            "a connection whose heartbeat failed was left open"
+        assert dropped == [conn_id], \
+            f"expected one disconnect for {conn_id}, got {dropped}"
+        assert not wait_until(lambda: len(dropped) > 1, timeout=1.0), \
+            f"on_disconnect fired more than once: {dropped}"
+        assert not T.peer_ids(), \
+            f"the dropped peer is still registered: {T.peer_ids()}"
+        assert failures == [], \
+            f"the drop was also reported as a task failure: {failures}"
+        client.settimeout(3.0)
+        assert client.recv(4096) == b"", \
+            "the writer was never closed, so the peer saw no EOF"
+    finally:
+        client.close()
+
+
 # -------------------------------------------------------------- heartbeat in
 
 def test_inbound_heartbeat_reaches_no_callback_but_chat_does(monkeypatch):

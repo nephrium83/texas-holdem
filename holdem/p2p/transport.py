@@ -513,8 +513,8 @@ async def _heartbeat_loop(conn_id: str, writer: asyncio.StreamWriter) -> None:
 
     The first one goes out one interval after connect, so a connection
     that fails immediately never pays for a signature. The task is
-    cancelled by _handle_connection's ``finally``; a write failure closes
-    the writer and leaves the one disconnect report to that same
+    cancelled by _handle_connection's ``finally``; a failed heartbeat
+    closes the writer and leaves the one disconnect report to that same
     ``finally`` rather than reporting it here too.
     """
     while True:
@@ -527,21 +527,26 @@ async def _heartbeat_loop(conn_id: str, writer: asyncio.StreamWriter) -> None:
         try:
             writer.write(_sign_frame({"type": HEARTBEAT_TYPE}))
             await writer.drain()
-        except (OSError, ConnectionError) as exc:
-            # This peer is gone. Closing the socket ends the read loop,
-            # which reports the disconnect exactly once.
-            log.warning("transport: heartbeat to %s failed (%s) — closing",
+        except Exception as exc:
+            # Fail closed on ANY emission failure, not just the OSError
+            # family: a beat that cannot be signed, written or drained
+            # leaves this end unable to prove it is alive, so the peer
+            # drops us at its own SILENCE_TIMEOUT regardless. Carrying on
+            # would only hide the cause and leave the two ends disagreeing
+            # about the connection until it did.
+            #
+            # Closing the socket ends the read loop, whose finally reports
+            # the disconnect exactly once -- this path deliberately calls
+            # no callback itself. Cancellation by that same finally is a
+            # BaseException and passes through untouched.
+            log.warning("transport: heartbeat to %s failed (%r) — closing",
                         conn_id, exc)
-            writer.close()
+            try:
+                writer.close()
+            except Exception:
+                log.debug("transport: heartbeat writer close raced",
+                          exc_info=True)
             return
-        except Exception:
-            # Not evidence of a dead peer: drain() can also lose a race
-            # with another coroutine writing to the same socket while the
-            # send buffer is over its high-water mark. SILENCE_TIMEOUT
-            # spans four intervals, so skipping one beat is far cheaper
-            # than dropping a healthy connection over a local race.
-            log.debug("transport: heartbeat to %s did not go out",
-                      conn_id, exc_info=True)
 
 
 async def _handle_connection(reader: asyncio.StreamReader,
