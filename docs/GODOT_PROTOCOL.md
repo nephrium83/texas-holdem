@@ -287,7 +287,7 @@ the latest snapshot; it never advances state on its own.
 | `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` until a table is accepted |
 | `proofs_verified`| int         | shuffle proofs THIS seat has verified in the current hand      |
 | `events`      | array           | sequenced, append-only events for the current hand              |
-| `voided`      | bool            | hand was voided (cheat/desync/chip count); chips reverted    |
+| `voided`      | bool            | hand was voided (cheat/desync/chip count) and chips reverted, or a player's drop stopped it |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
 | `result`      | object \| null  | settlement result when `phase` is `settled` (see §6)         |
 | `settlement`  | object \| null  | display-ready pot, payout, hand, refund, and local-net summary |
@@ -306,7 +306,7 @@ the latest snapshot; it never advances state on its own.
 | `dealing`  | the mental-poker deal is running; cards not yet in hand — show a spinner  |
 | `betting`  | a betting round is open                                                  |
 | `settled`  | the hand is over and paid out; `result` is populated                     |
-| `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand |
+| `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand, unless a player's drop stopped it (`PEER_LOST` below) |
 
 ### Continuous-session lifecycle
 
@@ -338,8 +338,9 @@ redeals it.
 
 Two failures end the table rather than the hand. The session reaches a
 terminal state on every peer and no further hand is dealt. Chips stand at the
-last settlement: the pot of a hand that had not settled is discarded, not
-paid. Neither state is in the snapshot yet: a table that ended mid-hand can
+last settlement, which for a lost peer includes its forfeit (below);
+otherwise the pot of a hand that had not settled is discarded, not paid.
+Neither state is in the snapshot yet: a table that ended mid-hand can
 still show `you.legal`, and a betting command then returns `rejected`. A planned
 snapshot field, `terminal: {state, reason, last_settled_stacks}`, will carry
 them.
@@ -353,10 +354,23 @@ them.
   table and confirms it, for the peers that cannot judge. Receivers accept any
   seat's confirmation of a drop the host reported, a busted seat's included,
   even if no seat still playing needed the leaver. A seat that has busted may
-  leave, and so may any seat once the match is decided. Discarding the pot
-  hands back what every seat had committed to it, the leaver's included. This is a beta policy: standing invariants 1 and 4 in
-  `docs/ROADMAP.md` forbid it, and no dated decision records the exception
-  yet.
+  leave, and so may any seat once the match is decided.
+
+  The leaver folds (`docs/CASUAL_P2P_RULES.md`; the casual P2P profile in
+  `docs/ROADMAP.md`). The notice carries no figures, only where its sender's
+  hand stood: the hand number, whether it had been dealt or settled, and how
+  many actions had been applied. Every seat still playing settles its own
+  copy of the table from that. If the hand had been dealt, it stops: the
+  leaver forfeits every chip it put in, a raise nobody called included, and
+  the seats left share each pot they are in, or the one seat left takes it.
+  The snapshot shows `phase: "void"` with `turn.headline` "Hand stopped |
+  *name* dropped and forfeits", not "chips restored". A seat everyone else
+  had folded to is paid the pot. A hand still being shuffled is cancelled
+  and its blinds go back. A hand settles this way, without its end-of-hand
+  card check, only on a Bayer-Groth table where this seat verified every
+  shuffle proof; otherwise its pot is discarded. A seat whose own action or
+  message crossed the drop keeps its own result, and the reason marks it
+  "disputed".
 - **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
   broadcasts a signed digest of the table it settled (`hand_settled`), and
   no seat deals the next hand until every seat dealt into the last one has
@@ -366,10 +380,10 @@ them.
   would redeal from its own stacks. If that is the seat's first report on the
   hand, nothing at the table can say which side is right, so chips stand where
   that hand was dealt from, the last settlement the table agreed on. That
-  hands back the hand's pot, as `PEER_LOST` does, so a seat can undo a hand it
-  lost by lying in its first report. A seat that contradicts a digest it has
-  already reported is contradicting itself: the table ends on that seat, and
-  the settlement it reported stands.
+  hands back the hand's pot, so a seat can undo a hand it lost by lying in
+  its first report. A seat that contradicts a digest it has already reported
+  is contradicting itself: the table ends on that seat, and the settlement
+  it reported stands.
 
 A seat still playing accepts the signed `session_end` only when it names that
 seat's own settled hand and exactly its settled stacks. Anything else is
@@ -437,7 +451,7 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 | `all_in_waiting` | remove betting controls and show runout/audit progress |
 | `resolving` | betting closed; wait for street progression or settlement |
 | `hand_complete` | replace the decision card with `settlement` |
-| `voided` | show `void_reason` and that stacks were restored |
+| `voided` | show `void_reason` and `headline`: stacks were restored, or a dropped player forfeits the hand |
 | `eliminated` | spectator state; no betting or next-hand control |
 | `match_complete` | terminal winner/final-stack presentation |
 
