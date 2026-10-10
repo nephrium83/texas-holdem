@@ -34,6 +34,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem import client_view
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
 from holdem.p2p.session import Player, Session
@@ -134,6 +135,10 @@ def test_seated_peer_lost_mid_hand_ends_the_table():
     assert host.hand_record.blamed_seat == 1
     assert len(seen) == 1
     assert host.last_settled_stacks == [510, 490]
+    # The client is not told its chips were restored: they were not.
+    snap = client_view.snapshot(host)
+    assert snap["turn"]["headline"] == "Hand stopped | P1 dropped and forfeits"
+    assert snap["void_reason"] == "seat 1 (P1) dropped and forfeits hand 1"
 
 
 def test_peer_lost_in_a_later_hand_forfeits_that_hand(monkeypatch):
