@@ -278,12 +278,13 @@ Evidence: `docs/research/p2-suspension-reconnect.md`.
 - **Depends on:** M1; **C6 additionally on M2** — see Known limitations
 - **Goal:** close the conformance gaps listed in
   `docs/POKER_RULES_PROFILE.md` §7.2 — cumulative short all-ins reopening
-  betting (**B6**); the showdown reveal of seats that folded earlier
-  (**C1**); reject rather than silently coerce a sub-minimum raise
+  betting (**B6**); reject rather than silently coerce a sub-minimum raise
   (**C2**); consider an engine-level turn guard (**C3**); the untyped
   `"check"` action string (**C4**); refuse rather than merely omit the
   straddle (**C5**); table all-in hands when betting finalises rather
-  than after the runout (**C6**).
+  than after the runout (**C6**). The showdown reveal of seats that folded
+  earlier (**C1**) is no longer M7's: the Godot beta's client work (B1)
+  closed it.
 - **Acceptance gate:** each fix has a deliberate-break control; no
   existing behaviour regresses.
 - **Known limitations:** **C6 is not an engine fix.** Tabling early

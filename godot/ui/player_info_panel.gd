@@ -49,10 +49,20 @@ func _apply_state_color(state: String) -> void:
 			state_badge.modulate = Color("#efb76f")
 		"hand_complete", "match_complete":
 			state_badge.modulate = Color("#6fd5a7")
-		"voided":
+		"voided", "table_closed", "connection_lost":
 			state_badge.modulate = Color("#ef6f72")
 		_:
 			state_badge.modulate = Color("#9ab8aa")
+
+
+## The sidecar is gone and nothing reconnects. No later snapshot will come
+## to replace the last one, whose badge and decision card would otherwise go
+## on offering a turn that can no longer be taken.
+func apply_connection_lost() -> void:
+	state_badge.text = "CONNECTION LOST"
+	status_label.text = "Connection lost"
+	_apply_state_color("connection_lost")
+	decision_card.visible = false
 
 
 func _apply_decision(turn: Dictionary) -> void:
@@ -112,21 +122,16 @@ func _apply_events(raw_events: Variant) -> void:
 
 
 func _apply_result(snapshot: Dictionary, state: String) -> void:
+	if state == "table_closed":
+		_apply_closed(snapshot)
+		return
 	var settlement: Variant = snapshot.get("settlement")
 	result_card.visible = settlement is Dictionary or state == "match_complete"
 	if settlement is not Dictionary:
 		var final_lines := PackedStringArray([
 			str(snapshot.get("turn", {}).get("headline", "Match complete")),
 		])
-		var final_stacks: Variant = snapshot.get("final_stacks")
-		var seats: Variant = snapshot.get("seats", [])
-		if final_stacks is Array and seats is Array:
-			for index in range(min(final_stacks.size(), seats.size())):
-				var seat: Variant = seats[index]
-				var name := "Seat %d" % index
-				if seat is Dictionary:
-					name = str(seat.get("name", name))
-				final_lines.append("%s: %d" % [name, int(final_stacks[index])])
+		final_lines.append_array(_final_stack_lines(snapshot))
 		result_text.text = "\n".join(final_lines)
 		return
 
@@ -138,6 +143,12 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 	var lines := PackedStringArray([turn_headline])
 	if summary_headline != turn_headline:
 		lines.append(summary_headline)
+	# The settlement view has always carried the showdown hands and any
+	# refund; the panel dropped both, so the hands that decided a showdown
+	# and an uncalled bet coming back appeared nowhere a player could read.
+	for raw_show in summary.get("showdown", []):
+		if raw_show is Dictionary:
+			lines.append(_showdown_line(raw_show))
 	for raw_pot in summary.get("pots", []):
 		if raw_pot is not Dictionary:
 			continue
@@ -157,6 +168,12 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 				str(pot.get("label", "Pot")),
 				", ".join(paid),
 			])
+	var refund: Variant = summary.get("refund")
+	if refund is Dictionary:
+		lines.append("%d returned to %s (uncalled)" % [
+			int(refund.get("amount", 0)),
+			str(refund.get("name", "Seat")),
+		])
 	var you: Dictionary = summary.get("you", {})
 	if you.get("net") != null:
 		var net := int(you.get("net", 0))
@@ -167,4 +184,66 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 				int(you.get("stack", 0)),
 			]
 		)
+	if state == "match_complete":
+		lines.append_array(_final_stack_lines(snapshot))
 	result_text.text = "\n".join(lines)
+
+
+## The match's outcome. A finished match still carries the settlement of the
+## last hand this seat played, and for a seat eliminated earlier that hand --
+## like the seats' own stacks -- is the one it busted in, not the match's last.
+## Only final_stacks are the chips the match ended with (GODOT_PROTOCOL.md
+## section 5), and they were shown only when no settlement was present, which
+## a finished match almost never has.
+func _final_stack_lines(snapshot: Dictionary) -> PackedStringArray:
+	var lines := PackedStringArray()
+	var final_stacks: Variant = snapshot.get("final_stacks")
+	var seats: Variant = snapshot.get("seats", [])
+	if final_stacks is Array and seats is Array:
+		lines.append("Final chips:")
+		lines.append_array(_stack_lines(final_stacks, seats))
+	return lines
+
+
+## A closed table (snapshot.terminal, GODOT_PROTOCOL.md section 5) has no
+## next hand. Shows why, and the chips as the last settled hand left them: a
+## hand cut off mid-play never paid out, so the seats' own stacks still have
+## its pot taken out of them.
+func _apply_closed(snapshot: Dictionary) -> void:
+	result_card.visible = true
+	var lines := PackedStringArray([
+		str(snapshot.get("turn", {}).get("headline", "Table closed")),
+	])
+	var terminal: Variant = snapshot.get("terminal")
+	var stacks: Variant = (
+		terminal.get("last_settled_stacks") if terminal is Dictionary else null
+	)
+	var seats: Variant = snapshot.get("seats", [])
+	if stacks is Array and seats is Array:
+		lines.append("Chips after the last settled hand:")
+		lines.append_array(_stack_lines(stacks, seats))
+	result_text.text = "\n".join(lines)
+
+
+func _stack_lines(stacks: Array, seats: Array) -> PackedStringArray:
+	var lines := PackedStringArray()
+	for index in range(min(stacks.size(), seats.size())):
+		var seat: Variant = seats[index]
+		var name := "Seat %d" % index
+		if seat is Dictionary:
+			name = str(seat.get("name", name))
+		lines.append("%s: %d" % [name, int(stacks[index])])
+	return lines
+
+
+## One settlement.showdown entry: the seat's exact hand description for each
+## run, read from the settlement rather than decoded from score tuples.
+func _showdown_line(show: Dictionary) -> String:
+	var name := str(show.get("name", "Seat"))
+	if bool(show.get("mucked", false)):
+		return "%s mucks" % name
+	var hands := PackedStringArray()
+	for raw_hand in show.get("hands", []):
+		if raw_hand is Dictionary:
+			hands.append(str(raw_hand.get("description", "")))
+	return "%s shows %s" % [name, " / ".join(hands)]
