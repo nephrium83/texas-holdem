@@ -667,6 +667,12 @@ class Session:
         # Seats the host reported dropped while it could not judge whether
         # the table still needed them (a busted host); see _on_peer_lost.
         self._reported_lost: set[int] = set()
+        # Whether this game ended on a drop a busted host reported, where
+        # its own hand stood then (and whether it was live), and the seats
+        # whose notice it has compared with that; see _on_peer_lost.
+        self._ended_on_report = False
+        self._drop_stage: tuple[dict, bool] | None = None
+        self._drop_compared: set[int] = set()
         # The stacks a drop's forfeit left, once one has; see _settle_drop.
         self._drop_stacks: list | None = None
         # on_state_changed() -- fired after any hand progress, so an async UI
@@ -715,11 +721,15 @@ class Session:
     @owned
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
-        if self.terminal_state is not None:
+        if self.terminal_state is not None and not (
+                self._ended_on_report and msg.get("type") == "peer_lost"):
             # A terminated session accepts no further protocol mutation.
             # Messages already in flight when the session ended arrive here
             # and must be inert rather than reviving a hand nobody is
-            # playing any more.
+            # playing any more. Except a confirmation of the drop a busted
+            # host reported: the busted host still relays each one, and
+            # every game compares it with its own, moving no chips (see
+            # _on_peer_lost).
             _log.debug("session: dropping %s from %s — session is %s",
                        msg.get("type"), conn_id, self.terminal_state)
             return
@@ -2157,11 +2167,24 @@ class Session:
         refund this replaces, once the host had reported any drop. The
         busted host still cannot judge, and ends on any confirmation of a
         seat it reported.
+
+        Once a game has ended on a reported drop, each further
+        confirmation of it still arrives (see handle_message): the busted
+        host relays them all, even once it has ended itself, so every game
+        that was still playing hears every other one's. Each settled from its own stage, so an
+        action that crossed the host's report leaves them with different
+        results, and only these confirmations can show it. A game compares
+        each with where its own hand stood at the drop, as _settle_drop
+        does, and on a difference marks its result "disputed" (rule 11).
+        It moves no chips: a confirmation is still its sender's word.
         """
         reporter, lost = msg.get("seat"), msg.get("lost_seat")
         if not _is_seat(reporter) or not _is_seat(lost):
             return
         if not 0 <= lost < len(self._seat_order):
+            return
+        if self.terminal_state is not None:
+            self._compare_confirmation(reporter, msg)
             return
         notice = msg
         if reporter == self._host_seat():
@@ -2185,10 +2208,30 @@ class Session:
             return
         label = self._seat_label(lost)
         outcome = self._settle_drop(lost, notice, label, reporter)
+        self._ended_on_report = lost in self._reported_lost
         self.terminate(self.PEER_LOST,
                        f"{label} disconnected (reported by seat {reporter})"
                        + outcome,
                        conn_id=conn_id, seat=lost)
+
+    def _compare_confirmation(self, reporter: int, notice: dict) -> None:
+        """Mark this ended game's result disputed if another seat's
+        confirmation puts that seat's hand elsewhere (see _on_peer_lost).
+        Once per seat, counting the one whose notice this game settled on,
+        so a seat cannot grow the reason by repeating itself; the result is
+        never moved. A busted game had no hand to compare. The mark goes on
+        terminal_reason only: terminal_record keeps the transition as it
+        happened.
+        """
+        if self._drop_stage is None or reporter in self._drop_compared:
+            return
+        self._drop_compared.add(reporter)
+        own, live = self._drop_stage
+        disputed, _ = self._drop_dispute(own, live, notice, reporter)
+        if disputed:
+            self.terminal_reason += disputed
+            if self.on_state_changed is not None:
+                self.on_state_changed()
 
     def _drop_notice(self, lost: int) -> dict:
         """The peer_lost notice that ends the table on ``lost``'s drop.
@@ -2264,38 +2307,11 @@ class Session:
             return ""
         h, own = self._hand_no, self._drop_notice(lost)
         live = self.hand_result is None and not self.hand_voided
-        cancel = not own["dealt"]
-        hand, dealt = notice.get("hand"), notice.get("dealt")
-        settled, actions = notice.get("settled"), notice.get("actions")
-        # _is_seat is the int-but-not-bool check; it fits counts too
-        if not (_is_seat(hand) and _is_seat(actions)
-                and isinstance(dealt, bool) and isinstance(settled, bool)):
-            disputed = (f"; disputed: seat {sender}'s notice did not say "
-                        f"where its hand stood")
-        else:
-            if hand == h:
-                cancel = cancel or not dealt
-                if not dealt:
-                    agreed = not own["settled"]
-                elif settled:
-                    agreed = own["settled"]
-                else:
-                    agreed = (own["dealt"] and not own["settled"]
-                              and own["actions"] == actions)
-            elif hand < h:
-                # The sender ended its hand and this game has begun the
-                # next; a void is redealt as a new hand, so "not dealt"
-                # covers a voided hand as well as one being shuffled.
-                agreed = settled or not dealt
-            else:
-                # The sender has begun the next hand; this game has not.
-                agreed = not dealt and not live
-            mine = self._stage(h, own["dealt"], own["settled"],
-                               own["actions"])
-            disputed = "" if agreed else (
-                f"; disputed: seat {sender} had "
-                f"{self._stage(hand, dealt, settled, actions)}, this game "
-                f"{mine}")
+        self._drop_stage = (own, live)
+        if sender is not None:
+            self._drop_compared.add(sender)
+        disputed, undealt = self._drop_dispute(own, live, notice, sender)
+        cancel = not own["dealt"] or undealt
         if not live:
             return disputed
         # A seat that settled this hand before the drop is the same race.
@@ -2339,6 +2355,47 @@ class Session:
                        f"{label} dropped and forfeits hand {h}" + disputed,
                        blamed_seat=lost, announce=False)
         return f"; it forfeits hand {h}" + disputed
+
+    @classmethod
+    def _drop_dispute(cls, own: dict, live: bool, notice: dict,
+                      sender: Optional[int]) -> tuple[str, bool]:
+        """Does ``notice`` put its sender where this game stood at the drop?
+
+        ``own`` is this game's own notice then and ``live`` whether its hand
+        was still being played (see _settle_drop). Returns the "disputed"
+        mark for the terminal reason, empty if they agree, and whether the
+        notice says this game's hand was not dealt.
+        """
+        h = own["hand"]
+        hand, dealt = notice.get("hand"), notice.get("dealt")
+        settled, actions = notice.get("settled"), notice.get("actions")
+        # _is_seat is the int-but-not-bool check; it fits counts too
+        if not (_is_seat(hand) and _is_seat(actions)
+                and isinstance(dealt, bool) and isinstance(settled, bool)):
+            return (f"; disputed: seat {sender}'s notice did not say "
+                    f"where its hand stood"), False
+        if hand == h:
+            if not dealt:
+                agreed = not own["settled"]
+            elif settled:
+                agreed = own["settled"]
+            else:
+                agreed = (own["dealt"] and not own["settled"]
+                          and own["actions"] == actions)
+        elif hand < h:
+            # The sender ended its hand and this game has begun the
+            # next; a void is redealt as a new hand, so "not dealt"
+            # covers a voided hand as well as one being shuffled.
+            agreed = settled or not dealt
+        else:
+            # The sender has begun the next hand; this game has not.
+            agreed = not dealt and not live
+        mine = cls._stage(h, own["dealt"], own["settled"], own["actions"])
+        disputed = "" if agreed else (
+            f"; disputed: seat {sender} had "
+            f"{cls._stage(hand, dealt, settled, actions)}, this game "
+            f"{mine}")
+        return disputed, hand == h and not dealt
 
     @staticmethod
     def _stage(hand: int, dealt: bool, settled: bool, actions: int) -> str:

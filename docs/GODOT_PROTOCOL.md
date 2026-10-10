@@ -373,7 +373,10 @@ them.
   card check, only on a Bayer-Groth table where this seat verified every
   shuffle proof; otherwise its pot is discarded. A seat whose own action or
   message crossed the drop keeps its own result, and the reason marks it
-  "disputed".
+  "disputed". When a busted host reported the drop, each seat that settled
+  learns of the race from the other seats' confirmations, which the busted
+  host relays even after it has ended, so the mark can reach the reason just
+  after the table ends; the chips do not move.
 - **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
   broadcasts a signed digest of the table it settled (`hand_settled`), and
   no seat deals the next hand until every seat dealt into the last one has

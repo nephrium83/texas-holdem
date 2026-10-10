@@ -745,23 +745,30 @@ def test_a_confirmation_moves_no_chips_in_a_hand_being_played(monkeypatch,
 def test_a_confirmation_between_hands_ends_the_table_and_moves_no_chips(
         monkeypatch):
     """Hand 2 is settled and hand 3 not begun: a confirmer that needed the
-    reported seat ends the table there, and the settled stacks stand."""
+    reported seat ends the table there, and the settled stacks stand. The
+    confirmer repeating itself adds nothing."""
     bus, sessions, order = busted_host_table(monkeypatch)
     bus.unregister("peer3")
     sessions["peer0"].handle_disconnect("peer3")
     bus.drain()
+    confirmation = {"type": "peer_lost", "hand": 2, "lost_seat": 3,
+                    "ended": True, "dealt": True, "settled": False,
+                    "actions": 3}
 
-    sessions["peer1"]._send_hostless({
-        "type": "peer_lost", "hand": 2, "lost_seat": 3, "ended": True,
-        "dealt": True, "settled": False, "actions": 3})
+    sessions["peer1"]._send_hostless(dict(confirmation))
     bus.drain()
 
     other = sessions["peer2"]
     assert other.terminal_state == Session.PEER_LOST
-    assert other.terminal_reason == (
+    reason = (
         "seat 3 (P3) disconnected (reported by seat 1); disputed: seat 1 "
         "had applied 3 actions in hand 2, this game settled hand 2")
+    assert other.terminal_reason == reason
     assert other.last_settled_stacks == [0, 625, 495, 0]
+
+    sessions["peer1"]._send_hostless(dict(confirmation))
+    bus.drain()
+    assert other.terminal_reason == reason
 
 
 def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
@@ -806,6 +813,52 @@ def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
     # and keep the figure they busted with.
     assert sessions["peer0"].last_settled_stacks == [0, 535, 495, 90]
     assert sessions["peer3"].last_settled_stacks == [0, 625, 495, 0]
+
+
+def test_an_action_that_races_a_busted_hosts_report_is_disputed(
+        monkeypatch):
+    """The host busts in hand 1 and seats 1-3 deal hand 2. Seat 1 drops,
+    and seat 2 calls in the same instant: its game has applied the call
+    when the host's report reaches it, seat 3's has not. Each settles its
+    own copy and confirms with its action count, and the busted host
+    relays every confirmation, even after it has ended on the first. Each
+    game then sees the other's count differ from its own, and marks its
+    result disputed (rule 11) without moving a chip. A seat repeating its
+    confirmation adds nothing."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 0, 2, 3)
+    bus, sessions, order = table(4, stacks=[20, 500, 500, 500])
+    play(bus, sessions, order, folds(2, 3))
+    assert sessions["peer1"].replica.stacks == [0, 535, 495, 490]
+    assert [sessions[c].next_p2p_hand() for c in order] == [
+        "eliminated", "started", "started", "started"]
+    bus.drain()
+    racer, other = sessions["peer2"], sessions["peer3"]
+    assert racer.replica.actor == 2
+    confirmed = peer_lost_sent(other)
+    bus.unregister("peer1")
+
+    sessions["peer0"].handle_disconnect("peer1")
+    assert racer.send_bet_action("call") == "applied"   # crosses the report
+    bus.drain()
+
+    assert racer.terminal_reason == (
+        "seat 1 (P1) disconnected (reported by seat 0); it forfeits hand 2; "
+        "disputed: seat 3 had applied 0 actions in hand 2, this game "
+        "applied 1 actions in hand 2")
+    assert other.terminal_reason == (
+        "seat 1 (P1) disconnected (reported by seat 0); it forfeits hand 2; "
+        "disputed: seat 2 had applied 1 actions in hand 2, this game "
+        "applied 0 actions in hand 2")
+    # Each keeps its own forfeit: the disputes move no chips.
+    assert racer.last_settled_stacks == [0, 525, 502, 493]
+    assert other.last_settled_stacks == [0, 525, 495, 500]
+    assert sessions["peer0"].terminal_state == Session.PEER_LOST
+
+    reason = racer.terminal_reason
+    other._send_hostless({"type": "peer_lost", **confirmed[0]})
+    bus.drain()
+    assert racer.terminal_reason == reason
 
 
 def test_a_busted_host_lets_the_winner_end_the_match_normally(monkeypatch):
