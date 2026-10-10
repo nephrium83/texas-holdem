@@ -49,6 +49,15 @@ on_disconnect(callback)
 stop()
     Shut down the transport.
 
+Liveness
+--------
+Every connection sends a signed ``{"type": "heartbeat"}`` frame every
+HEARTBEAT_INTERVAL seconds and drops the peer after SILENCE_TIMEOUT
+seconds in which nothing at all arrived.  The heartbeat never reaches the
+game: the read loop discards verified heartbeats before dispatch, so no
+on_message callback sees one, and a drop is reported through the ordinary
+on_disconnect path.
+
 Rendezvous (LAN multicast)
 --------------------------
 announce(discovery_token: str, address: str)
@@ -155,6 +164,42 @@ _task_error_callbacks: list[Callable] = []
 delivers_verified_envelopes = True
 
 MAX_MSG = 1 << 20  # 1 048 576 bytes
+
+# ---------------------------------------------------------------------------
+# Liveness: a heartbeat out, a silence timeout in
+# ---------------------------------------------------------------------------
+#
+# A peer used to count as gone only when its socket closed. A machine that
+# was paused, suspended, or cut off at the router sends no FIN, so the
+# table went on waiting for a turn from a connection TCP itself still
+# considered open.
+#
+# So every connection sends a signed, payload-free frame on a fixed
+# HEARTBEAT_INTERVAL schedule, and is dropped once SILENCE_TIMEOUT seconds
+# pass with nothing arriving on it at all. The receiving half treats ANY
+# verified frame as proof of life, so a table mid-hand is kept alive by its
+# own traffic and the heartbeat only matters on an idle connection. The
+# frame is invisible above the transport either way: the read loop discards
+# verified heartbeats before dispatch.
+#
+# The timeout spans four intervals, so a blip that costs one or two
+# heartbeats costs nothing else. Either constant set to None turns that
+# half off: the in-process tests shrink both, and the process harness
+# disables them to show that a drop depends on the heartbeat and not on
+# something else closing the socket.
+HEARTBEAT_INTERVAL: Optional[float] = 5.0
+SILENCE_TIMEOUT: Optional[float] = 20.0
+
+#: The one frame type this module both generates and consumes itself.
+HEARTBEAT_TYPE = "heartbeat"
+
+# SO_KEEPALIVE on its own leaves the probe schedule at the OS default,
+# which on Linux is a first probe after two hours -- no use to a card
+# table. These tighten it where the platform names the knobs; a platform
+# that does not define one keeps its default rather than failing.
+_KEEPALIVE_TUNING = (("TCP_KEEPIDLE", 10),
+                     ("TCP_KEEPINTVL", 5),
+                     ("TCP_KEEPCNT", 3))
 
 # How long stop() waits for cancelled tasks to finish before reporting them
 # as stragglers. Bounds shutdown latency: a task blocked in a default
@@ -436,6 +481,69 @@ def _new_conn_id() -> str:
     return str(uuid.uuid4())
 
 
+def _enable_keepalive(conn_id: str, writer: asyncio.StreamWriter) -> None:
+    """Turn on TCP keepalive for one peer socket.
+
+    Best effort by design: keepalive is a second line of defence behind
+    the heartbeat, so a platform that refuses an option must not cost us
+    the connection. Every failure is logged and none is raised.
+    """
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        log.debug("transport: no socket for %s; keepalive not set", conn_id)
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except (OSError, AttributeError) as exc:
+        log.warning("transport: SO_KEEPALIVE for %s failed: %s", conn_id, exc)
+        return                      # tuning an option that is off is pointless
+    for name, value in _KEEPALIVE_TUNING:
+        option = getattr(socket, name, None)
+        if option is None:
+            continue                # not defined on this platform
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError as exc:
+            log.warning("transport: %s=%d for %s failed: %s",
+                        name, value, conn_id, exc)
+
+
+async def _heartbeat_loop(conn_id: str, writer: asyncio.StreamWriter) -> None:
+    """Write a signed heartbeat every HEARTBEAT_INTERVAL seconds.
+
+    The first one goes out one interval after connect, so a connection
+    that fails immediately never pays for a signature. The task is
+    cancelled by _handle_connection's ``finally``; a write failure closes
+    the writer and leaves the one disconnect report to that same
+    ``finally`` rather than reporting it here too.
+    """
+    while True:
+        interval = HEARTBEAT_INTERVAL
+        if not interval:
+            return                  # switched off under us
+        await asyncio.sleep(interval)
+        if writer.is_closing():
+            return
+        try:
+            writer.write(_sign_frame({"type": HEARTBEAT_TYPE}))
+            await writer.drain()
+        except (OSError, ConnectionError) as exc:
+            # This peer is gone. Closing the socket ends the read loop,
+            # which reports the disconnect exactly once.
+            log.warning("transport: heartbeat to %s failed (%s) — closing",
+                        conn_id, exc)
+            writer.close()
+            return
+        except Exception:
+            # Not evidence of a dead peer: drain() can also lose a race
+            # with another coroutine writing to the same socket while the
+            # send buffer is over its high-water mark. SILENCE_TIMEOUT
+            # spans four intervals, so skipping one beat is far cheaper
+            # than dropping a healthy connection over a local race.
+            log.debug("transport: heartbeat to %s did not go out",
+                      conn_id, exc_info=True)
+
+
 async def _handle_connection(reader: asyncio.StreamReader,
                               writer: asyncio.StreamWriter,
                               conn_id: str,
@@ -443,13 +551,44 @@ async def _handle_connection(reader: asyncio.StreamReader,
     with _writers_lock:
         _writers[conn_id] = writer
     log.debug("transport: connected %s (%s)", conn_id, address)
+    _enable_keepalive(conn_id, writer)
+    heartbeat: Optional["asyncio.Task"] = None
+    if HEARTBEAT_INTERVAL:
+        try:
+            heartbeat = spawn(_heartbeat_loop(conn_id, writer),
+                              name=f"heartbeat-{conn_id[:8]}")
+        except RuntimeError:
+            # Shutting down: this connection is about to be torn down, so
+            # it has no use for a liveness timer.
+            log.debug("transport: no heartbeat for %s during shutdown",
+                      conn_id)
     # Onto the dispatch consumer, not this thread: connect/disconnect
     # callbacks mutate the same Session state message handlers do, and
     # handlers no longer run here. See dispatch.submit_event.
     _deliver_event(_run_conn_callbacks, conn_id, address)
     try:
         while True:
-            msg = await _read_msg(reader)
+            silence = SILENCE_TIMEOUT
+            try:
+                if silence:
+                    msg = await asyncio.wait_for(_read_msg(reader), silence)
+                else:
+                    msg = await _read_msg(reader)
+            except asyncio.TimeoutError:
+                # Nothing at all for SILENCE_TIMEOUT: not one heartbeat,
+                # not one game frame. A suspended or unplugged peer never
+                # sends a FIN, so its socket still looks open to TCP and
+                # this is the only evidence that it is gone. The close and
+                # the single on_disconnect are left to the finally below.
+                log.warning("transport: no frame from %s (%s) for %.1fs — "
+                            "dropping peer", conn_id, address, silence)
+                break
+            if msg.get("type") == HEARTBEAT_TYPE:
+                # Proof of life and nothing more. Discarded here so the
+                # game never sees a transport-level frame; any OTHER
+                # verified frame counts as a sign of life just as well,
+                # because the timeout above covers every arrival.
+                continue
             # Handed to the dispatch worker rather than run here. Handlers
             # verify shuffle proofs at ~35 ms each; inline they blocked the
             # loop for 2.9 s across a nine-seat hand, so timeouts fired
@@ -468,6 +607,8 @@ async def _handle_connection(reader: asyncio.StreamReader,
         # C-1/C-3/M-1: bad signature, oversized frame, or malformed JSON → drop peer
         log.warning("transport: dropping conn %s: %s", conn_id, exc)
     finally:
+        if heartbeat is not None:
+            heartbeat.cancel()      # nothing left to prove liveness to
         writer.close()
         with _writers_lock:
             _writers.pop(conn_id, None)
