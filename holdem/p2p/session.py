@@ -2139,6 +2139,24 @@ class Session:
         ignored it would deal on with a seat that has already ended. A
         busted seat can already stall the table by voiding every hand,
         which hand_void does not limit to the seats dealt in.
+
+        Except in one place: a game still playing a hand ignores one. A
+        game that needed the leaver ended on the host's report, which
+        reaches it before any confirmation does, so a confirmation only
+        ever reaches games that did not. An honest confirmer needed the
+        leaver: the next hand would deal it, or the leaver was dealt into
+        a hand the confirmer had not finished (settled, with every
+        settlement report in). The first case binds everyone; in the
+        second no game can begin the next hand without the confirmer, and
+        one still playing that hand needed the leaver as well. So a game
+        that did not has finished the hand and begun no other, and ending
+        there costs nobody chips. Neither the report nor the confirmation is
+        hand-scoped, and the hand, "dealt" and action count a confirmation
+        carries are its sender's word; were they followed in a hand being
+        played, any seat could cancel it or stop it and split the pot, the
+        refund this replaces, once the host had reported any drop. The
+        busted host still cannot judge, and ends on any confirmation of a
+        seat it reported.
         """
         reporter, lost = msg.get("seat"), msg.get("lost_seat")
         if not _is_seat(reporter) or not _is_seat(lost):
@@ -2158,6 +2176,12 @@ class Session:
             _log.warning("session: ignoring peer_lost from seat %s -- only "
                          "the host can see a seat's connection drop",
                          reporter)
+            return
+        elif (self._replica is not None and not self._eliminated()
+              and self.hand_result is None and not self.hand_voided):
+            _log.warning("session: ignoring seat %s's confirmation of seat "
+                         "%s's drop -- a hand is being played without it",
+                         reporter, lost)
             return
         label = self._seat_label(lost)
         outcome = self._settle_drop(lost, notice, label, reporter)
@@ -2216,7 +2240,10 @@ class Session:
         difference is the race rule 11 covers: this game keeps its own
         result and marks it "disputed" rather than guess at the sender's.
         A game a hand ahead of the sender has begun a hand that cannot
-        have been dealt without it, so that hand is cancelled.
+        have been dealt without it, so that hand is cancelled. A hand in
+        play is settled only on the host's notice or this game's own: a
+        confirmation from another seat reaches only a game with none (see
+        _on_peer_lost).
 
         A hand settled here skips its end-of-hand card check, so it
         settles only on proofs (the revival conditions in

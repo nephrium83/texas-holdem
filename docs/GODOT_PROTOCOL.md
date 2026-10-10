@@ -353,8 +353,11 @@ them.
   reports the drop. A seat still playing that needs the leaver then ends the
   table and confirms it, for the peers that cannot judge. Receivers accept any
   seat's confirmation of a drop the host reported, a busted seat's included,
-  even if no seat still playing needed the leaver. A seat that has busted may
-  leave, and so may any seat once the match is decided.
+  even if no seat still playing needed the leaver, except a seat in the middle
+  of a hand: an honest confirmation never reaches one, so it ignores it and
+  plays on rather than cancel or split the hand on another seat's word. A
+  seat that has busted may leave, and so may any seat once the match is
+  decided.
 
   The leaver folds (`docs/CASUAL_P2P_RULES.md`; the casual P2P profile in
   `docs/ROADMAP.md`). The notice carries no figures, only where its sender's

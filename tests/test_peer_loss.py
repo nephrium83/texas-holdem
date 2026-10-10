@@ -705,6 +705,65 @@ def test_a_confirmation_counts_only_for_the_seat_the_host_reported(
     assert {sessions[c].next_p2p_hand() for c in order[1:3]} == {"started"}
 
 
+@pytest.mark.parametrize("dealt", [False, True],
+                         ids=["claims-not-dealt", "claims-dealt"])
+def test_a_confirmation_moves_no_chips_in_a_hand_being_played(monkeypatch,
+                                                              dealt):
+    """The host has reported seat 3, which nobody needed, and seats 1 and
+    2 have dealt hand 3 and put chips in. Seat 1 then confirms the stale
+    report, with whatever stage it likes. An honest confirmer needed
+    seat 3, so seat 2 could not have dealt a hand without it, and the
+    notice is no confirmation: seat 2 neither cancels the hand ("not
+    dealt", its blinds back) nor stops it and splits the pot. The busted
+    host cannot judge, and still ends."""
+    bus, sessions, order = busted_host_table(monkeypatch)
+    bus.unregister("peer3")
+    sessions["peer0"].handle_disconnect("peer3")
+    bus.drain()
+    assert {sessions[c].next_p2p_hand() for c in order[1:3]} == {"started"}
+    bus.drain()
+    other = sessions["peer2"]
+    actor = other.replica.actor
+    assert sessions[order[actor]].send_bet_action("call") == "applied"
+    bus.drain()
+    stacks = list(other.replica.stacks)
+    assert stacks == [0, 615, 485, 0]
+
+    sessions["peer1"]._send_hostless({
+        "type": "peer_lost", "hand": 3, "lost_seat": 3, "ended": True,
+        "dealt": dealt, "settled": False,
+        "actions": other.replica.next_seq})
+    bus.drain()
+
+    assert other.terminal_state is None
+    assert other.hand_result is None and not other.hand_voided
+    assert other.replica.stacks == stacks
+    assert other.last_settled_stacks == [0, 625, 495, 0]
+    assert sessions["peer0"].terminal_state == Session.PEER_LOST
+
+
+def test_a_confirmation_between_hands_ends_the_table_and_moves_no_chips(
+        monkeypatch):
+    """Hand 2 is settled and hand 3 not begun: a confirmer that needed the
+    reported seat ends the table there, and the settled stacks stand."""
+    bus, sessions, order = busted_host_table(monkeypatch)
+    bus.unregister("peer3")
+    sessions["peer0"].handle_disconnect("peer3")
+    bus.drain()
+
+    sessions["peer1"]._send_hostless({
+        "type": "peer_lost", "hand": 2, "lost_seat": 3, "ended": True,
+        "dealt": True, "settled": False, "actions": 3})
+    bus.drain()
+
+    other = sessions["peer2"]
+    assert other.terminal_state == Session.PEER_LOST
+    assert other.terminal_reason == (
+        "seat 3 (P3) disconnected (reported by seat 1); disputed: seat 1 "
+        "had applied 3 actions in hand 2, this game settled hand 2")
+    assert other.last_settled_stacks == [0, 625, 495, 0]
+
+
 def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
         monkeypatch):
     """Seat 3 has busted too and stays to watch. Seat 2 drops mid-hand.
