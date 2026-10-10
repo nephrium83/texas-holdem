@@ -120,22 +120,23 @@ IMPORT_ALLOWLIST = {
 
 # Every import of a host module in the core today: the core module, the
 # host module, and the function or class the import is in. Each entry is
-# one import, so a second one is new wherever it is. A place rather than a
-# line, so an edit above an import does not move it; a failure names lines.
+# one import, so a second one is new wherever it is. The key is a place
+# rather than a line, so an edit above an import does not move it; the
+# value records today's line, and a failure names lines.
 GRAPH_ALLOWLIST = {
     ("holdem.p2p.invite", "holdem.p2p.identity", "<module>"):
-        "the process-wide key in every invite",
+        "invite.py:62, the process-wide key in every invite",
     ("holdem.p2p.join_auth", "holdem.p2p.identity", "<module>"):
-        "the joiner's public key",
+        "join_auth.py:38, the joiner's public key",
     ("holdem.p2p.wire", "holdem.p2p.identity", "<module>"):
-        "signs and verifies every message",
+        "wire.py:25, signs and verifies every message",
     ("holdem.p2p.session", "holdem.p2p.transport", "Session.__init__"):
-        "the global transport when none is given",
+        "session.py:431, the global transport when none is given",
     ("holdem.p2p.session", "holdem.p2p.device_secret",
      "Session._deal_master_secret"):
-        "the device secret read from disk",
+        "session.py:972, the device secret read from disk",
     ("holdem.p2p.session", "holdem.p2p.identity", "Session.add_local_player"):
-        "the process-wide identity",
+        "session.py:2993, the process-wide identity",
 }
 
 # Runs in the fresh interpreter. The audit hook goes in before the import,
