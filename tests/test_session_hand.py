@@ -160,6 +160,71 @@ def test_desync_is_detected_and_voids():
     assert all(sessions[cid].hand_voided for cid in order)
 
 
+def test_settlement_that_breaks_chip_conservation_voids_the_hand():
+    """A settle that does not hand back every chip the hand was dealt with
+    takes the void path on that replica instead of paying out: nothing
+    settles there, and the reason is on the hand record.
+
+    The other replicas settled the hand. A void cannot reconcile the two
+    sides, so the table ends ABORTED_PROTOCOL rather than redealing, with
+    chips where the hand was dealt from. Only a failure every replica
+    shares (a deterministic engine bug) voids everywhere and redeals."""
+    bus, sessions, order = make_table(3)
+    faulty = sessions[order[1]]
+    engine = faulty.replica.engine
+    real_settle = engine.settle
+
+    def leaky_settle(*args, **kwargs):
+        out = real_settle(*args, **kwargs)
+        engine.players[0].stack -= 1                 # one chip goes missing
+        return out
+
+    engine.settle = leaky_settle
+    while faulty.replica.phase == PHASE_BETTING:
+        seat = faulty.replica.actor
+        assert sessions[order[seat]].send_bet_action("fold") == "applied"
+        bus.drain()
+
+    assert faulty.hand_result is None
+    assert faulty.hand_voided
+    assert "chip conservation failed" in faulty.void_reason
+    assert "settled to 1499 chips but was dealt with 1500" in \
+        faulty.hand_record.reason
+    for cid in order:
+        s = sessions[cid]
+        assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
+        assert s.terminal_reason.startswith(
+            "table state disagrees on hand 1: seat "), s.terminal_reason
+        assert s.last_settled_stacks == [500, 500, 500], cid
+        assert s.next_p2p_hand() == "session_over"
+
+
+def test_a_conservation_failure_every_replica_shares_is_redealt():
+    """The same leak on every replica: nobody settled, so nobody disputes,
+    and the hand is redealt from the stacks it was dealt with."""
+    bus, sessions, order = make_table(3)
+    for cid in order:
+        engine = sessions[cid].replica.engine
+
+        def leaky_settle(*args, _engine=engine, _settle=engine.settle,
+                         **kwargs):
+            out = _settle(*args, **kwargs)
+            _engine.players[0].stack -= 1
+            return out
+        engine.settle = leaky_settle
+    while sessions[order[0]].replica.phase == PHASE_BETTING:
+        act(bus, sessions, order, "fold")
+
+    for cid in order:
+        s = sessions[cid]
+        assert s.hand_voided and s.terminal_state is None, s.terminal_reason
+        assert s.next_p2p_hand() == "started"
+    bus.drain()
+    for cid in order:
+        assert sessions[cid]._hand_stacks == [500, 500, 500]
+    assert_synced(sessions, order)
+
+
 def test_bet_action_seat_spoof_dropped():
     bus, sessions, order = make_table(3)
     actor = sessions[order[0]].replica.actor

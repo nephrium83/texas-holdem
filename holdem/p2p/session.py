@@ -106,7 +106,7 @@ AUTHOR_MODE_COMPAT = "compat"   # unsigned flat dicts; conn_id stands in
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
-    "timeout_proposal",
+    "timeout_proposal", "peer_lost", "hand_settled",
 })
 
 
@@ -340,6 +340,27 @@ class Session:
     #: PLAYING is one of them; it is NOT a fold, a timeout, or grounds for
     #: electing a host.
     HOST_LOST = "HOST_LOST"
+    #: A seated peer's connection dropped while the table still needed that
+    #: seat to finish or deal a hand. There is no reconnect, so the table
+    #: ends, and chips stand at last_settled_stacks.
+    #:
+    #: The leaver folds (docs/CASUAL_P2P_RULES.md, rules 1-5; the casual
+    #: P2P profile in docs/ROADMAP.md). A hand that had been dealt stops,
+    #: and every game settles its own copy of the table with
+    #: settle_forfeit: the leaver forfeits every chip it put in, and the
+    #: seats left share each pot they are in. A hand still being shuffled
+    #: is cancelled and its blinds go back. A hand this game cannot settle
+    #: without its end-of-hand card check -- no Bayer-Groth proofs, or not
+    #: every one verified -- is not settled, and its pot is discarded. See
+    #: _settle_drop.
+    #:
+    #: ABORTED_PROTOCOL over a disputed settlement still refunds. A seat
+    #: whose first hand_settled report lies about a hand it lost ends the
+    #: table at that hand's carry-in, undoing the hand. It must lie before
+    #: the next hand is dealt, which waits on its report, and a seat that
+    #: contradicts a settlement it already reported gets no rollback (see
+    #: last_settled_stacks).
+    PEER_LOST = "PEER_LOST"
     ENDED_NORMAL = "ENDED_NORMAL"
     ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
     LOCAL_SHUTDOWN = "LOCAL_SHUTDOWN"
@@ -347,6 +368,9 @@ class Session:
     #: Hand-level outcomes. RECOVERABLE: the session plays on, and a voided
     #: hand is redealt to the same seats at the same button.
     HAND_COMPLETED = "COMPLETED"
+    #: A seat dropped from a dealt hand, which stopped there and was settled
+    #: by settle_forfeit (see _settle_drop). Not redealt: the table ends.
+    HAND_FORFEIT = "FORFEIT"
     VOID_PROTOCOL = "VOID_PROTOCOL"
     VOID_PEER_LOST = "VOID_PEER_LOST"
     VOID_TIMEOUT = "VOID_TIMEOUT"
@@ -625,6 +649,32 @@ class Session:
         self._final_stacks: list | None = None
         self._session_end_announced = False
         self._p2p_spectator = False
+        # Settlement agreement (hand_settled): how this replica ended its
+        # most recent hand -- the hand number, its settled digest or None
+        # for a void, the seats dealt into it, the stacks it was dealt
+        # from, and the seats that have reported that same settlement, this
+        # one included -- and the digests peers reported for the CURRENT
+        # hand before it ended here, by seat. Once a seat's first report
+        # disagrees and ends the table, _agreed_stacks holds that hand's
+        # carry-in: the last settlement the table agreed on.
+        self._ended_hand: int | None = None
+        self._ended_digest: str | None = None
+        self._ended_seats: frozenset = frozenset()
+        self._ended_from: list | None = None
+        self._ended_agreed: set[int] = set()
+        self._agreed_stacks: list | None = None
+        self._early_settled: dict[int, str] = {}
+        # Seats the host reported dropped while it could not judge whether
+        # the table still needed them (a busted host); see _on_peer_lost.
+        self._reported_lost: set[int] = set()
+        # Whether this game ended on a drop a busted host reported, where
+        # its own hand stood then (and whether it was live), and the seats
+        # whose notice it has compared with that; see _on_peer_lost.
+        self._ended_on_report = False
+        self._drop_stage: tuple[dict, bool] | None = None
+        self._drop_compared: set[int] = set()
+        # The stacks a drop's forfeit left, once one has; see _settle_drop.
+        self._drop_stacks: list | None = None
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
         self.on_state_changed: Optional[Callable[[], None]] = None
@@ -671,11 +721,15 @@ class Session:
     @owned
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
-        if self.terminal_state is not None:
+        if self.terminal_state is not None and not (
+                self._ended_on_report and msg.get("type") == "peer_lost"):
             # A terminated session accepts no further protocol mutation.
             # Messages already in flight when the session ended arrive here
             # and must be inert rather than reviving a hand nobody is
-            # playing any more.
+            # playing any more. Except a confirmation of the drop a busted
+            # host reported: the busted host still relays each one, and
+            # every game compares it with its own, moving no chips (see
+            # _on_peer_lost).
             _log.debug("session: dropping %s from %s — session is %s",
                        msg.get("type"), conn_id, self.terminal_state)
             return
@@ -744,7 +798,7 @@ class Session:
         body = msg
         if t in _HOSTLESS_PAYLOAD_TYPES:
             # The peer-authored, host-relayed ingress pipeline. Every step
-            # runs exactly once, in this order, for all eight types:
+            # runs exactly once, in this order, for every hostless type:
             #
             #   normalize -> author/seat -> authorize -> sequence -> relay
             #
@@ -797,6 +851,10 @@ class Session:
             self._on_session_end(conn_id, body)
         elif t == "timeout_proposal":
             self._on_timeout_proposal(conn_id, body)
+        elif t == "peer_lost":
+            self._on_peer_lost(conn_id, body)
+        elif t == "hand_settled":
+            self._on_hand_settled(conn_id, body)
 
     @staticmethod
     def _hostless_projection(msg: dict):
@@ -1164,10 +1222,10 @@ class Session:
     def _send_hostless(self, m: dict) -> None:
         """The ONE place a local hostless message leaves this peer.
 
-        Eight types are broadcast from five call sites. Stamping author
-        identity and sequence at each would let them drift, and a type
-        that forgot to stamp would be indistinguishable, to a receiver,
-        from one that had been suppressed.
+        Every hostless type is broadcast through here, from several call
+        sites. Stamping author identity and sequence at each would let them
+        drift, and a type that forgot to stamp would be indistinguishable,
+        to a receiver, from one that had been suppressed.
 
         Stamped BEFORE the transport signs, so (hand, seat, author_seq) is
         covered by the Ed25519 signature and a relaying host cannot
@@ -1559,8 +1617,8 @@ class Session:
         to, and consuming one on an unauthorized message would let a stranger
         desynchronise a real seat.
 
-        Checked for all eight types together, because the counter that
-        produces it is stamped for all eight in one place (_send_hostless).
+        Checked for every hostless type together, because the counter that
+        produces it is stamped for all of them in one place (_send_hostless).
         Validating a subset is worse than validating none -- the sender
         advances on every hostless send, so a receiver watching only some
         types reads the others as gaps.
@@ -1833,7 +1891,7 @@ class Session:
         if self._deal_driver is None or self.hand_voided:
             return                              # no active hand yet
         # Author authorization is NOT repeated here: _admit_hostless settled
-        # it at ingress for all eight types. An unattributable message (no
+        # it at ingress for every hostless type. An unattributable message (no
         # integer seat) still has to go, though -- ingress lets it through
         # for its type's own handler to judge, and the deal driver routes by
         # seat, so it cannot route this.
@@ -1846,7 +1904,22 @@ class Session:
         self._flush_deal()
 
     def _on_hand_void(self, conn_id: str, msg: dict) -> None:
-        """Fail the current hand closed when any authenticated seat voids it."""
+        """Fail the current hand closed when any authenticated seat voids it.
+
+        Unless this replica already settled that hand. The void used to be
+        ignored then (_end_hand refuses a settled hand), which split the
+        table: the voiding side redealt the hand while this side carried
+        the payout forward, and no later hand could agree. Checked before
+        the hand-scope filter, because the void may arrive after this peer
+        has already dealt the next hand. As with hand_settled, only a seat
+        dealt into that hand can disagree about it.
+        """
+        hand = msg.get("hand", self._hand_no)
+        if (self._ended_digest is not None and hand == self._ended_hand
+                and not isinstance(hand, bool) and _is_seat(msg.get("seat"))):
+            if msg["seat"] in self._ended_seats:
+                self._settlement_disagrees(msg["seat"], hand, None)
+            return
         if not self._hand_msg_ok(conn_id, msg):
             return
         # Authorized at ingress; see _admit_hostless. What ingress could NOT
@@ -1861,7 +1934,30 @@ class Session:
         self._void_hand(reason, announce=False)
 
     def _on_session_end(self, conn_id: str, msg: dict) -> None:
-        """Receive final match state, including on already-busted spectators."""
+        """Receive final match state, including on already-busted spectators.
+
+        A peer still playing does not take the sender's word for it. Before
+        this, any seat could end the match mid-hand and name itself the
+        winner with stacks that merely summed right. An honest sender ends
+        the match from next_p2p_hand, after settling its last hand, so the
+        notice must name this peer's own hand, arrive after this peer has
+        settled it too, and carry exactly this replica's settled stacks.
+
+        Anything else is ignored rather than terminal. A notice that
+        overtakes this peer's own settlement is honest skew, and this peer
+        reaches the same verdict itself from next_p2p_hand. A genuine
+        disagreement about the settled stacks is hand_settled's to catch,
+        with the digest that proves it.
+
+        A seat that busted while others play on stopped following hands at
+        its bust, whether or not it has pressed Next yet (see _eliminated),
+        so a notice about a later hand is one it has nothing to compare,
+        and it keeps the shape and total checks alone. That notice is the
+        only one it will ever get. A notice naming the hand it busted in
+        gets the full check, which it cannot pass: that settlement left at
+        least two seats with chips, which is how it busted while others
+        play on.
+        """
         # Authorized at ingress; see _admit_hostless. The seat is checked for
         # shape only, and NOT coerced -- ingress declines to authorize a
         # non-integer seat, so int("1") here would apply one it refused.
@@ -1876,6 +1972,15 @@ class Session:
             return
         if hand < self._hand_no or len(stacks) != len(self._seat_order):
             return
+        if not self._eliminated() or hand == self._hand_no:
+            r = self._replica
+            if (hand != self._hand_no or self.hand_result is None
+                    or r is None or stacks != r.stacks):
+                _log.warning(
+                    "session: ignoring session_end from seat %s -- it does "
+                    "not match this peer's settled hand %s",
+                    msg.get("seat"), self._hand_no)
+                return
         if any(stack < 0 for stack in stacks):
             return
         expected_total = (self._table_cfg or {}).get("total_chips")
@@ -1887,6 +1992,419 @@ class Session:
         if len(alive) > 1 or winner != expected_winner:
             return
         self._finish_session(stacks, announce=False)
+
+    def _on_hand_settled(self, conn_id: str, msg: dict) -> None:
+        """Hold a seat's settlement digest against this replica's own.
+
+        Every seat broadcasts hand_settled {hand, digest} when its replica
+        settles a hand. The digest covers stacks, positions and the result
+        -- everything the next hand is dealt from -- so equal digests mean
+        the table agrees. Nothing compared them before: a divergence showed
+        up only as a desync in the next hand, whose void redealt from each
+        peer's own carry-in and diverged again, forever.
+
+        Compared whenever it arrives. If this replica has ended that hand,
+        against how it ended it, even if it has since dealt the next one
+        (the sender may be slower). If not, held in _early_settled until it
+        does; see _hand_ended. Authorized and replay-checked at ingress like
+        every hostless type.
+
+        Counted only from a seat dealt into that hand. Ingress proves who
+        signed it, not that the signer played: a busted seat, or one never
+        dealt, settled nothing and could otherwise end a table it is no
+        part of.
+
+        A matching report is recorded, and the next hand waits until every
+        seat dealt into this one has sent one (see next_p2p_hand), so a
+        seat cannot hold its report back and dispute the hand once the
+        next is underway. The client is told when one arrives: Next may
+        now go through.
+        """
+        seat, digest, hand = msg.get("seat"), msg.get("digest"), msg.get("hand")
+        if not _is_seat(seat) or not isinstance(digest, str):
+            return
+        if not isinstance(hand, int) or isinstance(hand, bool):
+            return
+        if hand == self._ended_hand:
+            if seat not in self._ended_seats:
+                return
+            if digest != self._ended_digest:
+                self._settlement_disagrees(seat, hand, digest)
+            elif seat not in self._ended_agreed:
+                self._ended_agreed.add(seat)
+                self._notify_state_changed()
+            return
+        if not self._hand_msg_ok(conn_id, msg):
+            return                       # a later hand buffers; older drops
+        if self._replica is not None and seat in self._replica.seats_dealt:
+            self._early_settled[seat] = digest
+
+    def _hand_ended(self, digest: Optional[str]) -> None:
+        """Record how this replica ended the current hand -- its settled
+        digest, or None for a void -- and hold it to every hand_settled that
+        arrived first. A peer that settled a hand this replica voided
+        disagrees just as much as one that settled it differently."""
+        self._ended_hand = self._hand_no
+        self._ended_digest = digest
+        self._ended_seats = (frozenset(self._replica.seats_dealt)
+                             if self._replica is not None else frozenset())
+        self._ended_from = (list(self._hand_stacks)
+                            if self._hand_stacks else None)
+        self._ended_agreed = {self.local_seat} if digest is not None else set()
+        early, self._early_settled = self._early_settled, {}
+        for seat in sorted(early):
+            if early[seat] != digest:
+                self._settlement_disagrees(seat, self._hand_no, early[seat])
+                return
+            self._ended_agreed.add(seat)
+
+    def _settlement_disagrees(self, seat: int, hand: int,
+                              theirs: Optional[str]) -> None:
+        """Two seats ended the same hand differently: end the table.
+
+        A void is no remedy. It redeals from each peer's own carry-in, so
+        peers that disagree about the stacks disagree again and void again,
+        for good, and a peer that already settled ignores the void anyway.
+        Nothing at the table can say which side is right. Every seat that
+        sees the other side's message reaches this too, so the table ends
+        everywhere rather than splitting, and every seat then reports the
+        stacks that hand was dealt from (see last_settled_stacks) rather
+        than its own side of the dispute.
+
+        Unless the seat had already reported this peer's settlement. Then
+        it is contradicting itself, not this peer, and the hand it agreed
+        to stands: the table still ends, on that seat, but rolling back to
+        the carry-in would let a seat that lost the hand undo it, and keep
+        a better figure than leaving the table gets it. A non-host seat's
+        messages reach every peer in the order it sent them, through the
+        host, so every peer judges the retraction the same way.
+        """
+        retracted = seat in self._ended_agreed
+        if not retracted:
+            self._agreed_stacks = self._ended_from
+        def ended(d):
+            return "voided it" if d is None else f"settled it as {d[:16]}"
+        self.terminate(
+            self.ABORTED_PROTOCOL,
+            f"table state disagrees on hand {hand}: seat {seat} "
+            f"{ended(theirs)}, this peer {ended(self._ended_digest)}"
+            + (f", as seat {seat} itself had reported" if retracted else ""),
+            seat=seat)
+
+    def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
+        """The host saw a seated peer's connection drop.
+
+        The production topology is a star, so when a joiner drops only the
+        host's socket closes. Without this the other joiners kept waiting
+        on a seat that would never act again, with nothing to tell them the
+        host had already ended the table.
+
+        Chosen over having the host stop its transport, which would also
+        reach them: that reports HOST_LOST, naming the wrong peer and the
+        wrong cause, and stopping the transport is not the session's to do.
+        This is an ordinary hostless message instead. It reaches the
+        handler only after ingress has checked it is signed by the key
+        bound to the reporting seat and is not a replay or an equivocation.
+
+        Reported by the host's seat. Under the star only the host can see a
+        joiner's socket close, so from any other seat a report claims
+        something its sender could not have observed: a connected joiner
+        could otherwise end the table and pin the blame on another seat,
+        and a busted or never-dealt one could end a table it is not part
+        of. The host is still trusted to name the right seat. That is no
+        new power -- the host can end the table by leaving -- but the
+        blame is the host's word.
+
+        Two kinds, by "ended":
+
+          True    the host judged the seat needed and has ended the table.
+                  It relays nothing further, so a peer that weighed the
+                  notice against its own view and ignored it would wait
+                  forever: every peer ends, busted spectators included. Not
+                  hand-scoped either, since the host and this peer can be a
+                  hand apart around next_p2p_hand.
+          False   the host has busted and cannot judge: its replica stopped
+                  at the hand it busted in (see handle_disconnect). It
+                  keeps relaying, and the seats still playing decide. One
+                  that still needs the seat ends the table and says so in
+                  a notice of its own, "ended" and naming the same seat.
+                  That confirmation is the one peer_lost a seat other than
+                  the host may send, and it counts only for a seat the host
+                  has reported; it is how the busted host and any busted
+                  joiner, which cannot judge either, learn the table is
+                  over. If no seat still playing needs the leaver, it had
+                  busted too, and play goes on.
+
+        A notice that ends the table also says where its sender's hand
+        stood (see _drop_notice), and every game still playing settles its
+        own copy of the table for the drop (see _settle_drop).
+
+        So a seat other than the host can end the table only after the host
+        has seen the seat it names drop. A seat still playing could end it
+        anyway, by leaving. A busted one can too, but only this way: once
+        the host has reported a drop it can confirm it, and the table ends
+        even if no seat still playing needed the leaver. Receivers do not
+        weigh a confirmation against their own view, because a confirmer
+        still playing may be a hand away from them; a receiver that
+        ignored it would deal on with a seat that has already ended. A
+        busted seat can already stall the table by voiding every hand,
+        which hand_void does not limit to the seats dealt in.
+
+        Except in one place: a game still playing a hand ignores one. A
+        game that needed the leaver ended on the host's report, which
+        reaches it before any confirmation does, so a confirmation only
+        ever reaches games that did not. An honest confirmer needed the
+        leaver: the next hand would deal it, or the leaver was dealt into
+        a hand the confirmer had not finished (settled, with every
+        settlement report in). The first case binds everyone; in the
+        second no game can begin the next hand without the confirmer, and
+        one still playing that hand needed the leaver as well. So a game
+        that did not has finished the hand and begun no other, and ending
+        there costs nobody chips. Neither the report nor the confirmation is
+        hand-scoped, and the hand, "dealt" and action count a confirmation
+        carries are its sender's word; were they followed in a hand being
+        played, any seat could cancel it or stop it and split the pot, the
+        refund this replaces, once the host had reported any drop. The
+        busted host still cannot judge, and ends on any confirmation of a
+        seat it reported.
+
+        Once a game has ended on a reported drop, each further
+        confirmation of it still arrives (see handle_message): the busted
+        host relays them all, even once it has ended itself, so every game
+        that was still playing hears every other one's. Each settled from its own stage, so an
+        action that crossed the host's report leaves them with different
+        results, and only these confirmations can show it. A game compares
+        each with where its own hand stood at the drop, as _settle_drop
+        does, and on a difference marks its result "disputed" (rule 11).
+        It moves no chips: a confirmation is still its sender's word.
+        """
+        reporter, lost = msg.get("seat"), msg.get("lost_seat")
+        if not _is_seat(reporter) or not _is_seat(lost):
+            return
+        if not 0 <= lost < len(self._seat_order):
+            return
+        if self.terminal_state is not None:
+            self._compare_confirmation(reporter, msg)
+            return
+        notice = msg
+        if reporter == self._host_seat():
+            if msg.get("ended") is not True:
+                self._reported_lost.add(lost)
+                if self._eliminated() or not self._seat_in_play(lost):
+                    return
+                # Sent BEFORE terminating, as in handle_disconnect.
+                notice = self._drop_notice(lost)
+                self._send_hostless(dict(notice))
+        elif msg.get("ended") is not True or lost not in self._reported_lost:
+            _log.warning("session: ignoring peer_lost from seat %s -- only "
+                         "the host can see a seat's connection drop",
+                         reporter)
+            return
+        elif (self._replica is not None and not self._eliminated()
+              and self.hand_result is None and not self.hand_voided):
+            _log.warning("session: ignoring seat %s's confirmation of seat "
+                         "%s's drop -- a hand is being played without it",
+                         reporter, lost)
+            return
+        label = self._seat_label(lost)
+        outcome = self._settle_drop(lost, notice, label, reporter)
+        self._ended_on_report = lost in self._reported_lost
+        self.terminate(self.PEER_LOST,
+                       f"{label} disconnected (reported by seat {reporter})"
+                       + outcome,
+                       conn_id=conn_id, seat=lost)
+
+    def _compare_confirmation(self, reporter: int, notice: dict) -> None:
+        """Mark this ended game's result disputed if another seat's
+        confirmation puts that seat's hand elsewhere (see _on_peer_lost).
+        Once per seat, counting the one whose notice this game settled on,
+        so a seat cannot grow the reason by repeating itself; the result is
+        never moved. A busted game had no hand to compare. The mark goes on
+        terminal_reason only: terminal_record keeps the transition as it
+        happened.
+        """
+        if self._drop_stage is None or reporter in self._drop_compared:
+            return
+        self._drop_compared.add(reporter)
+        own, live = self._drop_stage
+        disputed, _ = self._drop_dispute(own, live, notice, reporter)
+        if disputed:
+            self.terminal_reason += disputed
+            if self.on_state_changed is not None:
+                self.on_state_changed()
+
+    def _drop_notice(self, lost: int) -> dict:
+        """The peer_lost notice that ends the table on ``lost``'s drop.
+
+        It carries no figures, only where this game's hand stands, so that
+        every other game can tell whether it is at the same place (see
+        _settle_drop):
+
+          hand     the hand number
+          dealt    the hand's shuffle had finished, so cards were being
+                   dealt (docs/CASUAL_P2P_RULES.md rule 5: a hand starts
+                   when its cards are dealt), and it had not been voided,
+                   which redeals it from the stacks it was dealt from just
+                   as cancelling it does
+          settled  this game had settled the hand
+          actions  betting actions this game had applied (the replica's
+                   next_seq)
+        """
+        r = self._replica
+        deal = getattr(self._deal_driver, "deal", None)
+        settled = r is not None and self.hand_result is not None
+        dealt = r is not None and not self.hand_voided and (
+            settled or (deal is not None and deal.is_shuffle_complete()))
+        return {"type": "peer_lost", "hand": self._hand_no,
+                "lost_seat": lost, "ended": True, "dealt": dealt,
+                "settled": settled,
+                "actions": r.next_seq if r is not None else 0}
+
+    def _settle_drop(self, lost: int, notice: dict, label: str,
+                     sender: Optional[int]) -> str:
+        """Settle this game's copy of the table for ``lost``'s drop.
+
+        The casual rules (docs/CASUAL_P2P_RULES.md): a seat that drops
+        folds. If the hand in progress had been dealt, it stops there and
+        settle_forfeit settles it: the leaver forfeits every chip it put
+        in, a raise nobody called included, and the seats left share each
+        pot they are in, or the one seat left wins it (rules 1-4). A hand
+        not yet dealt is cancelled instead and its blinds go back, since
+        nobody has seen a card (rule 5). A hand already settled or voided
+        stands. Either way the table then ends; see PEER_LOST.
+
+        No figures come from the notice. Everything its sender had seen
+        reached this game first, through the host and in order, so a game
+        still playing is at the same place unless a message of its own
+        crossed the drop: an action it applied (its action count is above
+        the notice's), or the last message a hand was waiting on. A notice
+        saying this hand was not dealt is followed, so a deal this game
+        finished by itself is cancelled with everyone else's. Any other
+        difference is the race rule 11 covers: this game keeps its own
+        result and marks it "disputed" rather than guess at the sender's.
+        A game a hand ahead of the sender has begun a hand that cannot
+        have been dealt without it, so that hand is cancelled. A hand in
+        play is settled only on the host's notice or this game's own: a
+        confirmation from another seat reaches only a game with none (see
+        _on_peer_lost).
+
+        A hand settled here skips its end-of-hand card check, so it
+        settles only on proofs (the revival conditions in
+        docs/CASUAL_P2P_RULES.md): the table runs Bayer-Groth, checked
+        here rather than inferred from the transport, and this game
+        verified a proof for every shuffle round. Otherwise it is not
+        settled, and chips stand where it was dealt from. If everyone else
+        had folded, betting has decided the hand, and the leaver is paid
+        it (decision 1 of the approved plan). A busted seat stopped
+        following hands, so it has nothing to settle.
+
+        Returns what happened, for the terminal reason.
+        """
+        from holdem.engine import settle_forfeit
+        from holdem.p2p.replica_table import ChipConservationError
+        r = self._replica
+        if r is None or self._eliminated():
+            return ""
+        h, own = self._hand_no, self._drop_notice(lost)
+        live = self.hand_result is None and not self.hand_voided
+        self._drop_stage = (own, live)
+        if sender is not None:
+            self._drop_compared.add(sender)
+        disputed, undealt = self._drop_dispute(own, live, notice, sender)
+        cancel = not own["dealt"] or undealt
+        if not live:
+            return disputed
+        # A seat that settled this hand before the drop is the same race.
+        # Its report is dropped: held to this hand's end, it would end the
+        # table over the disagreement instead and roll the hand back.
+        early, self._early_settled = self._early_settled, {}
+        if early and not disputed:
+            disputed = (f"; disputed: seat {min(early)} had settled hand "
+                        f"{h}, this game had not")
+        if cancel:
+            self._end_hand(self.VOID_PEER_LOST,
+                           f"{label} left before hand {h} was dealt: it is "
+                           f"cancelled and its blinds go back" + disputed,
+                           blamed_seat=lost, announce=False)
+            return (f"; hand {h} was cancelled before the deal and its "
+                    f"blinds go back" + disputed)
+        rounds = len(self._deal_driver.deal.seats_in)
+        if not self.prevention:
+            return (f"; hand {h} was not settled: this table runs no "
+                    f"Bayer-Groth shuffle proofs" + disputed)
+        if self.proofs_verified != rounds:
+            return (f"; hand {h} was not settled: this game verified "
+                    f"{self.proofs_verified} of its {rounds} shuffle "
+                    f"proofs" + disputed)
+        e = r.engine
+        in_hand = [p.idx for p in e.contested()]
+        if in_hand == [lost]:
+            try:
+                self.hand_result = r.finish()
+            except ChipConservationError as exc:
+                return f"; hand {h} was not settled: {exc}" + disputed
+            return (f"; everyone else had folded hand {h}, so it is paid "
+                    f"the pot" + disputed)
+        out = settle_forfeit(
+            stacks=[p.stack for p in e.players],
+            live=[p.total_live for p in e.players],
+            dead=[p.total_dead for p in e.players],
+            in_hand=in_hand, dropped=lost, button=e.button)
+        self._drop_stacks = out["stacks"]
+        self._end_hand(self.HAND_FORFEIT,
+                       f"{label} dropped and forfeits hand {h}" + disputed,
+                       blamed_seat=lost, announce=False)
+        return f"; it forfeits hand {h}" + disputed
+
+    @classmethod
+    def _drop_dispute(cls, own: dict, live: bool, notice: dict,
+                      sender: Optional[int]) -> tuple[str, bool]:
+        """Does ``notice`` put its sender where this game stood at the drop?
+
+        ``own`` is this game's own notice then and ``live`` whether its hand
+        was still being played (see _settle_drop). Returns the "disputed"
+        mark for the terminal reason, empty if they agree, and whether the
+        notice says this game's hand was not dealt.
+        """
+        h = own["hand"]
+        hand, dealt = notice.get("hand"), notice.get("dealt")
+        settled, actions = notice.get("settled"), notice.get("actions")
+        # _is_seat is the int-but-not-bool check; it fits counts too
+        if not (_is_seat(hand) and _is_seat(actions)
+                and isinstance(dealt, bool) and isinstance(settled, bool)):
+            return (f"; disputed: seat {sender}'s notice did not say "
+                    f"where its hand stood"), False
+        if hand == h:
+            if not dealt:
+                agreed = not own["settled"]
+            elif settled:
+                agreed = own["settled"]
+            else:
+                agreed = (own["dealt"] and not own["settled"]
+                          and own["actions"] == actions)
+        elif hand < h:
+            # The sender ended its hand and this game has begun the
+            # next; a void is redealt as a new hand, so "not dealt"
+            # covers a voided hand as well as one being shuffled.
+            agreed = settled or not dealt
+        else:
+            # The sender has begun the next hand; this game has not.
+            agreed = not dealt and not live
+        mine = cls._stage(h, own["dealt"], own["settled"], own["actions"])
+        disputed = "" if agreed else (
+            f"; disputed: seat {sender} had "
+            f"{cls._stage(hand, dealt, settled, actions)}, this game "
+            f"{mine}")
+        return disputed, hand == h and not dealt
+
+    @staticmethod
+    def _stage(hand: int, dealt: bool, settled: bool, actions: int) -> str:
+        """Where a hand stood, as a drop notice puts it."""
+        if settled:
+            return f"settled hand {hand}"
+        if not dealt:
+            return f"not dealt hand {hand}"
+        return f"applied {actions} actions in hand {hand}"
 
     def _flush_deal(self) -> None:
         """Route buffered driver emissions. Each is broadcast to the OTHER
@@ -1998,6 +2516,7 @@ class Session:
         self._hand_record = None
         self.void_reason = None
         self.hand_result = None
+        self._early_settled = {}
         self._own_hole_set = False
         self._hand_stacks = list(stacks)
         self._hand_positions = positions
@@ -2051,7 +2570,9 @@ class Session:
           "eliminated"   -- the LOCAL seat busted: this session stops
                             playing and drops later hands' gameplay messages;
                             final lifecycle updates are still accepted
-          "not_ready"    -- the previous hand is still in progress
+          "not_ready"    -- the previous hand is still in progress, or it
+                            settled and a seat dealt into it has not yet
+                            reported the same settlement (hand_settled)
         """
         if self.terminal_state is not None:
             # A terminated session has no next hand. Reported as
@@ -2068,10 +2589,11 @@ class Session:
         if not voided and self.hand_result is None:
             return "not_ready"
         if voided:
-            # Chips reverted (settle never ran); redeal the same seats
-            # with the same button, a live room's misdeal rule: re-running
-            # the position advance from the SAME previous chain state
-            # reproduces the voided hand's positions exactly.
+            # Chips go back to the hand's carry-in (settle never ran, or its
+            # payout broke chip conservation and is discarded); redeal the
+            # same seats with the same button, a live room's misdeal rule:
+            # re-running the position advance from the SAME previous chain
+            # state reproduces the voided hand's positions exactly.
             stacks = list(self._hand_stacks)
             positions = self._hand_positions
         else:
@@ -2089,6 +2611,12 @@ class Session:
             self._msg_buffer.clear()
             self._notify_state_changed()
             return "eliminated"
+        if not voided and self._ended_agreed != self._ended_seats:
+            # No hand is dealt on a settlement a dealt seat has not
+            # confirmed. Otherwise that seat could hold its report back,
+            # watch the next hand, and dispute the last one if it went
+            # badly. A match that is over deals nothing, so it does not wait.
+            return "not_ready"
         started = self._begin_p2p_hand(hand_no=self._hand_no + 1,
                                        stacks=stacks, positions=positions)
         return "started" if started else "session_over"
@@ -2196,6 +2724,14 @@ class Session:
             # Compare only when we applied exactly that action (a buffered
             # later action draining in the same call would legitimately
             # move our digest past the sender's snapshot).
+            #
+            # A desync at action 0 voids too, rather than ending the table,
+            # even though a redeal cannot cure peers dealt from different
+            # stacks. After the first hand those cannot arise unnoticed:
+            # hand_settled ends the table at the settlement where they
+            # diverged. What is left at action 0 is a replica corrupted
+            # before it acted, which a redeal does cure, or a first hand
+            # started from different arguments on different peers.
             theirs = msg.get("digest")
             if (theirs is not None
                     and self._replica.next_seq == seq + 1
@@ -2226,7 +2762,8 @@ class Session:
         This used to be the authoritative void flag -- assigned in one
         place, read in eleven -- which made hand termination a second
         shutdown path with no record and no first-cause-wins guarantee. It
-        now reports what _end_hand decided.
+        now reports what _end_hand decided. A hand a drop forfeited counts:
+        it stopped without settling, and nothing more may be applied to it.
         """
         rec = self._hand_record
         return rec is not None and rec.outcome != self.HAND_COMPLETED
@@ -2278,6 +2815,7 @@ class Session:
                 "seat": self.local_seat,
                 "reason": self.void_reason,
             })
+        self._hand_ended(None)
         return True
 
     @owned
@@ -2319,7 +2857,8 @@ class Session:
     def _step_hand(self) -> bool:
         """One orchestration step. Returns True iff progress was made."""
         from holdem.p2p.replica_table import (
-            PHASE_STREET_OVER, PHASE_SHOWDOWN, PHASE_HAND_OVER)
+            PHASE_STREET_OVER, PHASE_SHOWDOWN, PHASE_HAND_OVER,
+            ChipConservationError)
         r = self._replica
         # 1. local hole cards -> replica, as soon as the deal recovers them
         if not self._own_hole_set:
@@ -2351,9 +2890,24 @@ class Session:
             holes = self._deal_driver.all_hole_cards()
             if r.phase == PHASE_SHOWDOWN and holes:
                 r.set_all_holes(holes)
-            self.hand_result = r.finish(
-                force_tabled=(r.phase == PHASE_SHOWDOWN))
-            if self.on_hand_settled:
+            try:
+                result = r.finish(force_tabled=(r.phase == PHASE_SHOWDOWN))
+            except ChipConservationError as exc:
+                # The existing void path: the payout the replica computed is
+                # discarded, and the reason lands in the hand record. Peers
+                # that settled the hand end the table over the void (see
+                # _on_hand_void); only if every replica failed alike is the
+                # hand redealt from the stacks it was dealt with.
+                self._void_hand(str(exc))
+                return False
+            self.hand_result = result
+            digest = r.state_digest()
+            self._send_hostless({"type": "hand_settled",
+                                 "hand": self._hand_no, "digest": digest})
+            self._hand_ended(digest)
+            # Not when an earlier report disagreed: the table has just
+            # aborted over this very settlement.
+            if self.on_hand_settled and self.terminal_state is None:
                 self.on_hand_settled(self.hand_result)
             return False               # settled: terminal state
         return False
@@ -2768,6 +3322,11 @@ class Session:
 
         Runs on the owner thread. All transport-originated callers already
         arrive on the dispatch consumer; local callers must too.
+
+        Ends by firing on_session_terminated, then on_state_changed. The
+        second is what a client renders from: without it a peer that died
+        mid-hand kept showing the live table until something else happened
+        to change, which on a dead table is never.
         """
         self._assert_owner()
         # Atomic by construction: @owned holds the owner across this
@@ -2810,6 +3369,11 @@ class Session:
                            else {"reason": f"{state}: {reason}"}))
         if self.on_session_terminated:
             self.on_session_terminated(self.terminal_record)
+        # Called directly, not through _notify_state_changed: that would
+        # re-arm a deadline on a session whose pending work was just
+        # invalidated.
+        if self.on_state_changed is not None:
+            self.on_state_changed()
         return True
 
     def _invalidate_pending_work(self) -> None:
@@ -2831,6 +3395,19 @@ class Session:
         hand host-only authority over an in-flight cryptographic protocol
         to a peer that inherited none of its state, with no authenticated
         transfer of that authority. So it terminates instead.
+
+        Any other seated peer is just as irreplaceable once the table is in
+        play: every hand's deal and audit need a share from every dealt
+        seat, and nothing reconnects or times it out, so without this the
+        table waited on that seat forever. Losing a seat the table still
+        needs (see _seat_in_play) terminates with PEER_LOST, and the leaver
+        forfeits the hand in progress (see _settle_drop). A seat that has
+        busted out is not needed, and may leave.
+
+        A busted host cannot tell which: its replica stopped at the hand it
+        busted in, so a seat that has busted since would still look needed.
+        It reports the drop instead, keeps relaying, and leaves the verdict
+        to the seats still playing (see _on_peer_lost).
         """
         # Admission is connection-scoped, so it dies with the connection --
         # cleared even on a terminal session, because conn_ids can be reused
@@ -2843,6 +3420,15 @@ class Session:
 
         if self.terminal_state is not None:
             return                          # already terminal; late event
+
+        # Decided, and the seat named, before the roster entry goes.
+        seat = (self._seat_order.index(conn_id)
+                if conn_id != self._host_conn_id
+                and conn_id in self._seat_order else None)
+        in_play = (seat is not None and not self._eliminated()
+                   and (self._replica is not None or self.state == "PLAYING")
+                   and self._seat_in_play(seat))
+        label = self._seat_label(seat) if in_play else ""
 
         with self._lock:
             self.players.pop(conn_id, None)
@@ -2858,12 +3444,103 @@ class Session:
                 return
             # LOBBY only.
             self._elect_new_host()
+        elif in_play:
+            # Under the star only the host sees a joiner's socket close, so
+            # the other joiners learn of it from this notice or not at all.
+            # Sent BEFORE terminating, so a teardown in on_session_terminated
+            # cannot swallow it. "ended": this host has ended the table and
+            # relays nothing further, so the notice binds every peer. It
+            # says where this host's hand stood, and this host follows it
+            # like everyone else (see _settle_drop).
+            notice = self._drop_notice(seat)
+            if self.is_host:
+                self._send_hostless(dict(notice))
+            outcome = self._settle_drop(seat, notice, label, None)
+            self.terminate(self.PEER_LOST, f"{label} disconnected{outcome}",
+                           conn_id=conn_id, seat=seat)
         else:
             # A non-host peer dropped
+            if self.is_host and seat is not None and self._eliminated():
+                # A report, not an end: this host cannot judge the seat,
+                # and keeps relaying for a table that may play on.
+                self._reported_lost.add(seat)
+                self._send_hostless({"type": "peer_lost",
+                                     "hand": self._hand_no,
+                                     "lost_seat": seat, "ended": False})
             if self.is_host:
                 self._broadcast_player_list()
             if self.on_player_list_changed:
                 self.on_player_list_changed(list(self.players.values()))
+
+    def _seat_in_play(self, seat: int) -> bool:
+        """Does the table still need ``seat`` to finish or deal a hand?
+
+        Before the first hand every seat is needed. During a hand, or after
+        a void (the redeal deals the same seats), the seats dealt in. After
+        a settle, the seats with chips, which the next hand will deal, and
+        any seat dealt in whose settlement report has not arrived, which
+        the next hand waits on (see next_p2p_hand) -- if there is a next
+        hand: with at most one seat holding chips the match is over, and
+        next_p2p_hand ends it normally whoever has left.
+
+        Only a peer still playing can answer. A busted one's replica stopped
+        at the hand it busted in, so seats that have busted since would
+        still look needed (see _eliminated); callers do not ask it.
+        """
+        r = self._replica
+        if r is None:
+            return True
+        if self.hand_result is not None:
+            if sum(1 for stack in r.stacks if stack > 0) < 2:
+                return False
+            if seat in self._ended_seats and seat not in self._ended_agreed:
+                return True
+            return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
+        return seat in r.seats_dealt
+
+    def _host_seat(self) -> Optional[int]:
+        """The host's seat, or None if this peer cannot name it.
+
+        A joiner that pinned the host from its invite goes by that key: the
+        seat bound to it. Its own conn_id for the host is a local name the
+        seat order never contains. Otherwise the seat of the host's conn_id
+        -- the host's own, or the one a harness joiner was given.
+        """
+        if self.is_host:
+            cid = self.local_conn_id
+        elif self._pinned_host_pubkey is not None:
+            for seat, key in sorted(self._seat_keys.items()):
+                if key == self._pinned_host_pubkey:
+                    return seat
+            return None
+        else:
+            cid = self._host_conn_id
+        return self._seat_order.index(cid) if cid in self._seat_order else None
+
+    def _eliminated(self) -> bool:
+        """Is the local seat out while the match goes on without it?
+
+        True once next_p2p_hand has said "eliminated", and already from the
+        settle that busted it: the seats with chips deal on without it
+        whether or not it has pressed Next, so either way its replica stops
+        at that hand and soon goes stale.
+        """
+        if self._p2p_spectator:
+            return True
+        r = self._replica
+        if r is None or self.hand_result is None:
+            return False
+        return (r.stacks[self.local_seat] == 0
+                and sum(1 for stack in r.stacks if stack > 0) >= 2)
+
+    def _seat_label(self, seat: int) -> str:
+        """'seat 2 (Cara)' -- the seat as a player would recognise it."""
+        cid = self._seat_order[seat] if 0 <= seat < len(self._seat_order) \
+            else None
+        player = self.players.get(cid) if isinstance(cid, str) else None
+        if player is None or not player.nickname:
+            return f"seat {seat}"
+        return f"seat {seat} ({str(player.nickname)[:32]})"
 
     def _elect_new_host(self) -> None:
         """Lowest-join-order peer becomes the new host. LOBBY only.
@@ -3163,6 +3840,65 @@ class Session:
     def replica(self):
         """The ReplicaTable for the current hand, or None between hands."""
         return self._replica
+
+    @property
+    def last_settled_stacks(self) -> Optional[list]:
+        """Each seat's chips, by seat index, as of the last settlement.
+
+        What the table owes its players if it stops now. This is the figure
+        to show once a session has terminated (PEER_LOST, HOST_LOST, a
+        protocol abort), and it is equally valid while play continues.
+
+          * match over:                       the final stacks
+          * ended over a disputed settlement: the stacks that hand was
+                                              dealt from, the last
+                                              settlement the table agreed
+                                              on (see hand_settled) --
+                                              unless the disputing seat
+                                              had reported this peer's
+                                              settlement itself: then that
+          * a seat dropped from the hand:     the stacks the leaver's
+                                              forfeit left (see PEER_LOST)
+          * current hand settled:             its settled stacks
+          * hand in progress, voided, or      the stacks it was dealt from,
+            cancelled by a drop before the    i.e. the previous settlement
+            deal:                             or the opening stacks
+          * no hand begun yet:                None
+
+        So the pot of a hand that has not settled is discarded when the
+        table stops for any other reason: the host's drop (the casual rules
+        credit nobody with the host's chips), a protocol abort, or a drop
+        this game could not settle (see _settle_drop).
+
+        Derived on every read. It is this replica's own settlement;
+        hand_settled is what checks that every seat agrees, and once a
+        seat's first report finds they do not, the figure falls back to the
+        one they last agreed on, so no seat reports its side of the
+        dispute. That rollback hands back the disputed hand's pot, so a
+        seat that would lose a hand can lie in its first report to undo
+        it. A seat that contradicts a settlement it has already reported
+        cannot: the figure stays at the settlement it reported (see
+        _settlement_disagrees). A busted spectator's figure stops at the
+        hand it busted in until session_end brings the final stacks.
+
+        Read it as the session owner (``with session._owner``). It combines
+        several fields that the owner thread rewrites together -- starting
+        a hand clears hand_result before it records the new hand's stacks
+        -- so a read from another thread can return a figure one settlement
+        stale.
+        """
+        if self._agreed_stacks is not None:
+            return list(self._agreed_stacks)
+        if self._drop_stacks is not None:
+            return list(self._drop_stacks)
+        if self._final_stacks is not None:
+            return list(self._final_stacks)
+        r = self._replica
+        if r is not None and self.hand_result is not None:
+            return list(r.stacks)
+        if self._hand_stacks:
+            return list(self._hand_stacks)
+        return None
 
     @owned
     def configure_seats(self, order: list[str]) -> None:

@@ -12,9 +12,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem import client_view
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
+from tests.showdown_rig import rig_showdowns
 
 import importlib
 try:
@@ -43,7 +45,9 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]
     stacks = list(stacks) if stacks else [500] * n
-    for cid in order:
+    for i, cid in enumerate(order):
+        if stacks[i] == 0:
+            continue                  # never dealt: it has no hand to start
         sessions[cid].start_p2p_hand(hand_no=hand, names=names,
                                      stacks=stacks, sb=sb, bb=bb,
                                      button=button)
@@ -260,13 +264,15 @@ def test_elimination_drops_seat_and_shrinks_next_deal():
 
 
 def test_eliminated_spectator_accepts_signed_session_end_envelope():
+    """The match ends in a hand after the spectator's last, the one hand
+    a session_end can name for it (see the test below)."""
     bus, sessions, order = make_table(3)
     spectator = sessions[order[0]]
     spectator._p2p_spectator = True
     spectator.handle_message(order[1], {
         "type": "session_end",
         "payload": {
-            "hand": spectator._hand_no,
+            "hand": spectator._hand_no + 1,
             "seat": 1,
             "winner": 1,
             "stacks": [0, 1500, 0],
@@ -278,6 +284,123 @@ def test_eliminated_spectator_accepts_signed_session_end_envelope():
     assert spectator._session_over
     assert spectator._session_winner == 1
     assert spectator._final_stacks == [0, 1500, 0]
+
+
+# A seated peer that is still playing checks a session_end against its own
+# settlement: same hand, already settled here, identical stacks. Each case
+# below would have passed the old shape-and-total checks.
+
+def test_a_seated_peer_ignores_a_session_end_sent_mid_hand():
+    """The old hole: any seat could end the match mid-hand and name itself
+    the winner, with stacks that merely summed to the table total."""
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    before = target.replica.state_digest()
+    target.handle_message(order[1], {"type": "session_end", "hand": 1,
+                                     "seat": 1, "winner": 1,
+                                     "stacks": [0, 1500, 0]})
+    assert target.terminal_state is None
+    assert not target._session_over
+    assert target.replica.state_digest() == before
+
+
+def _heads_up_bust():
+    """A heads-up all-in that busts a seat. The shuffle is random and an
+    all-in can chop, so retry until the precondition holds."""
+    for _ in range(20):
+        bus, sessions, order = make_table(2, stacks=[500, 500])
+        _shove_hand(bus, sessions, order, alive=[0, 1])
+        stacks = sessions[order[0]].replica.stacks
+        if 0 in stacks:
+            return bus, sessions, order, stacks
+    pytest.fail("no heads-up all-in busted a seat in 20 tries")
+
+
+def test_a_seated_peer_accepts_a_session_end_matching_its_settlement():
+    """The honest path: the winner ends the match before the loser has
+    called next_p2p_hand. The loser has settled the same hand with the
+    same stacks, so it accepts."""
+    bus, sessions, order, stacks = _heads_up_bust()
+    winner, loser = (0, 1) if stacks[0] else (1, 0)
+    assert sessions[order[winner]].next_p2p_hand() == "session_over"
+    bus.drain()
+    s = sessions[order[loser]]
+    assert s.terminal_state == Session.ENDED_NORMAL
+    assert s._final_stacks == stacks
+    assert s._session_winner == winner
+
+
+@pytest.mark.parametrize("change", ["later-hand", "other-stacks"])
+def test_a_seated_peer_ignores_a_session_end_unlike_its_settlement(change):
+    bus, sessions, order, stacks = _heads_up_bust()
+    winner, loser = (0, 1) if stacks[0] else (1, 0)
+    claim = {"type": "session_end", "hand": 1, "seat": winner,
+             "winner": winner, "stacks": list(stacks)}
+    if change == "later-hand":
+        claim["hand"] = 2
+    else:                                         # the loser named winner
+        claim["stacks"] = list(reversed(stacks))
+        claim["winner"] = loser
+    s = sessions[order[loser]]
+    s.handle_message(order[winner], claim)
+    assert s.terminal_state is None
+    assert not s._session_over
+
+
+def test_a_seat_busted_before_pressing_next_accepts_the_later_end(
+        monkeypatch):
+    """Seat 2 busts in hand 1 and never presses Next. Seats 0 and 1 play
+    hand 2 to a winner, whose session_end names hand 2 -- a hand seat 2
+    was never dealt. It stopped following hands at its bust, as a
+    spectator does, so it checks the notice as one does. Ignoring it, as a
+    seat still playing would, left it waiting for good: the notice is
+    sent once, and Next would only report it eliminated."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 2, 0)
+    bus, sessions, order = make_table(3, stacks=[500, 500, 20])
+    _shove_hand(bus, sessions, order, alive=[0, 1, 2], folding=[0])
+    # Seat 1 opens all in, seat 2 calls all in for 20 and seat 0 folds its
+    # big blind: seat 1's aces take 20 + 20 + 10.
+    assert sessions[order[0]].replica.stacks == [490, 530, 0]
+    busted = sessions[order[2]]
+    assert {sessions[c].next_p2p_hand() for c in order[:2]} == {"started"}
+    bus.drain()
+    rank(1, 0, 2)
+    _shove_hand(bus, sessions, order, alive=[0, 1])
+    assert sessions[order[0]].replica.stacks == [0, 1020, 0]
+    assert busted.terminal_state is None
+
+    assert sessions[order[1]].next_p2p_hand() == "session_over"
+    bus.drain()
+
+    for s in (busted, sessions[order[0]]):
+        assert s.terminal_state == Session.ENDED_NORMAL
+        assert s._final_stacks == [0, 1020, 0]
+        assert s._session_winner == 1
+    assert client_view.snapshot(busted)["turn"]["state"] == "match_complete"
+    assert busted.next_p2p_hand() == "session_over"
+
+
+@pytest.mark.parametrize("pressed_next", [False, True])
+def test_a_busted_seat_ignores_a_session_end_for_the_hand_it_busted_in(
+        monkeypatch, pressed_next):
+    """Seat 2 busts in hand 1 while seats 0 and 1 keep chips, so hand 1
+    ended no match. Seat 0 nonetheless claims it won it all in hand 1.
+    Seat 2 settled hand 1 itself and can see the claim is false, so its
+    relaxed check for later hands does not apply."""
+    rig_showdowns(monkeypatch)(1, 2, 0)
+    bus, sessions, order = make_table(3, stacks=[500, 500, 20])
+    _shove_hand(bus, sessions, order, alive=[0, 1, 2], folding=[0])
+    busted = sessions[order[2]]
+    assert busted.replica.stacks == [490, 530, 0]
+    if pressed_next:
+        assert busted.next_p2p_hand() == "eliminated"
+    claim = {"type": "session_end", "hand": 1, "seat": 0, "winner": 0,
+             "stacks": [1020, 0, 0]}
+    for cid in order[1:]:
+        sessions[cid].handle_message(order[0], dict(claim))
+        assert sessions[cid].terminal_state is None, cid
+        assert not sessions[cid]._session_over
 
 
 def test_heads_up_positions_and_play():
@@ -427,14 +550,17 @@ def test_replica_desync_void_propagates_and_redeals():
     assert_synced(sessions, order)
 
 
-def _shove_hand(bus, sessions, order, alive):
-    """Everyone still alive goes all-in; returns the settled result."""
+def _shove_hand(bus, sessions, order, alive, folding=()):
+    """Everyone still alive goes all-in, except that the seats folding
+    fold; returns the settled result."""
     ref = alive[0]
     while sessions[order[ref]].replica.phase == PHASE_BETTING:
         r = sessions[order[ref]].replica
         seat = r.actor
         lg = r.engine.legal(seat)
         a = ("raise", lg["max_to"]) if lg["can_raise"] else ("call", 0)
+        if seat in folding:
+            a = ("fold", 0)
         assert sessions[order[seat]].send_bet_action(*a) == "applied"
         bus.drain()
     return sessions[order[ref]].hand_result
@@ -542,3 +668,234 @@ def test_long_session_conserves_chips_and_stays_synced():
             assert len(winners) == 1
             break
     assert hands >= 2                       # actually played multiple hands
+
+
+# ------------------------------------------------- settlement agreement
+#
+# Every seat broadcasts hand_settled {hand, digest} when it settles. Equal
+# digests mean equal stacks and positions -- the next hand's inputs -- so a
+# mismatch, or a void of a hand another seat settled, ends the table with
+# ABORTED_PROTOCOL instead of looping void-and-redeal from carry-ins that
+# can never agree.
+
+def test_every_seat_reports_the_same_settlement():
+    """Every seat holds a matching report from each of the others: the
+    broadcast reached it and was compared, not merely sent."""
+    bus, sessions, order = make_table(3)
+    checkdown(bus, sessions, order)
+    digests = {sessions[c]._ended_digest for c in order}
+    assert len(digests) == 1 and None not in digests
+    assert digests == {sessions[order[0]].replica.state_digest()}
+    assert all(sessions[c].terminal_state is None for c in order)
+    assert all(sessions[c]._ended_agreed == {0, 1, 2} for c in order)
+
+
+def _hold_settlement_reports(session):
+    """Keep session's hand_settled broadcasts back; returns the release."""
+    transport = session._transport
+    send, held = transport.broadcast, []
+
+    def broadcast(msg):
+        if msg.get("type") == "hand_settled":
+            held.append(msg)
+        else:
+            send(msg)
+    transport.broadcast = broadcast
+
+    def release():
+        transport.broadcast = send
+        for msg in held:
+            send(msg)
+    return release
+
+
+def test_the_next_hand_waits_for_every_seats_settlement_report():
+    """Seat 2's report is late. Dealing hand 2 before it arrives would let
+    seat 2 watch hand 2 and then dispute hand 1, so nobody deals it yet."""
+    bus, sessions, order = make_table(3)
+    release = _hold_settlement_reports(sessions[order[2]])
+    checkdown(bus, sessions, order)
+    for cid in order[:2]:
+        assert sessions[cid].hand_result is not None
+        assert sessions[cid].next_p2p_hand() == "not_ready"
+    release()
+    bus.drain()
+    assert set(next_all(bus, sessions, order).values()) == {"started"}
+    assert_synced(sessions, order)
+
+
+def test_a_settlement_that_differs_ends_the_table_instead_of_looping():
+    """One replica pays a chip to the wrong seat -- chips conserved, so the
+    conservation guard passes, and after the last action, so no per-action
+    digest sees it. Before hand_settled the table only found out in hand 2,
+    as a desync whose void redealt from the same disagreeing carry-ins and
+    desynced again, indefinitely. Now every seat sees a digest it does not
+    share and ends the table at the settlement."""
+    bus, sessions, order = make_table(3)
+    faulty = sessions[order[1]]
+    engine = faulty.replica.engine
+    real_settle = engine.settle
+
+    def misdealt_settle(*args, **kwargs):
+        out = real_settle(*args, **kwargs)
+        engine.players[0].stack -= 1
+        engine.players[1].stack += 1
+        return out
+
+    engine.settle = misdealt_settle
+    while sessions[order[0]].replica.phase == PHASE_BETTING:
+        seat = sessions[order[0]].replica.actor
+        assert sessions[order[seat]].send_bet_action("call") == "applied"
+        bus.drain()
+
+    for cid in order:
+        s = sessions[cid]
+        assert s.hand_result is not None
+        assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
+        assert s.terminal_reason.startswith(
+            "table state disagrees on hand 1: seat ")
+        assert s.next_p2p_hand() == "session_over"
+        # Not each peer's own side of the dispute: the stacks the hand was
+        # dealt from, which every seat agreed on.
+        assert s.last_settled_stacks == [500, 500, 500], cid
+
+
+def test_a_void_of_a_hand_this_peer_settled_ends_the_table():
+    bus, sessions, order = make_table(3)
+    checkdown(bus, sessions, order)
+    target = sessions[order[0]]
+    target.handle_message(order[2], {"type": "hand_void", "hand": 1,
+                                     "seat": 2, "reason": "late"})
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert target.terminal_reason.startswith(
+        "table state disagrees on hand 1: seat 2 voided it, this peer "
+        "settled it as ")
+
+
+def test_a_late_void_of_the_previous_hand_still_ends_the_table(monkeypatch):
+    """The void may arrive after this peer has dealt the next hand. Seat 2
+    had reported the settlement it now voids, so it is seat 2 that is
+    contradicting itself: the table ends, and hand 1 stands."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
+    bus, sessions, order = make_table(3)
+    checkdown(bus, sessions, order)
+    target = sessions[order[0]]
+    settled = target.replica.stacks
+    assert settled == [520, 490, 490]                # seat 0 took 3 x 10
+    assert target.next_p2p_hand() == "started"
+    assert target._hand_no == 2
+    target.handle_message(order[2], {"type": "hand_void", "hand": 1,
+                                     "seat": 2, "reason": "late"})
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert target.terminal_reason.endswith(", as seat 2 itself had reported")
+    assert target.last_settled_stacks == settled
+
+
+@pytest.mark.parametrize("retraction", [
+    {"type": "hand_void", "hand": 1, "reason": "late"},
+    {"type": "hand_settled", "hand": 1, "digest": "ab" * 32},
+], ids=["void", "other-digest"])
+def test_a_seat_cannot_take_back_a_settlement_every_seat_reported(
+        monkeypatch, retraction):
+    """Seat 2 loses hand 1 and every seat reports the same digest. In hand
+    2 seat 2 signs a fresh message disputing hand 1. Rolling back to hand
+    1's carry-in would erase a hand the whole table agreed on, and pay
+    seat 2 better than leaving does: a disconnect here ends PEER_LOST with
+    seat 2 forfeiting what it has put into hand 2 (test_peer_loss). It
+    gets hand 1's settlement and no better, with the blame. Hand 2's pot
+    is still discarded, so the 10 seat 2 called there comes back to it,
+    which leaving would not do."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
+    bus, sessions, order = make_table(3)
+    checkdown(bus, sessions, order)
+    settled = sessions[order[0]].replica.stacks
+    assert settled == [520, 490, 490]                # seat 0 took 3 x 10
+    assert all(sessions[c]._ended_agreed == {0, 1, 2} for c in order)
+    assert set(next_all(bus, sessions, order).values()) == {"started"}
+    act(bus, sessions, order, "call")
+
+    sessions[order[2]]._send_hostless(dict(retraction))
+    bus.drain()
+
+    for cid in order[:2]:
+        s = sessions[cid]
+        assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
+        assert s.terminal_record.initiating_seat == 2
+        assert s.terminal_reason.startswith(
+            "table state disagrees on hand 1: seat 2 ")
+        assert s.last_settled_stacks == settled, cid
+
+
+def test_a_seat_that_settled_a_hand_this_peer_voided_ends_the_table():
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    target._void_hand("deal failure", announce=False)
+    target.handle_message(order[2], {"type": "hand_settled", "hand": 1,
+                                     "seat": 2, "digest": "ab" * 32})
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert target.terminal_reason == (
+        "table state disagrees on hand 1: seat 2 settled it as "
+        "abababababababab, this peer voided it")
+
+
+def test_an_early_settlement_report_is_held_until_this_peer_ends_the_hand():
+    """A faster seat's report can arrive mid-hand here. It is kept, not
+    dropped, and judged when this replica ends the hand."""
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    target.handle_message(order[2], {"type": "hand_settled", "hand": 1,
+                                     "seat": 2, "digest": "cd" * 32})
+    assert target.terminal_state is None             # nothing to compare yet
+    target._void_hand("deal failure", announce=False)
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert "seat 2 settled it as cdcdcdcdcdcdcdcd" in target.terminal_reason
+
+
+def test_a_settlement_the_table_aborted_over_is_not_announced():
+    """An early report disagrees, so this peer's own settle ends the table.
+    The client must not then be told the hand settled and paid out."""
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    settled = []
+    target.on_hand_settled = settled.append
+    target.handle_message(order[2], {"type": "hand_settled", "hand": 1,
+                                     "seat": 2, "digest": "cd" * 32})
+    checkdown(bus, sessions, order)
+    assert target.hand_result is not None
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert settled == []
+    assert sessions[order[1]].terminal_state is None   # it never saw the lie
+
+
+def test_a_seat_not_dealt_in_cannot_dispute_the_settlement():
+    """Seat 2 holds no chips, so no hand deals it. Ingress still admits
+    what it signs -- it does own seat 2 -- but it settled and voided
+    nothing, so no report of its can end the table: not one held from
+    before the settle, not one after it, and not a late void."""
+    bus, sessions, order = make_table(3, stacks=[500, 500, 0])
+    live = [sessions[order[0]], sessions[order[1]]]
+    assert live[0].replica.seats_dealt == [0, 1]
+    bogus = {"type": "hand_settled", "hand": 1, "seat": 2,
+             "digest": "ee" * 32}
+    for s in live:
+        s.handle_message(order[2], dict(bogus))      # held until the settle?
+    checkdown(bus, sessions, order, alive=[0, 1])
+    for s in live:
+        assert s.hand_result is not None
+        assert s.terminal_state is None, s.terminal_reason
+        s.handle_message(order[2], dict(bogus))      # compared after it?
+        assert s.terminal_state is None, s.terminal_reason
+        s.handle_message(order[2], {"type": "hand_void", "hand": 1,
+                                    "seat": 2, "reason": "late"})
+        assert s.terminal_state is None, s.terminal_reason
+
+
+def test_a_matching_report_after_settling_changes_nothing():
+    bus, sessions, order = make_table(3)
+    checkdown(bus, sessions, order)
+    target = sessions[order[0]]
+    target.handle_message(order[2], {
+        "type": "hand_settled", "hand": 1, "seat": 2,
+        "digest": target.replica.state_digest()})
+    assert target.terminal_state is None
+    assert set(next_all(bus, sessions, order).values()) == {"started"}

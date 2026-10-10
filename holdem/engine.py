@@ -1051,6 +1051,125 @@ class Engine:
         return result
 
 
+# ---------------------------------------------------------------- forfeit
+
+def settle_forfeit(*, stacks, live, dead, in_hand, dropped, button):
+    """Settle a hand that stops because the player in seat `dropped` left.
+
+    Under the casual table's rules whoever drops folds, and every chip they
+    put in stays in the pot, a raise nobody called included. settle() cannot
+    do this: it hands an uncalled raise back even to a folded seat (step
+    1), so marking the dropper folded and settling would repay it. Any
+    other seat's uncalled raise still goes back as step 1 does it. If one
+    seat is left in the hand, it wins every pot. If more are left, the
+    hand cannot finish without the dropper's key, so each pot is shared
+    equally by the seats left in it, as if they tied. The pots are
+    settle()'s layers (step 4) and odd chips follow its rule (step 5), so
+    a short all-in seat shares only the pots it matched. An all-in dropper
+    forfeits too. A dropper that had folded is just another folded seat.
+
+    Pure: it does no I/O, reads no globals and changes none of its
+    arguments, so every replica, front end and server that passes the
+    same table gets the same answer.
+
+      stacks     chips each seat has behind, by seat index
+      live       live chips each seat has put in this hand
+                 (Player.total_live)
+      dead       dead money each seat has put in this hand, antes and dead
+                 blinds (Player.total_dead); step 1 never hands it back
+      in_hand    seats dealt in that have not folded, the dropper
+                 included unless it had folded
+      dropped    the seat that left
+      button     the button seat; odd chips walk forward from it
+
+    Returns {"stacks": the stacks after the hand, "refund": (seat, chips)
+    of an uncalled raise handed back, or None, as settle() reports it,
+    "pots": [{"amount", "eligible", "payouts"}, ...]}. The new stacks
+    hold every chip in `stacks`, `live` and `dead`. Raises ValueError if
+    the dropper is the only seat in the hand: betting has already decided
+    that hand, and settle() pays it. Raises ValueError on a malformed
+    table too, a chip count that is not a whole number among them.
+    """
+    n = len(stacks)
+    if len(live) != n or len(dead) != n:
+        raise ValueError("stacks, live and dead must cover the same seats")
+    chips = list(stacks) + list(live) + list(dead)
+    # the odd-chip walk below pays whole chips, so a count of 1.5 would
+    # come out as 2; True is an int to Python but not a chip count
+    if not all(isinstance(c, int) and not isinstance(c, bool) for c in chips):
+        raise ValueError("chip counts must be whole numbers")
+    if any(c < 0 for c in chips):
+        raise ValueError("chip counts cannot be negative")
+    seats = [dropped, button, *in_hand]
+    # a button of 0.5 would send the odd-chip walk round for ever
+    if not all(isinstance(i, int) and not isinstance(i, bool) for i in seats):
+        raise ValueError("seats must be whole numbers")
+    if not all(0 <= i < n for i in seats):
+        raise ValueError("seat out of range")
+    left = sorted(set(in_hand) - {dropped})
+    if not left:
+        raise ValueError(f"no seat but {dropped} is in the hand; settle() "
+                         "pays a hand betting has already decided")
+
+    # settle() step 1, but the dropper forfeits its uncalled raise. Another
+    # seat's must come back before the layers are built: a folded seat's
+    # dead money can sit above the next live bet, and laying the whole
+    # raise over it would win the raiser part of that dead money alone.
+    after = list(stacks)
+    live = list(live)
+    refund = None
+    lives = sorted((c for c in live if c > 0), reverse=True)
+    if len(lives) >= 2 and lives[0] > lives[1]:
+        top = [i for i in range(n) if live[i] == lives[0]]
+        if len(top) == 1 and top[0] != dropped:
+            refund = (top[0], lives[0] - lives[1])
+            live[top[0]] -= refund[1]
+            after[top[0]] += refund[1]
+    committed = [c + d for c, d in zip(live, dead)]
+
+    # settle() step 4, with the dropper eligible for nothing
+    pots = []
+    prev = 0
+    for lvl in sorted({c for c in committed if c > 0}):
+        amount = sum(min(c, lvl) - min(c, prev) for c in committed)
+        eligible = [i for i in left if committed[i] >= lvl]
+        prev = lvl
+        if amount <= 0 or not eligible:
+            continue
+        if pots and pots[-1]["eligible"] == eligible:
+            pots[-1]["amount"] += amount
+        else:
+            pots.append({"amount": amount, "eligible": eligible})
+
+    # chips above every stake a seat left has matched (the dropper's
+    # uncalled raise, say) have no eligible layer of their own; like
+    # settle()'s residual dead money they join the top pot. If no seat
+    # left has put a chip in, there is no pot to join, and they share all.
+    total = sum(committed)
+    built = sum(pot["amount"] for pot in pots)
+    if total > built:
+        if pots:
+            pots[-1]["amount"] += total - built
+        else:
+            pots.append({"amount": total, "eligible": left})
+
+    # settle() step 5: equal shares, odd chips to the first seat left of
+    # the button
+    for pot in pots:
+        share, rem = divmod(pot["amount"], len(pot["eligible"]))
+        payouts = {i: share for i in pot["eligible"]}
+        j = button
+        while rem > 0:
+            j = (j + 1) % n
+            if j in payouts:
+                payouts[j] += 1
+                rem -= 1
+        for i, amt in payouts.items():
+            after[i] += amt
+        pot["payouts"] = payouts
+    return {"stacks": after, "refund": refund, "pots": pots}
+
+
 class Brain:
     """Decides for one AI seat. Returns ('fold'|'call'|'raise', amount)."""
 

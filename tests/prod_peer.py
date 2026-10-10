@@ -17,35 +17,49 @@ form, and invisible to every test that never built an envelope.
 module scope, so exactly one peer can live in a process. Three peers is
 therefore three processes.
 
+Each process must also have its OWN ``HOLDEM_CONFIG_DIR``: the signing key
+is loaded from it at import, so peers sharing one directory share one
+identity and every seat binds to the same key -- not the deployment shape.
+The test harness (test_three_peer_topology.Peer) gives each peer its own.
+
 The onboarding sequence reproduced here is the one in onboarding.py, in
 order, with nothing shortcut:
 
   host    start_host() -> Session(is_host=True) -> local_conn_id from
           identity.peer_id() -> add_local_player() -> on_message(handle_message)
-  joiner  Session(is_host=False) -> connect() -> send a SIGNED player_info
+  joiner  Session(is_host=False, joiner_admission=pin from the invite)
+          -> on_message(JoinAuthenticator.route) -> connect()
+          -> JoinAuthenticator.begin(): the SHIPPED joiner half of admission,
+          which sends a SIGNED player_info only once the host is proven
   host    _on_player_info binds ed25519_pubkey_hex from the VERIFIED envelope,
           replies player_ack (which is how a joiner learns the conn_id the
           host filed it under -- production assigns random UUIDs, so a joiner
           cannot know its own id any other way), broadcasts player_list
   host    start_game() -> game_start carries seat_order to every peer
-  all     start_p2p_hand() -> the hostless deal begins
+  all     start_p2p_hand() -> the hostless deal begins (start_hand, or from
+          on_game_start once armed, as the sidecar starts it)
+  all     act / next drive betting and continuous play hand after hand
 
 Protocol, newline-JSON on stdin/stdout:
 
   in   {"op": "connect", "addr": "host:port"}
        {"op": "start_game"}                  -- host only
        {"op": "start_hand", "args": {...}}
+       {"op": "arm_hand", "args": {...}}     -- start_hand on game_start
+       {"op": "act", "action": "fold"|"call"|"raise", "amount": N}
+       {"op": "next"}                        -- next_p2p_hand()
        {"op": "graph"}                       -- my conn_ids
        {"op": "status"}                      -- session/deal state
        {"op": "broadcast", "msg": {...}}     -- raw, for topology probes
        {"op": "quit"}
   out  {"type": "ready",     "addr": "...", "peer_id": "..."}
        {"type": "connected", "conn_id": "..."}
+       {"type": "admission", "conn_id": "...", "admitted": bool}  -- joiner
        {"type": "recv",      "from": "...", "mtype": "...", "seat": N,
-                             "author_seq": N}
+                             "hand": N, "author_seq": N}
        {"type": "graph",     "peers": [...]}
        {"type": "status",    ...}
-       {"type": "ack",       "op": "..."}
+       {"type": "ack",       "op": "...", "verdict": "..."}  -- act/next
        {"type": "error",     "msg": "..."}
 """
 from __future__ import annotations
@@ -62,8 +76,8 @@ sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), ".."))
 from holdem.p2p import admission as _adm                # noqa: E402
 from holdem.p2p import identity as _identity            # noqa: E402
 from holdem.p2p import invite as _invite                # noqa: E402
+from holdem.p2p import join_auth as _join_auth          # noqa: E402
 from holdem.p2p import transport                        # noqa: E402
-from holdem.p2p import wire as _wire                    # noqa: E402
 from holdem.p2p.session import Session                  # noqa: E402
 
 _LOCK = threading.Lock()
@@ -77,7 +91,17 @@ def _emit(obj: dict) -> None:
 
 
 def _status(sess: Session, host_admission=None) -> dict:
-    """Everything a three-process assertion might need to see."""
+    """Everything a three-process assertion might need to see.
+
+    Read as the session owner: the dispatch consumer mutates the replica
+    while this runs on the stdin thread, and a digest taken halfway through
+    an action would report a state no peer was ever in.
+    """
+    with sess._owner:
+        return _status_owned(sess, host_admission)
+
+
+def _status_owned(sess: Session, host_admission) -> dict:
     driver = getattr(sess, "_deal_driver", None)
     deal = getattr(driver, "deal", None)
     replica = getattr(sess, "_replica", None)
@@ -116,6 +140,30 @@ def _status(sess: Session, host_admission=None) -> dict:
         "replica_phase": getattr(replica, "phase", None),
         "hand_voided":   bool(getattr(sess, "hand_voided", False)),
         "void_reason":   getattr(sess, "void_reason", None),
+        # Betting and settlement, for driving and comparing whole hands.
+        # legal is this seat's own menu, present only while it is to act.
+        "seq":           getattr(replica, "next_seq", None),
+        "actor":         replica.actor if replica is not None else None,
+        "button":        replica.button if replica is not None else None,
+        "stacks":        replica.stacks if replica is not None else None,
+        "digest":        (replica.state_digest() if replica is not None
+                          else None),
+        "legal":         (replica.engine.legal(local_seat)
+                          if replica is not None
+                          and replica.phase == "betting"
+                          and replica.actor == local_seat else None),
+        "settled":       sess.hand_result is not None,
+        "result":        sess.hand_result,
+        # Seats whose matching hand_settled this peer has admitted for the
+        # current hand, itself included: counted only after ingress checked
+        # the signature and seat and the digest compared equal. The next
+        # hand waits for every dealt seat.
+        "agreed":        (sorted(getattr(sess, "_ended_agreed", ()))
+                          if getattr(sess, "_ended_hand", None)
+                          == getattr(sess, "_hand_no", None) else []),
+        "last_settled_stacks": sess.last_settled_stacks,
+        "terminal":      sess.terminal_state,
+        "terminal_reason": sess.terminal_reason,
     }
 
 
@@ -145,83 +193,52 @@ def main() -> None:
             host_pubkey=_identity.public_key_bytes(),
             discovery_token=bytes.fromhex(_parsed["discovery_token"]))
 
-    # The joiner's pin is built up front from the invite so the Session can
-    # be constructed already refusing non-handshake traffic. Building it
-    # after connect() would leave a window in which a hostile endpoint could
-    # speak first and be believed.
-    joiner_adm = {"a": None, "done": False}
+    # The joiner's pin is built up front from the invite, by the same
+    # function onboarding uses, so the Session can be constructed already
+    # refusing non-handshake traffic. Building it after connect() would
+    # leave a window in which a hostile endpoint could speak first and be
+    # believed.
+    joiner_admission = None
     if not is_host and args.invite:
-        _inv = _invite.parse_room_code(args.invite)
-        joiner_adm["a"] = _adm.JoinerAdmission(
-            admission_secret=bytes.fromhex(_inv["admission_secret"]),
-            host_pubkey=bytes.fromhex(_inv["host_pubkey"]),
-            joiner_pubkey=_identity.public_key_bytes(),
-            discovery_token=bytes.fromhex(_inv["discovery_token"]))
+        joiner_admission = _join_auth.joiner_admission_from_invite(
+            _invite.parse_room_code(args.invite))
 
     sess = Session(is_host=is_host, nickname=args.label, avatar_b64="",
                    admission=host_admission,
-                   joiner_admission=joiner_adm["a"])
+                   joiner_admission=joiner_admission)
 
-    def _hex(value):
-        try:
-            return bytes.fromhex(value or "")
-        except ValueError:
-            return b""
-
-    def _joiner_admission_step(conn_id, mtype, body, author_hex):
-        adm = joiner_adm["a"]
-        if adm is None:
-            return False
-        if mtype == "admission_challenge":
-            resp = adm.on_challenge(_hex(author_hex),
-                                    _hex(body.get("client_nonce")),
-                                    _hex(body.get("server_nonce")))
-            if resp is None:
-                _emit({"type": "error",
-                       "msg": "admission_challenge failed the host pin"})
-                return True
-            transport.send(conn_id, {"type": "admission_response", **resp})
-            return True
-        if mtype == "admission_accept":
-            ok = adm.on_accept(_hex(author_hex),
-                               _hex(body.get("client_nonce")),
-                               _hex(body.get("server_nonce")))
-            joiner_adm["done"] = bool(ok)
-            _emit({"type": "admission", "conn_id": conn_id, "admitted": ok})
-            if ok:
-                # Only NOW is this connection the host hop -- not because it
-                # answered first, but because a signed accept verified
-                # against the exact key the invite pinned.
-                sess.mark_host_authenticated(conn_id)
-                # Identity is revealed only after mutual authentication.
-                info = _wire.pack("player_info",
-                                  {"nickname": args.label, "avatar_b64": ""})
-                transport.send(conn_id, json.loads(info))
-            return True
-        return False
+    # Neither half of the handshake is this harness's. The host half is
+    # Session's; it used to be reimplemented here, which is how the shipped
+    # host path came to have no handshake at all while these tests stayed
+    # green -- the harness answered on production's behalf. The joiner half
+    # is the shipped JoinAuthenticator, wired as onboarding wires it: route()
+    # is the message hook, begin() runs once connect() has a socket, and it
+    # sends the signed player_info only after the host is proven.
+    authenticator = None
+    if joiner_admission is not None:
+        authenticator = _join_auth.JoinAuthenticator(
+            transport=transport, session=sess,
+            joiner_admission=joiner_admission, nickname=args.label,
+            on_authenticated=lambda cid: _emit(
+                {"type": "admission", "conn_id": cid, "admitted": True}),
+            on_failed=lambda reason: _emit(
+                {"type": "admission", "conn_id": authenticator.conn_id,
+                 "admitted": False, "reason": reason}))
 
     def _on_msg(conn_id: str, msg: dict) -> None:
         # Report BEFORE handing to the Session, so a message that makes the
         # Session throw is still visible to the test as having arrived.
         payload = msg.get("payload", msg)
         body = payload if isinstance(payload, dict) else {}
-        mtype = msg.get("type")
-        _emit({"type": "recv", "from": conn_id, "mtype": mtype,
+        _emit({"type": "recv", "from": conn_id, "mtype": msg.get("type"),
                "seat": body.get("seat", body.get("seat_from")),
+               "hand": body.get("hand"),
                "author_seq": body.get("author_seq")})
-        author_hex = msg.get("pubkey", "")
         try:
-            # The HOST half is Session's, not this harness's. It used to be
-            # reimplemented here, which is how the shipped host path came to
-            # have no handshake at all while these tests stayed green: the
-            # harness answered on production's behalf. The joiner half is
-            # still driven here because in the application it belongs to
-            # onboarding's JoinAuthenticator, not to Session.
-            if mtype in _adm.ADMISSION_TYPES:
-                if not is_host and _joiner_admission_step(
-                        conn_id, mtype, body, author_hex):
-                    return
-            sess.handle_message(conn_id, msg)
+            if authenticator is not None:
+                authenticator.route(conn_id, msg)
+            else:
+                sess.handle_message(conn_id, msg)
         except Exception as exc:                       # noqa: BLE001
             _emit({"type": "error", "msg": f"handle_message: {exc!r}"})
 
@@ -262,15 +279,16 @@ def main() -> None:
         op = cmd.get("op")
         try:
             if op == "connect":
+                if authenticator is None:
+                    raise RuntimeError("a joiner needs --invite to connect")
                 cid = transport.connect(cmd["addr"])
-                # player_info is NOT sent here any more. Identity goes out
-                # only after admission_accept verifies against the pinned
-                # host key; this connection previously announced who we are
-                # to whoever happened to answer the socket.
-                transport.send(cid, {"type": "admission_hello",
-                                     **joiner_adm["a"].hello_payload()})
+                # player_info is NOT sent here. begin() sends only the
+                # hello; identity goes out once admission_accept verifies
+                # against the pinned host key, never to whoever happened to
+                # answer the socket.
                 _emit({"type": "connected", "conn_id": cid,
                        "addr": cmd["addr"], "outbound": True})
+                authenticator.begin(cid)
                 _emit({"type": "ack", "op": "connect"})
             elif op == "start_game":
                 sess.start_game(cmd.get("settings", {}))
@@ -278,6 +296,24 @@ def main() -> None:
             elif op == "start_hand":
                 sess.start_p2p_hand(**cmd["args"])
                 _emit({"type": "ack", "op": "start_hand"})
+            elif op == "arm_hand":
+                # Deal the first hand from on_game_start, as the sidecar
+                # does (_wire_hand_start): game_start is handled before any
+                # later frame from the host, so seat keys are bound before
+                # the first deal message can arrive. A first hand started
+                # from stdin races it, and a hostless message that beats
+                # the binding is refused rather than buffered.
+                def _deal(payload, _args=dict(cmd["args"])):
+                    sess.start_p2p_hand(**_args)
+                sess.on_game_start = _deal
+                _emit({"type": "ack", "op": "arm_hand"})
+            elif op == "act":
+                verdict = sess.send_bet_action(cmd["action"],
+                                               int(cmd.get("amount", 0)))
+                _emit({"type": "ack", "op": "act", "verdict": verdict})
+            elif op == "next":
+                _emit({"type": "ack", "op": "next",
+                       "verdict": sess.next_p2p_hand()})
             elif op == "graph":
                 with transport._writers_lock:
                     peers = sorted(transport._writers.keys())

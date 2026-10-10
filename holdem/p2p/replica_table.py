@@ -64,6 +64,12 @@ def _hand_seed(session_id: str, hand_no: int) -> int:
     return int.from_bytes(h[:8], "big")
 
 
+class ChipConservationError(RuntimeError):
+    """settle() left the table holding a different number of chips than
+    the hand was dealt with. The session voids the hand on this rather
+    than carrying created or destroyed chips into the next one."""
+
+
 class ReplicaTable:
     """One peer's deterministic replica of the table for a single hand."""
 
@@ -82,6 +88,9 @@ class ReplicaTable:
         self.engine = Engine(players, sb=sb, bb=bb, structure=structure,
                              rng=rng)
         self.hand_no = hand_no
+        # Every chip at the table when the hand was dealt; settle() must
+        # hand back exactly this many (see finish).
+        self.start_total = sum(stacks)
         self.next_seq = 0
         self.phase = PHASE_BETTING
         self._pending: Dict[int, tuple] = {}     # seq -> (seat, action, amount)
@@ -235,13 +244,29 @@ class ReplicaTable:
         """Settle the hand (runs pinned to 1 -- run-it-twice deals from the
         deck and cannot exist under mental poker). For a contested showdown
         the full 5-card real board must already be in place; settle is
-        never allowed to invent board cards from the dummy deck."""
+        never allowed to invent board cards from the dummy deck.
+
+        Chips are counted after settling: every pot and refund must land
+        back in a stack, so the stacks sum to start_total. A mismatch raises
+        ChipConservationError with no result recorded and the phase
+        unchanged, and the session voids the hand. If every replica fails
+        the same way, it is redealt from the stacks it started with. If the
+        others settled it, the table ends instead, because the settlements
+        disagree (Session._settlement_disagrees). The engine has already
+        paid out by then: this replica's stacks and state_digest() show the
+        non-conserving chips and mean nothing. Read the session's
+        last_settled_stacks."""
         if self.phase not in (PHASE_SHOWDOWN, PHASE_HAND_OVER):
             raise RuntimeError(f"cannot settle in phase {self.phase}")
         if len(self.engine.contested()) > 1 and len(self.engine.board) < 5:
             raise RuntimeError("board incomplete: reveal remaining streets "
                                "via the mental deal before settling")
         raw = self.engine.settle(runs=1, force_tabled=force_tabled)
+        total = sum(self.stacks)
+        if total != self.start_total:
+            raise ChipConservationError(
+                f"chip conservation failed: hand {self.hand_no} settled to "
+                f"{total} chips but was dealt with {self.start_total}")
         self.result = _normalize_result(raw)
         self.phase = PHASE_SETTLED
         return self.result
@@ -288,5 +313,6 @@ def _normalize_result(raw: dict) -> dict:
     return norm(raw)
 
 
-__all__ = ["ReplicaTable", "PHASE_BETTING", "PHASE_STREET_OVER",
-           "PHASE_SHOWDOWN", "PHASE_HAND_OVER", "PHASE_SETTLED"]
+__all__ = ["ReplicaTable", "ChipConservationError", "PHASE_BETTING",
+           "PHASE_STREET_OVER", "PHASE_SHOWDOWN", "PHASE_HAND_OVER",
+           "PHASE_SETTLED"]

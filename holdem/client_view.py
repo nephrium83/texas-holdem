@@ -53,6 +53,14 @@ def _phase(session, dealt: bool) -> str:
     return "betting"
 
 
+def _forfeit_seat(session) -> Optional[int]:
+    """The seat whose drop stopped this hand and forfeits it, if one did."""
+    record = session.hand_record
+    if record is None or record.outcome != session.HAND_FORFEIT:
+        return None
+    return record.blamed_seat
+
+
 def snapshot(session) -> dict:
     """Everything the local player's client needs to render right now.
 
@@ -124,6 +132,7 @@ def snapshot(session) -> dict:
         session_winner=snap["session_winner"],
         eliminated=snap["eliminated"],
         void_reason=snap["void_reason"],
+        forfeit_seat=_forfeit_seat(session),
     )
     snap["deal_progress"] = player_info.deal_progress_view(
         phase, snap["void_reason"]
