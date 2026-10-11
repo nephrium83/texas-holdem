@@ -19,9 +19,10 @@ Two checks, because each sees what the other cannot:
   under the crypto-gated suites' policy (tests/crypto_gate.py). Any other
   import error fails.
 
-* No core module imports a host module anywhere in its source. This is read
-  from the source rather than observed, so it also sees imports inside
-  functions, which do not run at import time: session.py's fallback to the
+* No core module imports a host module, or tkinter, socket or asyncio,
+  anywhere in its source. This is read from the source rather than
+  observed, so it also sees imports inside functions, which do not run at
+  import time and so escape the first check: session.py's fallback to the
   global transport is one. __import__ and importlib.import_module are not
   used at all, because what they load is not in the source to read.
 
@@ -118,14 +119,17 @@ IMPORT_ALLOWLIST = {
     },
 }
 
-# Every import of a host module in the core today: the core module, the
-# host module, and the function or class the import is in. Each entry is
-# one import, so a second one is new wherever it is. The key is a place
-# rather than a line, so an edit above an import does not move it; the
-# value records today's line, and a failure names lines.
+# Every import of a host module or a FORBIDDEN_MODULES one in the core
+# today: the core module, the module imported, and the function or class
+# the import is in. Each entry is one import, so a second one is new
+# wherever it is. The key is a place rather than a line, so an edit above
+# an import does not move it; the value records today's line, and a
+# failure names lines.
 GRAPH_ALLOWLIST = {
     ("holdem.p2p.invite", "holdem.p2p.identity", "<module>"):
         "invite.py:62, the process-wide key in every invite",
+    ("holdem.p2p.invite", "socket", "<module>"):
+        "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218",
     ("holdem.p2p.join_auth", "holdem.p2p.identity", "<module>"):
         "join_auth.py:38, the joiner's public key",
     ("holdem.p2p.wire", "holdem.p2p.identity", "<module>"):
@@ -264,8 +268,9 @@ def _source(module: str) -> Path:
 
 
 def _imports(source: str, package: str):
-    """Yield (name, place, line) for every name an import in *source* could
-    load; *place* is the function or class it is in, or ``<module>``.
+    """Yield (name, place, node) for every name an import in *source* could
+    load; *place* is the function or class it is in, or ``<module>``, and
+    *node* the statement or call that names it.
 
     ``from holdem.p2p import identity`` yields both ``holdem.p2p`` and
     ``holdem.p2p.identity``, because the second is a module; names that are
@@ -280,36 +285,47 @@ def _imports(source: str, package: str):
                          else f"{place}.{child.name}")
             elif isinstance(child, ast.Import):
                 for alias in child.names:
-                    yield alias.name, place, child.lineno
+                    yield alias.name, place, child
             elif isinstance(child, ast.ImportFrom):
                 base = child.module or ""
                 if child.level:
                     parent = package.rsplit(".", child.level - 1)[0]
                     base = f"{parent}.{base}" if base else parent
-                yield base, place, child.lineno
+                yield base, place, child
                 for alias in child.names:
-                    yield f"{base}.{alias.name}", place, child.lineno
+                    yield f"{base}.{alias.name}", place, child
                     if alias.name in IMPORTERS:     # renamed, then called
-                        yield DYNAMIC, place, child.lineno
+                        yield DYNAMIC, place, child
             elif (isinstance(child, ast.Name) and child.id in IMPORTERS
                   or isinstance(child, ast.Attribute)
                   and child.attr in IMPORTERS):
-                yield DYNAMIC, place, child.lineno
+                yield DYNAMIC, place, child
             yield from walk(child, inner)
 
     yield from walk(ast.parse(source), "<module>")
 
 
 def _check_graph(module: str, source: str) -> None:
-    """*source*, as *module*, imports no host module outside the allowlist."""
+    """*source*, as *module*, imports no host module and none of
+    FORBIDDEN_MODULES outside the allowlist, wherever the import runs."""
     path = _source(module)
     package = (module if path.name == "__init__.py"
                else module.rpartition(".")[0])
-    found, lines = Counter(), {}
-    for name, place, line in _imports(source, package):
-        if name in HOST or name == DYNAMIC:
-            found[name, place] += 1
-            lines.setdefault((name, place), []).append(f"{path.name}:{line}")
+    found, lines, seen = Counter(), {}, set()
+    for name, place, node in _imports(source, package):
+        top = name.partition(".")[0]
+        if top in FORBIDDEN_MODULES:
+            # ``from socket import inet_aton, inet_ntoa`` names socket three
+            # times in one import, which counts once.
+            if (top, node) in seen:
+                continue
+            seen.add((top, node))
+            name = top
+        elif name not in HOST and name != DYNAMIC:
+            continue
+        found[name, place] += 1
+        lines.setdefault((name, place), []).append(
+            f"{path.name}:{node.lineno}")
     allowed = Counter((host, place) for core, host, place in GRAPH_ALLOWLIST
                       if core == module)
     new = {f"{host} in {place}": lines[host, place]
@@ -523,3 +539,43 @@ def test_control_each_allowed_import_is_one_import_in_one_place(
     _check_graph(ALLOWED_ONCE[0], LATER)        # the allowed import passes
     with pytest.raises(AssertionError, match=failure):
         _check_graph(ALLOWED_ONCE[0], source)
+
+
+@pytest.mark.parametrize("statement, forbidden", [
+    ("import socket", "socket"),
+    ("from socket import inet_aton", "socket"),
+    ("import asyncio.subprocess", "asyncio"),
+    ("from tkinter import ttk", "tkinter"),
+], ids=["import", "from-import", "submodule", "from-package"])
+def test_control_the_scan_sees_a_lazy_forbidden_import(
+        statement, forbidden, tmp_path):
+    """A copy of a real core module whose function imports a forbidden
+    module: importing the copy does nothing, so only the scan can fail it."""
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    copy = lib / "boundary_break.py"
+    copy.write_text(
+        _source("holdem.p2p.timeout").read_text(encoding="utf-8")
+        + f"\n\ndef later():\n    {statement}\n", encoding="utf-8")
+    report = _fresh_import("boundary_break", tmp_path, lib)
+    assert report["failed"] is None
+    assert not _violations(report, tmp_path)
+    with pytest.raises(AssertionError,
+                       match=rf"host layer: .*'{forbidden} in later'"):
+        _check_graph("holdem.p2p.timeout", copy.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("source, failure", [
+    ("def later():\n    from socket import inet_aton, inet_ntoa\n", None),
+    ("def later():\n    import socket; import socket\n",
+     r"host layer: .*'socket in later'"),
+], ids=["one-import-many-names", "two-imports-one-line"])
+def test_control_a_forbidden_import_counts_once_per_import(
+        source, failure, monkeypatch):
+    monkeypatch.setitem(GRAPH_ALLOWLIST,
+                        ("holdem.p2p.timeout", "socket", "later"), "a control")
+    if failure is None:
+        _check_graph("holdem.p2p.timeout", source)
+    else:
+        with pytest.raises(AssertionError, match=failure):
+            _check_graph("holdem.p2p.timeout", source)
