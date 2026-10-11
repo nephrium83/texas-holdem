@@ -101,6 +101,7 @@ IMPORTERS = frozenset({"__import__", "import_module"})
 DYNAMIC = "a module named at run time"
 
 _IDENTITY = "through identity, which creates it at import (identity.py:83-85)"
+_INET = "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218"
 
 # What a fresh import of each core module does today that it must not. A
 # write names its file, so a second file from one of these is still new, and
@@ -108,8 +109,7 @@ _IDENTITY = "through identity, which creates it at import (identity.py:83-85)"
 IMPORT_ALLOWLIST = {
     "holdem.p2p.invite": {
         "writes config/identity.json": "invite.py:62, " + _IDENTITY,
-        "loads socket":
-            "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218",
+        "loads socket": _INET,
     },
     "holdem.p2p.join_auth": {
         "writes config/identity.json": "join_auth.py:38-39, " + _IDENTITY,
@@ -128,8 +128,7 @@ IMPORT_ALLOWLIST = {
 GRAPH_ALLOWLIST = {
     ("holdem.p2p.invite", "holdem.p2p.identity", "<module>"):
         "invite.py:62, the process-wide key in every invite",
-    ("holdem.p2p.invite", "socket", "<module>"):
-        "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218",
+    ("holdem.p2p.invite", "socket", "<module>"): _INET,
     ("holdem.p2p.join_auth", "holdem.p2p.identity", "<module>"):
         "join_auth.py:38, the joiner's public key",
     ("holdem.p2p.wire", "holdem.p2p.identity", "<module>"):
