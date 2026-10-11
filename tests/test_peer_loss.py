@@ -1001,6 +1001,32 @@ def test_after_the_table_ends_only_a_confirmation_of_its_drop_counts(
     assert ended.last_settled_stacks == [0, 525, 495, 500]
 
 
+def test_after_the_table_ends_a_busted_seat_confirms_nothing(monkeypatch):
+    """Seat 3 has busted and watches while seats 1 and 2 play hand 3, and
+    seat 2 drops. Seat 1 ends on the host's report. A notice from seat 3
+    that confirms the drop but puts the hand elsewhere is ignored: a busted
+    seat stopped following hands, so it cannot say where this one stood,
+    and only the check of who was still playing at the drop keeps it out."""
+    bus, sessions, order = busted_host_table(monkeypatch)
+    assert [sessions[c].next_p2p_hand() for c in order[1:]] == [
+        "started", "started", "eliminated"]
+    bus.drain()
+    ended = sessions["peer1"]
+    bus.unregister("peer2")
+
+    sessions["peer0"].handle_disconnect("peer2")
+    bus.drain()
+
+    reason = ("seat 2 (P2) disconnected (reported by seat 0); it forfeits "
+              "hand 3")
+    assert ended.terminal_reason == reason
+    ended.handle_message("peer3", {"type": "peer_lost", "hand": 3,
+                                   "seat": 3, "lost_seat": 2, "ended": True,
+                                   "dealt": True, "settled": False,
+                                   "actions": 5})
+    assert ended.terminal_reason == reason
+
+
 def test_a_busted_host_lets_the_winner_end_the_match_normally(monkeypatch):
     """Three seats. The host busts in hand 1, seat 2 in hand 2, and seat 2
     leaves before the winner presses Next. The host's stale replica still

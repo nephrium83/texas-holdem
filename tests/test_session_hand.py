@@ -166,9 +166,12 @@ def test_settlement_that_breaks_chip_conservation_voids_the_hand():
     settles there, and the reason is on the hand record.
 
     The other replicas settled the hand. A void cannot reconcile the two
-    sides, so the table ends ABORTED_PROTOCOL rather than redealing, with
-    chips where the hand was dealt from. Only a failure every replica
-    shares (a deterministic engine bug) voids everywhere and redeals."""
+    sides, so the table ends ABORTED_PROTOCOL rather than redealing, and
+    nothing is rolled back (rule 11 of docs/CASUAL_P2P_RULES.md): each game
+    keeps its own result, marked disputed -- the faulty one the stacks the
+    hand was dealt from, the others their settlement. Only a failure every
+    replica shares (a deterministic engine bug) voids everywhere and
+    redeals."""
     bus, sessions, order = make_table(3)
     faulty = sessions[order[1]]
     engine = faulty.replica.engine
@@ -195,8 +198,14 @@ def test_settlement_that_breaks_chip_conservation_voids_the_hand():
         assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
         assert s.terminal_reason.startswith(
             "table state disagrees on hand 1: seat "), s.terminal_reason
-        assert s.last_settled_stacks == [500, 500, 500], cid
+        assert s.terminal_reason.endswith(
+            "; disputed: this game keeps its own result"), s.terminal_reason
         assert s.next_p2p_hand() == "session_over"
+    assert faulty.last_settled_stacks == [500, 500, 500]
+    # Seats 1 and 2 fold to seat 0's big blind, which takes seat 2's small.
+    for cid in (order[0], order[2]):
+        assert sessions[cid].hand_result is not None, cid
+        assert sessions[cid].last_settled_stacks == [505, 500, 495], cid
 
 
 def test_a_conservation_failure_every_replica_shares_is_redealt():
