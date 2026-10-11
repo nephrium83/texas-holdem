@@ -354,12 +354,10 @@ class Session:
     #: every one verified -- is not settled, and its pot is discarded. See
     #: _settle_drop.
     #:
-    #: ABORTED_PROTOCOL over a disputed settlement still refunds. A seat
-    #: whose first hand_settled report lies about a hand it lost ends the
-    #: table at that hand's carry-in, undoing the hand. It must lie before
-    #: the next hand is dealt, which waits on its report, and a seat that
-    #: contradicts a settlement it already reported gets no rollback (see
-    #: last_settled_stacks).
+    #: ABORTED_PROTOCOL over a disputed settlement refunds nothing either:
+    #: each game keeps its own result, marked "disputed" (rule 11; see
+    #: _settlement_disagrees), so a seat that lies in its hand_settled
+    #: report about a hand it lost cannot undo the hand.
     PEER_LOST = "PEER_LOST"
     ENDED_NORMAL = "ENDED_NORMAL"
     ABORTED_PROTOCOL = "ABORTED_PROTOCOL"
@@ -651,27 +649,24 @@ class Session:
         self._p2p_spectator = False
         # Settlement agreement (hand_settled): how this replica ended its
         # most recent hand -- the hand number, its settled digest or None
-        # for a void, the seats dealt into it, the stacks it was dealt
-        # from, and the seats that have reported that same settlement, this
-        # one included -- and the digests peers reported for the CURRENT
-        # hand before it ended here, by seat. Once a seat's first report
-        # disagrees and ends the table, _agreed_stacks holds that hand's
-        # carry-in: the last settlement the table agreed on.
+        # for a void, the seats dealt into it, and the seats that have
+        # reported that same settlement, this one included -- and the
+        # digests peers reported for the CURRENT hand before it ended here,
+        # by seat.
         self._ended_hand: int | None = None
         self._ended_digest: str | None = None
         self._ended_seats: frozenset = frozenset()
-        self._ended_from: list | None = None
         self._ended_agreed: set[int] = set()
-        self._agreed_stacks: list | None = None
         self._early_settled: dict[int, str] = {}
         # Seats the host reported dropped while it could not judge whether
         # the table still needed them (a busted host); see _on_peer_lost.
         self._reported_lost: set[int] = set()
         # Whether this game ended on a drop a busted host reported, where
-        # its own hand stood then (and whether it was live), and the seats
-        # whose notice it has compared with that; see _on_peer_lost.
+        # its own hand stood then (whether it was live, and the seats still
+        # playing), and the seats whose notice it has compared with that;
+        # see _on_peer_lost.
         self._ended_on_report = False
-        self._drop_stage: tuple[dict, bool] | None = None
+        self._drop_stage: tuple[dict, bool, frozenset] | None = None
         self._drop_compared: set[int] = set()
         # The stacks a drop's forfeit left, once one has; see _settle_drop.
         self._drop_stacks: list | None = None
@@ -2048,8 +2043,6 @@ class Session:
         self._ended_digest = digest
         self._ended_seats = (frozenset(self._replica.seats_dealt)
                              if self._replica is not None else frozenset())
-        self._ended_from = (list(self._hand_stacks)
-                            if self._hand_stacks else None)
         self._ended_agreed = {self.local_seat} if digest is not None else set()
         early, self._early_settled = self._early_settled, {}
         for seat in sorted(early):
@@ -2067,28 +2060,24 @@ class Session:
         for good, and a peer that already settled ignores the void anyway.
         Nothing at the table can say which side is right. Every seat that
         sees the other side's message reaches this too, so the table ends
-        everywhere rather than splitting, and every seat then reports the
-        stacks that hand was dealt from (see last_settled_stacks) rather
-        than its own side of the dispute.
+        everywhere rather than splitting.
 
-        Unless the seat had already reported this peer's settlement. Then
-        it is contradicting itself, not this peer, and the hand it agreed
-        to stands: the table still ends, on that seat, but rolling back to
-        the carry-in would let a seat that lost the hand undo it, and keep
-        a better figure than leaving the table gets it. A non-host seat's
-        messages reach every peer in the order it sent them, through the
-        host, so every peer judges the retraction the same way.
+        Nothing is rolled back (docs/CASUAL_P2P_RULES.md rule 11): each game
+        keeps its own result, marked "disputed", and last_settled_stacks
+        reports it. Rolling back to the stacks the hand was dealt from let a
+        seat that lost the hand undo it by lying in its first report. The
+        reason also says when the seat had already reported this peer's
+        settlement, so is contradicting itself rather than this peer.
         """
         retracted = seat in self._ended_agreed
-        if not retracted:
-            self._agreed_stacks = self._ended_from
         def ended(d):
             return "voided it" if d is None else f"settled it as {d[:16]}"
         self.terminate(
             self.ABORTED_PROTOCOL,
             f"table state disagrees on hand {hand}: seat {seat} "
             f"{ended(theirs)}, this peer {ended(self._ended_digest)}"
-            + (f", as seat {seat} itself had reported" if retracted else ""),
+            + (f", as seat {seat} itself had reported" if retracted else "")
+            + "; disputed: this game keeps its own result",
             seat=seat)
 
     def _on_peer_lost(self, conn_id: str, msg: dict) -> None:
@@ -2176,7 +2165,10 @@ class Session:
         results, and only these confirmations can show it. A game compares
         each with where its own hand stood at the drop, as _settle_drop
         does, and on a difference marks its result "disputed" (rule 11).
-        It moves no chips: a confirmation is still its sender's word.
+        It moves no chips: a confirmation is still its sender's word. Any
+        other peer_lost arriving then -- one that does not end the table,
+        names another seat, or comes from the leaver or a busted seat --
+        confirms nothing and is ignored (see _compare_confirmation).
         """
         reporter, lost = msg.get("seat"), msg.get("lost_seat")
         if not _is_seat(reporter) or not _is_seat(lost):
@@ -2217,6 +2209,15 @@ class Session:
     def _compare_confirmation(self, reporter: int, notice: dict) -> None:
         """Mark this ended game's result disputed if another seat's
         confirmation puts that seat's hand elsewhere (see _on_peer_lost).
+
+        Only a confirmation counts: "ended", naming the seat this game
+        ended on, from a seat still playing at the drop -- dealt into a
+        hand this game had not settled, or holding chips after one it had
+        -- other than the leaver. A busted seat, the busted host included,
+        could not have seen where the hand stood, and a notice about
+        another seat is not about this drop, so neither may mark this
+        game's result.
+
         Once per seat, counting the one whose notice this game settled on,
         so a seat cannot grow the reason by repeating itself; the result is
         never moved. A busted game had no hand to compare. The mark goes on
@@ -2225,8 +2226,16 @@ class Session:
         """
         if self._drop_stage is None or reporter in self._drop_compared:
             return
+        own, live, playing = self._drop_stage
+        if (notice.get("ended") is not True
+                or notice.get("lost_seat") != own["lost_seat"]
+                or reporter not in playing):
+            _log.warning("session: ignoring seat %s's peer_lost -- the "
+                         "table has ended, and it is no confirmation of "
+                         "seat %s's drop from a seat still playing",
+                         reporter, own["lost_seat"])
+            return
         self._drop_compared.add(reporter)
-        own, live = self._drop_stage
         disputed, _ = self._drop_dispute(own, live, notice, reporter)
         if disputed:
             self.terminal_reason += disputed
@@ -2307,7 +2316,13 @@ class Session:
             return ""
         h, own = self._hand_no, self._drop_notice(lost)
         live = self.hand_result is None and not self.hand_voided
-        self._drop_stage = (own, live)
+        # The seats still playing at the drop, whose confirmations of it are
+        # compared once this game has ended (see _compare_confirmation).
+        if self.hand_result is None:
+            playing = set(r.seats_dealt)
+        else:
+            playing = {s for s, stack in enumerate(r.stacks) if stack > 0}
+        self._drop_stage = (own, live, frozenset(playing - {lost}))
         if sender is not None:
             self._drop_compared.add(sender)
         disputed, undealt = self._drop_dispute(own, live, notice, sender)
@@ -2316,7 +2331,7 @@ class Session:
             return disputed
         # A seat that settled this hand before the drop is the same race.
         # Its report is dropped: held to this hand's end, it would end the
-        # table over the disagreement instead and roll the hand back.
+        # table over the disagreement instead.
         early, self._early_settled = self._early_settled, {}
         if early and not disputed:
             disputed = (f"; disputed: seat {min(early)} had settled hand "
@@ -3850,13 +3865,6 @@ class Session:
         protocol abort), and it is equally valid while play continues.
 
           * match over:                       the final stacks
-          * ended over a disputed settlement: the stacks that hand was
-                                              dealt from, the last
-                                              settlement the table agreed
-                                              on (see hand_settled) --
-                                              unless the disputing seat
-                                              had reported this peer's
-                                              settlement itself: then that
           * a seat dropped from the hand:     the stacks the leaver's
                                               forfeit left (see PEER_LOST)
           * current hand settled:             its settled stacks
@@ -3871,15 +3879,12 @@ class Session:
         this game could not settle (see _settle_drop).
 
         Derived on every read. It is this replica's own settlement;
-        hand_settled is what checks that every seat agrees, and once a
-        seat's first report finds they do not, the figure falls back to the
-        one they last agreed on, so no seat reports its side of the
-        dispute. That rollback hands back the disputed hand's pot, so a
-        seat that would lose a hand can lie in its first report to undo
-        it. A seat that contradicts a settlement it has already reported
-        cannot: the figure stays at the settlement it reported (see
-        _settlement_disagrees). A busted spectator's figure stops at the
-        hand it busted in until session_end brings the final stacks.
+        hand_settled is what checks that every seat agrees, and when they
+        do not, the table ends with each game still reporting its own
+        figure, marked "disputed" (see _settlement_disagrees). Nothing is
+        rolled back, so a seat cannot undo a hand it lost by lying about
+        it. A busted spectator's figure stops at the hand it busted in
+        until session_end brings the final stacks.
 
         Read it as the session owner (``with session._owner``). It combines
         several fields that the owner thread rewrites together -- starting
@@ -3887,8 +3892,6 @@ class Session:
         -- so a read from another thread can return a figure one settlement
         stale.
         """
-        if self._agreed_stacks is not None:
-            return list(self._agreed_stacks)
         if self._drop_stacks is not None:
             return list(self._drop_stacks)
         if self._final_stacks is not None:
@@ -4007,13 +4010,18 @@ class Session:
         Call this periodically from the event loop (e.g. every second).
         Tests advance the FakeClock then call this directly — no sleeping.
         """
-        if self._current_deadline_token is None or self._deadline_started_at is None:
-            return
+        if self._deadline_expired():
+            self._broadcast_timeout_proposal(self._current_deadline_token)
+
+    def _deadline_expired(self) -> bool:
+        """Has the current deadline run its phase's time on this game's own
+        clock? The one test both for sending a timeout proposal and for
+        accepting one (see _on_timeout_proposal)."""
         token = self._current_deadline_token
+        if token is None or self._deadline_started_at is None:
+            return False
         elapsed = self._clock.monotonic() - self._deadline_started_at
-        limit   = self._phase_timeout.get(token.phase, 30.0)
-        if elapsed >= limit:
-            self._broadcast_timeout_proposal(token)
+        return elapsed >= self._phase_timeout.get(token.phase, 30.0)
 
     def _broadcast_timeout_proposal(self, token: DeadlineToken) -> None:
         # Sequence holes are read HERE and nowhere earlier. A hole is not a
@@ -4053,7 +4061,17 @@ class Session:
     @owned
     def _on_timeout_proposal(self, conn_id: str, msg: dict) -> None:
         """Receive and validate a timeout proposal; apply if it matches the
-        current deadline and the action sequence still agrees."""
+        current deadline, the action sequence still agrees, and that
+        deadline has expired here too.
+
+        The last test is what refuses a proposal at time zero. The token
+        only says which wait a proposal is about, and any seat can copy the
+        current one, so without it a seat could propose the moment a
+        deadline started and void the hand, handing back its blinds
+        (docs/CASUAL_P2P_RULES.md, "Time-zero timeout proposal"). This
+        game's own clock decides only whether this game has waited long
+        enough; which proposal is current is still the token's to say.
+        """
         if not self._hand_msg_ok(conn_id, msg):
             return
         if self._replica is None or self.hand_voided:
@@ -4083,6 +4101,12 @@ class Session:
             _log.debug("session: out-of-order timeout_proposal from %s "
                        "(seq %d, expected %d)",
                        conn_id, token.action_seq, self._replica.next_seq)
+            return
+
+        if not self._deadline_expired():
+            _log.warning("session: refusing timeout_proposal from %s -- "
+                         "this game's own %s deadline has not expired",
+                         conn_id, token.phase)
             return
 
         self._apply_timeout(token)

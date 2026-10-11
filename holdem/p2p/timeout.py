@@ -18,9 +18,11 @@ from typing import Optional, Protocol
 # ---------------------------------------------------------------------------
 
 class Clock(Protocol):
-    """Minimal clock surface: just what Session needs to decide when to
-    broadcast a timeout proposal.  Wall time is NOT used to apply or
-    reject proposals — that job belongs to the action sequence number."""
+    """Minimal clock surface: just what Session needs to decide whether its
+    own deadline has expired, which is when it broadcasts a timeout
+    proposal and whether it accepts one.  Which proposal is current is not
+    the clock's to say — that job belongs to the token and the action
+    sequence number."""
 
     def monotonic(self) -> float: ...
 

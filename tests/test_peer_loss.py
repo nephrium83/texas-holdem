@@ -515,6 +515,39 @@ def test_a_survivor_a_hand_behind_a_notice_checks_it_had_ended(settle,
         "seat 2 (P2) disconnected (reported by seat 0)" + disputed)
 
 
+@pytest.mark.parametrize("settle,stage,outcome,stacks", [
+    (False, {"dealt": True, "settled": True, "actions": 1},
+     "; it forfeits hand 1; disputed: seat 0 had settled hand 1, this game "
+     "applied 1 actions in hand 1", [503, 502, 495]),
+    (True, {"dealt": False, "settled": False, "actions": 0},
+     "; disputed: seat 0 had not dealt hand 1, this game settled hand 1",
+     [520, 490, 490]),
+], ids=["settled-to-a-game-still-playing", "not-dealt-to-a-game-that-settled"])
+def test_a_notice_from_the_same_hand_at_another_stage_is_disputed(
+        monkeypatch, settle, stage, outcome, stacks):
+    """The host's notice names this game's hand but puts it somewhere else:
+    settled while this game is still playing it, or not dealt once this
+    game has settled it. Each is the race rule 11 covers. This game keeps
+    its own result -- the forfeit, or the settlement, which a notice saying
+    "not dealt" must not cancel -- and marks it disputed."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
+    bus, sessions, order = table(3)
+    if settle:
+        settle_by_checkdown(bus, sessions, order)
+    else:
+        act(bus, sessions, order)
+    other = sessions["peer1"]
+
+    other.handle_message("peer0", {"type": "peer_lost", "hand": 1,
+                                   "seat": 0, "lost_seat": 2,
+                                   "ended": True, **stage})
+
+    assert other.terminal_state == Session.PEER_LOST
+    assert other.terminal_reason == (
+        "seat 2 (P2) disconnected (reported by seat 0)" + outcome)
+    assert other.last_settled_stacks == stacks
+
+
 def test_a_drop_while_the_next_hand_is_shuffled_cancels_it(monkeypatch):
     """Hand 1 settles with seat 2 ahead. Seats 0 and 1 press Next, post
     hand 2's blinds and start shuffling it. Seat 2 drops before it
@@ -875,6 +908,20 @@ def test_a_busted_host_reports_a_needed_seat_and_every_survivor_ends(
     assert sessions["peer3"].last_settled_stacks == [0, 625, 495, 0]
 
 
+def host_busted_hand_two(monkeypatch):
+    """Four seats. The host busts in hand 1, and seats 1-3 deal hand 2,
+    where seat 2 acts first."""
+    rig_showdowns(monkeypatch)(1, 0, 2, 3)
+    bus, sessions, order = table(4, stacks=[20, 500, 500, 500])
+    play(bus, sessions, order, folds(2, 3))
+    assert sessions["peer1"].replica.stacks == [0, 535, 495, 490]
+    assert [sessions[c].next_p2p_hand() for c in order] == [
+        "eliminated", "started", "started", "started"]
+    bus.drain()
+    assert sessions["peer2"].replica.actor == 2
+    return bus, sessions, order
+
+
 def test_an_action_that_races_a_busted_hosts_report_is_disputed(
         monkeypatch):
     """The host busts in hand 1 and seats 1-3 deal hand 2. Seat 1 drops,
@@ -885,16 +932,8 @@ def test_an_action_that_races_a_busted_hosts_report_is_disputed(
     game then sees the other's count differ from its own, and marks its
     result disputed (rule 11) without moving a chip. A seat repeating its
     confirmation adds nothing."""
-    rank = rig_showdowns(monkeypatch)
-    rank(1, 0, 2, 3)
-    bus, sessions, order = table(4, stacks=[20, 500, 500, 500])
-    play(bus, sessions, order, folds(2, 3))
-    assert sessions["peer1"].replica.stacks == [0, 535, 495, 490]
-    assert [sessions[c].next_p2p_hand() for c in order] == [
-        "eliminated", "started", "started", "started"]
-    bus.drain()
+    bus, sessions, order = host_busted_hand_two(monkeypatch)
     racer, other = sessions["peer2"], sessions["peer3"]
-    assert racer.replica.actor == 2
     confirmed = peer_lost_sent(other)
     bus.unregister("peer1")
 
@@ -919,6 +958,47 @@ def test_an_action_that_races_a_busted_hosts_report_is_disputed(
     other._send_hostless({"type": "peer_lost", **confirmed[0]})
     bus.drain()
     assert racer.terminal_reason == reason
+
+
+def test_after_the_table_ends_only_a_confirmation_of_its_drop_counts(
+        monkeypatch):
+    """The host busts in hand 1, seats 1-3 deal hand 2, and seat 1 drops.
+    Seat 2 settles its own copy and ends; seat 3's confirmation has not
+    reached it. Each notice below puts its sender's hand where seat 2's
+    was not, but only a confirmation of this drop -- "ended", naming seat
+    1, from a seat still playing -- may say so. One forged by the leaver,
+    one that ends nothing, and one about another seat leave the reason as
+    it was. Seat 3's confirmation is compared, and marks it disputed."""
+    bus, sessions, order = host_busted_hand_two(monkeypatch)
+    ended, other = sessions["peer2"], sessions["peer3"]
+    send = other._transport.broadcast
+    other._transport.broadcast = lambda msg: (
+        None if msg.get("type") == "peer_lost" else send(msg))
+    bus.unregister("peer1")
+
+    sessions["peer0"].handle_disconnect("peer1")
+    bus.drain()
+
+    reason = ("seat 1 (P1) disconnected (reported by seat 0); it forfeits "
+              "hand 2")
+    assert ended.terminal_reason == reason
+    elsewhere = {"type": "peer_lost", "hand": 2, "dealt": True,
+                 "settled": False, "actions": 5}
+    for sender, notice in [
+            (1, {"lost_seat": 1, "ended": True}),       # the leaver itself
+            (3, {"lost_seat": 1, "ended": False}),      # ends nothing
+            (3, {"lost_seat": 0, "ended": True}),       # another seat
+    ]:
+        ended.handle_message(order[sender],
+                             {**elsewhere, **notice, "seat": sender})
+        assert ended.terminal_reason == reason, (sender, notice)
+
+    ended.handle_message("peer3", {**elsewhere, "lost_seat": 1,
+                                   "ended": True, "seat": 3})
+    assert ended.terminal_reason == reason + (
+        "; disputed: seat 3 had applied 5 actions in hand 2, this game "
+        "applied 0 actions in hand 2")
+    assert ended.last_settled_stacks == [0, 525, 495, 500]
 
 
 def test_a_busted_host_lets_the_winner_end_the_match_normally(monkeypatch):

@@ -730,7 +730,8 @@ def test_a_settlement_that_differs_ends_the_table_instead_of_looping():
     digest sees it. Before hand_settled the table only found out in hand 2,
     as a desync whose void redealt from the same disagreeing carry-ins and
     desynced again, indefinitely. Now every seat sees a digest it does not
-    share and ends the table at the settlement."""
+    share and ends the table at the settlement, each keeping its own
+    result, marked disputed (rule 11 of docs/CASUAL_P2P_RULES.md)."""
     bus, sessions, order = make_table(3)
     faulty = sessions[order[1]]
     engine = faulty.replica.engine
@@ -754,10 +755,42 @@ def test_a_settlement_that_differs_ends_the_table_instead_of_looping():
         assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
         assert s.terminal_reason.startswith(
             "table state disagrees on hand 1: seat ")
+        assert s.terminal_reason.endswith(
+            "; disputed: this game keeps its own result")
         assert s.next_p2p_hand() == "session_over"
-        # Not each peer's own side of the dispute: the stacks the hand was
-        # dealt from, which every seat agreed on.
-        assert s.last_settled_stacks == [500, 500, 500], cid
+        # Each peer's own side of the dispute: nothing is rolled back.
+        assert s.last_settled_stacks == s.replica.stacks, cid
+    assert faulty.last_settled_stacks != \
+        sessions[order[0]].last_settled_stacks
+
+
+def test_a_first_report_that_lies_rolls_nothing_back(monkeypatch):
+    """Seat 2 loses hand 1 and, instead of the settlement every game
+    reached, reports another as its first. Rolling the table back to the
+    stacks the hand was dealt from would let it undo a hand it lost. The
+    table ends (rule 11 of docs/CASUAL_P2P_RULES.md), and each game keeps
+    its own result, marked disputed, which is what its client shows."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
+    bus, sessions, order = make_table(3)
+    _hold_settlement_reports(sessions[order[2]])     # its true one never goes
+    checkdown(bus, sessions, order)
+    settled = sessions[order[0]].replica.stacks
+    assert settled == [520, 490, 490]                # seat 0 took 3 x 10
+    lie = {"type": "hand_settled", "hand": 1, "seat": 2, "digest": "ab" * 32}
+
+    for cid in order[:2]:
+        s = sessions[cid]
+        assert s.terminal_state is None, cid
+        s.handle_message(order[2], dict(lie))
+        assert s.terminal_state == Session.ABORTED_PROTOCOL, cid
+        assert s.terminal_reason == (
+            "table state disagrees on hand 1: seat 2 settled it as "
+            "abababababababab, this peer settled it as "
+            f"{s._ended_digest[:16]}; disputed: this game keeps its own "
+            "result")
+        assert s.last_settled_stacks == settled, cid
+        terminal = client_view.snapshot(s)["terminal"]
+        assert terminal["last_settled_stacks"] == settled, cid
 
 
 def test_a_void_of_a_hand_this_peer_settled_ends_the_table():
@@ -787,7 +820,9 @@ def test_a_late_void_of_the_previous_hand_still_ends_the_table(monkeypatch):
     target.handle_message(order[2], {"type": "hand_void", "hand": 1,
                                      "seat": 2, "reason": "late"})
     assert target.terminal_state == Session.ABORTED_PROTOCOL
-    assert target.terminal_reason.endswith(", as seat 2 itself had reported")
+    assert target.terminal_reason.endswith(
+        ", as seat 2 itself had reported; disputed: this game keeps its own "
+        "result")
     assert target.last_settled_stacks == settled
 
 
@@ -835,7 +870,8 @@ def test_a_seat_that_settled_a_hand_this_peer_voided_ends_the_table():
     assert target.terminal_state == Session.ABORTED_PROTOCOL
     assert target.terminal_reason == (
         "table state disagrees on hand 1: seat 2 settled it as "
-        "abababababababab, this peer voided it")
+        "abababababababab, this peer voided it; disputed: this game keeps "
+        "its own result")
 
 
 def test_an_early_settlement_report_is_held_until_this_peer_ends_the_hand():

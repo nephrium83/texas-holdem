@@ -10,6 +10,7 @@ Coverage:
 - Betting timeout: fold when facing a bet, check when not
 - Deal timeout: voids the hand, preserves stacks, marks peer unavailable
 - Proposal validation: stale token, wrong seq, wrong hand, malformed
+- Time zero: a proposal before the receiver's own deadline is refused
 - Race: action-beats-proposal (action arrives first → proposal is stale)
 - Race: proposal-beats-action (proposal applied first → late action dropped)
 - Idempotency: two proposals for the same token collapse to one transition
@@ -336,15 +337,13 @@ class TestBettingTimeout:
 
         actor_seat = s0.replica.actor
         actor_conn = order[actor_seat]
-        if actor_conn == order[0]:
-            # Swap: timeout from s1's perspective
-            watcher = s1
-            clk = clk1
-        else:
-            watcher = s0
-            clk = clk0
+        # Timeout from a non-actor's perspective
+        watcher = s1 if actor_conn == order[0] else s0
 
-        clk.advance(31.0)
+        # Both deadlines expire: a peer refuses a proposal its own deadline
+        # has not reached.
+        clk0.advance(31.0)
+        clk1.advance(31.0)
         watcher.check_deadlines()
         bus.drain()  # proposal delivered to both; both apply
 
@@ -454,8 +453,10 @@ class TestDealTimeout:
 class TestProposalValidation:
     def _session_with_active_hand(self):
         bus = InMemoryBus()
+        # 31 s past the deadline set below, so it has expired here too.
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"))
+                    transport=InMemoryTransport(bus, "A"),
+                    clock=FakeClock(31.0))
         s.local_conn_id = "A"
         s.configure_seats(["A", "B"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -600,14 +601,66 @@ class TestProposalValidation:
 
 
 # ---------------------------------------------------------------------------
+# Time-zero proposal (docs/CASUAL_P2P_RULES.md, "Time-zero timeout proposal")
+# ---------------------------------------------------------------------------
+
+class TestTimeZeroProposal:
+    def test_a_proposal_before_the_deadline_has_expired_is_refused(self):
+        """Seat 2 sends a timeout proposal the moment the deal's deadline
+        starts. It names the current token, which any seat can copy, so it
+        used to void the hand at once and hand the blinds back: an undo for
+        whoever disliked its cards. Each other game refuses it, because its
+        own deadline has not expired; once that has, the same proposal is
+        applied."""
+        clocks = [FakeClock() for _ in range(3)]
+        bus, sessions, order = make_table(3, clocks=clocks)
+        proposer = sessions[order[2]]
+        token = proposer._current_deadline_token
+        assert token is not None and token.phase == "deal_shuffle"
+        proposal = {
+            "type": "timeout_proposal",
+            "hand": proposer._hand_no,
+            "token": {
+                "hand_id":    token.hand_id,
+                "phase":      token.phase,
+                "actor":      token.actor,
+                "action_seq": token.action_seq,
+            },
+            "missing_seat": None,
+        }
+
+        proposer._send_hostless(dict(proposal))
+        bus.drain()
+
+        for cid in order[:2]:
+            s = sessions[cid]
+            assert s._current_deadline_token == token, cid
+            assert not s.hand_voided, s.void_reason
+            assert s.hand_record is None, cid
+
+        # Control: the same proposal once every deadline has expired.
+        for clk in clocks:
+            clk.advance(31.0)
+        proposer._send_hostless(dict(proposal))
+        bus.drain()
+
+        for cid in order[:2]:
+            s = sessions[cid]
+            assert s.hand_voided, cid
+            assert s.void_reason == "deal timeout: deal_shuffle", cid
+
+
+# ---------------------------------------------------------------------------
 # Idempotency
 # ---------------------------------------------------------------------------
 
 class TestIdempotency:
     def _setup_and_get_token(self):
         bus = InMemoryBus()
+        # 31 s past the deadline set below, so it has expired here too.
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"))
+                    transport=InMemoryTransport(bus, "A"),
+                    clock=FakeClock(31.0))
         s.local_conn_id = "A"
         s.configure_seats(["A", "B"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -701,8 +754,10 @@ class TestRaceConditions:
 
     def test_proposal_beats_action(self):
         """Timeout proposal applied first; actor's late action is rejected."""
-        bus, sessions, order = make_table(2)
+        clk = FakeClock()
+        bus, sessions, order = make_table(2, clocks=[clk, FakeClock()])
         s0 = sessions[order[0]]
+        clk.advance(31.0)                  # s0's own deadline has expired
         actor_seat = s0.replica.actor
         actor_conn = order[actor_seat]
         non_actor  = next(c for c in order if c != actor_conn)
