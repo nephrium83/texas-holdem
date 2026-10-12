@@ -12,9 +12,9 @@ Policy enforced here:
             seats with chips after a settle and any dealt seat whose
             settlement report the next hand still waits on -- ends the
             table with PEER_LOST and a reason naming the seat.
-  not       a seat that has busted out, any seat once a settle leaves at
-            most one seat with chips (the match is decided), or any drop in
-            the lobby, is just a roster change.
+  not       a seat that has busted out, any seat that has reported once a
+            settle leaves at most one seat with chips (the match is
+            decided), or any drop in the lobby, is just a roster change.
 
 The leaver folds (docs/CASUAL_P2P_RULES.md). A hand it was dealt into
 stops, and every game still playing settles its own copy with
@@ -338,6 +338,27 @@ def test_a_decided_match_ends_normally_whoever_leaves_first(monkeypatch,
     assert host.next_p2p_hand() == "session_over"
     assert host.terminal_state == Session.ENDED_NORMAL
     assert host.last_settled_stacks == final
+
+
+def test_a_decided_match_waits_for_the_last_report_or_ends(monkeypatch):
+    """As above, but the loser leaves before its report of the final hand
+    goes. The match does not end without it, so the table ends instead of
+    waiting for it forever, and the settled hand stands."""
+    rig_showdowns(monkeypatch)(0, 1)
+    bus, sessions, order = table(2, stacks=[500, 500])
+    leaver = sessions["peer1"]
+    send = leaver._transport.broadcast
+    leaver._transport.broadcast = lambda msg: (
+        None if msg.get("type") == "hand_settled" else send(msg))
+    play(bus, sessions, order, shove)
+    host = sessions["peer0"]
+    assert host.next_p2p_hand() == "not_ready"
+    bus.unregister("peer1")
+
+    host.handle_disconnect("peer1")
+
+    assert host.terminal_state == Session.PEER_LOST
+    assert host.last_settled_stacks == [1000, 0]
 
 
 def test_a_lobby_drop_is_a_roster_change():

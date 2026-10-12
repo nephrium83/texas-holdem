@@ -308,6 +308,38 @@ def test_a_busted_seat_ends_only_on_what_every_seat_still_playing_reported(
     assert busted.last_settled_stacks == [0, 1020, 0]
 
 
+@pytest.mark.parametrize("deliveries", [
+    [(0, 3), (1, 3), (2, 2), (1, 2), (0, 2)],
+    [(1, 2), (0, 3), (2, 2), (1, 3), (0, 2)],
+], ids=["last-hand-first", "interleaved"])
+def test_a_busted_seat_follows_reports_that_arrive_out_of_order(
+        monkeypatch, deliveries):
+    """Seat 3 busts in hand 1, seat 2 in hand 2, and seat 1 wins it all in
+    hand 3. Seat 3 gets the session_end, then the reports out of order:
+    keeping only each seat's latest, a late hand-2 report replaced one of
+    hand 3, and seat 3 waited for good."""
+    rig_showdowns(monkeypatch)(1, 3)
+    bus, sessions, order = make_table(4, stacks=[500, 500, 500, 20])
+    _shove_hand(bus, sessions, order, alive=[0, 1, 2, 3], folding=[0, 2])
+    busted = sessions[order[3]]
+    start = busted.replica.stacks
+    assert start[3] == 0 and 0 not in start[:3]
+    total = sum(start)
+    reported = {2: [start[0] + start[2], start[1], 0, 0],
+                3: [0, total, 0, 0]}
+    busted.handle_message(order[1], {"type": "session_end", "hand": 3,
+                                     "seat": 1, "winner": 1,
+                                     "stacks": reported[3]})
+    for seat, hand in deliveries:
+        assert busted.terminal_state is None
+        busted.handle_message(order[seat], {
+            "type": "hand_settled", "hand": hand, "seat": seat,
+            "digest": str(hand) * 64, "stacks": reported[hand]})
+    assert busted.terminal_state == Session.ENDED_NORMAL
+    assert busted._session_winner == 1
+    assert busted.last_settled_stacks == [0, total, 0, 0]
+
+
 # A seated peer that is still playing checks a session_end against its own
 # settlement: same hand, already settled here, identical stacks. Each case
 # below would have passed the old shape-and-total checks.
@@ -745,6 +777,51 @@ def test_the_next_hand_waits_for_every_seats_settlement_report():
     bus.drain()
     assert set(next_all(bus, sessions, order).values()) == {"started"}
     assert_synced(sessions, order)
+
+
+@pytest.mark.parametrize("report", ["conflicting-first", "conflicting",
+                                    "matching"])
+@pytest.mark.parametrize("ending", ["session_end", "next"])
+def test_the_match_ends_only_once_every_final_report_is_in(
+        monkeypatch, ending, report):
+    """Seat 0 busts seat 1 heads-up, and its report of the final hand is
+    late. Seat 1 ends on neither seat 0's session_end nor its own Next
+    until the report is in, so one that disagrees ends the table in dispute
+    whichever came first, as ending first and ignoring it did not."""
+    rig_showdowns(monkeypatch)(0, 1)
+    bus, sessions, order = make_table(2, stacks=[500, 500])
+    winner, loser = sessions[order[0]], sessions[order[1]]
+    release = _hold_settlement_reports(winner)
+    _shove_hand(bus, sessions, order, alive=[0, 1])
+    assert loser.replica.stacks == [1000, 0]
+
+    def report_arrives():
+        if report == "matching":
+            release()
+            bus.drain()
+        else:
+            loser.handle_message(order[0], {
+                "type": "hand_settled", "hand": 1, "seat": 0,
+                "digest": "ab" * 32, "stacks": [1000, 0]})
+
+    if report == "conflicting-first":
+        report_arrives()
+    if ending == "session_end":
+        assert winner.next_p2p_hand() == "session_over"
+        bus.drain()
+    else:
+        ended = report == "conflicting-first"
+        assert loser.next_p2p_hand() == (
+            "session_over" if ended else "not_ready")
+    if report != "conflicting-first":
+        assert loser.terminal_state is None
+        report_arrives()
+        if ending == "next":
+            loser.next_p2p_hand()
+    assert loser.terminal_state == (
+        Session.ENDED_NORMAL if report == "matching"
+        else Session.ABORTED_PROTOCOL)
+    assert loser.last_settled_stacks == [1000, 0]
 
 
 def test_a_settlement_that_differs_ends_the_table_instead_of_looping():

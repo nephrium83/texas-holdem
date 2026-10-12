@@ -357,7 +357,7 @@ paid. Every later snapshot reports how the table ended in `terminal` (below).
   of a hand: an honest confirmation never reaches one, so it ignores it and
   plays on rather than cancel or split the hand on another seat's word. A
   seat that has busted may leave, and so may any seat once the match is
-  decided.
+  decided and its report of the last hand has arrived.
 
   The leaver folds (`docs/CASUAL_P2P_RULES.md`; the casual P2P profile in
   `docs/ROADMAP.md`). The notice carries no figures, only where its sender's
@@ -379,8 +379,9 @@ paid. Every later snapshot reports how the table ended in `terminal` (below).
   after the table ends; the chips do not move.
 - **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
   broadcasts a signed digest of the table it settled (`hand_settled`), and
-  no seat deals the next hand until every seat dealt into the last one has
-  reported the same digest. The table ends with the reason "table state
+  no seat deals the next hand, or ends the match, until every seat dealt
+  into the last one has reported the same digest. The table ends with
+  the reason "table state
   disagrees" when a seat dealt into that hand reports a different digest, or
   voids a hand this peer settled. A void cannot cure it, because each side
   would redeal from its own stacks. Nothing at the table can say which side
@@ -395,19 +396,25 @@ paid. Every later snapshot reports how the table ended in `terminal` (below).
 
 A seat still playing accepts the signed `session_end` only when it names that
 seat's own settled hand and exactly its settled stacks. Anything else is
-ignored. A seat that busted while others play on has no settlement of its own
+ignored. Like `next_hand`, it ends the match only once every seat dealt into
+that hand has reported the same settlement, and keeps a notice that arrives
+first until they have, so a report that disagrees ends the table in dispute
+whichever arrives first.
+A seat that busted while others play on has no settlement of its own
 for a later hand, and one seat's signature is not enough: any seat still
 playing could sign stacks that add up and name itself the winner. So each
 `hand_settled` report also carries the stacks, and the busted seat moves on to
 a later hand's stacks only once every seat that still had chips has reported
 settling that hand with the same digest and stacks, adding up to the table's
-chips. It accepts a `session_end` about a later hand only when it names the
+chips. Reports may arrive in any order, and each is kept by hand until the
+seat has moved past it.
+It accepts a `session_end` about a later hand only when it names the
 hand and stacks it has reached that way, and keeps one that arrives first
 until it has. A host whose own match has ended still relays these reports. A
 notice naming the hand it busted in is ignored, because that hand left at
 least two seats with chips. A seat that withholds or falsifies its report
 cannot show a busted seat a false result; it only leaves that seat
-spectating, as leaving before reporting the final hand does.
+spectating.
 
 ### `terminal`: the session has ended
 
