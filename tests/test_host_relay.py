@@ -261,6 +261,21 @@ def test_every_hostless_type_is_relayed(mtype):
     assert not _received_by(bus, "B", mtype), f"{mtype} was echoed to its author"
 
 
+def test_a_host_whose_match_ended_still_relays_settlement_reports():
+    """The winner may press Next, and end, before a loser's hand_settled
+    reaches it. A busted joiner ends only once every seat still playing
+    has reported the last hand (Session._follow_settled), and under the
+    star that report reaches it through the host or not at all. Nothing
+    else is relayed once the match is over."""
+    bus, s = _table()
+    s["A"].terminate(Session.ENDED_NORMAL, "match complete; winner seat 0")
+    s["A"].handle_message("B", _env("B", seat=1, mtype="hand_settled",
+                                    digest="ab" * 32, stacks=[1500, 0, 0]))
+    s["A"].handle_message("B", _env("B", seat=1, mtype="bet_action"))
+    assert _received_by(bus, "C", "hand_settled")
+    assert not _received_by(bus, "C", "bet_action")
+
+
 # ------------------------------------------------------------ peer_lost
 
 def test_a_host_signed_peer_lost_ends_the_table_for_a_joiner():

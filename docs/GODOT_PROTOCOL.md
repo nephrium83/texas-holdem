@@ -317,10 +317,11 @@ forward, while a void redeals from the current hand's original stacks and
 position chain.
 
 A busted sidecar becomes a lightweight spectator. It no longer participates in
-the mental-poker deal and ignores later hand traffic, but remains subscribed to
-the signed match lifecycle. When the final hand ends, `session_over`,
-`session_winner`, and `final_stacks` are pushed to active and eliminated
-clients alike, including a seat that busted and has not yet sent `next_hand`.
+the mental-poker deal and ignores later hand traffic, but still follows each
+later hand's signed settlement reports (`hand_settled`, below) and the match
+lifecycle. When the final hand ends, `session_over`, `session_winner`, and
+`final_stacks` are pushed to active and eliminated clients alike, including a
+seat that busted and has not yet sent `next_hand`.
 
 Any authenticated peer may fail the current hand closed. A locally detected
 deal failure, replica desync, or settlement that does not add up to the chips
@@ -394,11 +395,19 @@ paid. Every later snapshot reports how the table ended in `terminal` (below).
 
 A seat still playing accepts the signed `session_end` only when it names that
 seat's own settled hand and exactly its settled stacks. Anything else is
-ignored. A seat that busted while others play on stopped following hands, so
-for a notice about a later hand it checks only that the stacks add up to the
-table's chips and that the winner is the one seat with chips. A notice naming
-the hand it busted in is ignored, because that hand left at least two seats
-with chips.
+ignored. A seat that busted while others play on has no settlement of its own
+for a later hand, and one seat's signature is not enough: any seat still
+playing could sign stacks that add up and name itself the winner. So each
+`hand_settled` report also carries the stacks, and the busted seat moves on to
+a later hand's stacks only once every seat that still had chips has reported
+settling that hand with the same digest and stacks, adding up to the table's
+chips. It accepts a `session_end` about a later hand only when it names the
+hand and stacks it has reached that way, and keeps one that arrives first
+until it has. A host whose own match has ended still relays these reports. A
+notice naming the hand it busted in is ignored, because that hand left at
+least two seats with chips. A seat that withholds or falsifies its report
+cannot show a busted seat a false result; it only leaves that seat
+spectating, as leaving before reporting the final hand does.
 
 ### `terminal`: the session has ended
 
@@ -423,7 +432,8 @@ differ. Render it with `reason`, which marks it "disputed".
 
 An eliminated seat keeps the hand it busted in and drops every later hand, so
 its `seats` and `settlement` still describe that hand while the others play
-on. When the match ends, `session_end` brings it the final stacks: for
+on. When the match ends, `session_end`, checked against the other seats'
+settlement reports (see the lifecycle section), brings it the final stacks: for
 `ENDED_NORMAL`, on every seat, `last_settled_stacks` equals `final_stacks`,
 and that is the outcome to render. If the table instead closes abnormally
 after the seat busted, the last settlement it saw is its own last hand, so

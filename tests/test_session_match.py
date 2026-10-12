@@ -263,27 +263,49 @@ def test_elimination_drops_seat_and_shrinks_next_deal():
     assert sessions[order[b]].hand_result is not None
 
 
-def test_eliminated_spectator_accepts_signed_session_end_envelope():
-    """The match ends in a hand after the spectator's last, the one hand
-    a session_end can name for it (see the test below)."""
-    bus, sessions, order = make_table(3)
-    spectator = sessions[order[0]]
-    spectator._p2p_spectator = True
-    spectator.handle_message(order[1], {
-        "type": "session_end",
-        "payload": {
-            "hand": spectator._hand_no + 1,
-            "seat": 1,
-            "winner": 1,
-            "stacks": [0, 1500, 0],
-        },
-        "hash": "a" * 64,
-        "prev": "0" * 64,
-    })
+@pytest.mark.parametrize("backed", [False, True],
+                         ids=["notice-alone", "with-its-own-report"])
+def test_a_busted_seat_ends_only_on_what_every_seat_still_playing_reported(
+        monkeypatch, backed):
+    """Seat 2 busts in hand 1, and seats 0 and 1 deal hand 2. Before it is
+    played, seat 0 signs a session_end naming itself the winner of every
+    chip -- stacks that add up and a winner that is the one seat with
+    chips, all a busted seat used to check -- and may back it with a
+    hand_settled of its own. Seat 1 reported no such hand, so seat 2 stays
+    as it was. The real end of hand 2 still reaches it, and the false
+    notice it kept does not end it early."""
+    rank = rig_showdowns(monkeypatch)
+    rank(1, 2, 0)
+    bus, sessions, order = make_table(3, stacks=[500, 500, 20])
+    _shove_hand(bus, sessions, order, alive=[0, 1, 2], folding=[0])
+    busted = sessions[order[2]]
+    assert busted.replica.stacks == [490, 530, 0]
+    assert {sessions[c].next_p2p_hand() for c in order[:2]} == {"started"}
+    bus.drain()
 
-    assert spectator._session_over
-    assert spectator._session_winner == 1
-    assert spectator._final_stacks == [0, 1500, 0]
+    forged = [1020, 0, 0]
+    if backed:
+        busted.handle_message(order[0], {
+            "type": "hand_settled", "hand": 2, "seat": 0,
+            "digest": "ab" * 32, "stacks": forged})
+    busted.handle_message(order[0], {
+        "type": "session_end",
+        "payload": {"hand": 2, "seat": 0, "winner": 0, "stacks": forged},
+        "hash": "a" * 64, "prev": "0" * 64})
+    assert busted.terminal_state is None
+    assert not busted._session_over and busted._final_stacks is None
+    assert busted.last_settled_stacks == [490, 530, 0]
+    assert client_view.snapshot(busted)["terminal"] is None
+
+    rank(1, 0, 2)
+    _shove_hand(bus, sessions, order, alive=[0, 1])
+    assert sessions[order[0]].replica.stacks == [0, 1020, 0]
+    assert busted.terminal_state is None          # nobody has ended it yet
+    assert sessions[order[1]].next_p2p_hand() == "session_over"
+    bus.drain()
+    assert busted.terminal_state == Session.ENDED_NORMAL
+    assert busted._session_winner == 1
+    assert busted.last_settled_stacks == [0, 1020, 0]
 
 
 # A seated peer that is still playing checks a session_end against its own
@@ -351,10 +373,11 @@ def test_a_seat_busted_before_pressing_next_accepts_the_later_end(
         monkeypatch):
     """Seat 2 busts in hand 1 and never presses Next. Seats 0 and 1 play
     hand 2 to a winner, whose session_end names hand 2 -- a hand seat 2
-    was never dealt. It stopped following hands at its bust, as a
-    spectator does, so it checks the notice as one does. Ignoring it, as a
-    seat still playing would, left it waiting for good: the notice is
-    sent once, and Next would only report it eliminated."""
+    was never dealt. It stopped playing at its bust, as a spectator does,
+    so it checks the notice as one does: against the settlement seats 0
+    and 1 both reported. Ignoring it, as a seat still playing would, left
+    it waiting for good: the notice is sent once, and Next would only
+    report it eliminated."""
     rank = rig_showdowns(monkeypatch)
     rank(1, 2, 0)
     bus, sessions, order = make_table(3, stacks=[500, 500, 20])
