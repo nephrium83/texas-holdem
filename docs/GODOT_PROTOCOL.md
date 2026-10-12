@@ -332,19 +332,17 @@ attribution over trying to continue a possibly divergent hand.
 
 A settlement that does not add up is usually found on one replica only, after
 the others have settled the hand. The two sides then disagree about the
-settlement, and the table ends with `ABORTED_PROTOCOL` (below) at the stacks
-the hand was dealt from; nothing is redealt. Only a failure every replica
-shares, such as a deterministic engine bug, voids the hand everywhere and
-redeals it.
+settlement, and the table ends with `ABORTED_PROTOCOL` (below); nothing is
+redealt or rolled back. The replica that found it keeps the stacks the hand
+was dealt from, and the replicas that settled keep their payouts. Only a
+failure every replica shares, such as a deterministic engine bug, voids the
+hand everywhere and redeals it.
 
 Two failures end the table rather than the hand. The session reaches a
-terminal state on every peer and no further hand is dealt. Chips stand at the
-last settlement, which for a lost peer includes its forfeit (below);
-otherwise the pot of a hand that had not settled is discarded, not paid.
-Neither state is in the snapshot yet: a table that ended mid-hand can
-still show `you.legal`, and a betting command then returns `rejected`. A planned
-snapshot field, `terminal: {state, reason, last_settled_stacks}`, will carry
-them.
+terminal state on every peer and no further hand is dealt. Chips stand at
+each game's own last settlement, which for a lost peer includes its forfeit
+(below); otherwise the pot of a hand that had not settled is discarded, not
+paid. Every later snapshot reports how the table ended in `terminal` (below).
 
 - **A seated peer is lost (`PEER_LOST`).** A seat's connection drops while the
   table still needs it: it is dealt into the current hand, or, after a settle,
@@ -384,13 +382,15 @@ them.
   reported the same digest. The table ends with the reason "table state
   disagrees" when a seat dealt into that hand reports a different digest, or
   voids a hand this peer settled. A void cannot cure it, because each side
-  would redeal from its own stacks. If that is the seat's first report on the
-  hand, nothing at the table can say which side is right, so chips stand where
-  that hand was dealt from, the last settlement the table agreed on. That
-  hands back the hand's pot, so a seat can undo a hand it lost by lying in
-  its first report. A seat that contradicts a digest it has already reported
-  is contradicting itself: the table ends on that seat, and the settlement
-  it reported stands.
+  would redeal from its own stacks. Nothing at the table can say which side
+  is right, so nothing is rolled back (`docs/CASUAL_P2P_RULES.md` rule 11):
+  each seat keeps its own result, and the reason ends "disputed: this game
+  keeps its own result". A seat that settled the hand keeps its payout, and a
+  seat that voided it keeps the stacks the hand was dealt from, so the two
+  sides of a dispute can show different `terminal.last_settled_stacks`. A
+  seat that lost the hand therefore cannot undo it by lying in its report.
+  When the seat had already reported this peer's settlement, the reason also
+  says it is contradicting itself.
 
 A seat still playing accepts the signed `session_end` only when it names that
 seat's own settled hand and exactly its settled stacks. Anything else is
@@ -416,6 +416,10 @@ A hand cut off before it settled never paid out: its pot is discarded, and
 `last_settled_stacks` are the stacks that hand was dealt from. The seats'
 own `stack` fields still show the cut-off hand's live stacks, so render
 `last_settled_stacks` as the outcome.
+
+`last_settled_stacks` is this seat's own figure, and after a disputed
+settlement (`ABORTED_PROTOCOL`, see the lifecycle section) another seat's can
+differ. Render it with `reason`, which marks it "disputed".
 
 An eliminated seat keeps the hand it busted in and drops every later hand, so
 its `seats` and `settlement` still describe that hand while the others play

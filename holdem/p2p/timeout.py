@@ -19,10 +19,10 @@ from typing import Optional, Protocol
 
 class Clock(Protocol):
     """Minimal clock surface: just what Session needs to decide whether its
-    own deadline has expired, which is when it broadcasts a timeout
-    proposal and whether it accepts one.  Which proposal is current is not
-    the clock's to say — that job belongs to the token and the action
-    sequence number."""
+    own deadline has expired, which is when it reports one with a timeout
+    proposal.  What a proposal does is never the clock's to say: clocks on
+    different machines disagree, and one signed message must have the same
+    effect on every replica."""
 
     def monotonic(self) -> float: ...
 

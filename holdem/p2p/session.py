@@ -4005,18 +4005,20 @@ class Session:
 
     @owned
     def check_deadlines(self) -> None:
-        """Broadcast a timeout_proposal if the current deadline has expired.
+        """Report the current deadline to the table once it has expired.
 
         Call this periodically from the event loop (e.g. every second).
         Tests advance the FakeClock then call this directly — no sleeping.
+        The report is a timeout_proposal, which no game applies, this one
+        included (see _on_timeout_proposal).
         """
         if self._deadline_expired():
             self._broadcast_timeout_proposal(self._current_deadline_token)
 
     def _deadline_expired(self) -> bool:
         """Has the current deadline run its phase's time on this game's own
-        clock? The one test both for sending a timeout proposal and for
-        accepting one (see _on_timeout_proposal)."""
+        clock? Decides only when this game reports it, never what any game
+        does with a report (see _on_timeout_proposal)."""
         token = self._current_deadline_token
         if token is None or self._deadline_started_at is None:
             return False
@@ -4053,66 +4055,42 @@ class Session:
             "missing_seat": None,
             "author_seq_holes": holes,
         })
-        # The broadcaster is the first peer to act on its own proposal.
-        # InMemoryBus (and real transports) exclude the sender from their
-        # own broadcasts, so self-apply here to keep all replicas in sync.
-        self._apply_timeout(token)
+        # A report, not a transition: no game applies a timeout proposal, so
+        # neither does the one that sends it (see _on_timeout_proposal).
+        # Cleared so that each wait is reported once, not on every poll.
+        self._clear_deadline()
 
     @owned
     def _on_timeout_proposal(self, conn_id: str, msg: dict) -> None:
-        """Receive and validate a timeout proposal; apply if it matches the
-        current deadline, the action sequence still agrees, and that
-        deadline has expired here too.
+        """Refuse a timeout proposal. No game applies one, whatever it names.
 
-        The last test is what refuses a proposal at time zero. The token
-        only says which wait a proposal is about, and any seat can copy the
-        current one, so without it a seat could propose the moment a
-        deadline started and void the hand, handing back its blinds
-        (docs/CASUAL_P2P_RULES.md, "Time-zero timeout proposal"). This
-        game's own clock decides only whether this game has waited long
-        enough; which proposal is current is still the token's to say.
+        Nothing a proposal carries shows that the wait is over. Its token
+        names the current wait, which any seat can copy, so a game that
+        applied a matching proposal let any seat void a hand the moment its
+        deal began and hand back the blinds (docs/CASUAL_P2P_RULES.md,
+        "Time-zero timeout proposal"). Waiting out this game's own clock
+        first does not repair that. Each game starts a deadline when it
+        reaches it, so on one signed proposal one game folded the actor
+        while the next refused, and their copies of the table split. Clocks
+        decide when a game acts, never what a signed message does (standing
+        invariant 3 in the same document: evidence decides, clocks do not).
+
+        So a proposal changes nothing until rule 9's timekeeper exists,
+        whose signed notice every game can follow alike; _apply_timeout
+        keeps the consequences for it. No honest game sends one meanwhile:
+        check_deadlines has no production caller, and the game that sends
+        a proposal applies nothing either.
         """
-        if not self._hand_msg_ok(conn_id, msg):
-            return
-        if self._replica is None or self.hand_voided:
-            return
-
-        # Reconstruct the token from the wire.
-        raw = msg.get("token", {})
-        try:
-            token = DeadlineToken(
-                hand_id    = str(raw["hand_id"]),
-                phase      = str(raw["phase"]),
-                actor      = raw.get("actor"),          # may be None
-                action_seq = int(raw["action_seq"]),
-            )
-        except (KeyError, TypeError, ValueError):
-            _log.warning("session: malformed timeout_proposal from %s", conn_id)
-            return
-
-        # Reject if this proposal is not for the current deadline.
-        if token != self._current_deadline_token:
-            _log.debug("session: stale timeout_proposal from %s (token mismatch)",
-                       conn_id)
-            return
-
-        # Reject if the replica has already advanced past the proposal's seq.
-        if token.action_seq != self._replica.next_seq:
-            _log.debug("session: out-of-order timeout_proposal from %s "
-                       "(seq %d, expected %d)",
-                       conn_id, token.action_seq, self._replica.next_seq)
-            return
-
-        if not self._deadline_expired():
-            _log.warning("session: refusing timeout_proposal from %s -- "
-                         "this game's own %s deadline has not expired",
-                         conn_id, token.phase)
-            return
-
-        self._apply_timeout(token)
+        _log.warning("session: refusing timeout_proposal from %s -- no game "
+                     "applies one until there is a timekeeper", conn_id)
 
     def _apply_timeout(self, token: DeadlineToken) -> None:
-        """Apply the phase-specific consequence of an accepted timeout."""
+        """Apply the phase-specific consequence of a timeout.
+
+        Nothing triggers one yet: a timeout_proposal is refused everywhere
+        (see _on_timeout_proposal), so this waits for the timekeeper's
+        signed notice. Tests drive it directly.
+        """
         self._clear_deadline()
         # Forensics, not cause. The timeout remains the liveness reason; the
         # holes only say what was already missing when it fired. When the

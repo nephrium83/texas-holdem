@@ -6,15 +6,18 @@ Coverage:
 - Clock injection and FakeClock mechanics
 - Deadline starts when a remote peer is the actor
 - Deadline clears when the actor changes to local or hand ends
-- check_deadlines() broadcasts a timeout_proposal after the fake deadline
-- Betting timeout: fold when facing a bet, check when not
-- Deal timeout: voids the hand, preserves stacks, marks peer unavailable
-- Proposal validation: stale token, wrong seq, wrong hand, malformed
-- Time zero: a proposal before the receiver's own deadline is refused
-- Race: action-beats-proposal (action arrives first → proposal is stale)
-- Race: proposal-beats-action (proposal applied first → late action dropped)
-- Idempotency: two proposals for the same token collapse to one transition
-- Convergence: three replicas, proposals delivered in different orders
+- check_deadlines() reports an expired deadline once, as a timeout_proposal,
+  and applies nothing itself
+- Betting timeout consequence: fold when facing a bet, check when not
+- Deal timeout consequence: voids the hand, preserves stacks, marks peer
+  unavailable
+- Refusal: no game applies a timeout proposal -- current or stale, at time
+  zero or after its own deadline (docs/CASUAL_P2P_RULES.md, "Time-zero
+  timeout proposal")
+- Race: action-beats-proposal (action arrives first → proposal dropped)
+- Race: proposal-beats-action (proposal refused → the late action applies)
+- Idempotency: two proposals for the same token change nothing
+- Convergence: one proposal on staggered clocks cannot split replicas
 """
 from __future__ import annotations
 
@@ -71,6 +74,84 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0,
                                      button=button)
     bus.drain()
     return bus, sessions, order
+
+
+def make_betting_table(n, clocks):
+    """N sessions wired to a shared bus, each holding the same replica and
+    no deal driver, so every deadline is a betting one. Every deadline
+    starts at time 0 on its game's own clock."""
+    from holdem.p2p.replica_table import ReplicaTable
+    bus   = InMemoryBus()
+    order = [f"peer{i}" for i in range(n)]
+    sessions: dict[str, Session] = {}
+    for i, cid in enumerate(order):
+        s = Session(
+            is_host   = (i == 0),
+            nickname  = f"P{i}",
+            avatar_b64= "",
+            transport = InMemoryTransport(bus, cid),
+            clock     = clocks[i],
+        )
+        s.local_conn_id = cid
+        s.configure_seats(list(order))
+        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        r = ReplicaTable(
+            session_id="poker|" + "|".join(order), hand_no=1,
+            names=[f"P{j}" for j in range(n)], stacks=[1000] * n,
+            sb=5, bb=10, structure="No-Limit",
+        )
+        r.start_hand(0)
+        s._replica = r
+        s._hand_no = 1
+        s._maybe_start_deadline()
+        bus.register(cid, s)
+        sessions[cid] = s
+    return bus, sessions, order
+
+
+def proposal_msg(token: DeadlineToken, hand: int = 1) -> dict:
+    """The timeout_proposal a game sends for ``token``."""
+    return {
+        "type": "timeout_proposal",
+        "hand": hand,
+        "token": {
+            "hand_id":    token.hand_id,
+            "phase":      token.phase,
+            "actor":      token.actor,
+            "action_seq": token.action_seq,
+        },
+        "missing_seat": None,
+    }
+
+
+def session_with_deadline():
+    """One session whose replica waits on B, with a betting deadline for B
+    that started at 0 and has expired on its clock (now 31 s)."""
+    bus = InMemoryBus()
+    s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=InMemoryTransport(bus, "A"),
+                clock=FakeClock(31.0))
+    s.local_conn_id = "A"
+    s.configure_seats(["A", "B"])
+    s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    from holdem.p2p.replica_table import ReplicaTable
+    r = ReplicaTable(
+        session_id="poker|A|B", hand_no=1,
+        names=["Alice", "Bob"], stacks=[1000, 1000],
+        sb=5, bb=10, structure="No-Limit",
+    )
+    r.start_hand(0)
+    s._replica = r
+    s._hand_no  = 1
+    token = DeadlineToken(
+        hand_id    = "poker|A|B",
+        phase      = "betting",
+        actor      = "B",
+        action_seq = r.next_seq,
+    )
+    s._current_deadline_token = token
+    s._deadline_started_at   = 0.0
+    return s, token
 
 
 def current_actor_conn(sessions, order) -> str:
@@ -214,7 +295,7 @@ class TestDeadlineLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Betting timeout — check_deadlines dispatches a proposal
+# Betting timeout — check_deadlines reports; the consequence awaits a timekeeper
 # ---------------------------------------------------------------------------
 
 class TestBettingTimeout:
@@ -248,22 +329,13 @@ class TestBettingTimeout:
 
         return clk, bus, s, r
 
-    def _setup_remote_actor(self, clk=None):
-        """Return (clk, bus, sessions, order) via make_table.
-        Used only where the deal phase is acceptable."""
-        if clk is None:
-            clk = FakeClock()
-        for button in range(2):
-            clocks = [clk, FakeClock()]
-            bus, sessions, order = make_table(2, clocks=clocks, button=button)
-            s0 = sessions[order[0]]
-            if s0._current_deadline_token is not None:
-                return clk, bus, sessions, order
-        pytest.skip("couldn't get an active deadline from make_table")
-
     def test_check_deadlines_broadcasts_proposal_after_timeout(self):
+        """The expired deadline is reported once, and the game reporting it
+        applies nothing: no game applies a timeout proposal, the one that
+        sends it included."""
         clk, bus, s, r = self._make_betting_session()
         assert s._current_deadline_token is not None
+        seq, actor = r.next_seq, r.actor
 
         proposals = []
         original_broadcast = s._transport.broadcast
@@ -272,18 +344,23 @@ class TestBettingTimeout:
 
         clk.advance(31.0)
         s.check_deadlines()
-        assert any(m.get("type") == "timeout_proposal" for m in proposals)
+        assert [m.get("type") for m in proposals] == ["timeout_proposal"]
+        assert r.next_seq == seq
+        assert not r.engine.players[actor].folded
+
+        s.check_deadlines()
+        assert len(proposals) == 1, "the same wait was reported twice"
 
     def test_betting_timeout_folds_actor_facing_bet(self):
-        """When there is a bet to call and the actor times out, they are folded."""
+        """The consequence kept for the timekeeper (see
+        Session._apply_timeout): an actor facing a bet is folded."""
         clk, bus, s, r = self._make_betting_session()
         actor_seat = r.actor
         to_call = r.engine.legal(actor_seat).get("to_call", 0)
         if to_call == 0:
             pytest.skip("initial actor has no bet to face")
 
-        clk.advance(31.0)
-        s.check_deadlines()
+        s._apply_timeout(s._current_deadline_token)
         assert r.engine.players[actor_seat].folded
 
     def test_betting_timeout_checks_actor_no_bet(self):
@@ -295,8 +372,7 @@ class TestBettingTimeout:
         """
         # Find a game state where the first actor has no bet to face.
         # Preflop: UTG always faces a BB, so we need to get to postflop.
-        clk = FakeClock()
-        bus, sessions, order = make_table(2, clocks=[clk, FakeClock()])
+        bus, sessions, order = make_table(2)
         s0 = sessions[order[0]]
         # Drain preflop by having everyone call until postflop
         while s0.replica.phase == PHASE_BETTING and \
@@ -319,8 +395,13 @@ class TestBettingTimeout:
         if actor_conn == order[0]:
             pytest.skip("local peer is the postflop actor")
 
-        clk.advance(31.0)
-        s0.check_deadlines()
+        # The consequence kept for the timekeeper (see Session._apply_timeout).
+        s0._apply_timeout(DeadlineToken(
+            hand_id    = s0._deal_session_id(),
+            phase      = "betting",
+            actor      = actor_conn,
+            action_seq = s0.replica.next_seq,
+        ))
         bus.drain()
 
         # Actor was checked — action_on should have advanced past them
@@ -328,29 +409,30 @@ class TestBettingTimeout:
         assert new_actor != actor_seat or s0.replica.phase != PHASE_BETTING
 
     def test_timeout_convergence_two_replicas(self):
-        """Both replicas converge on the same state after a timeout proposal
-        is processed by each."""
+        """Both deadlines have expired and one game reports its own. Neither
+        game applies the proposal, the one that sent it included, so the
+        hand is not voided and the replicas stay on one state."""
         clk0 = FakeClock()
         clk1 = FakeClock()
         bus, sessions, order = make_table(2, clocks=[clk0, clk1])
         s0, s1 = sessions[order[0]], sessions[order[1]]
+        seq = s0.replica.next_seq
 
-        actor_seat = s0.replica.actor
-        actor_conn = order[actor_seat]
-        # Timeout from a non-actor's perspective
-        watcher = s1 if actor_conn == order[0] else s0
+        sent = []
+        original_broadcast = s0._transport.broadcast
+        s0._transport.broadcast = lambda m: (sent.append(m),
+                                              original_broadcast(m))[-1]
 
-        # Both deadlines expire: a peer refuses a proposal its own deadline
-        # has not reached.
         clk0.advance(31.0)
         clk1.advance(31.0)
-        watcher.check_deadlines()
-        bus.drain()  # proposal delivered to both; both apply
+        s0.check_deadlines()
+        bus.drain()
 
-        d0 = s0.replica.state_digest() if s0.replica else None
-        d1 = s1.replica.state_digest() if s1.replica else None
-        assert d0 is not None and d0 == d1, \
-            f"replicas diverged after timeout: {d0} vs {d1}"
+        assert any(m.get("type") == "timeout_proposal" for m in sent)
+        for s in (s0, s1):
+            assert not s.hand_voided, s.void_reason
+            assert s.replica.next_seq == seq
+        assert s0.replica.state_digest() == s1.replica.state_digest()
 
 
 # ---------------------------------------------------------------------------
@@ -451,55 +533,20 @@ class TestDealTimeout:
 # ---------------------------------------------------------------------------
 
 class TestProposalValidation:
-    def _session_with_active_hand(self):
-        bus = InMemoryBus()
-        # 31 s past the deadline set below, so it has expired here too.
-        s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"),
-                    clock=FakeClock(31.0))
-        s.local_conn_id = "A"
-        s.configure_seats(["A", "B"])
-        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        from holdem.p2p.replica_table import ReplicaTable
-        r = ReplicaTable(
-            session_id="poker|A|B", hand_no=1,
-            names=["Alice", "Bob"], stacks=[1000, 1000],
-            sb=5, bb=10, structure="No-Limit",
-        )
-        r.start_hand(0)
-        s._replica = r
-        s._hand_no  = 1
-        # Set a matching deadline token so proposals CAN match
-        token = DeadlineToken(
-            hand_id    = "poker|A|B",
-            phase      = "betting",
-            actor      = "B",
-            action_seq = r.next_seq,
-        )
-        s._current_deadline_token = token
-        s._deadline_started_at   = 0.0
-        return s, token
-
-    def test_valid_proposal_is_applied(self):
-        s, token = self._session_with_active_hand()
-        msg = {
-            "type": "timeout_proposal",
-            "hand": 1,
-            "token": {
-                "hand_id":    token.hand_id,
-                "phase":      token.phase,
-                "actor":      token.actor,
-                "action_seq": token.action_seq,
-            },
-            "missing_seat": None,
-        }
-        actor_before = s.replica.actor
-        s._on_timeout_proposal("B", msg)
-        # Actor should have changed (folded or checked)
-        assert s.replica.actor != actor_before or s.replica.phase != PHASE_BETTING
+    def test_a_current_proposal_is_refused_after_the_deadline(self):
+        """The proposal names this game's current deadline, which has run
+        out here too, and is still refused. A game's clock says when it may
+        report a wait, never what a report does: deadlines start at
+        different moments on different games."""
+        s, token = session_with_deadline()
+        seq, actor = s.replica.next_seq, s.replica.actor
+        s._on_timeout_proposal("B", proposal_msg(token))
+        assert s.replica.next_seq == seq
+        assert s.replica.actor == actor
+        assert not s.replica.engine.players[actor].folded
 
     def test_stale_token_dropped(self):
-        s, token = self._session_with_active_hand()
+        s, token = session_with_deadline()
         # Send a proposal with a wrong action_seq (stale)
         msg = {
             "type": "timeout_proposal",
@@ -518,7 +565,7 @@ class TestProposalValidation:
         assert s.replica.actor == actor_before
 
     def test_wrong_phase_dropped(self):
-        s, token = self._session_with_active_hand()
+        s, token = session_with_deadline()
         msg = {
             "type": "timeout_proposal",
             "hand": 1,
@@ -535,7 +582,7 @@ class TestProposalValidation:
         assert s.replica.actor == actor_before
 
     def test_wrong_actor_dropped(self):
-        s, token = self._session_with_active_hand()
+        s, token = session_with_deadline()
         msg = {
             "type": "timeout_proposal",
             "hand": 1,
@@ -552,7 +599,7 @@ class TestProposalValidation:
         assert s.replica.actor == actor_before
 
     def test_malformed_token_dropped(self):
-        s, token = self._session_with_active_hand()
+        s, token = session_with_deadline()
         msg = {
             "type": "timeout_proposal",
             "hand": 1,
@@ -581,7 +628,7 @@ class TestProposalValidation:
         s._on_timeout_proposal("B", msg)  # no-op
 
     def test_proposal_dropped_when_voided(self):
-        s, token = self._session_with_active_hand()
+        s, token = session_with_deadline()
         # Void through the real path: hand_voided is derived from the hand
         # record, so assigning it would bypass the transition under test.
         s._void_hand("test void", announce=False)
@@ -605,49 +652,31 @@ class TestProposalValidation:
 # ---------------------------------------------------------------------------
 
 class TestTimeZeroProposal:
-    def test_a_proposal_before_the_deadline_has_expired_is_refused(self):
+    def test_a_proposal_at_time_zero_is_refused(self):
         """Seat 2 sends a timeout proposal the moment the deal's deadline
         starts. It names the current token, which any seat can copy, so it
         used to void the hand at once and hand the blinds back: an undo for
-        whoever disliked its cards. Each other game refuses it, because its
-        own deadline has not expired; once that has, the same proposal is
-        applied."""
+        whoever disliked its cards. Every other game refuses it."""
         clocks = [FakeClock() for _ in range(3)]
         bus, sessions, order = make_table(3, clocks=clocks)
         proposer = sessions[order[2]]
         token = proposer._current_deadline_token
         assert token is not None and token.phase == "deal_shuffle"
-        proposal = {
-            "type": "timeout_proposal",
-            "hand": proposer._hand_no,
-            "token": {
-                "hand_id":    token.hand_id,
-                "phase":      token.phase,
-                "actor":      token.actor,
-                "action_seq": token.action_seq,
-            },
-            "missing_seat": None,
-        }
 
-        proposer._send_hostless(dict(proposal))
+        proposal = proposal_msg(token, proposer._hand_no)
+        proposer._send_hostless(proposal)          # stamps its author_seq
         bus.drain()
 
         for cid in order[:2]:
             s = sessions[cid]
+            # Past ingress, so the handler is what refused it.
+            seen = s._author_seq_seen.get((1, 2), {})
+            assert proposal["author_seq"] in seen, cid
+            # Current, not stale, so the refusal is not the token check's.
             assert s._current_deadline_token == token, cid
+            assert token.action_seq == s.replica.next_seq, cid
             assert not s.hand_voided, s.void_reason
             assert s.hand_record is None, cid
-
-        # Control: the same proposal once every deadline has expired.
-        for clk in clocks:
-            clk.advance(31.0)
-        proposer._send_hostless(dict(proposal))
-        bus.drain()
-
-        for cid in order[:2]:
-            s = sessions[cid]
-            assert s.hand_voided, cid
-            assert s.void_reason == "deal timeout: deal_shuffle", cid
 
 
 # ---------------------------------------------------------------------------
@@ -655,55 +684,14 @@ class TestTimeZeroProposal:
 # ---------------------------------------------------------------------------
 
 class TestIdempotency:
-    def _setup_and_get_token(self):
-        bus = InMemoryBus()
-        # 31 s past the deadline set below, so it has expired here too.
-        s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"),
-                    clock=FakeClock(31.0))
-        s.local_conn_id = "A"
-        s.configure_seats(["A", "B"])
-        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        from holdem.p2p.replica_table import ReplicaTable
-        r = ReplicaTable(
-            session_id="poker|A|B", hand_no=1,
-            names=["Alice", "Bob"], stacks=[1000, 1000],
-            sb=5, bb=10, structure="No-Limit",
-        )
-        r.start_hand(0)
-        s._replica = r
-        s._hand_no = 1
-        token = DeadlineToken(
-            hand_id    = "poker|A|B",
-            phase      = "betting",
-            actor      = "B",
-            action_seq = r.next_seq,
-        )
-        s._current_deadline_token = token
-        s._deadline_started_at   = 0.0
-        return s, token
-
     def test_second_proposal_is_harmless(self):
-        """Two proposals with the same token: first applies, second is stale."""
-        s, token = self._setup_and_get_token()
-        msg = {
-            "type": "timeout_proposal",
-            "hand": 1,
-            "token": {
-                "hand_id":    token.hand_id,
-                "phase":      token.phase,
-                "actor":      token.actor,
-                "action_seq": token.action_seq,
-            },
-            "missing_seat": None,
-        }
-        s._on_timeout_proposal("B", msg)   # first: applied
-        state_after_first = s.replica.actor if s.replica else None
-
-        s._on_timeout_proposal("B", msg)   # second: seq advanced → stale
-        state_after_second = s.replica.actor if s.replica else None
-
-        assert state_after_first == state_after_second   # idempotent
+        """Two proposals with the same token: both are refused, so neither
+        moves the hand."""
+        s, token = session_with_deadline()
+        before = s.replica.state_digest()
+        s._on_timeout_proposal("B", proposal_msg(token))   # refused
+        s._on_timeout_proposal("B", proposal_msg(token))   # refused again
+        assert s.replica.state_digest() == before
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +717,7 @@ class TestRaceConditions:
             pytest.skip("no deadline set (local is actor)")
 
         # Construct the proposal that would have fired for this actor
-        proposal_msg = {
+        stale = {
             "type": "timeout_proposal",
             "hand": s0._hand_no,
             "token": {
@@ -747,13 +735,15 @@ class TestRaceConditions:
 
         # Now the in-flight proposal arrives at s0 — must be stale
         actor_after = s0.replica.actor
-        s0._on_timeout_proposal(non_actor, proposal_msg)
+        s0._on_timeout_proposal(non_actor, stale)
 
         # Proposal was silently dropped; actor has already moved on
         assert s0.replica.actor == actor_after
 
     def test_proposal_beats_action(self):
-        """Timeout proposal applied first; actor's late action is rejected."""
+        """A proposal that reaches a game before the actor's action cannot
+        pre-empt it: the proposal is refused, and the late action then
+        applies on every game alike."""
         clk = FakeClock()
         bus, sessions, order = make_table(2, clocks=[clk, FakeClock()])
         s0 = sessions[order[0]]
@@ -768,33 +758,19 @@ class TestRaceConditions:
         token = s0._current_deadline_token
         if token is None:
             pytest.skip("no deadline set")
+        seq = s0.replica.next_seq
 
-        # Apply the proposal on s0 directly (proposal arrived first)
-        s0._on_timeout_proposal(
-            non_actor,
-            {
-                "type": "timeout_proposal",
-                "hand": s0._hand_no,
-                "token": {
-                    "hand_id":    token.hand_id,
-                    "phase":      token.phase,
-                    "actor":      token.actor,
-                    "action_seq": token.action_seq,
-                },
-                "missing_seat": None,
-            }
-        )
+        # The proposal arrives at s0 first.
+        s0._on_timeout_proposal(non_actor, proposal_msg(token, s0._hand_no))
+        assert not s0.hand_voided, s0.void_reason
+        assert s0.replica.next_seq == seq
 
-        # Actor's turn has been resolved; now actor "acts" (late message)
-        state_after_proposal = s0.replica.next_seq
-        actor_session = sessions[actor_conn]
-        # Manually send a bet_action as the timed-out actor would have
-        verdict = actor_session.replica.apply_action(
-            token.action_seq, actor_seat, "call", 0)
-        # Their action was based on the old seq, which is now consumed;
-        # either it's rejected ("rejected" verdict) or the seq is wrong.
-        # Either way the state should not have regressed.
-        assert s0.replica.next_seq >= state_after_proposal
+        # Then the actor acts, late.
+        assert sessions[actor_conn].send_bet_action("call") == "applied"
+        bus.drain()
+        assert s0.replica.next_seq == seq + 1
+        assert (s0.replica.state_digest()
+                == sessions[actor_conn].replica.state_digest())
 
 
 # ---------------------------------------------------------------------------
@@ -802,51 +778,55 @@ class TestRaceConditions:
 # ---------------------------------------------------------------------------
 
 class TestConvergence:
-    def test_three_replicas_converge_after_timeout(self):
-        """Timeout proposal delivered to three peers in different orders;
-        all end in identical state.
+    def test_one_proposal_cannot_split_replicas_on_staggered_clocks(self):
+        """Each game starts a deadline when it reaches it, so deadlines are
+        staggered: here the late watcher's started 21 s after the early
+        one's, and the early one reports its expired deadline. Judged by
+        each game's own clock, the proposal folded the actor on the early
+        game alone. Judged by the token alone, it folded the actor
+        everywhere but on the actor's own game, which sets no deadline on
+        itself. Every game refuses it, so all three stay on one state, and
+        the actor's real action then moves them together."""
+        clocks = [FakeClock() for _ in range(3)]
+        bus, sessions, order = make_betting_table(3, clocks)
+        actor = sessions[order[0]].replica.actor
+        early, late = [i for i in range(3) if i != actor]
+        token = sessions[order[early]]._current_deadline_token
+        assert token is not None and token.phase == "betting"
+        assert token.actor == order[actor]
+        assert sessions[order[late]]._current_deadline_token == token
+        assert sessions[order[actor]]._current_deadline_token is None
+        seq = token.action_seq
 
-        Tracked in https://github.com/nephrium83/texas-holdem/issues/12
-        The skip below fires when peer0 is the preflop actor; remove it
-        by fixing button/seating so peer0 is never the actor.
-        """
-        bus, sessions, order = make_table(3)
-        s0, s1, s2 = (sessions[c] for c in order)
+        clocks[early].advance(31.0)        # expired
+        clocks[late].advance(10.0)         # 20 s to go
+        reporter = sessions[order[early]]
+        sent = []
+        original_broadcast = reporter._transport.broadcast
+        reporter._transport.broadcast = lambda m: (sent.append(m),
+                                                    original_broadcast(m))[-1]
+        reporter.check_deadlines()
+        bus.drain()
 
-        # Find a peer that is NOT the actor in any session (a "watcher")
-        actor_seat = s0.replica.actor
-        actor_conn = order[actor_seat]
+        proposal = next(m for m in sent if m.get("type") == "timeout_proposal")
+        for i in (late, actor):
+            # Past ingress, so the handler is what refused it.
+            seen = sessions[order[i]]._author_seq_seen.get((1, early), {})
+            assert proposal["author_seq"] in seen, i
+        digests = {s.replica.state_digest() for s in sessions.values()}
+        assert len(digests) == 1, f"one proposal split the replicas: {digests}"
+        for cid, s in sessions.items():
+            assert s.replica.next_seq == seq, cid
+            assert not s.replica.engine.players[actor].folded, cid
+            assert not s.hand_voided, cid
 
-        # Build the timeout proposal as if peer0 generated it
-        token = s0._current_deadline_token
-        if token is None or token.phase != "betting":
-            pytest.skip("no betting deadline on peer0 (may be local actor)")
-
-        proposal_msg = {
-            "type": "timeout_proposal",
-            "hand": s0._hand_no,
-            "token": {
-                "hand_id":    token.hand_id,
-                "phase":      token.phase,
-                "actor":      token.actor,
-                "action_seq": token.action_seq,
-            },
-            "missing_seat": None,
-        }
-
-        # Deliver in different orders to each session
-        proposer = next(c for c in order if c != actor_conn)
-        s0._on_timeout_proposal(proposer, proposal_msg)
-        s2._on_timeout_proposal(proposer, proposal_msg)
-        s1._on_timeout_proposal(proposer, proposal_msg)
-
-        # All sessions with an active replica should have the same digest
-        active = [sessions[c] for c in order
-                  if sessions[c].replica is not None and not sessions[c].hand_voided]
-        if len(active) < 2:
-            pytest.skip("all hands voided — nothing to compare")
-        digs = {s.replica.state_digest() for s in active}
-        assert len(digs) == 1, f"replicas diverged after timeout: {digs}"
+        # Control: the replicas still move together on a real action.
+        assert sessions[order[actor]].send_bet_action("call") == "applied"
+        bus.drain()
+        digests = {s.replica.state_digest() for s in sessions.values()}
+        assert len(digests) == 1, f"replicas diverged on an action: {digests}"
+        for cid, s in sessions.items():
+            assert s.replica.next_seq == seq + 1, cid
 
     def test_no_sleep_anywhere(self):
         """Confirm the timeout module has no sleep() calls — the word may
