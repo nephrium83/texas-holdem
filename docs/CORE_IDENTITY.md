@@ -69,3 +69,31 @@ Session lifecycle code but has no hunk in `add_local_player`; this slice
 leaves the constructor and lifecycle untouched. Its rewritten peer test
 helper will need the same explicit signer/public-key arguments when the
 branches are combined.
+
+## Validation (2026-10-15)
+
+Validated on BWING with Python 3.13.3, libsodium 1.0.22 and Godot 4.7.1.
+The implementation snapshot was committed as `e727a59` before running the
+deliberate-break controls.
+
+- Full `python -m pytest -q`, with `HOLDEM_REQUIRE_CRYPTO=1` and `GODOT_BIN`
+  set: **1,537 passed, 2 skipped** in 294.35 seconds. The skips are the same
+  existing actor-dependent timeout cases seen on the pristine baseline;
+  all crypto-gated suites ran.
+- Godot GUT (`--headless --path godot -s addons/gut/gut_cmdln.gd
+  -gdir=res://test/unit -gexit`): **151 passed** across 13 scripts.
+- `python tests/gui_smoke.py`: **15 hands**, **2,400/2,400 chips**, no
+  callback exceptions.
+- A direct pristine-main/refactor comparison with a fixed signing key,
+  payload and timestamp produced identical signed envelope bytes.
+- The wrong-signer control triggers
+  `test_wire_uses_only_the_requested_signer`; the swapped-host-key control
+  triggers
+  `test_two_signed_peers_keep_independent_identity_and_write_no_config`.
+  Both controls pass by detecting their deliberate break.
+
+The pristine baseline initially lacked Godot's generated class-name cache,
+causing two end-to-end parse failures. After `godot --headless --path godot
+--import`, both failed cases passed unchanged. The refactored full run used
+the same import preparation and passed both end-to-end cases. Generated
+tracked import metadata is excluded from this change.
