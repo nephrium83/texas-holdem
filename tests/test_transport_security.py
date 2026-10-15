@@ -55,14 +55,16 @@ def test_unsigned_game_message_rejected():
 
 def test_signed_message_accepted():
     signed = json.loads(wire.pack("action",
-                                  {"seat": 1, "action": "raise", "amount": 40}))
+                                  {"seat": 1, "action": "raise", "amount": 40},
+                                  signer=_ident.load_or_create()))
     msg = _read(_framed(signed))
     assert msg["type"] == "action"
     assert msg["payload"]["amount"] == 40
 
 
 def test_tampered_payload_rejected():
-    env = json.loads(wire.pack("action", {"seat": 1, "amount": 40}))
+    env = json.loads(wire.pack("action", {"seat": 1, "amount": 40},
+                               signer=_ident.load_or_create()))
     env["payload"]["amount"] = 999999
     with pytest.raises(ValueError):
         _read(_framed(env))
@@ -112,7 +114,8 @@ def test_sign_frame_preserves_flat_hostless_fields(message):
 
 
 def test_presigned_dict_not_double_wrapped():
-    pre = json.loads(wire.pack("chat", {"text": "hi"}))
+    pre = json.loads(wire.pack("chat", {"text": "hi"},
+                               signer=_ident.load_or_create()))
     blob = t._sign_frame(pre)
     back = wire.unpack(blob[4:])
     assert back["payload"]["text"] == "hi"
@@ -169,8 +172,10 @@ def test_consecutive_signed_messages_deliver():
     admit(adm, "peerA", host_key, secret, host_key)
     got = []
     s._on_chat = lambda cid, msg: got.append(msg["payload"]["text"])
-    s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "one"})))
-    s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "two"})))
+    s.handle_message("peerA", json.loads(wire.pack(
+        "chat", {"text": "one"}, signer=_ident.load_or_create())))
+    s.handle_message("peerA", json.loads(wire.pack(
+        "chat", {"text": "two"}, signer=_ident.load_or_create())))
     assert got == ["one", "two"]
 
 

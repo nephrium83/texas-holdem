@@ -126,6 +126,7 @@ def main() -> None:
     ap.add_argument("--invite", default="",
                     help="joiner: the V2 room code to pin the host with")
     args = ap.parse_args()
+    local_identity = _identity.load_or_create()
 
     is_host = (args.role == "host")
 
@@ -195,7 +196,8 @@ def main() -> None:
                 sess.mark_host_authenticated(conn_id)
                 # Identity is revealed only after mutual authentication.
                 info = _wire.pack("player_info",
-                                  {"nickname": args.label, "avatar_b64": ""})
+                                  {"nickname": args.label, "avatar_b64": ""},
+                                  signer=local_identity)
                 transport.send(conn_id, json.loads(info))
             return True
         return False
@@ -244,7 +246,9 @@ def main() -> None:
         # key, not from a connection -- it has no inbound connection to be
         # named by. Joiners get UUIDs and learn theirs via player_ack.
         sess.local_conn_id = _identity.peer_id()
-        sess.add_local_player(sess.local_conn_id)
+        sess.add_local_player(
+            sess.local_conn_id, public_key=local_identity.public_key_bytes(),
+            x25519_public_key=local_identity.x25519_public_key_bytes())
         _emit({"type": "ready", "addr": addr,
                "peer_id": _identity.peer_id(),
                "invite": invite_code})

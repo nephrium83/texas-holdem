@@ -1199,11 +1199,12 @@ class Holdem:
         import json as _json
         from .p2p import wire as _wire
         from .p2p import transport as _t
+        from .p2p import identity as _identity
         msg = _json.loads(_wire.pack("action", {
             "seat":   self._mp_local_seat,
             "action": action,
             "amount": amount,
-        }))
+        }, signer=_identity.load_or_create()))
         _t.broadcast(msg)
 
     def _mp_send_chat(self, text: str) -> None:
@@ -1211,9 +1212,11 @@ class Holdem:
         import json as _json
         from .p2p import wire as _wire
         from .p2p import transport as _t
+        from .p2p import identity as _identity
         nickname = getattr(self, "nickname", "Player")
         msg = _json.loads(_wire.pack("chat",
-                                     {"text": text, "nickname": nickname}))
+                                     {"text": text, "nickname": nickname},
+                                     signer=_identity.load_or_create()))
         _t.broadcast(msg)
         if self._mp_is_host:
             self._append_chat(nickname, text)

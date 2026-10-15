@@ -986,7 +986,7 @@ def test_a_host_never_adopts_a_roster_from_a_peer():
     """
     h = _host_adm()
     s = _host_session(h)
-    s.add_local_player("hostlocal")
+    s.add_local_player("hostlocal", public_key=HOST_KEY)
     assert _full_exchange(h, conn_id="c1", joiner=K1)[0] is True
 
     s.handle_message("c1", {"type": "player_list", "pubkey": K1.hex(),

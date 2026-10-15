@@ -69,7 +69,7 @@ CORE = frozenset({
     "holdem.p2p.bg_hadamard", "holdem.p2p.bg_product",
     "holdem.p2p.bg_shuffle", "holdem.p2p.bg_svp", "holdem.p2p.bg_wire",
     "holdem.p2p.bg_witness", "holdem.p2p.bg_zero", "holdem.p2p.deck_audit",
-    "holdem.p2p.deal_map", "holdem.p2p.mental_deal",
+    "holdem.p2p.deal_map", "holdem.p2p.mental_deal", "holdem.p2p.signing",
     # protocol
     "holdem.p2p", "holdem.p2p.session", "holdem.p2p.replica_table",
     "holdem.p2p.mental_deal_driver", "holdem.p2p.timeout",
@@ -100,7 +100,6 @@ FORBIDDEN_MODULES = ("tkinter", "socket", "asyncio")
 IMPORTERS = frozenset({"__import__", "import_module"})
 DYNAMIC = "a module named at run time"
 
-_IDENTITY = "through identity, which creates it at import (identity.py:83-85)"
 _INET = "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218"
 
 # What a fresh import of each core module does today that it must not. A
@@ -108,14 +107,7 @@ _INET = "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218"
 # each entry allows it once, so a second write to the same file is new too.
 IMPORT_ALLOWLIST = {
     "holdem.p2p.invite": {
-        "writes config/identity.json": "invite.py:62, " + _IDENTITY,
         "loads socket": _INET,
-    },
-    "holdem.p2p.join_auth": {
-        "writes config/identity.json": "join_auth.py:38-39, " + _IDENTITY,
-    },
-    "holdem.p2p.wire": {
-        "writes config/identity.json": "wire.py:25, " + _IDENTITY,
     },
 }
 
@@ -126,20 +118,12 @@ IMPORT_ALLOWLIST = {
 # an import does not move it; the value records today's line, and a
 # failure names lines.
 GRAPH_ALLOWLIST = {
-    ("holdem.p2p.invite", "holdem.p2p.identity", "<module>"):
-        "invite.py:62, the process-wide key in every invite",
     ("holdem.p2p.invite", "socket", "<module>"): _INET,
-    ("holdem.p2p.join_auth", "holdem.p2p.identity", "<module>"):
-        "join_auth.py:38, the joiner's public key",
-    ("holdem.p2p.wire", "holdem.p2p.identity", "<module>"):
-        "wire.py:25, signs and verifies every message",
     ("holdem.p2p.session", "holdem.p2p.transport", "Session.__init__"):
         "session.py:431, the global transport when none is given",
     ("holdem.p2p.session", "holdem.p2p.device_secret",
      "Session._deal_master_secret"):
         "session.py:972, the device secret read from disk",
-    ("holdem.p2p.session", "holdem.p2p.identity", "Session.add_local_player"):
-        "session.py:2993, the process-wide identity",
 }
 
 # Runs in the fresh interpreter. The audit hook goes in before the import,

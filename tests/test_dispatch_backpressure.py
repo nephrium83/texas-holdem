@@ -25,7 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p import transport as T
-from holdem.p2p import wire
+from holdem.p2p import identity, wire
 from holdem.p2p.dispatch import MessageWorker
 from lifecycle import measure_loop_latency, transport_threads, wait_until
 
@@ -44,7 +44,7 @@ def _clean_transport():
 
 
 def _frame(msg_type: str, payload: dict) -> bytes:
-    body = wire.pack(msg_type, payload)
+    body = wire.pack(msg_type, payload, signer=identity.load_or_create())
     return struct.pack(">I", len(body)) + body
 
 
