@@ -300,6 +300,13 @@ def test_a_busted_seat_ends_only_on_what_every_seat_still_playing_reported(
     rank(1, 0, 2)
     _shove_hand(bus, sessions, order, alive=[0, 1])
     assert sessions[order[0]].replica.stacks == [0, 1020, 0]
+    if backed:          # seat 0's first report of hand 2 stands, and differs
+        assert busted.terminal_state == Session.ABORTED_PROTOCOL
+        assert busted.terminal_reason == (
+            "table state disagrees on hand 2: its reports differ; disputed: "
+            "this game keeps its own result")
+        assert busted.last_settled_stacks == [490, 530, 0]
+        return
     assert busted.terminal_state is None          # nobody has ended it yet
     assert sessions[order[1]].next_p2p_hand() == "session_over"
     bus.drain()
@@ -891,6 +898,34 @@ def test_a_first_report_that_lies_rolls_nothing_back(monkeypatch):
         assert s.last_settled_stacks == settled, cid
         terminal = client_view.snapshot(s)["terminal"]
         assert terminal["last_settled_stacks"] == settled, cid
+
+
+def test_a_lie_then_the_truth_before_this_peer_settles_ends_the_table(
+        monkeypatch):
+    """As above, but the lie and then seat 2's true report both reach seat 0
+    before it can settle. The first stands: the latest let the lie pass."""
+    rig_showdowns(monkeypatch)(0, 1, 2)
+    bus, sessions, order = make_table(3)
+    target = sessions[order[0]]
+    release = _hold_settlement_reports(sessions[order[2]])
+    held, deliver = [], target.handle_message
+    target.handle_message = lambda frm, msg: (
+        held.append((frm, msg)) if msg.get("type") == "audit_open"
+        else deliver(frm, msg))
+    checkdown(bus, sessions, order, alive=[1, 2])    # seat 0 cannot settle
+    deliver(order[2], {"type": "hand_settled", "hand": 1, "seat": 2,
+                       "digest": "ab" * 32})
+    release()
+    bus.drain()
+    assert held and target.hand_result is None
+    for frm, msg in held:
+        deliver(frm, msg)
+    assert target.terminal_state == Session.ABORTED_PROTOCOL
+    assert target.terminal_reason == (
+        "table state disagrees on hand 1: seat 2 settled it as abababababab"
+        f"abab, this peer settled it as {target._ended_digest[:16]}; "
+        "disputed: this game keeps its own result")
+    assert target.last_settled_stacks == [520, 490, 490]
 
 
 def test_a_void_of_a_hand_this_peer_settled_ends_the_table():

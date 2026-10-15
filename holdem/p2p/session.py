@@ -657,7 +657,7 @@ class Session:
         self._ended_digest: str | None = None
         self._ended_seats: frozenset = frozenset()
         self._ended_agreed: set[int] = set()
-        self._early_settled: dict[int, str] = {}
+        self._early_settled: dict[int, list[str]] = {}
         # Seats the host reported dropped while it could not judge whether
         # the table still needed them (a busted host); see _on_peer_lost.
         self._reported_lost: set[int] = set()
@@ -676,7 +676,7 @@ class Session:
         # latest session_end claim, which a seat still playing keeps too.
         # See _follow_settled and _finish_followed.
         self._followed: tuple[int, list] | None = None
-        self._follow_reports: dict[int, dict[int, tuple]] = {}
+        self._follow_reports: dict[int, dict[int, list[tuple]]] = {}
         self._end_claims: dict[int, tuple] = {}
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
@@ -2034,6 +2034,8 @@ class Session:
         that hand. Delivery may reorder them, so a seat's report of one hand
         must not replace its report of another, and the report of a hand in
         which a seat busted is needed before the hands dealt without it.
+        Nor may a later report replace a seat's first. Once all are in, any
+        that differ end the table in dispute, as for the seats still playing.
         """
         if self._followed is None:
             r = self._replica
@@ -2048,11 +2050,19 @@ class Session:
                 or not all(_is_seat(v) and v >= 0 for v in stacks)):
             return
         reports = self._follow_reports
-        reports.setdefault(hand, {})[seat] = (digest, tuple(stacks))
+        report = (digest, tuple(stacks))
+        kept = reports.setdefault(hand, {}).setdefault(seat, [])
+        if report not in kept and len(kept) < 2:
+            kept.append(report)          # the first, and any contradiction
         for h in sorted(reports):
-            got = {reports[h].get(s) for s in playing}
-            if len(playing) < 2 or len(got) != 1 or None in got:
+            if len(playing) < 2 or any(s not in reports[h] for s in playing):
                 continue
+            got = {r for s in playing for r in reports[h][s]}
+            if len(got) != 1:
+                self.terminate(self.ABORTED_PROTOCOL, f"table state disagrees "
+                               f"on hand {h}: its reports differ; disputed: "
+                               f"this game keeps its own result")
+                return
             settled = list(got.pop()[1])
             if sum(settled) != sum(known) or any(
                     settled[s] for s, chips in enumerate(known) if chips == 0):
@@ -2134,7 +2144,9 @@ class Session:
         if not self._hand_msg_ok(conn_id, msg):
             return                       # a later hand buffers; older drops
         if self._replica is not None and seat in self._replica.seats_dealt:
-            self._early_settled[seat] = digest
+            kept = self._early_settled.setdefault(seat, [])
+            if digest not in kept and len(kept) < 2:
+                kept.append(digest)      # the first, and any contradiction
 
     def _hand_ended(self, digest: Optional[str]) -> None:
         """Record how this replica ended the current hand -- its settled
@@ -2148,8 +2160,9 @@ class Session:
         self._ended_agreed = {self.local_seat} if digest is not None else set()
         early, self._early_settled = self._early_settled, {}
         for seat in sorted(early):
-            if early[seat] != digest:
-                self._settlement_disagrees(seat, self._hand_no, early[seat])
+            if early[seat] != [digest]:
+                theirs = next(d for d in early[seat] if d != digest)
+                self._settlement_disagrees(seat, self._hand_no, theirs)
                 return
             self._ended_agreed.add(seat)
 

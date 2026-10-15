@@ -441,7 +441,8 @@ class TestBettingTimeout:
 
 class TestDealTimeout:
     def test_deal_timeout_voids_hand_and_preserves_stacks(self):
-        """A deal-phase timeout proposal voids the hand; stacks unchanged."""
+        """What a future authenticated timekeeper notice would apply (no
+        proposal does now): the hand is voided and stacks are unchanged."""
         clk = FakeClock()
         bus = InMemoryBus()
         order = ["A", "B"]
