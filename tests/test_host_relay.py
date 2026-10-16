@@ -263,16 +263,19 @@ def test_every_hostless_type_is_relayed(mtype):
 
 def test_a_host_whose_match_ended_still_relays_settlement_reports():
     """A busted joiner ends only once it has every report it follows the
-    table by (Session._follow_settled), and under the star a report
-    reaches it through the host or not at all, so a host that has ended
-    still relays any that reach it late. Nothing else is relayed once the
-    match is over."""
+    table by (Session._follow_settled) and a session_end naming where they
+    lead, and under the star each reaches it through the host or not at
+    all, so a host that has ended still relays any that reach it late.
+    Nothing else is relayed once the match is over."""
     bus, s = _table()
     s["A"].terminate(Session.ENDED_NORMAL, "match complete; winner seat 0")
     s["A"].handle_message("B", _env("B", seat=1, mtype="hand_settled",
                                     digest="ab" * 32, stacks=[1500, 0, 0]))
+    s["A"].handle_message("B", _env("B", seat=1, mtype="session_end",
+                                    winner=0, stacks=[1500, 0, 0]))
     s["A"].handle_message("B", _env("B", seat=1, mtype="bet_action"))
     assert _received_by(bus, "C", "hand_settled")
+    assert _received_by(bus, "C", "session_end")
     assert not _received_by(bus, "C", "bet_action")
 
 

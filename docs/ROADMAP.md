@@ -48,8 +48,13 @@ Superseding a decision means adding a new row, not editing an old one.
 
 ## Standing invariants
 
-These hold across every milestone. A change that violates one is wrong
-regardless of how convenient it is.
+These hold across every milestone, except where a dated decision above
+relaxes one for a named profile. The casual P2P profile (2026-10-04) does
+so on casual tables only: invariant 2 for hands settled after a drop,
+invariant 4 for the players left (the dropper still forfeits what it put
+in), and invariant 6 for a heads-up timeout drop. Outside such an
+exception, a change that violates one is wrong regardless of how
+convenient it is.
 
 1. **Non-profitability.** A player's silence, timeout, disconnect or
    eviction must never give that player a better chip outcome than

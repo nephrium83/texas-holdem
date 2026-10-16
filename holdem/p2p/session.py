@@ -648,16 +648,17 @@ class Session:
         self._session_end_announced = False
         self._p2p_spectator = False
         # Settlement agreement (hand_settled): how this replica ended its
-        # most recent hand -- the hand number, its settled digest or None
-        # for a void, the seats dealt into it, and the seats that have
-        # reported that same settlement, this one included -- and the
-        # digests peers reported for the CURRENT hand before it ended here,
-        # by seat.
+        # most recent hand, or, once busted, the last hand it followed --
+        # the hand number, its settled digest and stacks or None for a void,
+        # the seats dealt into it, and the seats that have reported that
+        # same settlement, this one included -- and the reports peers sent
+        # for the CURRENT hand before it ended here, by seat.
         self._ended_hand: int | None = None
         self._ended_digest: str | None = None
+        self._ended_stacks: tuple | None = None
         self._ended_seats: frozenset = frozenset()
         self._ended_agreed: set[int] = set()
-        self._early_settled: dict[int, list[str]] = {}
+        self._early_settled: dict[int, list[tuple]] = {}
         # Seats the host reported dropped while it could not judge whether
         # the table still needed them (a busted host); see _on_peer_lost.
         self._reported_lost: set[int] = set()
@@ -672,11 +673,11 @@ class Session:
         self._drop_stacks: list | None = None
         # A busted seat's view of the hands played on without it: the last
         # hand every seat still playing reported settling alike, with its
-        # stacks; the later reports, by hand and then seat; and each seat's
-        # latest session_end claim, which a seat still playing keeps too.
-        # See _follow_settled and _finish_followed.
+        # stacks; the later reports, None for a void, by hand and then seat;
+        # and each seat's latest session_end claim, which a seat still
+        # playing keeps too. See _follow_settled and _finish_followed.
         self._followed: tuple[int, list] | None = None
-        self._follow_reports: dict[int, dict[int, list[tuple]]] = {}
+        self._follow_reports: dict[int, dict[int, list]] = {}
         self._end_claims: dict[int, tuple] = {}
         # on_state_changed() -- fired after any hand progress, so an async UI
         # can re-render from the local replica on its own thread.
@@ -727,18 +728,19 @@ class Session:
         if self.terminal_state is not None and not (
                 (self._ended_on_report and msg.get("type") == "peer_lost")
                 or (self.terminal_state == self.ENDED_NORMAL
-                    and msg.get("type") == "hand_settled")):
+                    and msg.get("type") in ("hand_settled", "session_end"))):
             # A terminated session accepts no further protocol mutation.
             # Messages already in flight when the session ended arrive here
             # and must be inert rather than reviving a hand nobody is
             # playing any more. Except a confirmation of the drop a busted
             # host reported: the busted host still relays each one, and
             # every game compares it with its own, moving no chips (see
-            # _on_peer_lost). And a settlement report once the match has
-            # ended normally: a busted seat ends only once it has every one
-            # it follows the table by (see _follow_settled), so a host
-            # still relays any that reach it late. No game that has ended
-            # applies one.
+            # _on_peer_lost). And a settlement report or session_end once
+            # the match has ended normally: a busted seat ends only once it
+            # has every report it follows the table by and a session_end
+            # naming where they lead (see _follow_settled), so a host still
+            # relays any that reach it late. No game that has ended applies
+            # one.
             _log.debug("session: dropping %s from %s — session is %s",
                        msg.get("type"), conn_id, self.terminal_state)
             return
@@ -1921,13 +1923,21 @@ class Session:
         the payout forward, and no later hand could agree. Checked before
         the hand-scope filter, because the void may arrive after this peer
         has already dealt the next hand. As with hand_settled, only a seat
-        dealt into that hand can disagree about it.
+        dealt into that hand can disagree about it. A busted seat holds the
+        last hand it followed the same way, and takes a void of a later hand
+        as the voiding seat's report of it (see _follow_settled), so a void
+        that ends the table for the seats still playing ends it there too.
         """
         hand = msg.get("hand", self._hand_no)
         if (self._ended_digest is not None and hand == self._ended_hand
                 and not isinstance(hand, bool) and _is_seat(msg.get("seat"))):
             if msg["seat"] in self._ended_seats:
                 self._settlement_disagrees(msg["seat"], hand, None)
+            return
+        if self._eliminated():
+            # Not a hand this seat plays, but an account of one it follows.
+            if _is_seat(msg.get("seat")) and _is_seat(hand):
+                self._follow_settled(msg["seat"], hand, None)
             return
         if not self._hand_msg_ok(conn_id, msg):
             return
@@ -1974,6 +1984,8 @@ class Session:
         pass: that settlement left at least two seats with chips, which is
         how it busted while others play on.
         """
+        if self.terminal_state is not None:
+            return                       # relayed only; see handle_message
         # Authorized at ingress; see _admit_hostless. The seat is checked for
         # shape only, and NOT coerced -- ingress declines to authorize a
         # non-integer seat, so int("1") here would apply one it refused.
@@ -2016,26 +2028,38 @@ class Session:
     #: seat still playing could make it keep one for every hand number.
     _FOLLOW_AHEAD = 64
 
-    def _follow_settled(self, seat: int, hand: int, digest: str,
-                        stacks) -> None:
+    def _follow_settled(self, seat: int, hand: int,
+                        report: Optional[tuple]) -> None:
         """Follow, on a busted seat, a hand the table played without it.
 
         It moves on to a later hand's stacks only once every seat that had
         chips after the last hand it followed -- the seats the next hand
         deals -- has reported settling the hand with the same digest and
         stacks, so no one seat can move it, and only if those add up to the
-        same chips and give none to a seat that had none. A false or
-        premature report holds this seat back, as withholding one would,
-        and moves nothing. A void sends no report and is redealt to the
-        same seats, so hand numbers may skip. Once one seat holds every
-        chip there is nothing further to follow.
+        same chips and give none to a seat that had none. A premature report
+        holds this seat back, as withholding one would, and moves nothing.
+        A void (``report`` None, from hand_void) is redealt to the same
+        seats as the next hand number, so hand numbers may skip; only the
+        seat that voided first says so. Once one seat holds every chip there
+        is nothing further to follow.
 
         Reports are kept by hand and seat until this seat has followed past
         that hand. Delivery may reorder them, so a seat's report of one hand
         must not replace its report of another, and the report of a hand in
         which a seat busted is needed before the hands dealt without it.
-        Nor may a later report replace a seat's first. Once all are in, any
-        that differ end the table in dispute, as for the seats still playing.
+        Nor may a later report replace a seat's first. Two that differ end
+        the table in dispute, as for the seats still playing: at once for
+        the hand after the one it followed last, whose seats are exactly
+        these, so a seat that voided it while another settled it cannot
+        leave this seat waiting on the seats that voided it without a word;
+        for a later hand only once all are in, since a seat that busts
+        before it is no part of it.
+
+        The hand it followed last is then held as a hand this seat ended
+        (see _ended_hand), so a seat that takes it back -- a different
+        report or a void -- ends the table here as it does for the seats
+        still playing, until they have all settled the next one and stopped
+        listening for that.
         """
         if self._followed is None:
             r = self._replica
@@ -2045,33 +2069,38 @@ class Session:
         last, known = self._followed
         playing = [s for s, chips in enumerate(known) if chips > 0]
         if (len(playing) < 2 or seat not in playing
-                or not last < hand <= last + self._FOLLOW_AHEAD
-                or not isinstance(stacks, list) or len(stacks) != len(known)
-                or not all(_is_seat(v) and v >= 0 for v in stacks)):
+                or not last < hand <= last + self._FOLLOW_AHEAD):
             return
         reports = self._follow_reports
-        report = (digest, tuple(stacks))
         kept = reports.setdefault(hand, {}).setdefault(seat, [])
         if report not in kept and len(kept) < 2:
             kept.append(report)          # the first, and any contradiction
+        agreed = None
         for h in sorted(reports):
-            if len(playing) < 2 or any(s not in reports[h] for s in playing):
-                continue
-            got = {r for s in playing for r in reports[h][s]}
-            if len(got) != 1:
+            if len(playing) < 2:
+                break
+            got = {r for s in playing for r in reports[h].get(s, ())}
+            complete = all(s in reports[h] for s in playing)
+            if len(got) > 1 and (complete or h == last + 1):
                 self.terminate(self.ABORTED_PROTOCOL, f"table state disagrees "
                                f"on hand {h}: its reports differ; disputed: "
                                f"this game keeps its own result")
                 return
-            settled = list(got.pop()[1])
-            if sum(settled) != sum(known) or any(
+            if not complete or None in got:
+                continue
+            digest, settled = got.pop()
+            if settled is None or sum(settled) != sum(known) or any(
                     settled[s] for s, chips in enumerate(known) if chips == 0):
                 continue
-            last, known = h, settled
+            agreed = (h, digest, settled, frozenset(playing))
+            last, known = h, list(settled)
             playing = [s for s, chips in enumerate(known) if chips > 0]
-        if last == self._followed[0]:
+        if agreed is None:
             return
         self._followed = (last, known)
+        (self._ended_hand, self._ended_digest, self._ended_stacks,
+         self._ended_seats) = agreed
+        self._ended_agreed = set(self._ended_seats)
         for h in [h for h in reports if h <= last]:
             del reports[h]
         self._finish_followed()
@@ -2090,13 +2119,36 @@ class Session:
                 and reached in self._end_claims.values()):
             self._finish_session(reached[1], announce=False)
 
+    def _settled_report(self, digest: str, stacks) -> tuple:
+        """A hand_settled report as it is compared: (digest, stacks), the
+        stacks a tuple of one chip count per seat, or None if they are not.
+
+        Both halves, by every game. The digest covers the stacks, but
+        nothing in the message ties the two, and a busted seat follows the
+        table by the stacks (see _follow_settled). A seat that signed the
+        shared digest beside false stacks used to pass where the hand was
+        played and end the table only where it was followed.
+        """
+        if (isinstance(stacks, list) and len(stacks) == len(self._seat_order)
+                and all(_is_seat(v) and v >= 0 for v in stacks)):
+            return digest, tuple(stacks)
+        return digest, None
+
+    def _ended_report(self) -> Optional[tuple]:
+        """The report matching how this game ended _ended_hand: None for a
+        void."""
+        if self._ended_digest is None:
+            return None
+        return self._ended_digest, self._ended_stacks
+
     def _on_hand_settled(self, conn_id: str, msg: dict) -> None:
-        """Hold a seat's settlement digest against this replica's own.
+        """Hold a seat's settlement report against this replica's own.
 
         Every seat broadcasts hand_settled {hand, digest, stacks} when its
         replica settles a hand. The digest covers stacks, positions and the
         result -- everything the next hand is dealt from -- so equal digests
-        mean the table agrees. Nothing compared them before: a divergence
+        mean the table agrees, and the stacks must be the ones it covers
+        (see _settled_report). Nothing compared them before: a divergence
         showed up only as a desync in the next hand, whose void redealt from
         each peer's own carry-in and diverged again, forever.
 
@@ -2128,46 +2180,52 @@ class Session:
             return
         if not isinstance(hand, int) or isinstance(hand, bool):
             return
+        report = self._settled_report(digest, msg.get("stacks"))
         if hand == self._ended_hand:
             if seat not in self._ended_seats:
                 return
-            if digest != self._ended_digest:
-                self._settlement_disagrees(seat, hand, digest)
+            if report != self._ended_report():
+                self._settlement_disagrees(seat, hand, report)
             elif seat not in self._ended_agreed:
                 self._ended_agreed.add(seat)
                 self._finish_followed()
                 self._notify_state_changed()
             return
         if self._eliminated():
-            self._follow_settled(seat, hand, digest, msg.get("stacks"))
+            self._follow_settled(seat, hand, report)
             return
         if not self._hand_msg_ok(conn_id, msg):
             return                       # a later hand buffers; older drops
         if self._replica is not None and seat in self._replica.seats_dealt:
             kept = self._early_settled.setdefault(seat, [])
-            if digest not in kept and len(kept) < 2:
-                kept.append(digest)      # the first, and any contradiction
+            if report not in kept and len(kept) < 2:
+                kept.append(report)      # the first, and any contradiction
 
     def _hand_ended(self, digest: Optional[str]) -> None:
         """Record how this replica ended the current hand -- its settled
-        digest, or None for a void -- and hold it to every hand_settled that
-        arrived first. A peer that settled a hand this replica voided
-        disagrees just as much as one that settled it differently."""
+        digest and stacks, or None for a void -- and hold it to every
+        hand_settled that arrived first. A peer that settled a hand this
+        replica voided disagrees just as much as one that settled it
+        differently."""
+        r = self._replica
         self._ended_hand = self._hand_no
         self._ended_digest = digest
-        self._ended_seats = (frozenset(self._replica.seats_dealt)
-                             if self._replica is not None else frozenset())
+        self._ended_stacks = (tuple(r.stacks)
+                              if digest is not None and r is not None else None)
+        self._ended_seats = (frozenset(r.seats_dealt)
+                             if r is not None else frozenset())
         self._ended_agreed = {self.local_seat} if digest is not None else set()
+        own = self._ended_report()
         early, self._early_settled = self._early_settled, {}
         for seat in sorted(early):
-            if early[seat] != [digest]:
-                theirs = next(d for d in early[seat] if d != digest)
+            if early[seat] != [own]:
+                theirs = next(d for d in early[seat] if d != own)
                 self._settlement_disagrees(seat, self._hand_no, theirs)
                 return
             self._ended_agreed.add(seat)
 
     def _settlement_disagrees(self, seat: int, hand: int,
-                              theirs: Optional[str]) -> None:
+                              theirs: Optional[tuple]) -> None:
         """Two seats ended the same hand differently: end the table.
 
         A void is no remedy. It redeals from each peer's own carry-in, so
@@ -2182,15 +2240,30 @@ class Session:
         reports it. Rolling back to the stacks the hand was dealt from let a
         seat that lost the hand undo it by lying in its first report. The
         reason also says when the seat had already reported this peer's
-        settlement, so is contradicting itself rather than this peer.
+        settlement, so is contradicting itself rather than this peer, and
+        gives both sides' stacks when only those differ. A busted seat says
+        it followed the hand it holds rather than settled it.
         """
         retracted = seat in self._ended_agreed
-        def ended(d):
-            return "voided it" if d is None else f"settled it as {d[:16]}"
+        mine = self._ended_report()
+        same_digest = (theirs is not None and mine is not None
+                       and theirs[0] == mine[0])
+
+        def ended(report, verb="settled"):
+            if report is None:
+                return "voided it"
+            digest, stacks = report
+            if not same_digest:
+                return f"{verb} it as {digest[:16]}"
+            return (f"{verb} it as {digest[:16]} with stacks "
+                    + (str(list(stacks)) if stacks is not None
+                       else "missing"))
+        verb = ("followed" if self._eliminated() and hand != self._hand_no
+                else "settled")
         self.terminate(
             self.ABORTED_PROTOCOL,
             f"table state disagrees on hand {hand}: seat {seat} "
-            f"{ended(theirs)}, this peer {ended(self._ended_digest)}"
+            f"{ended(theirs)}, this peer {ended(mine, verb)}"
             + (f", as seat {seat} itself had reported" if retracted else "")
             + "; disputed: this game keeps its own result",
             seat=seat)
@@ -2754,7 +2827,13 @@ class Session:
         return "started" if started else "session_over"
 
     def _finish_session(self, stacks: list, *, announce: bool) -> None:
-        """Record final stacks and optionally announce them to all spectators."""
+        """Record final stacks and optionally announce them to all spectators.
+
+        The announcement goes BEFORE any callback, as a drop notice does in
+        handle_disconnect: on_state_changed or on_session_terminated may
+        tear the transport down, and a busted seat ends on this notice or
+        not at all.
+        """
         final = [int(stack) for stack in stacks]
         alive = [i for i, stack in enumerate(final) if stack > 0]
         winner = alive[0] if len(alive) == 1 else None
@@ -2766,6 +2845,15 @@ class Session:
         self._session_winner = winner
         self._final_stacks = final
         self._p2p_spectator = self.local_seat not in alive
+        if announce and not self._session_end_announced:
+            self._session_end_announced = True
+            self._send_hostless({
+                "type": "session_end",
+                "hand": self._hand_no,
+                "seat": self.local_seat,
+                "winner": winner,
+                "stacks": final,
+            })
         self._notify_state_changed()
         # A completed match permanently ends the session, so it goes through
         # the one terminal mechanism. terminate() clears the message buffer,
@@ -2776,15 +2864,6 @@ class Session:
             if winner is not None else "match complete",
             event={"hand": self._hand_no, "reason": "session_complete",
                    "winner": winner})
-        if announce and not self._session_end_announced:
-            self._session_end_announced = True
-            self._send_hostless({
-                "type": "session_end",
-                "hand": self._hand_no,
-                "seat": self.local_seat,
-                "winner": winner,
-                "stacks": final,
-            })
 
     @owned
     def send_bet_action(self, action: str, amount: int = 0) -> str:

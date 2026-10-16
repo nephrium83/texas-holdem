@@ -378,12 +378,13 @@ paid. Every later snapshot reports how the table ended in `terminal` (below).
   host relays even after it has ended, so the mark can reach the reason just
   after the table ends; the chips do not move.
 - **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
-  broadcasts a signed digest of the table it settled (`hand_settled`), and
-  no seat deals the next hand, or ends the match, until every seat dealt
-  into the last one has reported the same digest. The table ends with
-  the reason "table state
-  disagrees" when a seat dealt into that hand reports a different digest, or
-  voids a hand this peer settled. A void cannot cure it, because each side
+  broadcasts a signed digest of the table it settled, with the stacks it
+  covers (`hand_settled`), and no seat deals the next hand, or ends the
+  match, until every seat dealt into the last one has reported the same
+  digest and stacks. The table ends with the reason "table state
+  disagrees" when a seat dealt into that hand reports a different digest or
+  different stacks (the reason then gives both sides' stacks), or voids a
+  hand this peer settled. A void cannot cure it, because each side
   would redeal from its own stacks. Nothing at the table can say which side
   is right, so nothing is rolled back (`docs/CASUAL_P2P_RULES.md` rule 11):
   each seat keeps its own result, and the reason ends "disputed: this game
@@ -410,11 +411,22 @@ chips. Reports may arrive in any order, and each is kept by hand until the
 seat has moved past it.
 It accepts a `session_end` about a later hand only when it names the
 hand and stacks it has reached that way, and keeps one that arrives first
-until it has. A host whose own match has ended still relays these reports. A
+until it has. A host whose own match has ended still relays these reports
+and `session_end` notices, and a seat whose `next_hand` ends the match
+sends its `session_end` before its client is told the match is over, so a
+client that closes the connection at once cannot strand a busted seat. A
 notice naming the hand it busted in is ignored, because that hand left at
-least two seats with chips. A seat that withholds or falsifies its report
-cannot show a busted seat a false result; it only leaves that seat
-spectating.
+least two seats with chips. No seat can show a busted seat a false result.
+A seat that withholds its report leaves the busted seat waiting, still
+spectating. Reports that differ, a falsified one included, end the table
+for the busted seat too, and so does a `hand_void` from one seat of a
+hand another reported settled: at once for the hand right after the last
+one it followed, whose seats it knows, and for a later hand once every
+report it needs is in. It reaches `ABORTED_PROTOCOL` with "its reports
+differ" and the "disputed" mark, and keeps the stacks it busted with as
+`terminal.last_settled_stacks`. A later report or void that takes back the
+last hand it followed ends it the same way, as it ends the seats still
+playing.
 
 ### `terminal`: the session has ended
 
