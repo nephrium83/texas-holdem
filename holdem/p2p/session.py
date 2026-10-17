@@ -3019,7 +3019,6 @@ class Session:
         _log.warning("session: HAND VOIDED - %s", reason)
         self._safe_emit("hand_voided", hand=self._hand_no,
                         reason=self.void_reason, outcome=outcome)
-        self._notify_state_changed()
         if announce:
             self._send_hostless({
                 "type": "hand_void",
@@ -3027,7 +3026,12 @@ class Session:
                 "seat": self.local_seat,
                 "reason": self.void_reason,
             })
+        # Finish recording and announcing this hand before a client can
+        # start its redeal inside on_state_changed (as BotDriver does).
+        # Otherwise the new hand is announced or recorded as the void.
         self._hand_ended(None)
+        if self.terminal_state is None:
+            self._notify_state_changed()
         return True
 
     @owned

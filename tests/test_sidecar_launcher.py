@@ -106,6 +106,63 @@ def test_next_hand_advances_after_bots_have_already_auto_advanced():
     assert snapshot["hand_num"] == 2
 
 
+@pytest.mark.parametrize("void_origin", ["remote", "bot"])
+def test_a_bot_redeals_a_void_without_disputing_the_next_settlement(
+        monkeypatch, void_origin):
+    """A bot presses Next inside the void notification. An honest faster
+    peer's report of the redeal must still wait for the bot's own audit,
+    rather than treating that new hand as the hand the bot voided.
+    """
+    bus, sessions, order = _make_sessions(3)
+    _deal_first_hand(sessions, order, bus, sb=5, bb=10, stack=500,
+                     structure="No-Limit")
+    human, bot, other = (sessions[cid] for cid in order)
+    monkeypatch.setattr(Brain, "decide", lambda self, engine, seat:
+                        ("call", 0))
+    BotDriver({order[1]: bot}, random.Random(0))
+    settled = []
+    bot.on_hand_settled = settled.append
+
+    # The bot receives the host's ordinary hand_void, or detects the void
+    # itself. Its shipped state callback starts hand 2 before this returns.
+    origin = human if void_origin == "remote" else bot
+    origin._void_hand("recoverable deal failure")
+    bus.drain()
+    assert bot._hand_no == 2
+    assert human.hand_voided and other.hand_voided
+    assert human.next_p2p_hand() == "started"
+    assert other.next_p2p_hand() == "started"
+    bus.drain()
+
+    # Delivery can leave one honest seat waiting for audit openings while
+    # another has settled and sent its report. Delay only those openings.
+    held, deliver = [], bot.handle_message
+
+    def delay_audit(conn_id, message):
+        if message.get("type") == "audit_open":
+            held.append((conn_id, message))
+        else:
+            deliver(conn_id, message)
+    monkeypatch.setattr(bot, "handle_message", delay_audit)
+    while human.replica.phase == "betting":
+        actor = human.replica.actor
+        assert sessions[order[actor]].send_bet_action("call") == "applied"
+        bus.drain()
+
+    assert held and bot.hand_result is None
+    assert human.hand_result is not None and other.hand_result is not None
+    assert all(session.terminal_state is None for session in sessions.values())
+
+    monkeypatch.setattr(bot, "handle_message", deliver)
+    for conn_id, message in held:
+        deliver(conn_id, message)
+    bus.drain()
+    assert settled == [human.hand_result]
+    assert bot.last_settled_stacks == human.replica.stacks
+    assert bot._hand_no == 3             # it can keep auto-advancing
+    assert all(session.terminal_state is None for session in sessions.values())
+
+
 def test_a_busted_human_sees_the_match_end_without_pressing_next(
         monkeypatch):
     """The human shoves its short stack, loses, and never presses Next
