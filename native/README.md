@@ -2,12 +2,14 @@
 
 The mental-poker shuffle (`docs/MULTIPLAYER.md` Phase 2) uses
 **Ristretto255** elliptic-curve operations from **libsodium**, accessed
-from Python via `holdem/p2p/ristretto.py` (ctypes).
+from Python via the explicit desktop adapter `holdem/native_crypto.py`
+(ctypes). The protocol uses the backend through `holdem/p2p/ristretto.py`.
 
 The compiled libsodium shared library is a **build artifact**, not
 source, so it is **git-ignored** (see `.gitignore`). Each machine builds
-or drops its own copy here. `holdem/p2p/ristretto.py` searches for the
-library in this order:
+or drops its own copy here. Calling `holdem.native_crypto.initialize()`
+searches for the library in this order; importing core modules or the host
+adapter itself does not load or initialize it:
 
 1. `$HOLDEM_LIBSODIUM` — explicit full path override
 2. this `native/` directory (`libsodium.dll` / `.so` / `.dylib`)
@@ -15,7 +17,7 @@ library in this order:
 4. the OS loader path (PATH / ldconfig)
 
 Put a platform-appropriate libsodium **with the Ristretto255 API
-enabled** here and the wrapper will find it. libsodium's standard build
+enabled** here and explicit host startup will find it. libsodium's standard build
 includes that API; PyNaCl's bundled copy does **not** expose it, so a
 generic `pip install pynacl` is not sufficient.
 
@@ -52,6 +54,18 @@ cd libsodium && ./configure && make -j
 
 ## Verifying
 
+An embedding desktop process initializes crypto before starting hands:
+
+```python
+from holdem.native_crypto import initialize
+initialize()
+```
+
+The sidecar and multiplayer onboarding call this before creating sessions
+or opening a listener. Solo Tk practice does not require the native library.
+Arithmetic before startup raises `CryptoNotInitialized`; it never triggers
+library discovery implicitly. See `docs/CRYPTO_STARTUP.md`.
+
 ```sh
 python -m pytest tests/test_ristretto.py -q
 ```
@@ -61,7 +75,7 @@ the rest of the suite still runs on machines without the native library.
 
 ## When a skip is not allowed
 
-Roughly twenty modules skip themselves this way, and libsodium is a
+Crypto-dependent modules skip themselves this way, and libsodium is a
 git-ignored build artifact, so its absence is invisible in the result: the
 shuffle-soundness, DLEQ, deal and audit suites vanish and the run still
 reports success. `tests/crypto_gate.py` decides whether that is allowed
@@ -99,3 +113,7 @@ The refusal surfaces as a named test failure from
 log. It is deliberately not raised from the reporting hooks themselves,
 which would replace the results of every test that ran with an
 INTERNALERROR.
+
+A present but broken library or an unexpected startup exception always fails;
+only known library absence is eligible for an optional skip. Startup is explicit
+in the test gate and each crypto-dependent harness.

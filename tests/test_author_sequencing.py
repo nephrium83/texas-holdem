@@ -41,9 +41,12 @@ from holdem.p2p.session import AUTHOR_SEQ_START, Session
 from holdem.p2p.session import _HOSTLESS_PAYLOAD_TYPES
 from holdem.p2p.timeout import FakeClock
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p import ristretto as R           # noqa: F401
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium/ristretto unavailable: {exc}",
                 allow_module_level=True)
 

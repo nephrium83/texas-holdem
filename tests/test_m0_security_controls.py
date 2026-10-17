@@ -380,7 +380,8 @@ def test_control_a_detection_only_compat_table_is_still_legal():
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
 
     assert s.prevention is False
-    s._assert_deal_preconditions()
+    with mock.patch("holdem.p2p.ristretto.require_initialized"):
+        s._assert_deal_preconditions()
 
 
 def test_control_the_real_guard_still_refuses_the_same_table():

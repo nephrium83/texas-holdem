@@ -52,8 +52,9 @@ from holdem.p2p.ristretto import Point, Scalar
 
 _DOMAIN = b"poker.bg.shuffle.v1"
 _MULTI_DOMAIN = b"poker.bg.shuffle.multi-exponentiation.v1"
-_GENERATOR = R.hash_to_group(
-    hashlib.sha512(b"poker.bg.shuffle.mask-generator.v1").digest())
+# Canonical hash-to-group encoding for the mask-generator domain below.
+_GENERATOR = Point(bytes.fromhex(
+    "e25b915920c6e0a4f782375f856b03ad63ac3da1db0a7bdbc9ae7a4495b2f63a"))
 _ZERO = Scalar(b"\x00" * 32)
 _ONE = Scalar(b"\x01" + b"\x00" * 31)
 

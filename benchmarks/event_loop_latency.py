@@ -112,6 +112,8 @@ def measure(verifications: int) -> dict:
 
 
 def main() -> None:
+    from holdem import native_crypto
+    native_crypto.initialize()
     parser = argparse.ArgumentParser()
     parser.add_argument("--verifications", type=int, nargs="+",
                         default=[1, 9, 81],

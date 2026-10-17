@@ -20,11 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.engine import Card
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p.replica_table import (
         PHASE_BETTING, PHASE_HAND_OVER, PHASE_SETTLED, PHASE_SHOWDOWN,
         PHASE_STREET_OVER, ReplicaTable)
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium unavailable: {exc}", allow_module_level=True)
 
 

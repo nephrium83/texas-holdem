@@ -159,6 +159,8 @@ def test_host_loss_notifies_local_consumers_exactly_once():
 
 
 def test_host_loss_clears_held_messages_and_blocks_mutation():
+    from crypto_gate import require_crypto
+    require_crypto()
     bus, sessions, order = make_peers(3)
     _start_playing(sessions, order)
     peer1 = sessions["peer1"]

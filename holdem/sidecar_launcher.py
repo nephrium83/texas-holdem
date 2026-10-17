@@ -34,6 +34,7 @@ import logging
 import random
 
 from holdem import client_view
+from holdem import native_crypto
 from holdem.client_server import ClientServer
 from holdem.engine import Brain
 from holdem.p2p.inmemory_transport import (
@@ -397,6 +398,7 @@ class BotDriver:
 
 async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
               port: int, seed: int | None, nickname: str) -> None:
+    native_crypto.initialize()
     bus, sessions, order = _make_sessions(seats, nickname=nickname)
     human_conn_id = order[HUMAN_SEAT]
     human_session = sessions[human_conn_id]

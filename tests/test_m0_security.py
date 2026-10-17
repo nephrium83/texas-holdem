@@ -349,7 +349,9 @@ def test_d4_bg_policy_forces_prevention_regardless_of_author_mode():
     s._adopt_deal_policy(Session.DEAL_POLICY_BG)
 
     assert s.prevention is True
-    s._assert_deal_preconditions()          # must not raise on an honest table
+    # This checks table policy; native readiness has its own cold tests.
+    with mock.patch("holdem.p2p.ristretto.require_initialized"):
+        s._assert_deal_preconditions()      # must not raise on an honest table
 
     # The disagreement the guard exists to catch: the policy says
     # Bayer-Groth, but this peer would deal without prevention. Today
@@ -373,4 +375,5 @@ def test_d4_detection_only_compat_table_remains_legal():
                 clock=_DependencyClock())
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     assert s.prevention is False
-    s._assert_deal_preconditions()          # legal in compat, must not raise
+    with mock.patch("holdem.p2p.ristretto.require_initialized"):
+        s._assert_deal_preconditions()      # legal in compat, must not raise

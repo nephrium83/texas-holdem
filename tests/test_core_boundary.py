@@ -14,10 +14,9 @@ Two checks, because each sees what the other cannot:
   process, because this one has already imported whatever the rest of the
   suite needed; an empty config folder, because a module that creates its
   file on first launch writes nothing when the file is already there.
-  Without libsodium, a crypto-backed import stops where ristretto loads it:
-  what it did up to there is still checked, and then it skips or fails
-  under the crypto-gated suites' policy (tests/crypto_gate.py). Any other
-  import error fails.
+  Native loading, path and home probes, config reads, entropy, and group
+  calculations are forbidden too. Every import completes without native
+  crypto installed or initialized.
 
 * No core module imports a host module, or tkinter, socket or asyncio,
   anywhere in its source. This is read from the source rather than
@@ -54,8 +53,6 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import crypto_gate
-
 # The core: the rules, the crypto and the protocol, which is what a host
 # imports. The two packages count as core because importing anything inside
 # them runs their __init__ first.
@@ -89,7 +86,7 @@ HOST = frozenset({
     "holdem.session_stats", "holdem.settings", "holdem.sidecar_launcher",
     "holdem.p2p.transport", "holdem.p2p.stun", "holdem.p2p.dispatch",
     "holdem.p2p.identity", "holdem.p2p.device_secret",
-    "holdem.p2p.tcp_transport",
+    "holdem.p2p.tcp_transport", "holdem.native_crypto",
 })
 
 FORBIDDEN_MODULES = ("tkinter", "socket", "asyncio")
@@ -117,7 +114,50 @@ GRAPH_ALLOWLIST = {}
 # so it sees every write the import attempts wherever it points; the empty
 # folders only catch writes that land in them.
 PROBE = r"""
-import _thread, os, sys, threading
+import _thread, ctypes, os, pathlib, random, secrets, sys, threading
+import importlib, json, traceback
+
+accesses = []
+
+def forbidden(name):
+    def stop(*args, **kwargs):
+        accesses.append(name)
+        raise RuntimeError(name + " during a cold import")
+    return stop
+
+# Import machinery needs os.stat and source reads. pathlib and home probes
+# are application choices, so they can be blocked without masking imports.
+for name in ("exists", "is_file", "is_dir", "stat", "resolve", "home"):
+    setattr(pathlib.Path, name, forbidden("probes Path." + name))
+os.path.expanduser = forbidden("probes home")
+ctypes.CDLL = forbidden("loads native library")
+ctypes.PyDLL = forbidden("loads native library")
+ctypes.cdll.LoadLibrary = forbidden("loads native library")
+os.urandom = forbidden("uses entropy")
+random._urandom = forbidden("uses entropy")
+if hasattr(os, "getrandom"):
+    os.getrandom = forbidden("uses entropy")
+original_seed = random.Random.seed
+
+def seed(instance, value=None, *args, **kwargs):
+    if value is None:
+        return forbidden("uses entropy")()
+    return original_seed(instance, value, *args, **kwargs)
+
+random.Random.seed = seed
+random.seed = lambda value=None, *args, **kwargs: seed(
+    random._inst, value, *args, **kwargs)
+
+MATH = {"random_scalar", "scalar_reduce", "scalar_add", "scalar_sub",
+        "scalar_mul", "scalar_negate", "scalar_invert", "mul", "mul_base",
+        "add", "sub", "hash_to_group", "is_valid", "mul_safe",
+        "mul_base_safe", "multiscalar_mul", "libsodium_version"}
+
+def profile(frame, event, arg):
+    if (event == "call"
+            and frame.f_globals.get("__name__") == "holdem.p2p.ristretto"
+            and frame.f_code.co_name in MATH):
+        accesses.append("calculates group operation " + frame.f_code.co_name)
 
 started = 0
 
@@ -156,6 +196,12 @@ def audit(event, args):
                    else flags & WRITE_FLAGS)
         if writing:
             writes.append(where(path))
+        elif not isinstance(path, int):
+            resolved = where(path)
+            if any(resolved == root or resolved.startswith(root + os.sep)
+                   for root in (os.environ["HOLDEM_CONFIG_DIR"],
+                                os.environ["HOLDEM_PROBE_HOME"])):
+                accesses.append("reads private config")
     elif event == "os.mkdir" and os.path.isdir(args[0]):
         pass                     # exist_ok on a folder already there
     elif event in WRITE_EVENTS:
@@ -163,62 +209,59 @@ def audit(event, args):
 
 sys.addaudithook(audit)
 
-import importlib, json, traceback
-
 failed = None
+sys.setprofile(profile)
 try:
-    importlib.import_module(sys.argv[1])
+    for module in json.loads(sys.argv[1]):
+        importlib.import_module(module)
 except BaseException as exc:         # what it did before failing still counts
-    where = traceback.extract_tb(exc.__traceback__)[-1]
+    last_frame = traceback.extract_tb(exc.__traceback__)[-1]
     failed = {"error": type(exc).__name__,
-              "raised_in": [where.filename, where.name],
+               "raised_in": [last_frame.filename, last_frame.name],
               "traceback": traceback.format_exc()}
+finally:
+    sys.setprofile(None)
 print(json.dumps({
     "writes": writes,
     "threads": started,
     "loaded": [m for m in sys.argv[2:] if m in sys.modules],
     "failed": failed,
+    "accesses": accesses,
 }))
 """
 
 
-def _fresh_import(module: str, tmp_path: Path, *path: Path) -> dict:
+def _fresh_import(module, tmp_path: Path, *path: Path) -> dict:
     """Import *module* alone in a new interpreter and report what it did."""
     config = tmp_path / "config"
     cwd = tmp_path / "cwd"
+    home = tmp_path / "home"
     config.mkdir()
     cwd.mkdir()
-    env = dict(os.environ, HOLDEM_CONFIG_DIR=str(config))
+    home.mkdir()
+    env = dict(os.environ, HOLDEM_CONFIG_DIR=str(config),
+               HOLDEM_PROBE_HOME=str(home), HOME=str(home), USERPROFILE=str(home))
     # This checkout, whether or not it is the copy pip installed.
     env["PYTHONPATH"] = os.pathsep.join(
         str(p) for p in (*path, REPO, env.get("PYTHONPATH")) if p)
     # -B: a bytecode cache would be the interpreter's write, not the module's.
+    modules = [module] if isinstance(module, str) else list(module)
+    watched = sorted((set(FORBIDDEN_MODULES) | HOST) - set(modules))
     proc = subprocess.run(
-        [sys.executable, "-B", "-c", PROBE, module, *FORBIDDEN_MODULES],
+        [sys.executable, "-B", "-c", PROBE, json.dumps(modules), *watched],
         cwd=cwd, env=env, capture_output=True, text=True, errors="replace",
         timeout=60)
     assert proc.returncode == 0, f"importing {module} crashed:\n{proc.stderr}"
     report = json.loads(proc.stdout.splitlines()[-1])
     # Whatever reached the empty folders, however it was written.
-    report["files"] = [str(p) for d in (config, cwd) for p in d.rglob("*")]
+    report["files"] = [str(p) for d in (config, cwd, home) for p in d.rglob("*")]
     return report
-
-
-def _libsodium_missing(failed: dict) -> bool:
-    """Did the import stop because ristretto's loader found no libsodium?
-
-    Only that one raise counts. Any other error, a RuntimeError with the
-    same message included, is the import going wrong.
-    """
-    file, function = failed["raised_in"]
-    return (failed["error"] == "RuntimeError"
-            and function == "_load_libsodium" and os.path.exists(file)
-            and os.path.samefile(file, _source("holdem.p2p.ristretto")))
 
 
 def _violations(report: dict, tmp_path: Path) -> Counter:
     """Each violation, as often as the import did it."""
     found = Counter(f"loads {name}" for name in report["loaded"])
+    found.update(report["accesses"])
     if report["threads"]:
         found["starts a thread"] = report["threads"]
     # Every write the hook saw counts, and a file on disk only once more if
@@ -309,22 +352,17 @@ def _check_graph(module: str, source: str) -> None:
 def _check_import(module: str, tmp_path: Path, *path: Path) -> None:
     report = _fresh_import(module, tmp_path, *path)
     found = _violations(report, tmp_path)
-    allowed = Counter(IMPORT_ALLOWLIST.get(module, {}).keys())
+    modules = [module] if isinstance(module, str) else module
+    allowed = Counter(key for name in modules
+                      for key in IMPORT_ALLOWLIST.get(name, {}))
     new = sorted(f"{v} x{found[v]}" if found[v] > 1 else v
                  for v in found - allowed)
     # Before anything about how the import ended: a module that writes and
     # then fails has still written.
     assert not new, f"importing {module} must do nothing, but it: {new}"
     failed = report["failed"]
-    if failed:
-        assert _libsodium_missing(failed), (
-            f"importing {module} failed:\n{failed['traceback']}")
-        if crypto_gate.crypto_status().available:
-            pytest.fail(f"{module} did not find the libsodium this process "
-                        f"loads:\n{failed['traceback']}")
-        # The rest of the import went unseen, and with it any allowlisted
-        # violation, so it is not passed either.
-        crypto_gate.require_crypto()       # skips, or fails where required
+    assert failed is None, (
+        f"importing {module} failed:\n{failed['traceback']}" if failed else "")
     gone = sorted(allowed - found)
     assert not gone, (f"{module} no longer does {gone}: remove them from "
                       f"IMPORT_ALLOWLIST so they cannot come back")
@@ -333,6 +371,14 @@ def _check_import(module: str, tmp_path: Path, *path: Path) -> None:
 @pytest.mark.parametrize("module", sorted(CORE))
 def test_importing_a_core_module_does_nothing(module, tmp_path):
     _check_import(module, tmp_path)
+
+
+def test_importing_all_core_modules_together_does_nothing(tmp_path):
+    _check_import(tuple(sorted(CORE)), tmp_path)
+
+
+def test_importing_native_startup_without_calling_it_is_inert(tmp_path):
+    _check_import("holdem.native_crypto", tmp_path)
 
 
 @pytest.mark.parametrize("module", sorted(CORE))
@@ -413,52 +459,38 @@ def test_control_an_allowed_write_is_allowed_once(
             _check_import("boundary_break", tmp_path, lib)
 
 
-# The real loader, failing as it does on a machine without the library.
-NO_LIBSODIUM = (
-    "import ctypes\n"
-    "def absent(name, *args, **kwargs): raise OSError(f'{name}: not here')\n"
-    "ctypes.CDLL = absent\n"
-    "import holdem.p2p.ristretto\n")
-
-
-@pytest.mark.parametrize("code, missing", [
-    (NO_LIBSODIUM, True),
-    ("def _load_libsodium():\n"
-     "    raise RuntimeError('libsodium with Ristretto255 support could not "
-     "be loaded.')\n"
-     "_load_libsodium()", False),
-], ids=["loader", "lookalike"])
-def test_control_only_the_loader_reads_as_libsodium_missing(
-        code, missing, tmp_path):
+@pytest.mark.parametrize("code, violation", [
+    ("import ctypes\nctypes.CDLL('missing')", "loads native library"),
+    ("pathlib.Path(CONFIG).exists()", "probes Path.exists"),
+    ("pathlib.Path.home()", "probes Path.home"),
+    ("os.path.expanduser('~')", "probes home"),
+    ("open(os.path.join(CONFIG, 'missing'), 'r')", "reads private config"),
+    ("os.urandom(8)", "uses entropy"),
+    ("import secrets\nsecrets.token_bytes(8)", "uses entropy"),
+    ("import random\nrandom.Random()", "uses entropy"),
+    ("import random\nrandom.seed()", "uses entropy"),
+    ("from holdem import native_crypto", "loads holdem.native_crypto"),
+    ("from holdem.p2p import ristretto as R\nR.mul_base(R.Scalar(bytes(32)))",
+     "calculates group operation mul_base"),
+], ids=["native", "exists", "path-home", "expand-home", "config-read",
+        "entropy", "secrets", "random-constructor", "random-seed", "host",
+        "group-math"])
+def test_control_cold_import_checks_see_reads_and_native_work(
+        code, violation, tmp_path):
     report = _fresh_import("boundary_break", tmp_path,
                            _break_module(tmp_path, code))
-    assert _libsodium_missing(report["failed"]) is missing
+    assert violation in _violations(report, tmp_path)
 
 
-@pytest.fixture
-def skip_allowed(monkeypatch):
-    """The machine a failed import once passed on: no libsodium, and the
-    crypto-gated suites allowed to skip. Reaching that skip fails instead,
-    so these controls are red on every machine, not only where libsodium
-    loads or is required."""
-    monkeypatch.setattr(crypto_gate, "crypto_status",
-                        lambda: crypto_gate.CryptoStatus(False, "not here"))
-    monkeypatch.setattr(crypto_gate, "require_crypto",
-                        lambda: pytest.fail("skipped instead of failing"))
-
-
-def test_control_a_write_before_libsodium_fails_still_fails(
-        tmp_path, skip_allowed):
-    """The write is the failure, not a reason to skip."""
+def test_control_a_write_before_an_import_failure_still_fails(tmp_path):
     lib = _break_module(
         tmp_path,
-        f"pathlib.Path(ELSEWHERE, 'x').write_text('')\n{NO_LIBSODIUM}")
+        "pathlib.Path(ELSEWHERE, 'x').write_text('')\nraise RuntimeError('boom')")
     with pytest.raises(AssertionError, match="writes elsewhere/x"):
         _check_import("boundary_break", tmp_path, lib)
 
 
-def test_control_any_other_import_error_fails(tmp_path, skip_allowed):
-    """It fails rather than skips."""
+def test_control_any_import_error_fails_without_a_native_exception(tmp_path):
     lib = _break_module(tmp_path, "raise RuntimeError('boom')")
     with pytest.raises(AssertionError, match="importing boundary_break failed"):
         _check_import("boundary_break", tmp_path, lib)

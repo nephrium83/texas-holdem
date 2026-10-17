@@ -40,6 +40,7 @@ its inputs by argument, so both branches are driven for real:
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -73,7 +74,7 @@ def test_crypto_is_available_wherever_it_is_required():
     """
     status = crypto_status()
     required = crypto_required()
-    if not status.available and not required:
+    if not status.available and not required and status.failure is None:
         pytest.skip(
             f"libsodium unavailable and not required in this environment "
             f"({REQUIRE_ENV} unset or 0, {CI_ENV} not set): the crypto-gated "
@@ -120,6 +121,88 @@ def test_a_status_that_loaded_but_cannot_answer_is_not_reported_absent():
         "a library that imports and then fails to answer is not 'absent'")
     assert "loaded but unusable" in st.detail
     assert "truncated library" in st.detail
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_a_broken_initializer_is_never_an_optional_absence(required):
+    failure = RuntimeError("host startup was forgotten")
+    status = CryptoStatus(False, "startup failed", failure)
+    with pytest.raises(RuntimeError, match="startup was forgotten"):
+        enforce(status, required)
+    assert "BROKEN" in header_line(status, required=required)
+    assert "SKIP" not in header_line(status, required=required)
+
+
+def test_only_the_typed_native_absence_can_report_an_optional_skip(monkeypatch):
+    def absent():
+        raise crypto_gate.NativeCryptoUnavailable("not installed")
+
+    monkeypatch.setattr(crypto_gate, "initialize_for_tests", absent)
+    monkeypatch.setattr(crypto_gate, "_status", None)
+    status = crypto_status()
+    assert not status.available
+    assert status.failure is None
+    assert "not installed" in status.detail
+    enforce(status, required=False)
+
+
+@pytest.mark.parametrize("failure", [
+    RuntimeError("host startup was forgotten"),
+    AttributeError("broken backend"),
+    ImportError("broken host import"),
+])
+def test_startup_bugs_are_reported_and_still_fail_with_crypto_excused(
+        monkeypatch, failure):
+    def broken():
+        raise failure
+
+    monkeypatch.setattr(crypto_gate, "initialize_for_tests", broken)
+    monkeypatch.setattr(crypto_gate, "_status", None)
+    monkeypatch.setenv(REQUIRE_ENV, "0")
+    status = crypto_status()
+    assert status.failure is failure
+    assert "BROKEN" in header_line(status, required=False)
+    with pytest.raises(type(failure), match=str(failure)):
+        crypto_gate.require_crypto()
+
+
+@pytest.mark.parametrize("required, exit_code", [("0", 0), ("1", 1)])
+def test_known_absence_skips_modules_but_keeps_the_named_policy_failure(
+        required, exit_code, tmp_path):
+    """Missing crypto cannot abort collection or turn required CI green."""
+    repo = Path(__file__).resolve().parents[1]
+    (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (tmp_path / "conftest.py").write_text(
+        "from holdem import native_crypto\n"
+        "def absent():\n"
+        "    raise native_crypto.NativeCryptoUnavailable('controlled absence')\n"
+        "native_crypto.initialize = absent\n", encoding="utf-8")
+    (tmp_path / "test_crypto_module.py").write_text(
+        "import pytest\n"
+        "from crypto_gate import initialize_for_tests, NativeCryptoUnavailable\n"
+        "try:\n"
+        "    initialize_for_tests()\n"
+        "except NativeCryptoUnavailable as exc:\n"
+        "    pytest.skip(str(exc), allow_module_level=True)\n"
+        "def test_needs_native():\n"
+        "    raise AssertionError('missing native test ran')\n", encoding="utf-8")
+    (tmp_path / "test_policy_evidence.py").write_text(
+        "from test_crypto_gate import "
+        "test_crypto_is_available_wherever_it_is_required\n"
+        "def test_unrelated_suite_still_runs():\n"
+        "    from pathlib import Path\n"
+        "    Path('unrelated-ran').write_text('yes')\n", encoding="utf-8")
+    env = dict(os.environ, CI="true", HOLDEM_REQUIRE_CRYPTO=required,
+               PYTHONPATH=os.pathsep.join((str(repo), str(repo / "tests"))))
+    result = subprocess.run(
+        [sys.executable, "-B", "-m", "pytest", "-q", "--tb=short"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == exit_code, result.stdout + result.stderr
+    assert (tmp_path / "unrelated-ran").read_text() == "yes"
+    assert "controlled absence" in result.stdout or exit_code == 0
+    assert "error during collection" not in result.stdout
+    if required == "1":
+        assert "test_crypto_is_available_wherever_it_is_required" in result.stdout
 
 
 def test_status_and_header_agree():

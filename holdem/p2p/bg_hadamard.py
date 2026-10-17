@@ -112,7 +112,9 @@ _VERSION = 1
 
 _ZERO = Scalar(b"\x00" * 32)
 _ONE = Scalar(b"\x01" + b"\x00" * 31)
-_NEG_ONE = R.scalar_negate(_ONE)
+# -1 in the scalar field, encoded little-endian; rederived in native tests.
+_NEG_ONE = Scalar(bytes.fromhex(
+    "ecd3f55c1a631258d69cf7a2def9de1400000000000000000000000000000010"))
 
 
 @dataclass(frozen=True)

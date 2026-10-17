@@ -20,9 +20,12 @@ from holdem.p2p.replica_table import PHASE_BETTING
 from holdem.client_server import ClientServer, PROTOCOL_VERSION
 
 import importlib
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     importlib.import_module("holdem.p2p.elgamal")   # libsodium guard
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium/ristretto unavailable: {exc}",
                 allow_module_level=True)
 

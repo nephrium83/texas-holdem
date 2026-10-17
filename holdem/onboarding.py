@@ -23,6 +23,7 @@ import threading
 log = logging.getLogger(__name__)
 
 from . import settings as cfg
+from . import native_crypto as _native_crypto
 from .p2p import invite as _invite
 from .p2p import join_auth as _join_auth
 from .p2p.invite import generate_room_code, parse_room_code
@@ -611,6 +612,13 @@ class OnboardingFlow:
         afterwards. Nothing about the credential depends on the listen
         address.
         """
+        try:
+            _native_crypto.initialize()
+        except (_native_crypto.NativeCryptoUnavailable,
+                _native_crypto.NativeCryptoInitializationError) as exc:
+            messagebox.showerror("Multiplayer unavailable", str(exc), parent=self.root)
+            return
+
         # ---- 1. the capability, before anything can connect ----
         import secrets as _secrets
         local_identity = _identity.load_or_create()
@@ -934,6 +942,13 @@ class OnboardingFlow:
                 parsed = parse_room_code(code)
             except ValueError as exc:
                 messagebox.showerror("Invalid code", str(exc), parent=win)
+                return
+
+            try:
+                _native_crypto.initialize()
+            except (_native_crypto.NativeCryptoUnavailable,
+                    _native_crypto.NativeCryptoInitializationError) as exc:
+                messagebox.showerror("Multiplayer unavailable", str(exc), parent=win)
                 return
 
             discovery_token = parsed["discovery_token"]

@@ -17,12 +17,15 @@ from holdem.engine import Card
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p import elgamal as eg
     from holdem.p2p import deal_map as dmap
     from holdem.p2p.mental_deal import derive_share
     from holdem.p2p.mental_deal_driver import label_to_card
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium/ristretto unavailable: {exc}",
                 allow_module_level=True)
 
