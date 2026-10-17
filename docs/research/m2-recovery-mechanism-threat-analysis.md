@@ -6,9 +6,12 @@
 **Supersedes the "Outstanding" section of** `docs/research/p2-suspension-reconnect.md`
 (2026-08-18, base `07f61a7`), which recorded the mechanism comparison as
 **not run**.
-**Normative output:** `docs/RECOVERY_SPEC.md`. Nothing in this note binds
-anything. Where this note and that spec disagree, the spec wins for
-implementation and this note wins for *why*.
+**Proposed output:** `docs/RECOVERY_SPEC.md`, scoped to a future recovery
+profile. Nothing in this note binds anything. Where this note and that spec
+disagree, the spec wins for a future implementation adopting that profile
+and this note wins for *why*. The approved casual P2P policy of 2026-10-04
+(PR #52, `docs/CASUAL_P2P_RULES.md`) retains precedence for casual v1; neither
+merging this research nor the recovery spec activates recovery there.
 **Revised 2026-08-26** after independent review of the first increment, which
 rejected three conclusions: that host process restart was out of reach (§7),
 that a local grace timer could drive a terminal transition (§8), and that
@@ -18,14 +21,19 @@ rejected a fourth: that total device loss could never reach a terminal state
 (§8.1). The superseded reasoning is restated in each section rather than
 deleted — the arguments were plausible, and a later reader who reconstructs
 them deserves to find out here why they fail.
+**Revised 2026-10-17** after review found that the draft v3 domain was not
+unique between separately created tables with the same keys and settings
+(F-7 below). The repair adds a session identifier derived from signed fresh
+per-seat nonces, including a durable local nonce check against host reuse.
 
 This workspace covers M2 — suspension, reconnect, and crash recovery — as
 defined by `docs/ROADMAP.md`. Candidate designs recorded here do not become a
 protocol contract silently.
 
-Method: reading the merged baseline. **No repository code was executed on the
-host that produced this note**, so every claim below is a citation to source,
-never a test result. Claims that need execution are named as such in §9.
+Original method: reading the merged baseline. The original findings are
+source analysis, not test results. Revision 4 additionally checks F-7 in a
+standalone specification model, distinct from the unimplemented recovery
+protocol. The remaining limits on execution are named in §9.
 
 ---
 
@@ -208,6 +216,38 @@ is exactly right, and this is a piece of the constructor tuple the first
 inventory pass left out. Replaying `bet_action` envelopes against a replica
 built with the wrong blinds does not fail loudly; it diverges.
 
+### 1.5 F-7 — persistent seat identity is not a unique table identity
+
+Revision 3's proposed v3 pre-image contained persistent ordered seat keys,
+policy, rules profile and timing parameters, but no per-table entropy. A new
+table with the same players and settings therefore had the same `ctx`, while
+hand numbering and receiver sequence maps started again. Its relaxed
+freshness checks accepted a retained validly signed `hand_abandon` from the
+earlier table: every context, hand and key comparison still passed. Fresh
+invite secrets did not help because neither invite field entered that domain.
+
+Merely letting the pinned host choose a random identifier would repair the
+honest path but leave a dishonest host able to choose an old identifier. The
+repair in `RECOVERY_SPEC.md` §3.2.1 derives the 32-byte `table_session_id` from
+an ordered transcript of signed fresh per-seat nonces. Every seat checks its
+own contribution against its locally generated nonce, fsynced in
+`SESSION_NONCE` before publication (§6.9). Replaying an old contribution set
+inside a freshly signed `game_start` fails that local comparison. At least
+one honest fresh contribution distinguishes the new table from the old one.
+
+The agreed identifier is fixed-width field 2 in the v3 pre-image and remains
+unchanged across all hands, reconnects and same-device restarts. Every
+`HAND_OPEN` persists it through that pre-image; a recovering peer also checks
+its durable local setup binding, never replacing it with a host-supplied
+nonce. The authenticated setup fetch (§9.2.1) also handles a crash after nonce
+publication but before `game_start` receipt: the peer fetches the transcript
+using its proposal digest and seat key, without already knowing `ctx`, checks
+its local nonce, and journals the accepted setup before normal resume. The
+host recovers the complete accepted transcript before listening. Controls
+C40-C43 cover cross-session rejection, recovery stability, dishonest-host
+reuse and that setup crash window. This changes an unmerged draft encoding;
+it neither rolls out v3 nor changes casual P2P v1's no-reconnect policy.
+
 ---
 
 ## 2. The three failure classes, separated
@@ -250,7 +290,7 @@ for, and it is the input to the mechanism comparison.
 
 | Field | Class | How, and the hazard if got wrong |
 |---|---|---|
-| `session_id` | **derivable** | from the v3 deal context. Today it is `conn_id`-dependent (**B7**), which is the whole reason reconnect fails |
+| `session_id` | **derivable** | from the v3 deal context including the agreed, recovery-stable `table_session_id` (§1.5). Today it is `conn_id`-dependent (**B7**), which is the whole reason reconnect fails |
 | `hand_no` | **must persist** | a wrong hand number is refused by `_hand_msg_ok` (`session.py:1788-1793`) — fails closed, but the peer never rejoins |
 | `seat` | **must persist** | derived today from `_seat_order.index(local_conn_id)` (`session.py:1943-1944`), which a new `conn_id` breaks outright |
 | `seats_in` | **must persist** | wrong membership changes `deal_map` and the n-of-n set |
@@ -269,7 +309,8 @@ for, and it is the input to the mechanism comparison.
 | Field | Class | How, and the hazard |
 |---|---|---|
 | `_seat_order` | **must NOT persist** — corrected, see below | seat index → **transport hop**. The 2026-08-18 note called it "seat index → identity", which was true only while `conn_id` *was* the identity. Under v3 it is a list of dead sockets |
-| `_seat_keys` | **must persist** | the immutable seat↔signing-key binding; the sole basis of exact-seat authorization (`session.py:1737-1771`). It need not be stored separately: it is field 5 of the deal-context pre-image (`RECOVERY_SPEC.md` §3.2), so the authorization bytes and the domain bytes cannot drift |
+| `_seat_keys` | **must persist** | the immutable seat↔signing-key binding; the sole basis of exact-seat authorization (`session.py:1737-1771`). It need not be stored separately: it is field 6 of the deal-context pre-image (`RECOVERY_SPEC.md` §3.2), so the authorization bytes and the domain bytes cannot drift |
+| `table_session_id`, local setup nonce binding | **must persist** | the agreed identifier is field 2 of each `HAND_OPEN` context; `SESSION_NONCE` is durable before contribution publication. New tables use fresh contributions, and recovery retains the same accepted value; spec §3.2.1, §6.9 |
 | `_table_cfg` (`names`, `sb`, `bb`, `structure`) | **must persist** | `ReplicaTable.__init__` (`replica_table.py:70-83`) takes all four, and `_begin_p2p_hand` reads them from `_table_cfg` (`session.py:2004-2007`). Memory-only today, so a restart cannot rebuild the replica at all — the betting layer's equivalent of losing `button`, though without the card-leak edge |
 | `_deal_policy` | **must persist** | write-once (`session.py:1033-1066`); without it no context can be built |
 | `local_conn_id` | **must NOT persist** | it is a per-socket UUID with no cryptographic content. Persisting it is the bug, not the fix. It is replaced, not restored |
@@ -622,11 +663,14 @@ that is deliberate: a table that is still hoping is correctly described as
 
 ## 9. What this analysis does not establish
 
-* **Nothing here was executed.** No test was run, no vector was computed, no
-  timing was measured. Every claim is a citation. The pinned pre-image digest
-  for deal-context v3 is deliberately **not** stated in the spec for this
-  reason — a hand-computed SHA-256 that nobody ran is worse than an honest
-  placeholder, because it would be committed as if it were verified.
+* **The recovery protocol has not been executed.** Revision 4's standalone
+  model checks the 208-octet encoding, cross-session replay rejection,
+  dishonest-host setup reuse, unchanged recovery identity and setup fetch
+  from a durable pending binding. It does not
+  exercise a v3 implementation, journal I/O or recovered poker hands; all
+  implementation controls remain requirements, not reported passes. The
+  spec deliberately pins no pre-image digest from that model as a runtime
+  compatibility vector.
 * **F-1 is read, not reproduced.** The corrupt-`identity.json` path is a code
   reading. It needs a control that writes a truncated file and observes a new
   public key.
@@ -658,3 +702,4 @@ that is deliberate: a table that is still hoping is correctly described as
 | F-4 | DLEQ proofs carry no session/hand binding | not a live hole; recorded so a future replay design does not create one |
 | F-5 | the invite's admission capability is memory-only, so no role can re-authenticate after a restart | in M2 scope — class 2 is unreachable without it; spec §6.7, and the sensitivity argument in §6.5 |
 | F-6 | `_table_cfg` is memory-only, so the replica cannot be rebuilt after a restart | in M2 scope — part of the constructor tuple; spec §6.8 carries it in `HAND_OPEN` |
+| F-7 | draft v3 reused the same domain for new tables with identical keys/settings, permitting old signed actions and abandonment | repaired in the future design by signed fresh per-seat contributions, a durable local nonce check, and the agreed `table_session_id`; spec §3.2.1, §6.9, §9.2.1, controls C40-C43. Model-checked; no runtime v3 implementation |

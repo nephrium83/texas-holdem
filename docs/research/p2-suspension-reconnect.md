@@ -14,6 +14,12 @@ established; the mechanism comparison is outstanding.
 > `4b5e85a`. Read that note first. This one is preserved as written, against
 > `07f61a7`: in particular its **Defects in `main`** table describes defects
 > that M0 has since closed, and its line numbers are `07f61a7`'s.
+>
+> **Scope clarification, 2026-10-17.** These are historical recovery findings
+> for a future recovery profile. The approved casual P2P policy of 2026-10-04
+> (PR #52) supersedes their drop/reconnect rulings for casual v1. The current
+> recovery proposal also corrects cross-table context reuse with signed fresh
+> per-seat nonces (`RECOVERY_SPEC.md` §3.2.1); no recovery runtime ships here.
 
 ## Headline
 

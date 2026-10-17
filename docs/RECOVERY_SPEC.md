@@ -1,18 +1,24 @@
 # Suspension, Reconnect and Crash Recovery — Contract Specification
 
-**Type:** normative contract (see `docs/COLLABORATION.md`, "Research versus
-contract"). Implementation that contradicts this document is a bug in the
-implementation.
+**Type:** proposed contract for a **future recovery profile** (see
+`docs/COLLABORATION.md`, "Research versus contract"). Its requirements apply
+only to an implementation that explicitly adopts that profile; they are not
+the current casual P2P v1 runtime contract.
 **Milestone:** M2. **Base:** `4b5e85a` (`main`, post-M0, post-M1).
 **Research input:** `docs/research/m2-recovery-mechanism-threat-analysis.md`
 and `docs/research/p2-suspension-reconnect.md`. Those are evidence; this is the
-contract. A candidate design in a research note became binding **here**, in
-this document, in a reviewed pull request — never silently.
+contract proposed here, subject to the scope below. A candidate design in a
+research note is promoted only by a deliberate, reviewed decision.
 
-**Status while PR #41 is open: proposed contract under review.** It is
-normative on merge. Nothing in this file has been executed; §12 lists the
-controls that must pass before the implementation is accepted, and §13 lists
-what remains unproven.
+**Status while PR #41 is open: proposed future contract under review.** On
+merge it specifies the future recovery profile only. Merging these documents
+does not activate recovery, change the current wire layout, schedule its
+implementation, or override the approved casual P2P profile of 2026-10-04
+(`docs/CASUAL_P2P_RULES.md`, carried by PR #52). Casual v1 has no reconnect;
+its drop settlement and host-loss rules retain precedence on casual tables.
+The recovery journal, suspension and version-3 layout below require a future
+profile adoption and implementation review. §12 lists the controls that must
+pass before that implementation is accepted; §13 lists what remains unproven.
 
 **Revision 2, 2026-08-26.** Independent review of revision 1 returned three
 blocking findings, and this document changed rather than argued: same-device
@@ -43,6 +49,18 @@ blocking findings, and both are fixed here.
    the newly authenticated `conn_id`; `_seat_keys` and every deal-context field
    are immutable (§5.2, §9.2 step 6, §9.7.2 step 5, control **C36**).
 
+**Revision 4, 2026-10-17.** Independent review found that replacing fresh
+connection IDs with persistent seat keys also removed session uniqueness.
+Two separately created tables with the same participants and settings could
+share `ctx`, letting an old signed action or `hand_abandon` pass the relaxed
+freshness rules. The proposed v3 layout now binds a 32-byte
+`table_session_id` derived from signed fresh contributions by every seat
+(§3.2.1), agreed before a hand opens and retained unchanged through recovery.
+Each seat checks its own fresh nonce, so even a dishonest pinned host cannot
+reuse an old table's domain. This repairs an unmerged draft layout, not an
+additional deployed wire-version break. The scope statement above also preserves the
+later approved casual-play policy: this remains a future recovery design.
+
 ---
 
 ## 0. Scope
@@ -52,8 +70,10 @@ including the host's own restart (§9.7); the state a peer must retain to
 resume at its exact seat; a durable recovery journal, specified to the octet;
 an authenticated exact-seat reconnect protocol; a deterministic `SUSPENDED`
 state with enumerated exits, each classified as replicated-and-evidenced or
-local-only; the deal-context version break from 2 to 3, carrying the stable
-seat identity (B7) and the M1 rules-profile binding.
+local-only; the future deal-context version break from 2 to 3, carrying the
+stable seat identity (B7), a fresh table-session identifier, and the M1
+rules-profile binding. These requirements are scoped to the future recovery
+profile, not to casual P2P v1.
 
 **Out of scope, and this document must not be read as deciding them.**
 Threshold cryptography of any kind. The M3 timeout *contract* — §3 binds
@@ -70,8 +90,8 @@ threat analysis did not show one is required, so none is made.
 |---|---|---|
 | **B1** — `MentalDeal` is fixed-membership n-of-n | **not removed.** Accepted as permanent without threshold crypto. Its consequence is specified rather than left as an undefined stall: the hand suspends with chips frozen, and ends `BLOCKED / UNRECOVERABLE` — still frozen — on a signed `hand_abandon`. n-of-n is also what makes that terminal *sound*: one irrevocable refusal proves the hand can never complete | §1, §8 |
 | **B2** — nothing persists | durable recovery journal | §6, §7 |
-| **B7** — `conn_id` in the crypto domain | stable seat identity; deal context v3 | §2, §3, §4 |
-| **B8** — envelopes expire, so stored transcripts cannot be replayed | freshness becomes type-classed, conditional on stronger anti-replay evidence being present. Envelopes are **never** re-signed | §7.5 |
+| **B7** — `conn_id` in the crypto domain | stable seat identity plus a fresh, recovery-stable `table_session_id`; deal context v3 | §2, §3, §4 |
+| **B8** — envelopes expire, so stored transcripts cannot be replayed | freshness becomes type-classed, conditional on stronger anti-replay evidence including a session-unique `ctx`. Envelopes are **never** re-signed | §3.2.1, §7.5 |
 | **B9** — honest re-sends look like equivocation | retransmission re-emits the **stored bytes**; `author_seq` is derived from the journal, so it never restarts | §7.4, §7.6 |
 
 ---
@@ -195,9 +215,9 @@ Keys are compared and encoded over all 32 bytes. No prefix comparison anywhere.
 3. `_author_owns_seat` reads only `(seat, author)`; `conn_id` participates only
    in the self-delivery shortcut (`session.py:1759-1760`) and the compat
    fallback (`session.py:1771`).
-4. Under v3 the deal context contains no `conn_id` (§3), so a new hop changes
-   no digest, hence no `session_id`, hence no `x_share`, hence no announced
-   `X`.
+4. Under v3 the deal context contains no `conn_id` (§3), and recovery retains
+   the same `table_session_id` (§3.2.1). A new hop therefore changes no digest,
+   hence no `session_id`, hence no `x_share`, hence no announced `X`.
 
 Therefore the same peer returning on a new socket produces the same
 authorization verdict and the same key share. The abort at
@@ -254,14 +274,108 @@ further version bump.
 |---|---|---|---|
 | 0 | domain label | bytes | `u32be(18)` then the 18 octets of `poker.deal.context` |
 | 1 | layout version | int | `u32be(3)` |
-| 2 | deal policy | UTF-8 | `u32be(len)` then the octets |
-| 3 | **rules profile** | UTF-8 | `u32be(22)` then the 22 octets of `poker.tda.2024.nlhe.v1` |
-| 4 | seat count | int | `u32be(n)` |
-| 5 | seat identities | — | `n` entries **in seat-index order**, each encoded per §2.2 |
-| 6 | `timeout_policy_version` | int | `u32be` |
-| 7 | `T` | milliseconds | `u64be` |
-| 8 | `Δ` (delta) | milliseconds | `u64be` |
-| 9 | `L` | milliseconds | `u64be` |
+| 2 | **`table_session_id`** | bytes | exactly 32 raw octets, fixed-width; §3.2.1 |
+| 3 | deal policy | UTF-8 | `u32be(len)` then the octets |
+| 4 | **rules profile** | UTF-8 | `u32be(22)` then the 22 octets of `poker.tda.2024.nlhe.v1` |
+| 5 | seat count | int | `u32be(n)` |
+| 6 | seat identities | — | `n` entries **in seat-index order**, each encoded per §2.2 |
+| 7 | `timeout_policy_version` | int | `u32be` |
+| 8 | `T` | milliseconds | `u64be` |
+| 9 | `Δ` (delta) | milliseconds | `u64be` |
+| 10 | `L` | milliseconds | `u64be` |
+
+### 3.2.1 A fresh session, a stable recovery
+
+`table_session_id` distinguishes independently created tables even when their
+ordered seat keys, policies and timing settings are identical. It is separate
+from `MentalDeal.session_id`: the latter remains the prefixed digest of the
+**whole** pre-image (§3.1). The identifier is public domain separation, not an
+admission capability.
+
+**A host-selected random value alone is insufficient.** A dishonest pinned
+host could select an old value and replay an old table's signed messages.
+The following agreement is mandatory in `AUTHOR_MODE_WIRE`; it requires no
+trust that the host chose a fresh value. Compat harnesses MUST supply an
+explicit 32-byte test identifier and claim no signed agreement or network
+anti-replay guarantee from it.
+
+1. **Propose.** After admission and before `game_start`, the pinned host sends
+   signed `table_session_setup` (`FRESHNESS_STRICT`) with its 32-byte
+   `host_setup_nonce` and the proposed policy, profile, ordered seat-key vector
+   and timing parameters. The host draws its setup nonce from a cryptographic
+   random source for each new table. All peers compute:
+
+   ```
+   LP(x) := u32be(len(x)) || x
+   proposal_bytes := LP(UTF8("poker.table.proposal.v1"))
+                  || host_pubkey : 32 octets
+                  || host_setup_nonce : 32 octets
+                  || fields 1, 3, 4, 5, 6, 7, 8, 9, 10 of §3.2, in that order
+   proposal_digest := SHA256(proposal_bytes)       # 32 octets
+   ```
+
+   Every field uses §3.2's exact encoding; field 2 is absent to avoid a circular
+   definition. The host key MUST equal the pinned admission key. Once a seat
+   accepts this proposal, its roster and parameters are frozen for this setup.
+2. **Contribute.** Every seat, including the host, draws its own fresh 32-byte
+   `seat_nonce` from a cryptographic random source, separately for each new
+   table. It MUST NOT reuse a prior table's nonce or derive it from a key,
+   setting, clock or socket. Before publishing it, the seat writes and fsyncs
+   its `SESSION_NONCE` record (§6.9). It then signs these exact bytes:
+
+   ```
+   contribution_preimage := LP(UTF8("poker.table.nonce.v1"))
+                          || proposal_digest : 32 octets
+                          || seat : u16be
+                          || seat_pubkey : 32 octets
+                          || seat_nonce : 32 octets
+   ```
+
+   The resulting 64-byte Ed25519 signature is a detached proof. The seat sends
+   `(seat, seat_nonce, signature)` in `table_session_nonce`
+   (`FRESHNESS_STRICT`). Retrying this same setup may resend the same proof;
+   creating a new table MUST generate a new nonce and use a new journal.
+3. **Agree.** `game_start` carries the complete setup proposal, exactly one
+   signed contribution per seat, and `table_session_id`. Every peer verifies
+   every detached signature against the proposed key for its seat and the
+   exact proposal digest. It MUST also compare its **own** contribution with
+   its locally generated, journalled nonce for this setup. An old signature,
+   even inside a newly signed `game_start`, cannot substitute for that local
+   check. Missing, duplicate, malformed or conflicting contributions refuse
+   the table before `HAND_OPEN`. In seat-index order, compute:
+
+   ```
+   table_session_id := SHA256(
+       LP(UTF8("poker.table.session.v1")) || proposal_digest : 32 octets
+       || u32be(n)
+       || for seat = 0 .. n-1:
+              seat : u16be || seat_pubkey : 32 octets || seat_nonce : 32 octets)
+   ```
+
+   The supplied identifier MUST byte-equal the computed 32 octets. All byte
+   fields in setup JSON use exact-width lowercase hexadecimal (64 characters
+   for 32 octets, 128 for a signature), decoded before comparison. There is no
+   default. No hand opens or emits a hand-scoped message before this check.
+   A host sending different transcripts produces different signed `ctx`
+   values, which ingress refuses before applying a contribution (§7.5).
+4. **Retain and recover.** Every `HAND_OPEN` contains the agreed identifier as
+   field 2 of its context pre-image, fsynced before hand traffic (§6.4). All
+   such records in one journal MUST agree byte-for-byte. Reconnect keeps that
+   value; restart recovers it and the local `SESSION_NONCE`, never generating
+   a replacement. If no `HAND_OPEN` exists yet, §9.5 permits initial entry
+   only after checking the proposal and complete contribution transcript
+   against the durable `SESSION_NONCE`. Detached proofs are re-verified as
+   signatures over the bytes above, independent of the expired transport
+   envelope that originally carried them. A corrupt, missing or unreadable
+   binding record is a refusal, not permission to adopt an old transcript.
+
+At least one honest participant's fresh, locally checked contribution makes
+a new table's domain differ from its predecessor, even under a dishonest
+host, except with negligible hash/nonce collision probability. Thus old
+`(ctx, hand, seat, author_seq)` and `(ctx, hand, seat)` authorizations cannot
+cross into the new table. **C40** checks separation, **C41** recovery stability,
+**C42** the dishonest-host reuse attempt, and **C43** the setup-fetch crash
+window.
 
 ### 3.3 The rules-profile field
 
@@ -269,7 +383,7 @@ M1 froze the identifier and its encoding (`POKER_RULES_PROFILE.md` §1.1-1.3)
 and left the placement to M2 (§1.4). This is the placement.
 
 ```
-field 3   00 00 00 16 | 70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
+field 4   00 00 00 16 | 70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
                         6e 6c 68 65 2e 76 31
 ```
 
@@ -284,8 +398,8 @@ octets. An implementation MUST NOT:
   profile MUST refuse to build a context, exactly as it already refuses with no
   adopted deal policy (`session.py:887-890`).
 
-It is bound **beside** the deal policy (field 2) and the seat order (fields
-4-5), not folded into either.
+It is bound **beside** the deal policy (field 3) and the seat order (fields
+5-6), not folded into either.
 
 ### 3.4 Timing fields
 
@@ -325,31 +439,53 @@ that agrees on `T`, `Δ` and `L` while disagreeing on `E`.
 
 ### 3.5 Worked pre-image layout
 
-A two-seat wire-mode table. Symbolic where the value is a key.
+A two-seat **encoding-only** vector. The fixed test `table_session_id` is the
+32 octets `00` through `1f`; this does not claim a valid signed setup transcript
+whose derived hash has those bytes, and is not a permitted production default.
+The setup-agreement controls use identifiers actually derived under §3.2.1.
+Symbolic where the value is a seat key.
 
 ```
 field 0  00 00 00 12  70 6f 6b 65 72 2e 64 65 61 6c 2e 63 6f 6e 74 65 78 74
 field 1  00 00 00 03
-field 2  00 00 00 0e  62 61 79 65 72 2d 67 72 6f 74 68 2d 76 31
-field 3  00 00 00 16  70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
+field 2  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+         10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+field 3  00 00 00 0e  62 61 79 65 72 2d 67 72 6f 74 68 2d 76 31
+field 4  00 00 00 16  70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
                       6e 6c 68 65 2e 76 31
-field 4  00 00 00 02
-field 5  01  00 00 00 20  <32 octets: seat 0 Ed25519 public key>
+field 5  00 00 00 02
+field 6  01  00 00 00 20  <32 octets: seat 0 Ed25519 public key>
          01  00 00 00 20  <32 octets: seat 1 Ed25519 public key>
-field 6  00 00 00 00                                    timeout_policy_version = 0
-field 7  00 00 00 00 00 00 75 30                        T = 30000 ms
-field 8  00 00 00 00 00 00 13 88                        Δ =  5000 ms
-field 9  00 00 00 00 00 00 13 88                        L =  5000 ms
+field 7  00 00 00 00                                    timeout_policy_version = 0
+field 8  00 00 00 00 00 00 75 30                        T = 30000 ms
+field 9  00 00 00 00 00 00 13 88                        Δ =  5000 ms
+field 10 00 00 00 00 00 00 13 88                        L =  5000 ms
 ```
 
-Total pre-image length for `n = 2`: **176 octets**
-(`22 + 4 + 18 + 26 + 4 + 2×37 + 4 + 24`).
+The zero-based field offsets and widths are:
 
-**No SHA-256 digest is pinned in this document.** Nothing here was executed
-(§13), and a hand-computed constant committed as though verified is worse than
-no constant. The implementation MUST add a vector test that pins the pre-image
-**bytes** for a fixed input — those are checkable by inspection against the
-table above — and separately pins the digest, generated once and committed with
+| Field | Offset | Width (octets) |
+|---|---:|---:|
+| 0 | 0 | 22 |
+| 1 | 22 | 4 |
+| 2 | 26 | 32 |
+| 3 | 58 | 18 |
+| 4 | 76 | 26 |
+| 5 | 102 | 4 |
+| 6 | 106 | 74 (`2×37`) |
+| 7 | 180 | 4 |
+| 8 | 184 | 8 |
+| 9 | 192 | 8 |
+| 10 | 200 | 8 |
+
+Total pre-image length for `n = 2`: **208 octets**
+(`22 + 4 + 32 + 18 + 26 + 4 + 2×37 + 4 + 24`).
+
+**No SHA-256 digest is pinned in this document.** The layout and replay
+predicate have been checked in a specification model (§13), not an
+implementation of v3 recovery. The future implementation MUST add a vector
+test that pins the pre-image **bytes** for a fixed input — those are checkable
+by inspection against the table above — and separately pins the digest, generated once and committed with
 the break controls of §12 proving it discriminates.
 
 ---
@@ -401,7 +537,9 @@ position.
 An implementation MUST be able to recover all of the following after a process
 restart, or MUST refuse to resume:
 
-`hand_no`; `local_seat`; `seats_in`; `button`; the **seat → key vector**
+the local `SESSION_NONCE` binding and accepted setup transcript (§6.9);
+`table_session_id`; `hand_no`;
+`local_seat`; `seats_in`; `button`; the **seat → key vector**
 (`_seat_keys`); `_deal_policy`; the rules profile; `timeout_policy_version`,
 `T`, `Δ`, `L`; the table configuration the replica is constructed from
 (`names`, `sb`, `bb`, `structure`); `_hand_stacks` and `_hand_positions` (the
@@ -409,12 +547,17 @@ pre-hand revert point); `prevention`; the outbound `author_seq` stream;
 evidence-derived `terminal_state` and `terminal_record`; and the **lobby
 record** — the invite parameters this peer needs to re-authenticate (§6.7).
 
-Everything on that list except the `author_seq` stream, the terminal record
-and the lobby record is carried by one `HAND_OPEN` record, whose canonical
-encoding is §6.8. The seat → key vector is not stored twice: it **is** the
-seat-identity field of the deal-context pre-image (§3.2, field 5), so the
+Everything on that list except the local setup binding/transcript, the `author_seq`
+stream, the terminal record and the lobby record is carried by one `HAND_OPEN`
+record, whose canonical encoding is §6.8. The seat → key vector is not stored
+twice: it **is** the
+seat-identity field of the deal-context pre-image (§3.2, field 6), so the
 bytes that authorize a resuming seat and the bytes that define the
 cryptographic domain cannot drift apart.
+
+The `table_session_id` likewise comes from field 2 of that pre-image. Every
+hand in this journal MUST use the same value; opening a later hand or
+recovering this table never mints a new identifier (§3.2.1).
 
 `prevention` MUST NOT be defaulted on recovery. A rebuilt `MentalDeal` that
 takes `mental_deal.py:201`'s `prevention: bool = False` silently stops
@@ -573,6 +716,7 @@ treated as a malformed record (§6.3), never allocated against.
 | `0x04` | `HAND_CLOSE` | the hand outcome record |
 | `0x05` | `TERMINAL` | the `TerminalRecord`, for an **evidence-derived** terminal only (§8.5) |
 | `0x06` | `LOBBY` | the lobby record of §6.7 |
+| `0x07` | `SESSION_NONCE` | the local setup binding of §6.9, fsynced before publishing the seat's contribution |
 
 An unknown `type` is malformed (§6.3), not skippable. Forward compatibility
 is the `journal_version`'s job, not a per-record guess: a reader that skipped
@@ -608,8 +752,8 @@ already acted on — including `author_seq` numbers other peers hold. The peer
 MUST refuse to resume and MUST NOT truncate.
 
 **Framing-valid but semantically malformed is also a refusal, not a
-truncation.** A record whose digest matches but whose payload violates §6.7
-or §6.8 — a bad payload version, a length that does not consume the payload
+truncation.** A record whose digest matches but whose payload violates §6.7,
+§6.8 or §6.9 — a bad payload version, a length that does not consume the payload
 exactly, a value outside its stated bounds, a `seats_in` that is not strictly
 increasing, a boolean that is neither `0x00` nor `0x01` — is corruption of
 recorded history, not an interrupted write. The peer MUST refuse to resume,
@@ -632,7 +776,10 @@ This is the button-leak control. It makes the following true by construction:
 * a peer with **no** `HAND_OPEN` for a hand has emitted nothing and leaked
   nothing, and may safely take the hand's parameters from the resume
   handshake — it is re-entering the hand from the beginning, exactly like a
-  peer that never started it.
+  peer that never started it. If it holds an earlier `HAND_OPEN` in this
+  session, its `table_session_id` is already frozen and MUST still match;
+  only a journal with no `HAND_OPEN` at all may establish it as initial entry,
+  after checking the complete transcript against its `SESSION_NONCE` (§6.9).
 
 There is no third case, so there is no state in which a returning peer must
 guess.
@@ -796,6 +943,45 @@ zeros — seat 0 is a legal button.
 
 ---
 
+### 6.9 `SESSION_NONCE`, before the seat contributes
+
+In wire mode this local record is appended and fsynced before the seat
+publishes its signed contribution (§3.2.1). It closes the crash window between
+setup and the first `HAND_OPEN`: after restart the peer can still distinguish
+its current proposal and nonce from a host's replay of an older setup.
+
+```
+session_nonce := payload_version : u32be       # 1
+              || local_seat      : u16be       # 0 <= seat < 23
+              || proposal_digest : 32 octets
+              || seat_nonce      : 32 octets
+```
+
+The payload is exactly **70 octets**. A version other than 1, a seat above
+22, or a trailing/missing octet is a refusal under §6.3. A second record with
+different bytes is malformed: one journal belongs to one table setup. The
+nonce is public and its signature is re-derivable from the existing signing
+key; neither a private key nor secret randomness is added to the journal.
+
+`game_start`, including the agreed proposal and all detached proofs, MUST be
+journalled before its parameters are applied or any `HAND_OPEN` is written.
+On recovery, the local `SESSION_NONCE` MUST match that accepted transcript,
+and the derived identifier MUST match every `HAND_OPEN` pre-image. The
+transcript's detached proofs are verified directly as setup evidence; an old
+`game_start` control envelope is not dispatched again as a live message.
+For a peer that entered through §9.2.1, the journalled, verified
+`table_session_setup_ack` supplies that same complete accepted transcript;
+the original `game_start` need not have reached it.
+If the peer crashed before receiving the complete `game_start`, the setup
+fetch of §9.2.1 supplies that transcript **before** a normal `seat_resume`
+needs its derived identifier. It is checked against this local record and
+journalled before initial entry. A wire-mode recovery missing `SESSION_NONCE`
+refuses; it MUST
+NOT accept a host-supplied nonce for its own seat. Creating a new table is a
+separate act with a new journal and freshly generated contributions.
+
+---
+
 ## 7. Retention, replay and retransmission
 
 ### 7.1 Mechanism, decided
@@ -861,6 +1047,8 @@ classes, decided in one place by message type.
 
 **`FRESHNESS_STRICT`** — unchanged ±30 s. Applies to every type that is
 neither seat-sequenced nor durable evidence: the admission handshake,
+`table_session_setup`, `table_session_nonce`, `table_session_setup_request`,
+`table_session_setup_ack`,
 `player_info`, `player_ack`, `player_list`, `game_start`, chat, the admin
 messages, and the resume handshake of §9. Each of these is sent live by a live
 peer and is meaningful only to the connection it is sent on, so a clock window
@@ -870,10 +1058,11 @@ costs them nothing.
 payload types (`session.py:106-110`). Their anti-replay evidence is strictly
 stronger than a clock window and it is signed:
 
-* `ctx` — the v3 deal-context id, which the receiver compares **byte-for-byte**
-  against its own and refuses on any difference. This is what makes replaying
-  an envelope from a *different table* impossible, and it is the property the
-  ±30 s window was standing in for;
+* `ctx` — the v3 deal-context id, including the fresh `table_session_id`
+  (§3.2.1), which the receiver compares **byte-for-byte** against its own and
+  refuses on any difference. Persistent seat keys and settings alone do not
+  distinguish tables: the fresh identifier is what prevents an envelope from
+  another session with the same players passing this comparison;
 * `hand` — a past hand is dropped and a future hand is buffered
   (`session.py:1788-1793`);
 * `(seat, author_seq, fingerprint)` — a duplicate is dropped and a second,
@@ -881,9 +1070,9 @@ stronger than a clock window and it is signed:
   (`session.py:1228-1255`).
 
 **`FRESHNESS_EVIDENCE`** — no timestamp check. Applies to exactly one type:
-`hand_abandon` (§8.6). Its anti-replay evidence is `ctx` byte-compared against
-the receiver's own, `hand` compared against the hand the receiver holds open,
-and an author that MUST byte-equal `_seat_keys[seat]`.
+`hand_abandon` (§8.6). Its anti-replay evidence is the session-unique `ctx`
+byte-compared against the receiver's own, `hand` compared against the hand the
+receiver holds open, and an author that MUST byte-equal `_seat_keys[seat]`.
 
 Three reasons it cannot take the strict window, each independently sufficient:
 
@@ -1291,12 +1480,17 @@ Reconnect reuses the immutable seat↔signing-key binding of §2 and introduces
 no new authority. It is available only for failure classes 1 and 2.
 
 For a class-2 return the peer must additionally hold the invite parameters
-(§6.7): admission is a fresh handshake, not a resumed one, and a peer that
+(§6.7) and its durable local `SESSION_NONCE` (§6.9): admission is a fresh
+handshake, not a resumed one, and a peer that
 cannot answer a challenge cannot reach step 4 whatever its seat key proves.
 A class-1 return still holds them in memory, which is why the requirement is
 invisible until a process restarts.
 
 ### 9.2 Sequence
+
+The setup fetch in **§9.2.1** is available after steps 1-3 and before step 4
+when a crash left only `SESSION_NONCE`. It establishes the accepted context
+without assuming the value the normal resume request must carry.
 
 1. **Transport reconnect.** A new `conn_id` `C'` is minted. Nothing is assumed
    from it.
@@ -1309,10 +1503,13 @@ invisible until a process restarts.
    32-byte key its invite pinned, and calls `mark_host_authenticated(C')`
    (`session.py:1315-1353`).
 4. **`seat_resume`** — new, joiner → host, signed, `FRESHNESS_STRICT`:
+   `table_session_id` (the accepted 32 octets, represented as in §3.2.1),
    `ctx` (the v3 context id), `hand`, `seat`, a 16-byte `resume_nonce`,
    `next_author_seq`, and `have` — the `(seat, author_seq)` set already held,
    as a per-seat highest-contiguous value plus explicit holes.
-5. **Authorization.** The envelope's author MUST byte-equal `_seat_keys[seat]`.
+5. **Authorization.** `table_session_id` and `ctx` MUST byte-equal the host's
+   recovered or retained values before any hop changes. The envelope's author
+   MUST byte-equal `_seat_keys[seat]`.
    Not the roster, not the connection, not the nickname — the frozen binding,
    which `handle_disconnect` never cleared. A mismatch is refused. An empty
    `_seat_keys` in wire mode is refused.
@@ -1323,8 +1520,11 @@ invisible until a process restarts.
    which is the entire purpose of B7.
 7. **`seat_resume_ack`** — host → joiner, signed, `FRESHNESS_STRICT`, echoing
    `resume_nonce` and carrying the retained absent-seat entitlement: the seat
-   index, the frozen seat→key map, `seats_in`, `button`, `hand`, `ctx` and the
-   deal policy.
+   index, the frozen seat→key map, `seats_in`, `button`, `hand`,
+   `table_session_id`, `ctx` and the deal policy. It also carries the complete
+   setup proposal and detached contribution proofs for a peer with no
+   `HAND_OPEN` yet (§6.9); a peer that had not received them at all uses
+   §9.2.1 first.
 8. **Verification before adoption.** See §9.5.
 9. **Retransmission.** Peers re-emit the journalled `OUTBOUND` envelopes the
    returning peer says it lacks, byte-for-byte (§7.6).
@@ -1353,6 +1553,40 @@ invisible until a process restarts.
   of how long the seat has been away (§8.5). A host MUST NOT expire an absent
   seat, and MUST NOT make acceptance conditional on a local clock.
 
+### 9.2.1 Setup fetch before a context-bound resume
+
+A crash after nonce publication but before receipt of `game_start` leaves a
+peer with `SESSION_NONCE`, but no agreed `table_session_id` or `ctx`. Those
+values MUST NOT be guessed, defaulted or required as inputs to this fetch.
+After full re-admission and host pinning (§9.2 steps 1-3):
+
+1. The peer sends signed `table_session_setup_request` (`FRESHNESS_STRICT`)
+   containing the pinned host key, its `local_seat`, the durable
+   `proposal_digest`, and a fresh 16-byte `request_nonce`.
+2. The host verifies the envelope's author against the frozen proposed key
+   for that seat, its own pinned key, and the retained proposal digest. A
+   mismatch is refused. This fetch asserts no hand, grants no seat, and
+   MUST NOT rebind any hop or permit a hand contribution.
+3. Signed `table_session_setup_ack` (`FRESHNESS_STRICT`) echoes the request
+   nonce and returns the **complete** setup proposal, ordered contribution
+   proofs, computed `table_session_id`, and the accepted hand parameters.
+   The requester verifies the pinned host signature and nonce, recomputes
+   the proposal digest and every detached proof, and compares its own seat
+   and nonce with `SESSION_NONCE`. It then computes the identifier and
+   context itself; any disagreement refuses without changing hand state.
+4. The verified ack is appended and fsynced before those parameters are
+   adopted or any `HAND_OPEN` is created. The peer can now issue the normal
+   `seat_resume` with its derived identifier/context (§9.2 step 4). Only
+   that normal resume's authorization may move a hop.
+
+The host retains the complete accepted `game_start` transcript, journalled
+**before** publishing it (§6.9), and restores it before listening after a
+restart. If no complete accepted transcript was ever durable, the host has
+not published `game_start` and MUST NOT invent a completed setup. It may
+continue the pending setup under the same durable nonce bindings or refuse
+the fetch while it remains incomplete. A missing, malformed or conflicting
+existing transcript is not permission to generate a replacement table ID.
+
 ### 9.3 Returning-peer seat discovery
 
 A returning peer MUST NOT rediscover its seat by indexing `_seat_order` with a
@@ -1379,15 +1613,21 @@ state, not a new authority, and it MUST NOT be writable by any message.
 On receiving `seat_resume_ack` the returning peer MUST compare every field
 against what it already holds:
 
-* if it has a `HAND_OPEN` record for `hand`, any disagreement on `ctx`,
-  `button`, `seats_in`, the seat→key map, or the deal policy is a refusal. The
+* if it has a `HAND_OPEN` record for `hand`, any disagreement on
+  `table_session_id`, `ctx`, `button`, `seats_in`, the seat→key map, or the
+  deal policy is a refusal. The
   peer stays `SUSPENDED` and records the conflict. It MUST NOT adopt the
   host's value. This is the button-leak control of §5.1 and §6.4: adopting a
   wrong `button` would make it publish decryption shares for its own hole
   cards;
 * if it has **no** `HAND_OPEN` record for `hand`, it has emitted nothing and
-  leaked nothing, and MAY adopt the parameters — it is entering the hand from
-  the beginning.
+  leaked nothing for that hand, and MAY adopt the parameters — it is entering
+  the hand from the beginning. If any earlier `HAND_OPEN` exists in this
+  session, its `table_session_id` MUST still match. Only a journal with no
+  `HAND_OPEN` at all may establish that value as initial entry, after
+  verifying the complete setup transcript against its local `SESSION_NONCE`
+  (§3.2.1, §6.9).
+  Corruption or an unsupported journal version is never absence of a record.
 
 §6.4 guarantees these are the only two cases.
 
@@ -1444,7 +1684,8 @@ it is a stranger, and §9.2 step 3 refuses it.
 |---|---|---|
 | host signing key | `identity.json` | the key every joiner's invite pins. §5.4 is what makes this dependable |
 | `master_secret` | `device_secret.py` | the host's own share input |
-| seat → key vector, `hand_no`, `button`, `seats_in`, stacks, table config | `HAND_OPEN` (§6.8) | identical to any other peer's recovery |
+| `table_session_id`, seat → key vector, `hand_no`, `button`, `seats_in`, stacks, table config | `HAND_OPEN` (§6.8) | retain the same identifier and context as every other peer; never generate a new one at restart |
+| complete accepted setup proposal and contribution transcript; local setup nonce | journalled `game_start` and `SESSION_NONCE` (§6.9) | restored before listening; answers §9.2.1 without changing the accepted identifier |
 | envelopes, `author_seq` | `OUTBOUND` / `INBOUND` records | §7.4, §7.6 |
 | `admission_secret`, `discovery_token` | `LOBBY` (§6.7) | **without these no existing invite can be honoured**, and every joiner is locked out of a table it is legitimately seated at |
 | bound listen port | `LOBBY` | the invite carries an address; a new port makes the old code unreachable |
@@ -1455,7 +1696,12 @@ it is a stranger, and §9.2 step 3 refuses it.
    any §6.3 refusal condition, and reconstructs `HAND_OPEN` state and its
    own `author_seq` position. It MUST NOT listen before this completes: a
    joiner admitted by a half-built host could be answered from state that
-   later fails to parse.
+   later fails to parse. If no `HAND_OPEN` was written yet, it restores the
+   accepted setup from the complete durable `game_start` transcript and its
+   local `SESSION_NONCE` instead (§6.9). It may then serve §9.2.1, but has no
+   opened hand to claim; before its own first hand contribution it follows
+   the initial-entry checks and durably writes `HAND_OPEN`. An incomplete
+   setup cannot be treated as an accepted one.
 2. **Terminal check.** If a `TERMINAL` record is present the session is over
    and stays over. The host MAY listen solely to answer with that record,
    and MUST NOT resume a hand.
@@ -1577,7 +1823,7 @@ against a broken implementation is a monument to a bug (standing invariant 9).
 | C2 | committed chips are not refunded on unrecoverable loss | make `BLOCKED / UNRECOVERABLE` revert to `_hand_stacks` | the same control at the terminal state |
 | C3 | seat authority comes from the frozen key | authorize `seat_resume` from the roster, or from `conn_id`, instead of `_seat_keys` | a substituted-key resume is accepted |
 | C4 | same seat, new `conn_id` resumes cleanly | restore `conn_id` into the deal-context pre-image | the returning seat derives a different `x_share` and is blamed at `mental_deal.py:438-439` |
-| C5 | the rules profile is bound | omit field 3 from the pre-image | two peers holding different profiles complete a hand |
+| C5 | the rules profile is bound | omit field 4 from the pre-image | two peers holding different profiles complete a hand |
 | C6 | the rules profile is bound **as bytes** | bind `sha256(profile)`, or bind the parsed grammar fields separately | the pinned pre-image vector of §3.5 |
 | C7 | the version break is real | leave `_DEAL_CTX_VERSION` at `2` | a v2 peer and a v3 peer share a domain |
 | C8 | `G` and `E` are derived | add `G` or `E` to the pre-image, or accept either from the wire | the pre-image vector, and a wire-field rejection control |
@@ -1612,14 +1858,23 @@ against a broken implementation is a monument to a bug (standing invariant 9).
 | C37 | abandonment is irrevocable | let a peer that emitted `hand_abandon` resume the hand — accept a `seat_resume` for it, contribute to it, or resume it after a restart from its own journalled `OUTBOUND` declaration | a replica progresses a hand it has proven cannot progress, and two replicas reach different outcomes from the same evidence |
 | C38 | permanent loss reaches the terminal | make `hand_abandon` unavailable (no path emits it), or treat it as advisory rather than terminal | a class-3 device-loss scenario in which no surviving replica ever leaves `SUSPENDED`. Paired with a positive control: destroy one peer's secrets entirely, have a survivor abandon, and assert every remaining replica records the identical `TerminalRecord` and identical stacks |
 | C39 | completion outranks abandonment | apply a `hand_abandon` immediately to a hand that is still progressing at this replica | a hand that had every contribution in hand is frozen instead of settled, and two replicas disagree about the pot |
+| C40 | independently created sessions cannot share replay authority | omit `table_session_id` from the pre-image, derive it from persistent keys/settings, or reuse the prior table's value | create two tables with identical ordered seat keys, rules, timeouts and hand number but fresh session identifiers; their `ctx` values MUST differ, and a retained validly signed sequenced message and `hand_abandon` from the first MUST both be refused at the second without action, equivocation, suspension or termination |
+| C41 | reconnect and restart retain the session identifier | generate or adopt a new `table_session_id` on reconnect, host restart, or a later hand; accept a resume value that differs from the journal | class-1 reconnect and class-2 restart (including the host) retain byte-identical `table_session_id`, context, and derived share, resume at the same seat, and can complete the hand. A conflicting resume value or cross-hand journal value refuses before hop rebinding or contribution |
+| C42 | a dishonest pinned host cannot revive an old setup | accept a supplied identifier without deriving it from all signed contributions, omit the comparison with this seat's local fresh nonce, or publish the nonce before `SESSION_NONCE` is durable | have the host replay its prior table's complete setup, contributions and identifier inside a freshly signed `game_start`; an honest seat with the same key but a new local nonce MUST refuse before `HAND_OPEN`. Paired with a crash after nonce publication but before `HAND_OPEN`: recovery verifies the same transcript against the durable nonce, while a substituted or missing record refuses |
+| C43 | a pre-`game_start` crash can fetch setup without already knowing its context | require `ctx` or `table_session_id` on `table_session_setup_request`, skip the durable own-nonce check, or move a hop during setup fetch | crash a joiner after its contribution is published but before it receives `game_start`; restart it knowing only `SESSION_NONCE`, fetch and durably verify the complete transcript, then perform normal context-bound resume. Repeat with a restarted host serving its durable transcript. An old/conflicting transcript refuses and neither fetch changes hops or emits hand contributions |
 
 ---
 
 ## 13. Known limitations
 
-* **Nothing in this document has been executed.** No test was run and no
-  digest was computed on the host that wrote it. §3.5 pins bytes, which are
-  checkable by inspection; it deliberately pins no SHA-256.
+* **Recovery is designed, not implemented or demonstrated.** Revision 4's
+  standalone specification model checks the 208-octet context layout,
+  rejection of a prior table's signed messages, the dishonest-host setup
+  reuse attempt, preservation of an accepted identifier on recovery, and
+  obtaining that identifier from a fetched transcript using only the durable
+  pending setup binding.
+  Those are model results, not executed runtime recovery or proof that the
+  §12 implementation controls pass. §3.5 deliberately pins no SHA-256.
 * **Host process restart is specified (§9.7) and unimplemented.** So is
   everything else here; it is called out because an earlier draft of this
   document carried it as *unsolvable*, which review showed was a description

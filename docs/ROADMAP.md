@@ -12,6 +12,15 @@ note, **this file wins**.
   professional rules audit, suspension/reconnect, M2 recovery-mechanism
   threat analysis
 
+**PR #41 scope update, 2026-10-17.** Its recovery milestones below describe a
+future recovery profile. They do not activate recovery or become the current
+casual P2P v1 contract when the documents merge. The approved casual profile
+of 2026-10-04 (PR #52, `docs/CASUAL_P2P_RULES.md`) retains precedence for
+casual tables, including no reconnect in v1. This preserves that decision and
+its implementation sequence; it does not put the journal chain back into the
+casual game. The older recovery decisions are historical and are scoped by
+the dated clarification below.
+
 ---
 
 ## Repository state
@@ -20,7 +29,7 @@ note, **this file wins**.
 |---|---|---|
 | origin/main | `4b5e85a` | canonical — M0 (PR #39) and M1 (PR #40) merged |
 | origin/main | `07f61a7` | superseded; the base the 2026-08-18 research notes read |
-| PR #41 — M2 suspension / reconnect | — | **open**, in progress |
+| PR #41 — M2 suspension / reconnect | — | **open**, future recovery design only; no casual v1 runtime change |
 | P2a — timeout phase ownership | `6955f4f` | **parked**, two tests red on purpose |
 | P2c — proposal applicability | `6b553a8` | **review artifact**, do not merge |
 | PR #36 — production deadline ticker | — | **closed / unmerged**, forensic only |
@@ -35,6 +44,8 @@ note, **this file wins**.
 
 Product and merge decisions belong here, dated, with their rationale.
 Superseding a decision means adding a new row, not editing an old one.
+In particular, the older phrase "normative on merge" below is narrowed by the
+2026-10-17 decision to the future recovery profile only.
 
 | Date | Decision | Rationale |
 |---|---|---|
@@ -49,13 +60,17 @@ Superseding a decision means adding a new row, not editing an old one.
 | 2026-08-26 | **Giving up is not a protocol transition, and host restart is not an exception to failure class 2.** **Amends the row below, which is still open in PR #41 and not yet normative.** Three changes to the proposed contract after independent review. (1) `SUSPENDED` → `BLOCKED / UNRECOVERABLE` now requires **authenticated evidence** — a signed `seat_lost` declaration from the affected seat's frozen key, or a peer's own proven loss — and never a local timer; a grace deadline or a user abandoning a hand is a **local stand-down** that writes no terminal record, deletes no journal, is not absorbing, and is invisible to every other replica. Elapsed local time may not gate whether a resume is accepted. (2) Same-device **host process restart** is specified (`RECOVERY_SPEC.md` §9.7) rather than carried as a limitation. (3) The journal gains a version header and a canonical, bounded `HAND_OPEN` encoding, plus a `LOBBY` record carrying the invite parameters. | The original justification for a timer-driven terminal was that the state allocates no value, so replicas that give up at different moments still hold identical chips. That proved chip agreement and not lifecycle agreement — and `BLOCKED / UNRECOVERABLE` is absorbing, so identical signed evidence could yield permanently different answers to "may this hand still be played", decided by whose timeout was shortest. A five-second Wi-Fi drop could be made permanent by one peer's private clock. Host restart was recorded as out of reach on evidence that only showed *no shipped code does it*: the host holds no authoritative game state under the hostless design, and the invite pin that forbids **migration** is exactly what permits **resumption** by the same key. What was actually missing was mundane — the admission capability and the table configuration were memory-only, so no role could re-authenticate or rebuild its replica after a restart. |
 | 2026-08-27 | **A hand ends on an irrevocable refusal to continue it, not on a claim that someone is gone.** **Amends the two rows below, both still open in PR #41 and not yet normative.** `RECOVERY_SPEC.md` revision 3 replaces the `seat_lost` declaration with **`hand_abandon`** (§8.6): a signed, context-bound, irrevocable statement by *any* seat that it will never contribute to this hand again. One valid declaration is terminal, chips frozen. `seat_lost` and the own-proven-loss rule become its self-naming case, so the mechanism count falls. Total device loss — which revision 2 left `SUSPENDED` forever, because the only peer that could sign was the peer that was gone — now reaches `BLOCKED / UNRECOVERABLE` through a **surviving** seat. Completion evidence outranks abandonment: a declaration arriving at a replica that can still finish the hand is buffered, the hand settles normally, and the session terminates at the hand boundary. A local clock may decide *when this peer offers to abandon* and may never decide the transition itself. | Revision 2 satisfied standing invariant 3 by refusing to let a timer end a hand, and paid for it with a class-3 outcome that never terminated at all — the required result and the shipped contract disagreed. The fix was to change what the evidence is *about*. No peer can verify that another peer is absent, so evidence of absence is unobtainable; every peer can verify a signature over "I will not continue", and because the deal is n-of-n and every seat still owes its audit shares until the hand is cryptographically complete, that statement **proves** the hand can never finish. It is a fact about the protocol, checkable from the signature and the membership rule, with no clock and no claim about anyone's whereabouts. It grants no power silence did not already grant: the abandoning seat's own chips freeze with everyone else's. |
 | 2026-08-26 | **M2's normative recovery contract is `docs/RECOVERY_SPEC.md`**, promoted from `docs/research/m2-recovery-mechanism-threat-analysis.md` in PR #41. It settles: a **durable recovery journal** of signed envelopes, journal-then-send, with recovery by replay rather than snapshot; the **stable seat identity** is the frozen 32-byte Ed25519 seat key, encoded with a kind tag; **deal context v3** binds the rules profile as one length-prefixed field beside the deal policy, the seat identities, `timeout_policy_version`, `T`, `Δ` and `L`, with `G` and `E` derived and never bound; envelope freshness becomes type-classed and conditional on the stronger `ctx` + `author_seq` binding being present; and `SUSPENDED` is a third state that neither settles nor unwinds, exiting only to resume, to `BLOCKED / UNRECOVERABLE`, to local shutdown, or to a void on signed evidence of misbehaviour. **Proposed until PR #41 merges; normative on merge.** | Three separate failure classes were being answered by one mechanism, and the obvious mapping — disconnect → `VOID_PEER_LOST` — reverts to the pre-hand stacks, which turns pulling the network cable into a refund primitive. Freezing value is the only outcome that refunds nobody, pays no unaudited pot, and needs no threshold cryptography. The journal is the only mechanism that reaches a process restart; peer-supplied history cannot prove completeness, because an omitted tail is indistinguishable from silence. Snapshotting `MentalDeal` was rejected: it would put a secret scalar at rest to store conclusions where a journal stores re-verifiable evidence. |
+| 2026-10-17 | **PR #41 is a future recovery-profile design, not the casual v1 runtime contract.** This supersedes the unqualified "normative on merge" scope of 2026-08-26; document merge neither activates recovery nor reverses the approved casual P2P policy of 2026-10-04 carried by PR #52. The proposed v3 layout is also corrected: `table_session_id` is derived from signed fresh per-seat nonces, each seat checks its own durable nonce, and that agreed 32-byte value survives every hand, reconnect and restart. Controls C40-C43 cover old-table replay and dishonest-host setup reuse. | Persistent seat keys solve reconnect identity but do not distinguish new tables. Identical keys/settings and restarted hand numbers made old signed messages valid in a new draft-v3 domain. Trusting the host to choose a fresh value would leave malicious-host reuse open, so at least one honest fresh contribution must determine the domain. This is a documentation and specification-model correction only; future profile adoption and implementation remain separate reviewed work. |
 
 ---
 
 ## Standing invariants
 
-These hold across every milestone. A change that violates one is wrong
-regardless of how convenient it is.
+These hold within the scope of the applicable profile. The approved casual
+P2P decision of 2026-10-04 carries its named exceptions for casual tables;
+the future recovery profile below does not revoke them. Outside a named
+profile exception, a change that violates one is wrong regardless of how
+convenient it is.
 
 1. **Non-profitability.** A player's silence, timeout, disconnect or
    eviction must never give that player a better chip outcome than
@@ -98,7 +113,7 @@ regardless of how convenient it is.
 | **B4** | P2c accepts a hostile canonical timeout at t=0, and diverges on action-vs-timeout arrival order | current timeout path is unsafe | M4 |
 | **B5** | P2c ownership regression: `@owned` sits on the pure `_expected_timeout_token`, while the mutating `_maybe_start_deadline` is unguarded | thread-safety guarantee weakened | M5 |
 | **B6** | Engine does not accumulate cumulative short all-ins for re-opening (TDA 47) | rules non-conformance | M7 |
-| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | M2 — **accepted**, and **design resolved** (`RECOVERY_SPEC.md` §2-§4): stable seat identity is the frozen 32-byte Ed25519 seat key; deal context `v2 → v3`; all eight derived contexts enumerated. Implementation pending |
+| **B7** | `conn_id` is baked into the cryptographic domain: `_deal_context_bytes` hashes seat-order conn_id strings into `_deal_session_id()`, which is the HKDF `session_id` for `derive_share` and the PoP/BG contexts | a reconnecting peer derives a **different** `x_share`, announces a conflicting `X`, and the hand aborts **blaming the honest returning seat** | Future recovery design (`RECOVERY_SPEC.md` §2-§4): the frozen 32-byte seat key gives stable authority, while the agreed `table_session_id` from signed fresh contributions distinguishes tables; deal context `v2 → v3`; all eight derived contexts enumerated. No current wire change |
 | **B8** | `wire.unpack` enforces a hard ±30 s freshness window | stored envelopes are already expired; transcript replay is impossible without re-signing, which destroys the property that made the transcript trustworthy | M2 — **design resolved** (`RECOVERY_SPEC.md` §7.5): freshness becomes type-classed, and the relaxation is conditional on the stronger signed `ctx` + `(hand, seat, author_seq)` binding being present. Envelopes are never re-signed. Implementation pending |
 | **B9** | Honest re-sends are indistinguishable from equivocation: `wire.pack` stamps a fresh `ts`, so the same logical message re-sent has a different envelope hash, which `_author_seq_ok` reads as equivocation | voids the hand blaming the honest returning seat; needs no attacker | M2 — **design resolved** (`RECOVERY_SPEC.md` §7.6): retransmission is byte-identical replay of a journalled envelope, never a re-`pack`, and `author_seq` is derived from the journal rather than a counter. Implementation pending |
 
@@ -158,7 +173,8 @@ independent second leg. The exception remains REFUTED.
   and re-based on the vendored TDA 2024 source, with every ADOPT re-checked
   against what the cited text actually forbids (Decisions, both
   2026-08-25 rows). The identifier and its encoding are frozen; the
-  **binding** is M2's and is specified in `docs/RECOVERY_SPEC.md` §3.3
+  future recovery **binding** is specified in `docs/RECOVERY_SPEC.md` §3.3;
+  current casual-profile sequencing remains governed by its later decision
 - **Depends on:** nothing — runs independently of the P2 crypto work
 - **Goal:** create `docs/POKER_RULES_PROFILE.md` pinned to
   `poker.tda.2024.nlhe.v1`, classifying every relevant rule as
@@ -184,16 +200,16 @@ independent second leg. The exception remains REFUTED.
 
 ### M2 — Suspension, reconnect, and crash recovery
 
-- **Status:** **IN PROGRESS** — PR #41, design revision 3. Threat analysis
-  (`docs/research/m2-recovery-mechanism-threat-analysis.md`) and the normative
-  contract (`docs/RECOVERY_SPEC.md`) are written and have been revised twice
-  under independent review: revision 2 answered host process restart, the
-  timer-driven terminal, and the `HAND_OPEN` encoding (Decisions, 2026-08-26);
-  revision 3 answers the class-3 terminal outcome, replacing `seat_lost` with
-  the irrevocable `hand_abandon` declaration, and settles the one reconnect
-  mutation the document had described two ways (Decisions, 2026-08-27). B1,
-  B2, B7, B8 and B9 are **resolved at design level**; no production change has
-  landed yet, and nothing in either document has been executed.
+- **Status:** **FUTURE RECOVERY DESIGN** — PR #41, revision 4. The threat
+  analysis (`docs/research/m2-recovery-mechanism-threat-analysis.md`) and
+  proposed future contract (`docs/RECOVERY_SPEC.md`) retain the earlier
+  host-restart, suspension and journal design. Revision 4 fixes cross-table
+  context reuse with signed fresh per-seat nonce agreement and its durable
+  local binding (Decisions, 2026-10-17). A standalone specification model
+  checks the 208-octet layout, replay rejection, malicious-host reuse and
+  retained recovery identity. This is no runtime v3 implementation or
+  recovered-hand result. Merging it does not restore the journal/reconnect
+  chain to casual v1 or change the approved casual profile.
 - **Depends on:** **M0** — satisfied (merged). M1 is merged, so the profile
   binding of `RECOVERY_SPEC.md` §3.3 is unblocked
 - **Goal:** define and prove exact-seat suspension and resumption. Cover
@@ -215,7 +231,8 @@ independent second leg. The exception remains REFUTED.
   in the same deliberate break, so the wire context is redesigned once.
   Design-level portions of this gate are met by
   `docs/RECOVERY_SPEC.md`; the controls are specified in its §12 and
-  **none has been run**.
+  **none has been run against a v3 implementation**. C40-C43's model checks
+  are supporting design evidence, not substitutes for those controls.
 - **Non-goals:** threshold cryptography of any kind; changing admission
   beyond what the analysis shows is required (the analysis showed none is);
   the production deadline ticker.
@@ -430,3 +447,4 @@ Not yet milestones; do not lose them.
 | — | Detection-only chain attribution needs a new message exchange; currently `bad_seat` is `None` for a corrupt deck with no bad decryptor |
 | M2-F3 | **A void refunds the seat it blamed.** `next_p2p_hand` on a voided hand reverts to the pre-hand stacks and redeals, so every `VOID_*` outcome — including `VOID_EQUIVOCATION` — returns everything the blamed seat committed. A seat that dislikes its holes can buy a mulligan for the cost of attribution, which is a standing-invariant-1 leak. Predates M2 and is **not** created or fixed by it; M2 only ensures disconnect and recovery never reach that path. Evidence: `docs/research/m2-recovery-mechanism-threat-analysis.md` §1.4 |
 | M2-F4 | DLEQ proofs carry no session or hand binding (`dleq.py:51-57` hashes only `G, X, D, C0, R1, R2`). Not a live hole — `X` is context-derived and `C0` carries per-shuffle randomness — but recorded so a future replay or caching design does not make `(X, C0)` recur |
+| M2-F7 | **Draft-v3 table domains were reusable.** Replacing connection IDs with persistent seat keys let new tables with identical keys/settings accept old signed traffic. The future design now derives `table_session_id` from signed fresh per-seat nonces and verifies this seat's durable local nonce even against a dishonest host; recovery retains that identifier. `RECOVERY_SPEC.md` §3.2.1, §6.9; C40-C43. Specification-model checked, no runtime implementation |
