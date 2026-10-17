@@ -248,6 +248,12 @@ C40-C43 cover cross-session rejection, recovery stability, dishonest-host
 reuse and that setup crash window. This changes an unmerged draft encoding;
 it neither rolls out v3 nor changes casual P2P v1's no-reconnect policy.
 
+The supporting [specification model](models/recovery_context_v3.py) is
+reproducible from the repository root with
+`python -B docs/research/models/recovery_context_v3.py`. It checks the proposed
+encoding and signed setup/replay predicates, including the pending-setup fetch
+case; it is not a recovery implementation or an executed poker-hand control.
+
 ---
 
 ## 2. The three failure classes, separated

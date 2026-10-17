@@ -1875,6 +1875,18 @@ against a broken implementation is a monument to a bug (standing invariant 9).
   pending setup binding.
   Those are model results, not executed runtime recovery or proof that the
   §12 implementation controls pass. §3.5 deliberately pins no SHA-256.
+
+  Reproduce revision 4's supporting checks from the repository root with the
+  [standalone specification model](research/models/recovery_context_v3.py),
+  using the repository's existing `cryptography` dependency:
+
+  ```sh
+  python -B docs/research/models/recovery_context_v3.py
+  ```
+
+  It checks C40-C43's design predicates and the deliberate breaks that omit
+  the session field or skip the local nonce comparison. It does not implement
+  journal I/O, transport, `MentalDeal`, or a recovered poker hand.
 * **Host process restart is specified (§9.7) and unimplemented.** So is
   everything else here; it is called out because an earlier draft of this
   document carried it as *unsolvable*, which review showed was a description
