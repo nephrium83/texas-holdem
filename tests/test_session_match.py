@@ -12,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
@@ -30,7 +31,9 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0):
     sessions = {}
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                    transport=InMemoryTransport(bus, cid))
+                    transport=InMemoryTransport(bus, cid),
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         # Stable per-seat device secrets keep the KEY ceremony reproducible.
         # The deal itself is not: shuffle_mp draws a fresh CSPRNG
         # permutation and fresh re-encryption scalars every run, as it

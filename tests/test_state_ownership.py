@@ -49,7 +49,7 @@ def _clean_transport():
 
 
 def _frame(msg_type: str, payload: dict) -> bytes:
-    body = wire.pack(msg_type, payload, signer=identity.load_or_create())
+    body = wire.pack(msg_type, payload, signer=identity.load_or_create(), clock=T.get_clock())
     return struct.pack(">I", len(body)) + body
 
 

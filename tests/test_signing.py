@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from holdem.p2p import identity, wire
+from holdem.p2p.timeout import FakeClock
 from holdem.p2p.signing import verify
 
 
@@ -34,20 +35,23 @@ _LEGACY_WIRE = (
 )
 
 
-def test_explicit_signer_preserves_every_legacy_wire_byte(monkeypatch):
-    monkeypatch.setattr(wire.time, "time", lambda: 1720000000.25)
+def test_explicit_signer_preserves_every_legacy_wire_byte():
+    clock = FakeClock(wall_start=1720000000.25)
     signer = _identity(bytes(range(32)))
     raw = wire.pack("chat", {"text": "hi \u2660", "seat": 2}, "a" * 64,
-                    signer=signer)
+                    signer=signer, clock=clock)
     assert raw == _LEGACY_WIRE
-    assert wire.unpack(raw)["payload"] == {"text": "hi \u2660", "seat": 2}
+    assert wire.unpack(raw, clock=clock)["payload"] == {"text": "hi \u2660", "seat": 2}
 
 
 def test_two_signers_in_one_process_keep_distinct_authors():
     first = _identity(bytes(range(32)))
     second = _identity(bytes(reversed(range(32))))
-    a = wire.unpack(wire.pack("chat", {"text": "one"}, signer=first))
-    b = wire.unpack(wire.pack("chat", {"text": "two"}, signer=second))
+    clock = FakeClock()
+    a = wire.unpack(wire.pack("chat", {"text": "one"}, signer=first, clock=clock),
+                    clock=clock)
+    b = wire.unpack(wire.pack("chat", {"text": "two"}, signer=second, clock=clock),
+                    clock=clock)
     assert a["pubkey"] == first.public_key_bytes().hex()
     assert b["pubkey"] == second.public_key_bytes().hex()
     assert a["pubkey"] != b["pubkey"]
@@ -61,8 +65,60 @@ def test_wire_verification_never_loads_a_local_identity(monkeypatch):
         pytest.fail("verifying a peer loaded local key material")
 
     monkeypatch.setattr(identity, "load_or_create", forbidden)
-    monkeypatch.setattr(wire.time, "time", lambda: 1720000000.25)
-    assert wire.unpack(_LEGACY_WIRE)["type"] == "chat"
+    clock = FakeClock(wall_start=1720000000.25)
+    assert wire.unpack(_LEGACY_WIRE, clock=clock)["type"] == "chat"
+
+
+def test_wire_timestamp_and_replay_window_follow_only_injected_wall_time():
+    clock = FakeClock(start=900.0, wall_start=1000.25)
+    signer = _identity(bytes(range(32)))
+    raw = wire.pack("chat", {"text": "clock"}, signer=signer, clock=clock)
+    assert wire.safe_loads(raw)["ts"] == 1000250, (
+        "wire.pack bypassed the injected wall clock")
+    assert wire.unpack(raw, clock=clock)["type"] == "chat"
+    clock.advance_wall(30.0)
+    assert clock.monotonic() == 900.0
+    assert wire.unpack(raw, clock=clock)["type"] == "chat"
+    clock.advance_wall(0.001)
+    with pytest.raises(ValueError, match="timestamp out of window"):
+        wire.unpack(raw, clock=clock)
+
+
+@pytest.mark.parametrize("offset", [-30.001, -30.0, 30.0, 30.001])
+def test_replay_window_is_symmetric_and_includes_the_exact_boundary(offset):
+    signer = _identity(bytes(range(32)))
+    raw = wire.pack("chat", {"text": "boundary"}, signer=signer,
+                    clock=FakeClock(wall_start=1000.0))
+    receiver = FakeClock(start=123.0, wall_start=1000.0 + offset)
+    if abs(offset) <= 30.0:
+        assert wire.unpack(raw, clock=receiver)["payload"]["text"] == "boundary"
+    else:
+        with pytest.raises(ValueError, match="timestamp out of window"):
+            wire.unpack(raw, clock=receiver)
+
+
+@pytest.mark.parametrize("call", [
+    lambda: wire.pack("chat", {}, signer=_identity(bytes(range(32)))),
+    lambda: wire.unpack(b"{}"),
+], ids=["pack", "unpack"])
+def test_wire_requires_an_explicit_clock(call):
+    with pytest.raises(TypeError, match="clock"):
+        call()
+
+
+def test_control_process_time_fires_the_injected_wall_clock_test(monkeypatch):
+    """Control for test_wire_timestamp_and_replay_window_follow_only_injected_wall_time."""
+    from holdem.p2p.timeout import RealClock
+
+    original = wire.pack
+
+    def process_time(action_type, payload, prev_hash="0" * 64, *, signer, clock):
+        return original(action_type, payload, prev_hash,
+                        signer=signer, clock=RealClock())
+
+    monkeypatch.setattr(wire, "pack", process_time)
+    with pytest.raises(AssertionError, match="bypassed the injected wall clock"):
+        test_wire_timestamp_and_replay_window_follow_only_injected_wall_time()
 
 
 @pytest.mark.parametrize("pubkey,signature", [

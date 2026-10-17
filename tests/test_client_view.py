@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem import client_view
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
@@ -30,11 +31,13 @@ def make_table(n, stacks=None):
     sessions = {}
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                    transport=InMemoryTransport(bus, cid))
+                    transport=InMemoryTransport(bus, cid),
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s._deal_master_secret = bytes([100 + i]) * 32   # deterministic deal
+        s._deal_master_secret = bytes([100 + i]) * 32   # stable key shares; shuffle stays random
         bus.register(cid, s)
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]
@@ -234,7 +237,9 @@ def test_lobby_snapshot_before_hand():
     bus = InMemoryBus()
     order = ["peer0", "peer1"]
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.configure_seats(list(order))
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -354,14 +359,27 @@ def _play_hand(bus, sessions, order, alive, shovers):
         bus.drain()
 
 
-def test_a_seat_busted_before_the_end_reports_the_match_final_stacks():
+def test_a_seat_busted_before_the_end_reports_the_match_final_stacks(monkeypatch):
     """The retained-replica case, played for real. A busted seat keeps the
     hand that eliminated it and drops every later hand, so when the match
     ends its replica is stale; session_end brings it the final stacks, and
     those are the last settlement its terminal reports."""
+    import random
+    from holdem.p2p import shuffle_mp
+
+    # Choose only the shuffle permutations. Real re-encryption, threshold
+    # dealing, audit and betting still run. Seed 0 makes seat 1 bust in hand
+    # 1, then seat 0 win the heads-up hand; random wins by the short seat
+    # could otherwise grow it large enough to eliminate another seat first.
+    rng = random.Random(0)
+
+    def permutation(n=52):
+        indices = list(range(n))
+        rng.shuffle(indices)
+        return indices
+
+    monkeypatch.setattr(shuffle_mp, "random_permutation", permutation)
     bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
-    # The short seat shoves and the others only call, so seat 1 is the one
-    # to bust -- in whichever hand the cards decide.
     for _ in range(40):
         _play_hand(bus, sessions, order, [0, 1, 2], shovers={1})
         verdicts = [client_view.apply_command(sessions[cid], "next_hand")
@@ -401,7 +419,9 @@ def test_a_seat_busted_before_the_end_reports_the_match_final_stacks():
 
 def _lobby_session():
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(InMemoryBus(), "peer0"))
+                transport=InMemoryTransport(InMemoryBus(), "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.configure_seats(["peer0", "peer1"])
     return s
@@ -488,7 +508,9 @@ def test_a_reason_quoting_the_host_is_cut_before_it_reaches_the_client():
     was. Session keeps that reason whole; the snapshot -- the headline the
     client shows and terminal.reason -- carries 512 characters of it."""
     s = Session(is_host=False, nickname="P1", avatar_b64="",
-                transport=InMemoryTransport(InMemoryBus(), "peer1"))
+                transport=InMemoryTransport(InMemoryBus(), "peer1"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer1"
     s._host_conn_id = "peer0"
     declared = ("Your opponent forfeited. Claim your winnings at "

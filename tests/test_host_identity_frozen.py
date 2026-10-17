@@ -25,6 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import Player, Session
 
@@ -33,7 +34,8 @@ def peer(state="PLAYING"):
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, "peer1"),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = "peer1"
     s._host_conn_id = "peer0"
     s._join_order = ["peer0", "peer1", "peer2"]

@@ -11,10 +11,12 @@ The desktop host loads its persisted identity explicitly:
 
 ```python
 from holdem.p2p import identity, wire
+from holdem.p2p.timeout import RealClock
 
 local_identity = identity.load_or_create()
-raw = wire.pack("chat", {"text": "hello"}, signer=local_identity)
-verified = wire.unpack(raw)
+clock = RealClock()
+raw = wire.pack("chat", {"text": "hello"}, signer=local_identity, clock=clock)
+verified = wire.unpack(raw, clock=clock)
 ```
 
 `load_or_create()` caches one default identity per process. Concurrent first
@@ -40,10 +42,10 @@ These entry points now require their identity inputs:
 
 | Entry point | Required input |
 | --- | --- |
-| `wire.pack(type, payload, prev_hash, *, signer)` | Signer; the existing default `prev_hash` is retained |
+| `wire.pack(type, payload, prev_hash, *, signer, clock)` | Signer and host clock; the existing default `prev_hash` is retained |
 | `invite.generate_room_code(host_pubkey, ...)` | Host's full Ed25519 public key |
 | `joiner_admission_from_invite(parsed, *, joiner_pubkey)` | Joiner's Ed25519 public key |
-| `JoinAuthenticator(..., *, signer)` | Signer matching the admission transcript's joiner key |
+| `JoinAuthenticator(..., *, signer, clock)` | Signer matching the admission transcript's joiner key, plus host clock |
 | `Session.add_local_player(conn_id, *, public_key, x25519_public_key=b"")` | Local Ed25519 key and optional X25519 public key |
 
 Desktop startup passes the same identity to admission, invite generation,
@@ -59,10 +61,10 @@ timestamps, and protocol version are unchanged. A fixed legacy envelope
 test pins the complete output bytes. Persisted key formats and poker rules
 are unchanged.
 
-The import-boundary allowlists remove the identity write exceptions and
-four core-to-identity imports. The remaining exceptions are the invite
-codec's socket helpers and Session's global transport and device-secret
-fallbacks; those belong to later slices.
+The identity slice removes the identity write exceptions and four
+core-to-identity imports. The following [session dependencies slice](SESSION_DEPENDENCIES.md)
+removes Session's transport and device-secret fallbacks and adds explicit
+clocks. The invite codec's socket helpers remain the sole exception.
 
 This change starts from `origin/main` at `f3abf49`. Draft PR #52 modifies
 Session lifecycle code but has no hunk in `add_local_player`; this slice

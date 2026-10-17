@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from holdem.p2p.timeout import FakeClock as _DependencyClock
     from holdem.p2p.session import Player, Session
     from holdem.p2p.events import EventSink
 except RuntimeError as exc:                          # pragma: no cover
@@ -70,7 +71,9 @@ class _Sink(EventSink):
 def _table(local="A"):
     """Three seats, keys bound, as a peer would hold them mid-session."""
     s = Session(is_host=False, nickname="n", avatar_b64="",
-                transport=_Spy(), sink=_Sink())
+                transport=_Spy(), sink=_Sink(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = local
     s._host_conn_id = "A"
     s._seat_order = ["A", "B", "C"]
@@ -180,7 +183,9 @@ def test_seat_with_no_bound_key_is_refused_not_trusted():
     fails before dealing rather than continuing with a dead seat.
     """
     s = Session(is_host=False, nickname="n", avatar_b64="",
-                transport=_Spy(), sink=_Sink())
+                transport=_Spy(), sink=_Sink(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "A"
     s._seat_order = ["A", "B", "C"]
     s.players["A"] = Player(conn_id="A", peer_id="", nickname="A",

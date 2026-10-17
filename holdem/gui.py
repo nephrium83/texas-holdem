@@ -1204,7 +1204,7 @@ class Holdem:
             "seat":   self._mp_local_seat,
             "action": action,
             "amount": amount,
-        }, signer=_identity.load_or_create()))
+        }, signer=_identity.load_or_create(), clock=_t.get_clock()))
         _t.broadcast(msg)
 
     def _mp_send_chat(self, text: str) -> None:
@@ -1216,7 +1216,8 @@ class Holdem:
         nickname = getattr(self, "nickname", "Player")
         msg = _json.loads(_wire.pack("chat",
                                      {"text": text, "nickname": nickname},
-                                     signer=_identity.load_or_create()))
+                                     signer=_identity.load_or_create(),
+                                     clock=_t.get_clock()))
         _t.broadcast(msg)
         if self._mp_is_host:
             self._append_chat(nickname, text)

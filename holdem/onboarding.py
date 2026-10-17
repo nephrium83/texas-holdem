@@ -28,6 +28,7 @@ from .p2p import join_auth as _join_auth
 from .p2p.invite import generate_room_code, parse_room_code
 from .p2p import admission as _admission
 from .p2p import identity as _identity
+from .p2p import device_secret as _device_secret
 from .p2p import transport as _transport
 from .p2p import wire as _wire
 from .p2p import session as _session_mod
@@ -631,6 +632,9 @@ class OnboardingFlow:
             nickname   = self.nickname,
             avatar_b64 = getattr(self, "avatar_b64", ""),
             admission  = host_admission,
+            transport  = _transport,
+            clock      = _transport.get_clock(),
+            secret_provider = _device_secret.load_or_create,
         )
         _p2p_pkg._session = sess
 
@@ -1006,6 +1010,9 @@ class OnboardingFlow:
                 nickname   = self.nickname,
                 avatar_b64 = getattr(self, "avatar_b64", ""),
                 joiner_admission = joiner_admission,
+                transport  = _transport,
+                clock      = _transport.get_clock(),
+                secret_provider = _device_secret.load_or_create,
             )
             _p2p_pkg._session = sess
             _sess_ref[0] = sess              # C-2: expose to _handle_start
@@ -1040,6 +1047,7 @@ class OnboardingFlow:
                 session=sess,
                 joiner_admission=joiner_admission,
                 signer=local_identity,
+                clock=_transport.get_clock(),
                 nickname=self.nickname,
                 avatar_b64=getattr(self, "avatar_b64", ""),
                 on_authenticated=_authenticated,
@@ -1168,7 +1176,8 @@ class OnboardingFlow:
                     import json as _json
                     ready_msg = _json.loads(
                         _wire.pack("ready", {"ready": True},
-                                   signer=local_identity))
+                                   signer=local_identity,
+                                   clock=_transport.get_clock()))
                     _transport.broadcast(ready_msg)
                     status_lbl.config(
                         text="Ready! Waiting for host to start…",

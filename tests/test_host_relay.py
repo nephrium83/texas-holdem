@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from holdem.p2p.timeout import FakeClock as _DependencyClock
     from holdem.p2p import admission as _adm_mod
     from holdem.p2p.events import EventSink
     from holdem.p2p.session import Player, Session
@@ -112,7 +113,9 @@ def _table():
     for cid in ("A", "B", "C"):
         s = Session(is_host=(cid == "A"), nickname=cid, avatar_b64="",
                     transport=StarTransport(bus, cid), sink=_Sink(),
-                    admission=host_admission if cid == "A" else None)
+                    admission=host_admission if cid == "A" else None,
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s.local_conn_id = cid
         s._host_conn_id = "A"
         s._seat_order = ["A", "B", "C"]
