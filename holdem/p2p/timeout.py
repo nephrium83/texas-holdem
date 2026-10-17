@@ -20,8 +20,10 @@ from typing import Optional, Protocol
 class Clock(Protocol):
     """Monotonic time for deadlines and records, wall time for timestamps.
 
-    Wall time is not used to apply or reject timeout proposals; that job
-    belongs to the action sequence number.
+    A local deadline decides when to report a timeout proposal. What a
+    proposal does is never the clock's to say: clocks on different machines
+    disagree, and one signed message must have the same effect on every
+    replica.
     """
 
     def monotonic(self) -> float: ...

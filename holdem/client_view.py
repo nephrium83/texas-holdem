@@ -53,6 +53,14 @@ def _phase(session, dealt: bool) -> str:
     return "betting"
 
 
+def _forfeit_seat(session) -> Optional[int]:
+    """The seat whose drop stopped this hand and forfeits it, if one did."""
+    record = session.hand_record
+    if record is None or record.outcome != session.HAND_FORFEIT:
+        return None
+    return record.blamed_seat
+
+
 def snapshot(session) -> dict:
     """Everything the local player's client needs to render right now.
 
@@ -124,6 +132,7 @@ def snapshot(session) -> dict:
         session_winner=snap["session_winner"],
         eliminated=snap["eliminated"],
         void_reason=snap["void_reason"],
+        forfeit_seat=_forfeit_seat(session),
     )
     snap["deal_progress"] = player_info.deal_progress_view(
         phase, snap["void_reason"]
@@ -162,30 +171,6 @@ def snapshot(session) -> dict:
     return _with_terminal(session, snap)
 
 
-def _last_settled_stacks(session) -> Optional[list]:
-    """Stacks after the last fully settled hand; None if no hand has begun.
-
-    A settled hand has paid out, so its replica's stacks are final. A hand
-    still in flight, or voided, never paid out: its pot is discarded, and
-    the stacks it was dealt from -- the carry-in, which is what the previous
-    settlement left -- are the last settled ones.
-    """
-    # A busted player keeps the replica of the hand that eliminated them so
-    # their client can continue rendering the table.  When the match later
-    # ends, that retained replica is no longer the latest settlement; the
-    # session_end payload's final stacks are authoritative for every peer.
-    if getattr(session, "terminal_state", None) == _ENDED_NORMAL:
-        final_stacks = getattr(session, "_final_stacks", None)
-        if final_stacks is not None:
-            return list(final_stacks)
-
-    replica = session.replica
-    if replica is not None and session.hand_result is not None:
-        return list(replica.stacks)
-    carry_in = getattr(session, "_hand_stacks", None)
-    return list(carry_in) if carry_in else None
-
-
 def _with_terminal(session, snap: dict) -> dict:
     """Attach how the session ended, and close the table if that was abnormal.
 
@@ -196,6 +181,11 @@ def _with_terminal(session, snap: dict) -> dict:
     invisible: the snapshot kept offering a hand that could never be played.
     ``turn`` now says the table is closed, gives the reason as its headline,
     and offers no decision.
+
+    The stacks shown are Session.last_settled_stacks, the one place that
+    says what the table owes its players: a forfeit, a cancelled hand, a
+    disputed settlement and a finished match each have their own figure
+    there, and a copy derived here would drift from it.
     """
     state = getattr(session, "terminal_state", None)
     if state is None:
@@ -207,7 +197,7 @@ def _with_terminal(session, snap: dict) -> dict:
     snap["terminal"] = {
         "state": state,
         "reason": reason,
-        "last_settled_stacks": _last_settled_stacks(session),
+        "last_settled_stacks": getattr(session, "last_settled_stacks", None),
     }
     if state != _ENDED_NORMAL:
         snap["turn"]["state"] = "table_closed"

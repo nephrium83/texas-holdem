@@ -132,6 +132,23 @@ def test_deal_progress_labels_make_no_cryptographic_claim():
     assert "seat 2" in voided["label"]
 
 
+def test_a_void_says_chips_are_restored_unless_a_drop_forfeits_it():
+    """A voided hand is redealt from the stacks it was dealt from. A hand
+    a player's drop stopped is not: the leaver forfeits what it put in, so
+    the headline must not say the chips came back."""
+    engine = _table()
+    voided = player_info.turn_view(engine, seat=0, phase="void",
+                                   void_reason="replica desync")
+    assert voided["state"] == "voided"
+    assert voided["headline"] == "Hand voided | chips restored"
+    stopped = player_info.turn_view(
+        engine, seat=0, phase="void", forfeit_seat=2,
+        void_reason="seat 2 (P2) dropped and forfeits hand 1")
+    assert stopped["state"] == "voided"
+    assert stopped["headline"] == "Hand stopped | P2 dropped and forfeits"
+    assert stopped["void_reason"] == "seat 2 (P2) dropped and forfeits hand 1"
+
+
 def test_eliminated_player_state_overrides_stale_hand_result():
     engine = _table()
     view = player_info.turn_view(

@@ -123,8 +123,13 @@ def turn_view(
     session_winner: int | None = None,
     eliminated: bool = False,
     void_reason: str | None = None,
+    forfeit_seat: int | None = None,
 ) -> dict:
-    """Build the complete, current turn context for one local seat."""
+    """Build the complete, current turn context for one local seat.
+
+    ``forfeit_seat`` names the seat whose drop stopped a voided hand. It
+    forfeits what it put in, so the chips are not restored.
+    """
     player = engine.players[seat]
     actor = engine.actor if engine.actor is not None else -1
     actor_name = engine.players[actor].name if 0 <= actor < len(engine.players) else ""
@@ -145,7 +150,11 @@ def turn_view(
         headline = "You are out | table still playing"
     elif phase == "void":
         state = "voided"
-        headline = "Hand voided | chips restored"
+        if forfeit_seat is not None and 0 <= forfeit_seat < len(engine.players):
+            headline = (f"Hand stopped | {engine.players[forfeit_seat].name} "
+                        f"dropped and forfeits")
+        else:
+            headline = "Hand voided | chips restored"
     elif phase == "settled":
         state = "hand_complete"
         cashout = result.get("cashout") if result else None

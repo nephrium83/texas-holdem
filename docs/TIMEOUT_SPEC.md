@@ -1,6 +1,6 @@
 # Peer Timeout Behavior — Contract Specification
 
-**Status:** Pre-implementation contract. This document is the specification.  
+**Status:** Pre-implementation contract, superseded in part (see the last section). This document is the specification.
 **Phase:** 3 — Deterministic silent-peer timeout  
 **Branch:** agent/sidecar-integration
 
@@ -276,3 +276,17 @@ The following are explicitly deferred:
 - [ ] Late messages are rejected after the timeout transition
 - [ ] 386+ tests pass; Godot sidecar integration remains green
 - [ ] Existing wire protocol snapshots remain compatible (no breaking changes)
+
+---
+
+## Superseded in part: no peer applies a timeout proposal
+
+`docs/CASUAL_P2P_RULES.md` ("Time-zero timeout proposal") closes the
+proposal path described above. A proposal's token names only the current
+wait, which any seat can copy, so a peer that applied a matching proposal let
+any seat void a hand the moment its deal began and take its blinds back. Every
+peer now refuses every `timeout_proposal`, the one that sends it included,
+until the timekeeper of that document's rule 9 exists
+(`Session._on_timeout_proposal`). Steps 3–5 of the lifecycle (validation, the
+action-vs-proposal race, idempotency) describe a peer that applied proposals;
+none does. The Phase Matrix consequences are kept for the timekeeper to apply.
