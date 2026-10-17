@@ -3,8 +3,8 @@ pytest configuration for the holdem test suite.
 
 Run header:
 
-The header states whether libsodium/Ristretto255 loaded, because the
-crypto-gated suites skip themselves at import when it did not and a bare
+The header explicitly initializes native crypto and states whether it
+loaded, because crypto-gated suites skip known native absence and a bare
 "N skipped" under ``pytest -q`` cannot tell that apart from a Godot binary
 being absent. See tests/crypto_gate.py for the policy and
 tests/test_crypto_gate.py for the test that enforces it.

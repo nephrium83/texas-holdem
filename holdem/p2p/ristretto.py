@@ -1,321 +1,193 @@
-"""Ristretto255 group operations, backed by libsodium via ctypes.
+"""Ristretto255 operations with an explicitly supplied backend.
 
-This is the cryptographic foundation for the mental-poker shuffle
-(docs/MULTIPLAYER.md Phase 2). It presents the small, safe interface the
-protocol pseudocode assumes -- ``mul``, ``add``, ``sub``,
-``random_scalar``, ``hash_to_group``, and scalar-field arithmetic -- over
-libsodium's audited Ristretto255 primitives.
-
-Why Ristretto255: it is a prime-order group built on Curve25519, so it
-has no cofactor subtleties, every 32-byte value is either a single
-canonical point or invalid (no ambiguous encodings), and libsodium
-rejects non-canonical / low-order encodings for us. That property is a
-security requirement here -- a shuffle proof that accepted a malformed
-point could let a cheater smuggle a card that is not in the deck.
-
-Points and scalars are represented as distinct subclasses of ``bytes``
-so the type checker and ``isinstance`` catch the classic footgun of
-passing a scalar where a point is expected. Both are always exactly 32
-bytes.
-
-The libsodium shared library is located at import time; see
-``_load_libsodium`` for the search order. If it cannot be found or the
-Ristretto API is not present, importing this module raises RuntimeError
-with an actionable message rather than failing later at call time.
+Importing this module does not discover, load or initialize a native library.
+An embedding host calls ``initialize(backend)`` before arithmetic. The desktop
+host supplies libsodium through ``holdem.native_crypto.initialize()``.
+Public points, scalars and deterministic constants retain their byte encoding.
 """
 from __future__ import annotations
 
-import ctypes as _C
-import os as _os
-import sys as _sys
-from pathlib import Path as _Path
-from typing import Iterable as _Iterable
+from threading import Lock
+from typing import Protocol
+
+POINT_BYTES = 32
+SCALAR_BYTES = 32
+HASH_BYTES = 64
+_WIDE_BYTES = 64
 
 
-# --------------------------------------------------------------------------
-# Library loading
-# --------------------------------------------------------------------------
-
-_LIB_BASENAMES = {
-    "win32": ["libsodium.dll", "sodium.dll"],
-    "darwin": ["libsodium.dylib", "libsodium.23.dylib"],
-    "linux": ["libsodium.so", "libsodium.so.23", "libsodium.so.26"],
-}
+class CryptoNotInitialized(RuntimeError):
+    """A host attempted native arithmetic before installing its backend."""
 
 
-def _candidate_paths() -> _Iterable[_Path]:
-    """Yield plausible libsodium locations, most-specific first.
+class Backend(Protocol):
+    """Stateless byte operations supplied by the embedding host.
 
-    Search order:
-      1. HOLDEM_LIBSODIUM env var (explicit override -- a full file path)
-      2. a ``native/`` directory beside the repo (packaged/shipped layout)
-      3. the poker-native build output on this dev machine
-      4. any of the platform base names on the default loader path
+    Backends validate canonical points and preserve libsodium's error and
+    zero-scalar behavior. They are trusted capabilities, like the host signer.
     """
-    plat = "win32" if _sys.platform.startswith("win") else \
-           "darwin" if _sys.platform == "darwin" else "linux"
-    names = _LIB_BASENAMES[plat]
-
-    override = _os.environ.get("HOLDEM_LIBSODIUM")
-    if override:
-        yield _Path(override)
-
-    repo_root = _Path(__file__).resolve().parents[2]
-    native_dir = repo_root / "native"
-    for n in names:
-        yield native_dir / n
-
-    # dev build output (see poker-native/_build_sodium.bat)
-    home = _Path(_os.path.expanduser("~"))
-    dev = home / "poker-native" / "libsodium" / "bin" / "x64" / "Release" / "v145" / "dynamic"
-    for n in names:
-        yield dev / n
-
-    # bare name -- let the OS loader resolve it from PATH / ldconfig
-    for n in names:
-        yield _Path(n)
+    def version(self) -> str: ...
+    def point_is_valid(self, point: bytes) -> bool: ...
+    def random_scalar(self) -> bytes: ...
+    def scalar_reduce(self, wide: bytes) -> bytes: ...
+    def scalar_add(self, a: bytes, b: bytes) -> bytes: ...
+    def scalar_sub(self, a: bytes, b: bytes) -> bytes: ...
+    def scalar_mul(self, a: bytes, b: bytes) -> bytes: ...
+    def scalar_negate(self, a: bytes) -> bytes: ...
+    def scalar_invert(self, a: bytes) -> bytes: ...
+    def mul(self, scalar: bytes, point: bytes) -> bytes: ...
+    def mul_base(self, scalar: bytes) -> bytes: ...
+    def add(self, a: bytes, b: bytes) -> bytes: ...
+    def sub(self, a: bytes, b: bytes) -> bytes: ...
+    def hash_to_group(self, data: bytes) -> bytes: ...
 
 
-def _load_libsodium() -> _C.CDLL:
-    tried = []
-    for cand in _candidate_paths():
-        try:
-            if cand.is_absolute() and not cand.exists():
-                tried.append(f"{cand} (not found)")
-                continue
-            lib = _C.CDLL(str(cand))
-            # smoke-check that this build actually has the ristretto API
-            if not hasattr(lib, "crypto_scalarmult_ristretto255_base"):
-                tried.append(f"{cand} (no ristretto255 API)")
-                continue
-            return lib
-        except OSError as exc:
-            tried.append(f"{cand} ({exc})")
-
-    raise RuntimeError(
-        "libsodium with Ristretto255 support could not be loaded. Set the "
-        "HOLDEM_LIBSODIUM environment variable to a libsodium shared library "
-        "built with the ristretto255 API, or place one in the repo's native/ "
-        "directory. Tried:\n  " + "\n  ".join(tried)
-    )
+_METHODS = (
+    'version', 'point_is_valid', 'random_scalar', 'scalar_reduce',
+    'scalar_add', 'scalar_sub', 'scalar_mul', 'scalar_negate', 'scalar_invert',
+    'mul', 'mul_base', 'add', 'sub', 'hash_to_group',
+)
+_backend: Backend | None = None
+_backend_lock = Lock()
 
 
-_lib = _load_libsodium()
+def initialize(backend: Backend) -> None:
+    """Install a fully initialized backend once; the same object is idempotent.
 
-if _lib.sodium_init() < 0:              # 0 = ok, 1 = already initialised
-    raise RuntimeError("sodium_init() failed")
+    The host prepares the capability before this atomic publication. Replacing
+    it during a running hand is forbidden. Failed validation publishes nothing.
+    """
+    global _backend
+    with _backend_lock:
+        if _backend is backend and backend is not None:
+            return
+        if _backend is not None:
+            raise RuntimeError('Ristretto backend is already initialized; replacement is forbidden')
+        missing = [name for name in _METHODS if not callable(getattr(backend, name, None))]
+        if missing:
+            raise TypeError('Ristretto backend is missing operations: ' + ', '.join(missing))
+        _backend = backend
 
 
-# --------------------------------------------------------------------------
-# ctypes signatures
-# --------------------------------------------------------------------------
-
-def _b(x: bytes):
-    """bytes -> ctypes ubyte buffer (a fresh copy; safe as an input arg)."""
-    return (_C.c_ubyte * len(x)).from_buffer_copy(x)
+def is_initialized() -> bool:
+    return _backend is not None
 
 
-def _out(n: int = 32):
-    return (_C.c_ubyte * n)()
+def _require_backend() -> Backend:
+    backend = _backend
+    if backend is None:
+        raise CryptoNotInitialized(
+            'Ristretto backend is not initialized. The host must explicitly '
+            'initialize its crypto backend before starting a mental-poker hand.')
+    return backend
 
 
-for _fn, _res in [
-    ("crypto_core_ristretto255_bytes", _C.c_size_t),
-    ("crypto_core_ristretto255_scalarbytes", _C.c_size_t),
-    ("crypto_core_ristretto255_hashbytes", _C.c_size_t),
-    ("crypto_core_ristretto255_nonreducedscalarbytes", _C.c_size_t),
-    ("crypto_scalarmult_ristretto255", _C.c_int),
-    ("crypto_scalarmult_ristretto255_base", _C.c_int),
-    ("crypto_core_ristretto255_add", _C.c_int),
-    ("crypto_core_ristretto255_sub", _C.c_int),
-    ("crypto_core_ristretto255_from_hash", _C.c_int),
-    ("crypto_core_ristretto255_is_valid_point", _C.c_int),
-    ("crypto_core_ristretto255_scalar_invert", _C.c_int),
-    ("sodium_version_string", _C.c_char_p),
-]:
-    getattr(_lib, _fn).restype = _res
-
-POINT_BYTES: int = _lib.crypto_core_ristretto255_bytes()          # 32
-SCALAR_BYTES: int = _lib.crypto_core_ristretto255_scalarbytes()   # 32
-HASH_BYTES: int = _lib.crypto_core_ristretto255_hashbytes()       # 64
-_WIDE_BYTES: int = _lib.crypto_core_ristretto255_nonreducedscalarbytes()  # 64
-
-assert POINT_BYTES == 32 and SCALAR_BYTES == 32 and HASH_BYTES == 64
+def require_initialized() -> None:
+    """Refuse a hand before state changes if its host omitted crypto startup."""
+    _require_backend()
 
 
 def libsodium_version() -> str:
-    return _lib.sodium_version_string().decode()
+    """Compatibility accessor for the installed backend's version."""
+    return _require_backend().version()
 
-
-# --------------------------------------------------------------------------
-# Types
-# --------------------------------------------------------------------------
 
 class Point(bytes):
     """A Ristretto255 group element (32 canonical bytes)."""
-
     __slots__ = ()
 
     def __new__(cls, data: bytes):
         if len(data) != POINT_BYTES:
-            raise ValueError(f"point must be {POINT_BYTES} bytes, got {len(data)}")
+            raise ValueError(f'point must be {POINT_BYTES} bytes, got {len(data)}')
         return super().__new__(cls, data)
 
     def is_valid(self) -> bool:
-        """True iff this is a canonical, non-low-order encoding."""
-        return _lib.crypto_core_ristretto255_is_valid_point(_b(self)) == 1
+        return _require_backend().point_is_valid(bytes(self))
 
     def __repr__(self) -> str:
-        return f"Point({self.hex()[:16]}...)"
+        return f'Point({self.hex()[:16]}...)'
 
 
 class Scalar(bytes):
-    """A scalar in the Ristretto255 group-order field (32 bytes, little-endian)."""
-
+    """A scalar in the Ristretto255 group-order field (little-endian)."""
     __slots__ = ()
 
     def __new__(cls, data: bytes):
         if len(data) != SCALAR_BYTES:
-            raise ValueError(f"scalar must be {SCALAR_BYTES} bytes, got {len(data)}")
+            raise ValueError(f'scalar must be {SCALAR_BYTES} bytes, got {len(data)}')
         return super().__new__(cls, data)
 
     def __repr__(self) -> str:
-        return f"Scalar({self.hex()[:16]}...)"
+        return f'Scalar({self.hex()[:16]}...)'
 
-
-# --------------------------------------------------------------------------
-# Scalar field arithmetic
-# --------------------------------------------------------------------------
 
 def random_scalar() -> Scalar:
-    """A uniformly random non-zero scalar."""
-    out = _out(SCALAR_BYTES)
-    _lib.crypto_core_ristretto255_scalar_random(out)
-    return Scalar(bytes(out))
+    return Scalar(_require_backend().random_scalar())
 
 
 def scalar_reduce(wide: bytes) -> Scalar:
-    """Reduce 64 arbitrary bytes into the scalar field (for Fiat-Shamir)."""
     if len(wide) != _WIDE_BYTES:
-        raise ValueError(f"scalar_reduce expects {_WIDE_BYTES} bytes")
-    out = _out(SCALAR_BYTES)
-    _lib.crypto_core_ristretto255_scalar_reduce(out, _b(wide))
-    return Scalar(bytes(out))
+        raise ValueError(f'scalar_reduce expects {_WIDE_BYTES} bytes')
+    return Scalar(_require_backend().scalar_reduce(wide))
 
 
 def scalar_add(a: Scalar, b: Scalar) -> Scalar:
-    out = _out(SCALAR_BYTES)
-    _lib.crypto_core_ristretto255_scalar_add(out, _b(a), _b(b))
-    return Scalar(bytes(out))
+    return Scalar(_require_backend().scalar_add(a, b))
 
 
 def scalar_sub(a: Scalar, b: Scalar) -> Scalar:
-    out = _out(SCALAR_BYTES)
-    _lib.crypto_core_ristretto255_scalar_sub(out, _b(a), _b(b))
-    return Scalar(bytes(out))
+    return Scalar(_require_backend().scalar_sub(a, b))
 
 
 def scalar_mul(a: Scalar, b: Scalar) -> Scalar:
-    out = _out(SCALAR_BYTES)
-    _lib.crypto_core_ristretto255_scalar_mul(out, _b(a), _b(b))
-    return Scalar(bytes(out))
+    return Scalar(_require_backend().scalar_mul(a, b))
 
 
 def scalar_negate(a: Scalar) -> Scalar:
-    out = _out(SCALAR_BYTES)
-    _lib.crypto_core_ristretto255_scalar_negate(out, _b(a))
-    return Scalar(bytes(out))
+    return Scalar(_require_backend().scalar_negate(a))
 
 
 def scalar_invert(a: Scalar) -> Scalar:
-    out = _out(SCALAR_BYTES)
-    rc = _lib.crypto_core_ristretto255_scalar_invert(out, _b(a))
-    if rc != 0:
-        raise ValueError("scalar has no inverse (is it zero?)")
-    return Scalar(bytes(out))
+    return Scalar(_require_backend().scalar_invert(a))
 
-
-# --------------------------------------------------------------------------
-# Group operations
-# --------------------------------------------------------------------------
 
 def mul(k: Scalar, p: Point) -> Point:
-    """k . p. Raises ValueError if p is the identity or invalid."""
-    out = _out(POINT_BYTES)
-    rc = _lib.crypto_scalarmult_ristretto255(out, _b(k), _b(p))
-    if rc != 0:
-        raise ValueError("scalarmult failed (identity or invalid point)")
-    return Point(bytes(out))
+    return Point(_require_backend().mul(k, p))
 
 
 def mul_base(k: Scalar) -> Point:
-    """k . G, where G is the Ristretto255 base point."""
-    out = _out(POINT_BYTES)
-    rc = _lib.crypto_scalarmult_ristretto255_base(out, _b(k))
-    if rc != 0:
-        raise ValueError("base scalarmult failed (zero scalar?)")
-    return Point(bytes(out))
+    return Point(_require_backend().mul_base(k))
 
 
 def add(a: Point, b: Point) -> Point:
-    out = _out(POINT_BYTES)
-    rc = _lib.crypto_core_ristretto255_add(out, _b(a), _b(b))
-    if rc != 0:
-        raise ValueError("point add failed (invalid input point)")
-    return Point(bytes(out))
+    return Point(_require_backend().add(a, b))
 
 
 def sub(a: Point, b: Point) -> Point:
-    out = _out(POINT_BYTES)
-    rc = _lib.crypto_core_ristretto255_sub(out, _b(a), _b(b))
-    if rc != 0:
-        raise ValueError("point sub failed (invalid input point)")
-    return Point(bytes(out))
+    return Point(_require_backend().sub(a, b))
 
 
 def hash_to_group(data: bytes) -> Point:
-    """Map arbitrary bytes to a group element (RFC 9380 hash-to-ristretto255).
-
-    ``data`` must be exactly 64 bytes of uniform input (e.g. a SHA-512
-    digest). The result is a valid point with no known discrete-log
-    relation to G -- this is how cards are encoded as points.
-    """
     if len(data) != HASH_BYTES:
-        raise ValueError(f"hash_to_group expects {HASH_BYTES} bytes, got {len(data)}")
-    out = _out(POINT_BYTES)
-    _lib.crypto_core_ristretto255_from_hash(out, _b(data))
-    return Point(bytes(out))
+        raise ValueError(f'hash_to_group expects {HASH_BYTES} bytes, got {len(data)}')
+    return Point(_require_backend().hash_to_group(data))
 
 
 def point_from_bytes(data: bytes) -> Point:
-    """Parse 32 bytes off the wire into a validated Point.
-
-    Rejects non-canonical and low-order encodings -- use this for anything
-    that arrives from another peer.
-    """
-    p = Point(data)
-    if not p.is_valid():
-        raise ValueError("non-canonical or low-order Ristretto255 point")
-    return p
+    point = Point(data)
+    if not point.is_valid():
+        raise ValueError('non-canonical or low-order Ristretto255 point')
+    return point
 
 
 def scalar_from_bytes(data: bytes) -> Scalar:
     return Scalar(data)
 
 
-# The Ristretto255 base point G (= 1*G). Exposed as a constant because the
-# DLEQ and shuffle proofs hash it into their Fiat-Shamir challenges.
-G: Point = mul_base(Scalar((1).to_bytes(SCALAR_BYTES, "little")))
-
-# The identity element: the canonical all-zero encoding. add() and sub()
-# handle it correctly, but libsodium's scalarmult REJECTS a zero scalar or
-# the identity point (a Diffie-Hellman contributory-behaviour check). The
-# Pedersen commitments and the Bayer-Groth shuffle arguments legitimately
-# need those cases (e.g. committing to a zero value), so the *_safe helpers
-# below route around the check.
-IDENTITY: Point = Point(b"\x00" * POINT_BYTES)
-
-_ZERO_SCALAR = Scalar(b"\x00" * SCALAR_BYTES)
+# Canonical encodings, independently checked against their native derivations.
+G = Point(bytes.fromhex('e2f2ae0a6abc4e71a884a961c500515f58e30b6aa582dd8db6a65945e08d2d76'))
+IDENTITY = Point(b'\x00' * POINT_BYTES)
+_ZERO_SCALAR = Scalar(b'\x00' * SCALAR_BYTES)
 
 
 def is_zero_scalar(s: Scalar) -> bool:
@@ -323,46 +195,34 @@ def is_zero_scalar(s: Scalar) -> bool:
 
 
 def mul_safe(k: Scalar, p: Point) -> Point:
-    """k*p, returning the identity when k == 0 or p is the identity.
-
-    Use this instead of ``mul`` anywhere a zero scalar or identity point is
-    a legitimate input (commitments, multi-exponentiation arguments).
-    """
-    if bytes(k) == bytes(_ZERO_SCALAR) or bytes(p) == bytes(IDENTITY):
+    _require_backend()
+    if is_zero_scalar(k) or bytes(p) == bytes(IDENTITY):
         return IDENTITY
     return mul(k, p)
 
 
 def mul_base_safe(k: Scalar) -> Point:
-    """k*G, returning the identity when k == 0."""
-    if bytes(k) == bytes(_ZERO_SCALAR):
-        return IDENTITY
-    return mul_base(k)
+    _require_backend()
+    return IDENTITY if is_zero_scalar(k) else mul_base(k)
 
 
 def multiscalar_mul(scalars, points) -> Point:
-    """Sum_i scalars[i] * points[i], zero-safe. Identity if empty.
-
-    The workhorse of the commitment scheme and shuffle arguments:
-    comck(a; r) = r*H + sum a_i*G_i is one such multiscalar multiplication.
-    """
-    scalars = list(scalars)
-    points = list(points)
+    _require_backend()
+    scalars, points = list(scalars), list(points)
     if len(scalars) != len(points):
-        raise ValueError("multiscalar_mul: scalars and points differ in length")
+        raise ValueError('multiscalar_mul: scalars and points differ in length')
     acc = IDENTITY
-    for k, p in zip(scalars, points):
-        acc = add(acc, mul_safe(k, p))
+    for scalar, point in zip(scalars, points):
+        acc = add(acc, mul_safe(scalar, point))
     return acc
 
 
 __all__ = [
-    "Point", "Scalar", "G", "IDENTITY",
-    "POINT_BYTES", "SCALAR_BYTES", "HASH_BYTES",
-    "libsodium_version",
-    "random_scalar", "scalar_reduce", "is_zero_scalar",
-    "scalar_add", "scalar_sub", "scalar_mul", "scalar_negate", "scalar_invert",
-    "mul", "mul_base", "mul_safe", "mul_base_safe", "multiscalar_mul",
-    "add", "sub", "hash_to_group",
-    "point_from_bytes", "scalar_from_bytes",
+    'Backend', 'CryptoNotInitialized', 'initialize', 'is_initialized',
+    'require_initialized',
+    'Point', 'Scalar', 'G', 'IDENTITY', 'POINT_BYTES', 'SCALAR_BYTES', 'HASH_BYTES',
+    'libsodium_version', 'random_scalar', 'scalar_reduce', 'is_zero_scalar',
+    'scalar_add', 'scalar_sub', 'scalar_mul', 'scalar_negate', 'scalar_invert',
+    'mul', 'mul_base', 'mul_safe', 'mul_base_safe', 'multiscalar_mul',
+    'add', 'sub', 'hash_to_group', 'point_from_bytes', 'scalar_from_bytes',
 ]

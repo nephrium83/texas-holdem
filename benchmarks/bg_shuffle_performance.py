@@ -91,6 +91,8 @@ def _summary(records: list[dict]) -> dict:
 
 
 def main() -> None:
+    from holdem import native_crypto
+    native_crypto.initialize()
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=10)
     parser.add_argument("--m", type=int, default=4)

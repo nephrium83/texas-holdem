@@ -36,6 +36,8 @@ from holdem.p2p.session import Player, Session
 
 
 def table(n=3, stacks=None, hand_no=1):
+    from crypto_gate import require_crypto
+    require_crypto()
     bus = InMemoryBus()
     order = [f"peer{i}" for i in range(n)]
     sessions = {}

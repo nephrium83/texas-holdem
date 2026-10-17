@@ -28,10 +28,13 @@ from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import Player, Session
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p import elgamal as eg
     from holdem.p2p import ristretto as R
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium unavailable: {exc}", allow_module_level=True)
 
 

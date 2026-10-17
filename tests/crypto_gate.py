@@ -1,10 +1,11 @@
 """Did the crypto-gated suites actually run, and was skipping them allowed?
 
-Every crypto-backed module in this suite guards its own import::
+Every crypto-backed module in this suite starts native crypto explicitly::
 
     try:
+        initialize_for_tests()
         from holdem.p2p import ristretto as R
-    except RuntimeError as exc:          # libsodium not available here
+    except NativeCryptoUnavailable as exc:
         pytest.skip(f"libsodium/ristretto unavailable: {exc}",
                     allow_module_level=True)
 
@@ -56,6 +57,10 @@ import os
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
+from holdem import native_crypto
+
+NativeCryptoUnavailable = native_crypto.NativeCryptoUnavailable
+
 #: Set to 1/true/yes/on to demand crypto, or 0/false/no/off to excuse its
 #: absence. Unset means "required iff this looks like CI".
 REQUIRE_ENV = "HOLDEM_REQUIRE_CRYPTO"
@@ -91,6 +96,8 @@ class CryptoStatus:
     #: not. Kept because "unavailable" without the reason sends the reader
     #: back to reproducing the failure by hand.
     detail: str
+    #: Unexpected startup failures are bugs, never an optional absence.
+    failure: Optional[Exception] = None
 
 
 def flag(value) -> Optional[bool]:
@@ -118,29 +125,36 @@ def flag(value) -> Optional[bool]:
 _status: Optional[CryptoStatus] = None
 
 
+def initialize_for_tests():
+    """Explicit test-host startup, before a suite first uses native crypto.
+
+    Module guards catch only NativeCryptoUnavailable. A missing library
+    can then skip collection while the named gate test enforces CI policy;
+    a broken initializer cannot silently remove the crypto suites.
+    """
+    return native_crypto.initialize()
+
+
 def crypto_status(*, refresh: bool = False) -> CryptoStatus:
     """Probe libsodium once per process.
 
-    Imports the same module the guarded suites import, so the two cannot
-    disagree: if ``ristretto`` imports here it imports there.
-
-    Catches Exception rather than RuntimeError alone -- broader than the
-    guards in the suites, deliberately. A guarded suite meeting a
-    non-RuntimeError import failure crashes loudly, which is the correct
-    outcome there; this probe only reports, so it must not crash the run
-    that is trying to describe the problem.
+    The reporter records unexpected failures rather than raising from a
+    pytest hook. ``enforce`` still raises those failures even when native
+    crypto was optional, so reporting cannot turn a startup bug into a skip.
     """
     global _status
     if _status is None or refresh:
         try:
+            initialize_for_tests()
             from holdem.p2p import ristretto as R
-        except RuntimeError as exc:
+        except NativeCryptoUnavailable as exc:
             # The wrapper's own diagnosis: it names every candidate path
             # it tried and why each was rejected, which is the entire
             # lead for a machine that has the library somewhere odd.
             _status = CryptoStatus(False, str(exc))
         except Exception as exc:
-            _status = CryptoStatus(False, f"{type(exc).__name__}: {exc}")
+            _status = CryptoStatus(
+                False, f"startup failed: {type(exc).__name__}: {exc}", exc)
         else:
             try:
                 _status = CryptoStatus(True, f"libsodium {R.libsodium_version()}")
@@ -149,7 +163,8 @@ def crypto_status(*, refresh: bool = False) -> CryptoStatus:
                 # absent, and reporting it as a bare 'unavailable' sends
                 # the reader off to hunt for a library that is present.
                 _status = CryptoStatus(
-                    False, f"loaded but unusable: {type(exc).__name__}: {exc}")
+                    False, f"loaded but unusable: {type(exc).__name__}: {exc}",
+                    exc)
     return _status
 
 
@@ -186,6 +201,8 @@ def crypto_required(env: Optional[Mapping[str, str]] = None) -> bool:
 
 def enforce(status: CryptoStatus, required: bool) -> None:
     """Raise if the crypto estate is missing where it was required."""
+    if status.failure is not None:
+        raise status.failure
     if status.available or not required:
         return
     raise CryptoUnavailable(
@@ -222,6 +239,8 @@ def header_line(status: Optional[CryptoStatus] = None,
                     f"Probe says: {status.detail}")
     if status.available:
         return f"crypto: {status.detail} — crypto-gated suites RUN"
+    if status.failure is not None:
+        return f"crypto: BROKEN — {status.detail}"
     if required:
         return (f"crypto: UNAVAILABLE and REQUIRED here — {status.detail}")
     return (f"crypto: UNAVAILABLE — crypto-gated suites SKIP, and that is "
@@ -250,8 +269,10 @@ def require_crypto() -> str:
     """
     import pytest
 
-    status = crypto_status()
     required = crypto_required()
+    status = crypto_status()
+    if status.failure is not None:
+        enforce(status, required)
     if status.available:
         return status.detail
     if required:

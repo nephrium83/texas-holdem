@@ -18,13 +18,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p import device_secret
     from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
     from holdem.p2p.mental_deal import derive_share
     from holdem.p2p.session import Session
     from holdem.p2p.timeout import FakeClock
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium unavailable: {exc}", allow_module_level=True)
 
 

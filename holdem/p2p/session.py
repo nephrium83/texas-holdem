@@ -1138,10 +1138,9 @@ class Session:
     def _assert_deal_preconditions(self) -> None:
         """Everything that must hold before a hand may exist at all.
 
-        Shared by _begin_p2p_hand (which calls it before constructing any
-        gameplay state) and begin_hand (which re-checks at the last moment
-        before the driver exists). Two callers, one rule: a check duplicated
-        by hand is a check that can drift.
+        Shared by start_p2p_hand and _begin_p2p_hand before constructing
+        gameplay state, and begin_hand at the last moment before the driver
+        exists. All entry points use one rule so the checks cannot drift.
         """
         if self.terminal_state is not None:
             raise RuntimeError(
@@ -1169,6 +1168,10 @@ class Session:
                 f"cannot begin hand: wire mode requires "
                 f"{self.DEAL_POLICY_BG!r}, but the adopted policy is "
                 f"{self._deal_policy!r}")
+        # The embedding host must install crypto before a hand can mutate
+        # state, post blinds or ask its lazy secret provider for material.
+        from holdem.p2p import ristretto
+        ristretto.require_initialized()
 
     @owned
     def begin_hand(self, hand_no: int, button: int = 0,
@@ -2681,6 +2684,7 @@ class Session:
             raise RuntimeError(
                 f"cannot start a hand: session terminated "
                 f"({self.terminal_state}: {self.terminal_reason})")
+        self._assert_deal_preconditions()
         self._table_cfg = {"names": list(names), "sb": int(sb),
                            "bb": int(bb), "structure": structure,
                            "button": int(button),

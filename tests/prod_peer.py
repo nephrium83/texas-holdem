@@ -174,6 +174,8 @@ def main() -> None:
     ap.add_argument("--invite", default="",
                     help="joiner: the V2 room code to pin the host with")
     args = ap.parse_args()
+    from holdem import native_crypto
+    native_crypto.initialize()
     local_identity = _identity.load_or_create()
     from holdem.p2p import device_secret
 

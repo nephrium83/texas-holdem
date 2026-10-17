@@ -18,13 +18,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p import deck_audit as da
     from holdem.p2p import dleq
     from holdem.p2p import elgamal as eg
     from holdem.p2p import ristretto as R
     from holdem.p2p.shuffle_mp import shuffle_deck
-except RuntimeError as exc:
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium/ristretto unavailable: {exc}",
                 allow_module_level=True)
 

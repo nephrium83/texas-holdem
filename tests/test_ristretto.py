@@ -12,9 +12,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
+    initialize_for_tests()
     from holdem.p2p import ristretto as R
-except RuntimeError as exc:  # libsodium not available on this machine
+except NativeCryptoUnavailable as exc:  # libsodium not available on this machine
     pytest.skip(f"libsodium/ristretto unavailable: {exc}",
                 allow_module_level=True)
 

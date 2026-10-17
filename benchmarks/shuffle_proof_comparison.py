@@ -129,6 +129,8 @@ def _validate_model(bg: dict) -> list:
 
 
 def main() -> None:
+    from holdem import native_crypto
+    native_crypto.initialize()
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--k", type=int, default=shuffle_proof.DEFAULT_K,

@@ -16,13 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from holdem.p2p import deal_map as dm
 from holdem.engine import Engine, Player, Deck, FULL_DECK
 
-# elgamal import may fail if libsodium absent; the card-label/order tests
-# that need it are guarded, but the index-translation tests do not need it.
-try:
-    from holdem.p2p import elgamal as eg
-    _HAVE_EG = True
-except RuntimeError:
-    _HAVE_EG = False
+from holdem.p2p import elgamal as eg
 
 
 # ------------------------------------------------------ card index bijection
@@ -53,7 +47,6 @@ def test_translation_fixed_points_and_divergence():
     assert any(dm.elgamal_to_engine_index(i) != i for i in range(1, 51))
 
 
-@pytest.mark.skipif(not _HAVE_EG, reason="libsodium/elgamal unavailable")
 def test_card_label_matches_elgamal_cards():
     for i in range(52):
         assert dm.card_label(i) == eg.CARDS[i]

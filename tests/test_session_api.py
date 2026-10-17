@@ -94,12 +94,6 @@ class TestConfigureSeats:
 
     def test_blocked_during_active_hand(self):
         """Cannot reconfigure seats while a hand is in progress."""
-        import importlib
-        try:
-            importlib.import_module("holdem.p2p.elgamal")
-        except RuntimeError:
-            pytest.skip("libsodium unavailable")
-
         from holdem.p2p.replica_table import ReplicaTable
 
         s = _make_session()
@@ -118,12 +112,6 @@ class TestConfigureSeats:
 
     def test_allowed_after_hand_void(self):
         """Voided hand is not 'active'; reconfiguration is permitted."""
-        import importlib
-        try:
-            importlib.import_module("holdem.p2p.elgamal")
-        except RuntimeError:
-            pytest.skip("libsodium unavailable")
-
         from holdem.p2p.replica_table import ReplicaTable
 
         s = _make_session()
@@ -153,12 +141,6 @@ class TestReplicaProperty:
 
     def test_replica_exposes_current_table(self):
         """Bot can read decision context via the public property."""
-        import importlib
-        try:
-            importlib.import_module("holdem.p2p.elgamal")
-        except RuntimeError:
-            pytest.skip("libsodium unavailable")
-
         from holdem.p2p.replica_table import ReplicaTable
 
         s = _make_session()

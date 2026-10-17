@@ -221,6 +221,8 @@ def _metadata() -> dict:
 
 
 def main() -> None:
+    from holdem import native_crypto
+    native_crypto.initialize()
     parser = argparse.ArgumentParser()
     parser.add_argument("--hands", type=int, default=20,
                         help="hands per configuration, including the cold one")

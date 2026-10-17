@@ -115,6 +115,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    from holdem import native_crypto
+    native_crypto.initialize()
     conn_id = args.conn_id or args.role
     is_host = (args.role == "host")
 
