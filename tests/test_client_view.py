@@ -37,7 +37,7 @@ def make_table(n, stacks=None):
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s._deal_master_secret = bytes([100 + i]) * 32   # deterministic deal
+        s._deal_master_secret = bytes([100 + i]) * 32   # stable key shares; shuffle stays random
         bus.register(cid, s)
         sessions[cid] = s
     names = [f"P{i}" for i in range(n)]
@@ -359,14 +359,27 @@ def _play_hand(bus, sessions, order, alive, shovers):
         bus.drain()
 
 
-def test_a_seat_busted_before_the_end_reports_the_match_final_stacks():
+def test_a_seat_busted_before_the_end_reports_the_match_final_stacks(monkeypatch):
     """The retained-replica case, played for real. A busted seat keeps the
     hand that eliminated it and drops every later hand, so when the match
     ends its replica is stale; session_end brings it the final stacks, and
     those are the last settlement its terminal reports."""
+    import random
+    from holdem.p2p import shuffle_mp
+
+    # Choose only the shuffle permutations. Real re-encryption, threshold
+    # dealing, audit and betting still run. Seed 0 makes seat 1 bust in hand
+    # 1, then seat 0 win the heads-up hand; random wins by the short seat
+    # could otherwise grow it large enough to eliminate another seat first.
+    rng = random.Random(0)
+
+    def permutation(n=52):
+        indices = list(range(n))
+        rng.shuffle(indices)
+        return indices
+
+    monkeypatch.setattr(shuffle_mp, "random_permutation", permutation)
     bus, sessions, order = make_table(3, stacks=[1000, 20, 1000])
-    # The short seat shoves and the others only call, so seat 1 is the one
-    # to bust -- in whichever hand the cards decide.
     for _ in range(40):
         _play_hand(bus, sessions, order, [0, 1, 2], shovers={1})
         verdicts = [client_view.apply_command(sessions[cid], "next_hand")
