@@ -23,6 +23,7 @@ try:
     from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
     from holdem.p2p.mental_deal import derive_share
     from holdem.p2p.session import Session
+    from holdem.p2p.timeout import FakeClock
 except RuntimeError as exc:
     pytest.skip(f"libsodium unavailable: {exc}", allow_module_level=True)
 
@@ -86,7 +87,8 @@ def test_error_message_tells_the_operator_what_to_do(tmp_path):
 
 def _session(bus, cid, **kw):
     s = Session(is_host=True, nickname="P", avatar_b64="",
-                transport=InMemoryTransport(bus, cid), **kw)
+                transport=InMemoryTransport(bus, cid), clock=FakeClock(),
+                secret_provider=device_secret.load_or_create, **kw)
     s.local_conn_id = cid
     return s
 

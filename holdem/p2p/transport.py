@@ -90,11 +90,21 @@ import time
 import uuid
 from typing import Callable, Optional
 
+from holdem.p2p.timeout import Clock, RealClock
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module-level state (singleton transport)
 # ---------------------------------------------------------------------------
+
+_clock: Clock = RealClock()
+
+
+def get_clock() -> Clock:
+    """The host clock shared by this transport and its Session."""
+    return _clock
+
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
@@ -450,7 +460,7 @@ def _sign_frame(msg: dict) -> bytes:
     from holdem.p2p import wire as _wire
     signer = _identity.load_or_create()
     signed = json.loads(_wire.pack(msg.get("type", ""), _wire_payload(msg),
-                                   signer=signer))
+                                   signer=signer, clock=_clock))
     return _frame(signed)
 
 
@@ -473,7 +483,7 @@ async def _read_msg(reader: asyncio.StreamReader) -> dict:
     if msg.get("type") in _RELAY_CONTROL_TYPES:
         return msg
     from holdem.p2p import wire as _wire
-    return _wire.unpack(body)   # raises ValueError on missing/bad/expired sig
+    return _wire.unpack(body, clock=_clock)  # missing/bad/expired sig raises
 
 
 # ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ from holdem.p2p import identity as _identity
 from holdem.p2p import invite as inv
 from holdem.p2p.join_auth import JoinAuthenticator, joiner_admission_from_invite
 from holdem.p2p.session import Session
+from holdem.p2p.timeout import FakeClock
 
 HOST_KEY = bytes(range(32))
 IMPOSTOR = bytes([9]) * 32
@@ -97,13 +98,15 @@ def _wire_up(eager=None):
     ja = joiner_admission_from_invite(
         parsed, joiner_pubkey=_identity.public_key_bytes())
     sess = Session(is_host=False, nickname="J", avatar_b64="",
-                   transport=t, joiner_admission=ja)
+                   transport=t, joiner_admission=ja, clock=FakeClock(),
+                   master_secret=bytes([9]) * 32)
     sess.local_conn_id = "me"
     events = {"auth": [], "failed": []}
     auth = JoinAuthenticator(
         transport=t, session=sess, joiner_admission=ja, nickname="J",
         on_authenticated=lambda cid: events["auth"].append(cid),
-        on_failed=lambda why: events["failed"].append(why), signer=_identity)
+        on_failed=lambda why: events["failed"].append(why),
+        signer=_identity, clock=FakeClock())
     t.reset_callbacks()
     t.on_message(auth.route)
     return parsed, host, t, ja, sess, auth, events
@@ -153,9 +156,10 @@ def test_callbacks_are_registered_before_connect_in_the_shipped_path():
     ja = joiner_admission_from_invite(
         parsed, joiner_pubkey=_identity.public_key_bytes())
     sess = Session(is_host=False, nickname="J", avatar_b64="",
-                   transport=t, joiner_admission=ja)
+                   transport=t, joiner_admission=ja, clock=FakeClock(),
+                   master_secret=bytes([9]) * 32)
     auth = JoinAuthenticator(transport=t, session=sess, joiner_admission=ja,
-                             signer=_identity)
+                             signer=_identity, clock=FakeClock())
 
     t.reset_callbacks()
     t.on_message(auth.route)          # BEFORE connect, as onboarding does

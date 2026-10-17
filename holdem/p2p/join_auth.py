@@ -37,6 +37,7 @@ from typing import Callable, Optional
 from holdem.p2p import admission as _adm
 from holdem.p2p import wire as _wire
 from holdem.p2p.signing import Signer
+from holdem.p2p.timeout import Clock
 
 _log = logging.getLogger(__name__)
 
@@ -48,10 +49,11 @@ class JoinAuthenticator:
                  nickname: str = "", avatar_b64: str = "",
                  on_authenticated: Optional[Callable] = None,
                  on_failed: Optional[Callable] = None,
-                 *, signer: Signer) -> None:
+                 *, signer: Signer, clock: Clock) -> None:
         if signer.public_key_bytes() != joiner_admission.joiner_pubkey:
             raise ValueError("signer does not match the joiner's admission key")
         self._signer = signer
+        self._clock = clock
         self._transport = transport
         self._session = session
         self._adm = joiner_admission
@@ -151,7 +153,7 @@ class JoinAuthenticator:
         """
         info = _wire.pack("player_info", {
             "nickname": self._nickname, "avatar_b64": self._avatar_b64},
-            signer=self._signer)
+            signer=self._signer, clock=self._clock)
         self._transport.send(conn_id, json.loads(info))
         self.player_info_sent = True
 

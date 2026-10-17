@@ -127,6 +127,7 @@ def main() -> None:
                     help="joiner: the V2 room code to pin the host with")
     args = ap.parse_args()
     local_identity = _identity.load_or_create()
+    from holdem.p2p import device_secret
 
     is_host = (args.role == "host")
 
@@ -160,6 +161,8 @@ def main() -> None:
             discovery_token=bytes.fromhex(_inv["discovery_token"]))
 
     sess = Session(is_host=is_host, nickname=args.label, avatar_b64="",
+                   transport=transport, clock=transport.get_clock(),
+                   secret_provider=device_secret.load_or_create,
                    admission=host_admission,
                    joiner_admission=joiner_adm["a"])
 
@@ -197,7 +200,7 @@ def main() -> None:
                 # Identity is revealed only after mutual authentication.
                 info = _wire.pack("player_info",
                                   {"nickname": args.label, "avatar_b64": ""},
-                                  signer=local_identity)
+                                  signer=local_identity, clock=transport.get_clock())
                 transport.send(conn_id, json.loads(info))
             return True
         return False

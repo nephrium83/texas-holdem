@@ -61,7 +61,7 @@ def _framed(envelope: dict) -> bytes:
 def _signed(mtype: str, payload: dict) -> bytes:
     """A frame this process signs with its own identity, as a peer would."""
     return _framed(json.loads(wire.pack(mtype, payload,
-                                       signer=identity.load_or_create())))
+                                       signer=identity.load_or_create(), clock=T.get_clock())))
 
 
 def _recv_exactly(sock: socket.socket, count: int) -> bytes:
@@ -114,7 +114,7 @@ def test_peer_receives_signed_heartbeats_on_schedule(monkeypatch):
         frames = [_recv_frame(client) for _ in range(3)]
         elapsed = time.monotonic() - started
 
-    verified = [wire.unpack(raw) for raw in frames]
+    verified = [wire.unpack(raw, clock=T.get_clock()) for raw in frames]
     assert [m["type"] for m in verified] == [T.HEARTBEAT_TYPE] * 3, \
         "a peer received something other than heartbeats on an idle socket"
     assert all(m["payload"] == {} for m in verified), \

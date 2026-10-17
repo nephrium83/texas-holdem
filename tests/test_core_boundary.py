@@ -119,11 +119,6 @@ IMPORT_ALLOWLIST = {
 # failure names lines.
 GRAPH_ALLOWLIST = {
     ("holdem.p2p.invite", "socket", "<module>"): _INET,
-    ("holdem.p2p.session", "holdem.p2p.transport", "Session.__init__"):
-        "session.py:431, the global transport when none is given",
-    ("holdem.p2p.session", "holdem.p2p.device_secret",
-     "Session._deal_master_secret"):
-        "session.py:972, the device secret read from disk",
 }
 
 # Runs in the fresh interpreter. The audit hook goes in before the import,

@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from holdem.p2p.timeout import FakeClock as _DependencyClock
     from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
     from holdem.p2p.session import (
         AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Player, Session,
@@ -41,7 +42,9 @@ def make_table(n=2, settings=None):
     for i in range(n):
         cid = f"peer{i}"
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                    transport=InMemoryTransport(bus, cid))
+                    transport=InMemoryTransport(bus, cid),
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s.local_conn_id = cid
         if not s.is_host:
             s._host_conn_id = "peer0"
@@ -77,7 +80,9 @@ class _WireTransport:
 
 def _wire_joiner():
     s = Session(is_host=False, nickname="J", avatar_b64="",
-                transport=_WireTransport())
+                transport=_WireTransport(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s._host_conn_id = "host"
     return s
@@ -308,7 +313,9 @@ def test_begin_hand_refuses_without_an_adopted_policy():
     accepted table has no policy to derive a deal context from."""
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.configure_seats(["peer0", "peer1"])
     with pytest.raises(RuntimeError, match="no deal policy"):
@@ -336,7 +343,9 @@ def test_the_deal_context_encoding_is_injective():
 
     def ctx(order):
         s = Session(is_host=True, nickname="P", avatar_b64="",
-                    transport=InMemoryTransport(bus, "x"))
+                    transport=InMemoryTransport(bus, "x"),
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s._deal_policy = BG
         s._seat_order = order
         return s._deal_context_bytes()
@@ -349,7 +358,9 @@ def test_the_deal_context_refuses_non_string_seat_ids():
     str() would trade a loud failure for an injectivity hole."""
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="P", avatar_b64="",
-                transport=InMemoryTransport(bus, "x"))
+                transport=InMemoryTransport(bus, "x"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s._deal_policy = BG
     s._seat_order = ["ok", 7]
     with pytest.raises(TypeError, match="seat id must be str"):
@@ -371,7 +382,9 @@ def make_deal_table(n, policy):
     sessions = {}
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                    transport=InMemoryTransport(bus, cid))
+                    transport=InMemoryTransport(bus, cid),
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s.local_conn_id = cid
         s.configure_seats(list(order))
         assert s._adopt_deal_policy(policy)
@@ -491,7 +504,9 @@ def test_a_session_terminated_from_the_lobby_records_no_deal_context():
     one would mean inventing a context for a table that never started."""
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.terminate(Session.LOCAL_SHUTDOWN, "user quit")
     assert s.terminal_record is not None
@@ -514,7 +529,9 @@ def test_a_refused_deal_leaves_no_bettable_table():
     bus = InMemoryBus()
     order = ["peer0", "peer1"]
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.configure_seats(order)                     # no policy adopted
 
@@ -534,7 +551,9 @@ def test_the_chokepoint_refuses_a_policy_it_does_not_recognise():
     caller. _deal_first_hand takes a caller-supplied policy."""
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     with pytest.raises(ValueError, match="not a deal policy"):
         s._adopt_deal_policy("banana")
     assert s.deal_policy is None
@@ -552,7 +571,9 @@ def test_the_deal_context_refuses_a_session_with_no_adopted_policy():
     """
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="P", avatar_b64="",
-                transport=InMemoryTransport(bus, "x"))
+                transport=InMemoryTransport(bus, "x"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s._seat_order = ["a", "b"]
     assert s.deal_policy is None
     with pytest.raises(RuntimeError, match="before a policy is adopted"):
@@ -577,7 +598,9 @@ def test_a_hand_that_fails_after_the_replica_exists_rolls_it_back():
     bus = InMemoryBus()
     order = ["peer0", "peer1"]
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.configure_seats(order)
     assert s._adopt_deal_policy(DETECTION)
@@ -603,7 +626,9 @@ def test_reseating_clears_the_cached_deal_context():
     """
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="P0", avatar_b64="",
-                transport=InMemoryTransport(bus, "peer0"))
+                transport=InMemoryTransport(bus, "peer0"),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "peer0"
     s.configure_seats(["peer0", "peer1"])
     assert s._adopt_deal_policy(BG)

@@ -40,6 +40,8 @@ from holdem.p2p.inmemory_transport import (
     DrainLoopError, InMemoryBus, InMemoryTransport,
 )
 from holdem.p2p.session import Session
+from holdem.p2p.timeout import RealClock
+from holdem.p2p import device_secret
 
 _log = logging.getLogger(__name__)
 
@@ -74,6 +76,7 @@ def _make_sessions(seats: int, nickname: str = "You"):
     bus = InMemoryBus()
     order = [f"seat{i}" for i in range(seats)]
     sessions = {}
+    clock = RealClock()
     for i, conn_id in enumerate(order):
         seat_nick = nickname if i == HUMAN_SEAT else f"Bot {i}"
         session = Session(
@@ -81,6 +84,8 @@ def _make_sessions(seats: int, nickname: str = "You"):
             nickname=seat_nick,
             avatar_b64="",
             transport=InMemoryTransport(bus, conn_id),
+            clock=clock,
+            secret_provider=device_secret.load_or_create,
         )
         session.local_conn_id = conn_id
         bus.register(conn_id, session)
