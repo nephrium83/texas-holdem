@@ -15,7 +15,8 @@ Coverage:
 - digest_changed fires when replica state advances
 - hand_voided fires when _void_hand is called
 - peer_unavailable fires before hand_voided on deal timeout
-- timeout_proposed fires before timeout_applied
+- timeout_proposed fires when check_deadlines reports, and nothing is applied
+- timeout_applied fires when a timeout's consequence is applied
 - sidecar_stopping fires at session end
 - Schema version and required fields present on every event
 - _emit_event never raises even with a broken sink
@@ -53,6 +54,7 @@ def make_session(conn_id="peer0", is_host=True, sink=None, clock=None):
         transport=InMemoryTransport(bus, conn_id),
         clock=clock or FakeClock(),
         sink=sink,
+        master_secret=b"test-session-secret",
     )
     s.local_conn_id = conn_id
     # configure_seats requires ≥2; use a placeholder second seat
@@ -73,6 +75,7 @@ def make_table_with_sink(n=2, sinks=None):
             transport=InMemoryTransport(bus, cid),
             clock=FakeClock(),
             sink=sk,
+            master_secret=b"test-session-secret",
         )
         s.local_conn_id = cid
         s.configure_seats(list(order))
@@ -218,11 +221,13 @@ class TestPeerConnected:
         bus = InMemoryBus()
         sink = ListSink()
         s = Session(is_host=True, nickname="Bob", avatar_b64="",
-                    transport=InMemoryTransport(bus, "h"), sink=sink)
+                    transport=InMemoryTransport(bus, "h"), sink=sink,
+                    clock=FakeClock(),
+                    master_secret=b"test-session-secret")
         s.local_conn_id = "h"
         s.configure_seats(["h", "placeholder"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s.add_local_player("h")
+        s.add_local_player("h", public_key=bytes(range(32)))
         matches = sink.of_type("peer_connected")
         assert any(e["conn_id"] == "h" for e in matches)
 
@@ -376,7 +381,8 @@ class TestTimeoutEvents:
         clk = FakeClock()
         s = Session(is_host=True, nickname="H", avatar_b64="",
                     transport=InMemoryTransport(bus, "peer0"),
-                    clock=clk, sink=sink)
+                    clock=clk, sink=sink,
+                    master_secret=b"test-session-secret")
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -392,17 +398,15 @@ class TestTimeoutEvents:
             pytest.skip("local peer is first actor")
         return clk, sink, s, r
 
-    def test_timeout_proposed_fires_before_applied(self):
+    def test_timeout_proposed_fires_and_nothing_is_applied(self):
+        """check_deadlines reports the wait and applies nothing: no game
+        applies a timeout proposal, the one that sends it included."""
         clk, sink, s, r = self._betting_session()
         clk.advance(31.0)
         s.check_deadlines()
 
-        events = [e["event"] for e in sink.events]
-        prop_idx = next((i for i, e in enumerate(events) if e == "timeout_proposed"), None)
-        appl_idx = next((i for i, e in enumerate(events) if e == "timeout_applied"), None)
-        assert prop_idx is not None
-        assert appl_idx is not None
-        assert prop_idx < appl_idx
+        assert sink.last("timeout_proposed") is not None
+        assert sink.last("timeout_applied") is None
 
     def test_timeout_proposed_has_actor_and_token_phase(self):
         clk, sink, s, r = self._betting_session()
@@ -415,9 +419,10 @@ class TestTimeoutEvents:
         assert ev["token_phase"] == "betting"
 
     def test_timeout_applied_has_digest(self):
+        """The consequence kept for the timekeeper (see
+        Session._apply_timeout) records the digest it applied at."""
         clk, sink, s, r = self._betting_session()
-        clk.advance(31.0)
-        s.check_deadlines()
+        s._apply_timeout(s._current_deadline_token)
 
         ev = sink.last("timeout_applied")
         assert ev is not None
@@ -428,7 +433,9 @@ class TestTimeoutEvents:
         sink = ListSink()
         bus = InMemoryBus()
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "host"), sink=sink)
+                    transport=InMemoryTransport(bus, "host"), sink=sink,
+                    clock=FakeClock(),
+                    master_secret=b"test-session-secret")
         s.local_conn_id = "host"
         s.configure_seats(["host", "peerA"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)

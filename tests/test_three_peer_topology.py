@@ -24,6 +24,7 @@ one measures nothing.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -54,17 +55,25 @@ HAND_ARGS = {
 
 
 class Peer:
-    """One prod_peer subprocess with a stdout collector."""
+    """One prod_peer subprocess with a stdout collector.
 
-    def __init__(self, role: str, label: str, invite: str = "") -> None:
+    ``config_dir`` becomes the process's HOLDEM_CONFIG_DIR, and every peer
+    needs its own: the signing key lives there. Peers that inherited the
+    test's one directory all ran under one identity, so every seat bound
+    the same key and the seat-author check could not tell them apart.
+    """
+
+    def __init__(self, role: str, label: str, config_dir,
+                 invite: str = "") -> None:
         self.label = label
         argv = [sys.executable, PEER, "--role", role, "--label", label]
         if invite:
             argv += ["--invite", invite]
+        env = dict(os.environ, HOLDEM_CONFIG_DIR=str(config_dir))
         self.proc = subprocess.Popen(
             argv,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, bufsize=1)
+            stderr=subprocess.PIPE, text=True, bufsize=1, env=env)
         self.events: list = []
         self._lock = threading.Lock()
         self.stderr: list = []
@@ -110,6 +119,8 @@ class Peer:
             return [e for e in self.events if e.get("type") == mtype]
 
     def close(self) -> None:
+        if self.proc.poll() is not None:
+            return                     # already gone; a test killed it
         try:
             self.send({"op": "quit"})
             self.proc.wait(timeout=5)
@@ -121,9 +132,9 @@ class Peer:
 
 
 @pytest.fixture
-def three_peers():
+def three_peers(tmp_path):
     """Host A, joiners B and C -- wired exactly as onboarding.py wires them."""
-    a = Peer("host", "A")
+    a = Peer("host", "A", tmp_path / "A")
     b = c = None
     try:
         ready = a.wait_for(lambda e: e.get("type") == "ready")
@@ -136,8 +147,8 @@ def three_peers():
         # before joining. The pin has to exist before the socket does: a
         # Session built after connect() would spend the gap accepting
         # whatever the far end said, which is the window this closes.
-        b = Peer("joiner", "B", invite=invite)
-        c = Peer("joiner", "C", invite=invite)
+        b = Peer("joiner", "B", tmp_path / "B", invite=invite)
+        c = Peer("joiner", "C", tmp_path / "C", invite=invite)
         # Joiners dial the HOST and begin the handshake. They no longer send
         # player_info on connect: identity is revealed only after the host
         # proves it holds the pinned key.
@@ -299,6 +310,10 @@ def test_production_onboarding_binds_every_seat_to_a_key(three_sessions):
     keysets = [_status(p)["seat_keys"] for p in (a, b, c)]
     assert keysets[0] == keysets[1] == keysets[2], (
         f"peers disagree on seat bindings: {keysets}")
+    # Three processes, three identities. With one shared key every seat
+    # authorizes every other, and the author check is vacuous.
+    assert len(set(keysets[0].values())) == 3, (
+        f"seats share signing keys: {keysets[0]}")
 
 
 def test_a_joiners_deal_message_reaches_the_other_joiner_via_the_host(

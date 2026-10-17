@@ -31,6 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import crypto_gate
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import (
     AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Player, Session,
@@ -44,7 +45,8 @@ def wire_session(cid="peer0", is_host=False):
     s = Session(is_host=is_host, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, cid),
                 author_mode=AUTHOR_MODE_WIRE,
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = cid
     bus.register(cid, s)
     return s
@@ -70,7 +72,8 @@ def compat_joiner(cid="joiner", host="host"):
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="J", avatar_b64="",
                 transport=InMemoryTransport(bus, cid),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = cid
     s._host_conn_id = host
     bus.register(cid, s)
@@ -110,7 +113,8 @@ def test_d1_empty_map_is_legitimate_and_unchanged():
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, "peer0"),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = "peer0"
     seated(s, {"a": "", "b": "", "c": ""})
     assert s.author_mode == AUTHOR_MODE_COMPAT
@@ -180,7 +184,8 @@ def test_d1_a_repeated_seat_id_is_refused_in_compat_too():
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, "peer0"),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = "peer0"
     assert s.author_mode == AUTHOR_MODE_COMPAT
     repeated_order(s, ["a", "b", "a"], {"a": "", "b": ""})
@@ -251,7 +256,8 @@ def compat_host(cid="host"):
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="H", avatar_b64="",
                 transport=InMemoryTransport(bus, cid),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = cid
     s._host_conn_id = cid
     bus.register(cid, s)
@@ -337,7 +343,8 @@ def test_d4_bg_policy_forces_prevention_regardless_of_author_mode():
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, "peer0"),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     assert s.author_mode == AUTHOR_MODE_COMPAT
     s._adopt_deal_policy(Session.DEAL_POLICY_BG)
 
@@ -362,7 +369,8 @@ def test_d4_detection_only_compat_table_remains_legal():
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, "peer0"),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     assert s.prevention is False
     s._assert_deal_preconditions()          # legal in compat, must not raise

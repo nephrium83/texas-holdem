@@ -115,6 +115,85 @@ func test_settled_hand_replaces_decision_card_with_result():
 	assert_eq(panel.deal_progress_label.text, "Hand settled")
 
 
+func _settled_snapshot(settlement: Dictionary) -> Dictionary:
+	var snapshot := _turn_snapshot()
+	snapshot["turn"] = {
+		"state": "hand_complete",
+		"headline": "You won 120",
+		"street_label": "Idle",
+		"pot": 0,
+	}
+	snapshot["settlement"] = settlement
+	return snapshot
+
+
+func test_a_refund_is_listed():
+	## The shape player_info.settlement_view gives an uncalled bet.
+	var panel: Variant = _panel()
+	panel.apply_snapshot(_settled_snapshot({
+		"headline": "You won 120",
+		"pots": [],
+		"refund": {"seat": 1, "name": "Maya", "amount": 40},
+		"showdown": [],
+		"you": {"net": 60, "stack": 560},
+	}))
+	assert_string_contains(panel.result_text.text, "40 returned to Maya (uncalled)")
+
+
+func test_each_showdown_seat_gets_its_hand_description():
+	var panel: Variant = _panel()
+	panel.apply_snapshot(_settled_snapshot({
+		"headline": "You won 120",
+		"pots": [],
+		"refund": null,
+		"showdown": [
+			{"seat": 0, "name": "You", "shown": true, "mucked": false, "won": 120,
+				"hands": [{"run": 1, "name": "Pair",
+					"description": "Pair of Kings, Ace-Queen-Four kickers"}]},
+			{"seat": 1, "name": "Maya", "shown": true, "mucked": false, "won": 0,
+				"hands": [{"run": 1, "name": "High Card",
+					"description": "Ace-high, Jack-Nine-Six-Two kickers"}]},
+		],
+		"you": {"net": 60, "stack": 560},
+	}))
+	assert_string_contains(panel.result_text.text,
+		"You shows Pair of Kings, Ace-Queen-Four kickers")
+	assert_string_contains(panel.result_text.text,
+		"Maya shows Ace-high, Jack-Nine-Six-Two kickers")
+
+
+func test_a_closed_table_shows_the_reason_and_the_last_settled_chips():
+	## The shape client_view sends when the session ends abnormally: the
+	## seats still hold the cut-off hand's live stacks, terminal holds the
+	## stacks the last settled hand left.
+	var panel: Variant = _panel()
+	var snapshot := _turn_snapshot()
+	snapshot["turn"] = {
+		"state": "table_closed",
+		"headline": "host connection peer0 dropped during play",
+		"street_label": "Flop",
+		"pot": 100,
+	}
+	snapshot["seats"] = [
+		{"name": "You", "stack": 950}, {"name": "Maya", "stack": 950},
+	]
+	snapshot["terminal"] = {
+		"state": "HOST_LOST",
+		"reason": "host connection peer0 dropped during play",
+		"last_settled_stacks": [970, 1030],
+	}
+	panel.apply_snapshot(snapshot)
+
+	assert_eq(panel.state_badge.text, "TABLE CLOSED")
+	assert_eq(panel.status_label.text, "host connection peer0 dropped during play")
+	assert_false(panel.decision_card.visible)
+	assert_true(panel.result_card.visible)
+	assert_string_contains(panel.result_text.text, "You: 970")
+	assert_string_contains(panel.result_text.text, "Maya: 1030")
+	assert_false(panel.result_text.text.contains("950"),
+		"showed the cut-off hand's stacks")
+
+
 func test_match_complete_has_no_next_turn_decision():
 	var panel: Variant = _panel()
 	var snapshot := _turn_snapshot()
@@ -134,3 +213,37 @@ func test_match_complete_has_no_next_turn_decision():
 	assert_string_contains(panel.result_text.text, "You won the match")
 	assert_string_contains(panel.result_text.text, "You: 1000")
 	assert_string_contains(panel.result_text.text, "Maya: 0")
+
+
+func test_a_seat_out_before_the_end_sees_the_final_chips():
+	## The shape client_view sends a seat eliminated before the match ended:
+	## its settlement and seats still describe the hand it busted in, while
+	## final_stacks holds what the match ended with.
+	var panel: Variant = _panel()
+	var snapshot := _settled_snapshot({
+		"headline": "Hand complete",
+		"pots": [],
+		"refund": null,
+		"showdown": [],
+		"you": {"net": -20, "stack": 0},
+	})
+	snapshot["turn"] = {
+		"state": "match_complete",
+		"headline": "Ravi won the match",
+		"street_label": "Idle",
+		"pot": 0,
+	}
+	snapshot["seats"] = [
+		{"name": "You", "stack": 0},
+		{"name": "Maya", "stack": 1040},
+		{"name": "Ravi", "stack": 980},
+	]
+	snapshot["final_stacks"] = [0, 0, 2020]
+	panel.apply_snapshot(snapshot)
+
+	assert_true(panel.result_card.visible)
+	assert_string_contains(panel.result_text.text, "Ravi won the match")
+	assert_string_contains(panel.result_text.text, "Your net: -20 | stack 0")
+	assert_string_contains(panel.result_text.text, "Final chips:\nYou: 0\nMaya: 0\nRavi: 2020")
+	assert_false(panel.result_text.text.contains("1040"),
+		"showed the busting hand's stacks as the outcome")

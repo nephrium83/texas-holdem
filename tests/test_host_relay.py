@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 try:
+    from holdem.p2p.timeout import FakeClock as _DependencyClock
     from holdem.p2p import admission as _adm_mod
     from holdem.p2p.events import EventSink
     from holdem.p2p.session import Player, Session
@@ -112,7 +113,9 @@ def _table():
     for cid in ("A", "B", "C"):
         s = Session(is_host=(cid == "A"), nickname=cid, avatar_b64="",
                     transport=StarTransport(bus, cid), sink=_Sink(),
-                    admission=host_admission if cid == "A" else None)
+                    admission=host_admission if cid == "A" else None,
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s.local_conn_id = cid
         s._host_conn_id = "A"
         s._seat_order = ["A", "B", "C"]
@@ -241,9 +244,10 @@ def test_only_the_host_relays():
 @pytest.mark.parametrize("mtype", [
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end", "timeout_proposal",
+    "peer_lost", "hand_settled",
 ])
 def test_every_hostless_type_is_relayed(mtype):
-    """All eight, not the six originally noticed.
+    """All of them, not the six originally noticed.
 
     A type missing from _HOSTLESS_PAYLOAD_TYPES is not merely unrelayed --
     it also skips the envelope unwrap, so its author never reaches the
@@ -258,3 +262,99 @@ def test_every_hostless_type_is_relayed(mtype):
     s["A"].handle_message("B", dict(env))
     assert _received_by(bus, "C", mtype), f"{mtype} was not relayed to C"
     assert not _received_by(bus, "B", mtype), f"{mtype} was echoed to its author"
+
+
+def test_a_host_whose_match_ended_still_relays_settlement_reports():
+    """A busted joiner ends only once it has every report it follows the
+    table by (Session._follow_settled) and a session_end naming where they
+    lead, and under the star each reaches it through the host or not at
+    all, so a host that has ended still relays any that reach it late.
+    Nothing else is relayed once the match is over."""
+    bus, s = _table()
+    s["A"].terminate(Session.ENDED_NORMAL, "match complete; winner seat 0")
+    s["A"].handle_message("B", _env("B", seat=1, mtype="hand_settled",
+                                    digest="ab" * 32, stacks=[1500, 0, 0]))
+    s["A"].handle_message("B", _env("B", seat=1, mtype="session_end",
+                                    winner=0, stacks=[1500, 0, 0]))
+    s["A"].handle_message("B", _env("B", seat=1, mtype="bet_action"))
+    assert _received_by(bus, "C", "hand_settled")
+    assert _received_by(bus, "C", "session_end")
+    assert not _received_by(bus, "C", "bet_action")
+
+
+# ------------------------------------------------------------ peer_lost
+
+def test_a_host_signed_peer_lost_ends_the_table_for_a_joiner():
+    """The notice a host sends when another joiner's socket closes. On the
+    production rule it is authorized by the key bound to the host's seat,
+    like any other hostless message."""
+    bus, s = _table()
+    s["B"].handle_message("A", _env("A", seat=0, mtype="peer_lost",
+                                    lost_seat=2, ended=True))
+    assert s["B"].terminal_state == Session.PEER_LOST
+    assert s["B"].terminal_reason == "seat 2 (C) disconnected (reported by seat 0)"
+
+
+def test_a_peer_lost_signed_by_a_stranger_is_refused():
+    """The notice ends a table, so it gets no exemption from the seat check:
+    a key that holds no seat cannot report one lost."""
+    bus, s = _table()
+    s["B"].handle_message("A", _env(KEY_X, seat=0, mtype="peer_lost",
+                                    lost_seat=2, ended=True))
+    assert s["B"].terminal_state is None
+
+
+def test_a_pinned_joiner_knows_the_host_seat_by_its_key():
+    """A production joiner reaches the host under a local conn_id that the
+    seat order never contains; it names the host's seat by the key its
+    invite pinned instead."""
+    bus, s = _table()
+    s["B"]._host_conn_id = "conn-to-host"
+    s["B"]._pinned_host_pubkey = KEY["A"]
+    s["B"].handle_message("conn-to-host", _env("A", seat=0, mtype="peer_lost",
+                                               lost_seat=2, ended=True))
+    assert s["B"].terminal_state == Session.PEER_LOST
+
+
+@pytest.mark.parametrize("lost", [0, 2], ids=["blames-the-host",
+                                              "blames-the-other-joiner"])
+def test_a_peer_lost_signed_by_a_joiner_is_dropped(lost):
+    """Signed by B for B's own seat, so ingress admits it, and relayed.
+    But only the host sees a joiner's socket close, so B claims a drop it
+    could not have observed, and C must not end on it."""
+    bus, s = _table()
+    s["C"].handle_message("A", _env("B", seat=1, mtype="peer_lost",
+                                    lost_seat=lost, ended=True))
+    assert s["C"].terminal_state is None
+
+
+def test_a_replayed_peer_lost_is_not_relayed_twice():
+    """Same author, same author_seq, same envelope: the replay gate drops
+    the second copy before the relay, as for every hostless type."""
+    bus, s = _table()
+    env = _env("B", seat=1, mtype="peer_lost", lost_seat=2, author_seq=0)
+    s["A"]._on_peer_lost = lambda *a: None       # observe relay only
+    s["A"].handle_message("B", dict(env))
+    s["A"].handle_message("B", dict(env))
+    assert len(_received_by(bus, "C", "peer_lost")) == 1
+
+
+# --------------------------------------------------------- hand_settled
+
+def test_a_hand_settled_counts_only_from_the_seat_that_signed_it():
+    """A settlement report can end the table, so it takes the same ingress
+    as every hostless type: handed on for comparison when signed by the key
+    of the seat it names, dropped when signed by a stranger or by a seat
+    speaking for another."""
+    bus, s = _table()
+    digest = "ab" * 32
+    judged = []
+    s["C"]._on_hand_settled = lambda cid, body: judged.append(body["seat"])
+    s["C"].handle_message("A", _env(KEY_X, seat=1, mtype="hand_settled",
+                                    digest=digest))
+    s["C"].handle_message("A", _env("B", seat=2, mtype="hand_settled",
+                                    digest=digest))
+    assert judged == []
+    s["C"].handle_message("A", _env("B", seat=1, mtype="hand_settled",
+                                    digest=digest))
+    assert judged == [1]

@@ -7,6 +7,13 @@ config/name="Poker Client"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.7")
 
+[display]
+
+window/size/viewport_width=1370
+window/size/viewport_height=850
+window/stretch/mode="canvas_items"
+window/stretch/aspect="keep"
+
 [editor_plugins]
 
 enabled=PackedStringArray("res://addons/gut/plugin.cfg")

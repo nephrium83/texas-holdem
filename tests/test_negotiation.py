@@ -20,7 +20,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from holdem.p2p import wire
+from holdem.p2p import identity, wire
+from holdem.p2p.timeout import FakeClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import Player, Session
 
@@ -32,32 +33,34 @@ DETECTION = Session.DEAL_POLICY_DETECTION
 # --------------------------------------------------- protocol version
 
 def test_pack_uses_the_declared_version():
-    env = wire.safe_loads(wire.pack("chat", {"text": "hi"}))
+    env = wire.safe_loads(wire.pack("chat", {"text": "hi"},
+                                   signer=identity.load_or_create(), clock=FakeClock()))
     assert env["v"] == wire.PROTOCOL_VERSION
 
 
 def test_unpack_accepts_the_current_version():
-    assert wire.unpack(wire.pack("chat", {"text": "hi"}))["type"] == "chat"
+    assert wire.unpack(wire.pack("chat", {"text": "hi"},
+                                 signer=identity.load_or_create(), clock=FakeClock()), clock=FakeClock())["type"] == "chat"
 
 
 @pytest.mark.parametrize("version", [0, 2, 99, -1])
 def test_unpack_rejects_an_unsupported_version(version):
     """An incompatible peer must be refused before its payload is
     interpreted under rules it may not share."""
-    raw = wire.pack("chat", {"text": "hi"})
+    raw = wire.pack("chat", {"text": "hi"}, signer=identity.load_or_create(), clock=FakeClock())
     env = wire.safe_loads(raw)
     env["v"] = version
     with pytest.raises(ValueError, match="version"):
-        wire.unpack(_reseal(env))
+        wire.unpack(_reseal(env), clock=FakeClock())
 
 
 @pytest.mark.parametrize("version", ["1", 1.0, None, [1], {"v": 1}])
 def test_unpack_rejects_a_non_integer_version(version):
-    raw = wire.pack("chat", {"text": "hi"})
+    raw = wire.pack("chat", {"text": "hi"}, signer=identity.load_or_create(), clock=FakeClock())
     env = wire.safe_loads(raw)
     env["v"] = version
     with pytest.raises(ValueError, match="version"):
-        wire.unpack(_reseal(env))
+        wire.unpack(_reseal(env), clock=FakeClock())
 
 
 def _reseal(env: dict) -> bytes:
@@ -87,7 +90,7 @@ def make_table(n=2, settings=None):
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid),
-                    master_secret=bytes([i + 1]) * 32)
+                    master_secret=bytes([i + 1]) * 32, clock=FakeClock())
         s.local_conn_id = cid
         if not s.is_host:
             s._host_conn_id = "peer0"
@@ -154,7 +157,7 @@ def test_host_game_start_still_works_from_the_lobby():
     bus = InMemoryBus()
     peer = Session(is_host=False, nickname="P1", avatar_b64="",
                    transport=InMemoryTransport(bus, "peer1"),
-                   master_secret=b"\x02" * 32)
+                   master_secret=b"\x02" * 32, clock=FakeClock())
     peer.local_conn_id = "peer1"
     peer._host_conn_id = "peer0"
     bus.register("peer1", peer)

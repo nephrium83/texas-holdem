@@ -173,7 +173,10 @@ For `start_game`, `verdict` is one of:
 For `next_hand`, `verdict` is one of:
 
 - `"started"` — the next hand is underway.
-- `"not_ready"` — the current hand has not settled or voided.
+- `"not_ready"` — the current hand has not settled or voided, or it settled
+  and a seat dealt into it has not yet reported the same settlement (see the
+  lifecycle section). A fresh snapshot is pushed when each report arrives, so
+  the client can send `next_hand` again.
 - `"eliminated"` — this seat is busted and no longer participates in deals.
 - `"session_over"` — the match has ended.
 
@@ -284,7 +287,7 @@ the latest snapshot; it never advances state on its own.
 | `deal_policy` | string \| null  | the table's deal policy (§4.1); `null` until a table is accepted |
 | `proofs_verified`| int         | shuffle proofs THIS seat has verified in the current hand      |
 | `events`      | array           | sequenced, append-only events for the current hand              |
-| `voided`      | bool            | hand was voided (cheat/desync/dropout); chips reverted       |
+| `voided`      | bool            | hand was voided (cheat/desync/chip count) and chips reverted, or a player's drop stopped it |
 | `void_reason` | string \| null  | human-readable reason when `voided`                          |
 | `result`      | object \| null  | settlement result when `phase` is `settled` (see §6)         |
 | `settlement`  | object \| null  | display-ready pot, payout, hand, refund, and local-net summary |
@@ -292,6 +295,7 @@ the latest snapshot; it never advances state on its own.
 | `session_winner` | int \| null  | winning seat when `session_over`; null for no winner          |
 | `eliminated`  | bool            | local seat is busted and excluded from later deals            |
 | `final_stacks`| array \| null   | final stack by seat once `session_over`                       |
+| `terminal`    | object \| null  | how the session ended (see below); `null` while it is live. Present in the lobby shape too |
 | `seats`       | array           | one entry per seat, in seat order                            |
 | `you`         | object          | data private to the local seat                               |
 
@@ -303,7 +307,7 @@ the latest snapshot; it never advances state on its own.
 | `dealing`  | the mental-poker deal is running; cards not yet in hand — show a spinner  |
 | `betting`  | a betting round is open                                                  |
 | `settled`  | the hand is over and paid out; `result` is populated                     |
-| `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand |
+| `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand, unless a player's drop stopped it (`PEER_LOST` below) |
 
 ### Continuous-session lifecycle
 
@@ -313,17 +317,153 @@ forward, while a void redeals from the current hand's original stacks and
 position chain.
 
 A busted sidecar becomes a lightweight spectator. It no longer participates in
-the mental-poker deal and ignores later hand traffic, but remains subscribed to
-the signed match lifecycle. When the final hand ends, `session_over`,
-`session_winner`, and `final_stacks` are pushed to active and eliminated
-clients alike.
+the mental-poker deal and ignores later hand traffic, but still follows each
+later hand's signed settlement reports (`hand_settled`, below) and the match
+lifecycle. When the final hand ends, `session_over`, `session_winner`, and
+`final_stacks` are pushed to active and eliminated clients alike, including a
+seat that busted and has not yet sent `next_hand`.
 
 Any authenticated peer may fail the current hand closed. A locally detected
-deal failure or replica desync broadcasts an idempotent signed hand-void
-message; every current participant enters `phase: "void"` and uses the same
-redeal inputs. In an n-of-n protocol, a malicious peer can already halt by
-disconnecting, so v1 favors safety and attribution over trying to continue a
-possibly divergent hand.
+deal failure, replica desync, or settlement that does not add up to the chips
+the hand was dealt with broadcasts an idempotent signed hand-void message;
+every current participant that has not settled the hand enters
+`phase: "void"` and uses the same redeal inputs. In an n-of-n protocol, a
+malicious peer can already halt by disconnecting, so v1 favors safety and
+attribution over trying to continue a possibly divergent hand.
+
+A settlement that does not add up is usually found on one replica only, after
+the others have settled the hand. The two sides then disagree about the
+settlement, and the table ends with `ABORTED_PROTOCOL` (below); nothing is
+redealt or rolled back. The replica that found it keeps the stacks the hand
+was dealt from, and the replicas that settled keep their payouts. Only a
+failure every replica shares, such as a deterministic engine bug, voids the
+hand everywhere and redeals it.
+
+Two failures end the table rather than the hand. The session reaches a
+terminal state on every peer and no further hand is dealt. Chips stand at
+each game's own last settlement, which for a lost peer includes its forfeit
+(below); otherwise the pot of a hand that had not settled is discarded, not
+paid. Every later snapshot reports how the table ended in `terminal` (below).
+
+- **A seated peer is lost (`PEER_LOST`).** A seat's connection drops while the
+  table still needs it: it is dealt into the current hand, or, after a settle,
+  it still has chips or has not yet reported the settlement. Only the host sees a joiner's socket close. The host ends
+  the table and tells the other seats with a signed notice, and the reason
+  names the seat. A host that has busted cannot judge the seat, so it only
+  reports the drop. A seat still playing that needs the leaver then ends the
+  table and confirms it, for the peers that cannot judge. Receivers accept any
+  seat's confirmation of a drop the host reported, a busted seat's included,
+  even if no seat still playing needed the leaver, except a seat in the middle
+  of a hand: an honest confirmation never reaches one, so it ignores it and
+  plays on rather than cancel or split the hand on another seat's word. A
+  seat that has busted may leave, and so may any seat once the match is
+  decided and its report of the last hand has arrived.
+
+  The leaver folds (`docs/CASUAL_P2P_RULES.md`; the casual P2P profile in
+  `docs/ROADMAP.md`). The notice carries no figures, only where its sender's
+  hand stood: the hand number, whether it had been dealt or settled, and how
+  many actions had been applied. Every seat still playing settles its own
+  copy of the table from that. If the hand had been dealt, it stops: the
+  leaver forfeits every chip it put in, a raise nobody called included, and
+  the seats left share each pot they are in, or the one seat left takes it.
+  The snapshot shows `phase: "void"` with `turn.headline` "Hand stopped |
+  *name* dropped and forfeits", not "chips restored". A seat everyone else
+  had folded to is paid the pot. A hand still being shuffled is cancelled
+  and its blinds go back. A hand settles this way, without its end-of-hand
+  card check, only on a Bayer-Groth table where this seat verified every
+  shuffle proof; otherwise its pot is discarded. A seat whose own action or
+  message crossed the drop keeps its own result, and the reason marks it
+  "disputed". When a busted host reported the drop, each seat that settled
+  learns of the race from the other seats' confirmations, which the busted
+  host relays even after it has ended, so the mark can reach the reason just
+  after the table ends; the chips do not move.
+- **The table disagrees about a settlement (`ABORTED_PROTOCOL`).** Every seat
+  broadcasts a signed digest of the table it settled, with the stacks it
+  covers (`hand_settled`), and no seat deals the next hand, or ends the
+  match, until every seat dealt into the last one has reported the same
+  digest and stacks. The table ends with the reason "table state
+  disagrees" when a seat dealt into that hand reports a different digest or
+  different stacks (the reason then gives both sides' stacks), or voids a
+  hand this peer settled. A void cannot cure it, because each side
+  would redeal from its own stacks. Nothing at the table can say which side
+  is right, so nothing is rolled back (`docs/CASUAL_P2P_RULES.md` rule 11):
+  each seat keeps its own result, and the reason ends "disputed: this game
+  keeps its own result". A seat that settled the hand keeps its payout, and a
+  seat that voided it keeps the stacks the hand was dealt from, so the two
+  sides of a dispute can show different `terminal.last_settled_stacks`. A
+  seat that lost the hand therefore cannot undo it by lying in its report.
+  When the seat had already reported this peer's settlement, the reason also
+  says it is contradicting itself.
+
+A seat still playing accepts the signed `session_end` only when it names that
+seat's own settled hand and exactly its settled stacks. Anything else is
+ignored. Like `next_hand`, it ends the match only once every seat dealt into
+that hand has reported the same settlement, and keeps a notice that arrives
+first until they have, so a report that disagrees ends the table in dispute
+whichever arrives first.
+A seat that busted while others play on has no settlement of its own
+for a later hand, and one seat's signature is not enough: any seat still
+playing could sign stacks that add up and name itself the winner. So each
+`hand_settled` report also carries the stacks, and the busted seat moves on to
+a later hand's stacks only once every seat that still had chips has reported
+settling that hand with the same digest and stacks, adding up to the table's
+chips. Reports may arrive in any order, and each is kept by hand until the
+seat has moved past it.
+It accepts a `session_end` about a later hand only when it names the
+hand and stacks it has reached that way, and keeps one that arrives first
+until it has. A host whose own match has ended still relays these reports
+and `session_end` notices, and a seat whose `next_hand` ends the match
+sends its `session_end` before its client is told the match is over, so a
+client that closes the connection at once cannot strand a busted seat. A
+notice naming the hand it busted in is ignored, because that hand left at
+least two seats with chips. No seat can show a busted seat a false result.
+A seat that withholds its report leaves the busted seat waiting, still
+spectating. Reports that differ, a falsified one included, end the table
+for the busted seat too, and so does a `hand_void` from one seat of a
+hand another reported settled: at once for the hand right after the last
+one it followed, whose seats it knows, and for a later hand once every
+report it needs is in. It reaches `ABORTED_PROTOCOL` with "its reports
+differ" and the "disputed" mark, and keeps the stacks it busted with as
+`terminal.last_settled_stacks`. A later report or void that takes back the
+last hand it followed ends it the same way, as it ends the seats still
+playing.
+
+### `terminal`: the session has ended
+
+`terminal` is `null` while the session is live. Once the session reaches a
+terminal state — which is permanent — every snapshot built afterwards
+carries:
+
+| field                 | type          | notes                                                       |
+|-----------------------|---------------|-------------------------------------------------------------|
+| `state`               | string        | `ENDED_NORMAL` for a finished match; otherwise why the table stopped, e.g. `HOST_LOST`, `ABORTED_PROTOCOL`, `LOCAL_SHUTDOWN` |
+| `reason`              | string        | human-readable cause, at most 512 characters. It can quote a peer (a refused deal policy is quoted as the host declared it): render it as plain text only |
+| `last_settled_stacks` | array \| null | stack by seat after the last **fully settled** hand; `null` if no hand ever began |
+
+A hand cut off before it settled never paid out: its pot is discarded, and
+`last_settled_stacks` are the stacks that hand was dealt from. The seats'
+own `stack` fields still show the cut-off hand's live stacks, so render
+`last_settled_stacks` as the outcome.
+
+`last_settled_stacks` is this seat's own figure, and after a disputed
+settlement (`ABORTED_PROTOCOL`, see the lifecycle section) another seat's can
+differ. Render it with `reason`, which marks it "disputed".
+
+An eliminated seat keeps the hand it busted in and drops every later hand, so
+its `seats` and `settlement` still describe that hand while the others play
+on. When the match ends, `session_end`, checked against the other seats'
+settlement reports (see the lifecycle section), brings it the final stacks: for
+`ENDED_NORMAL`, on every seat, `last_settled_stacks` equals `final_stacks`,
+and that is the outcome to render. If the table instead closes abnormally
+after the seat busted, the last settlement it saw is its own last hand, so
+`last_settled_stacks` are the stacks that hand left — the latest it knows,
+not necessarily the table's.
+
+`ENDED_NORMAL` is presented through `turn.state` `match_complete` as before.
+Any other terminal state replaces `turn.state` with `table_closed`, sets
+`turn.headline` to `reason` — the same bounded text, which may quote a
+peer — and removes `turn.decision` and `you.legal`: the table offers
+nothing further.
 
 ### `seats[i]`
 
@@ -342,7 +482,11 @@ Public, per-seat, **never contains hole cards during play**.
 | `last_action` | string        | e.g. `"CALL 20"`, `"RAISE 60"`, `"CHECK"`, `""`   |
 | `pos`         | string \| null| `"BTN"` `"SB"` `"BB"` or null                      |
 | `is_you`      | bool          | true for the local seat                           |
-| `hole`        | array of card | **present only at a contested showdown** (§6)     |
+| `hole`        | array of card | **present only at a contested showdown**, for seats in `result.shown`, never your own (§6) |
+
+In the lobby (`phase: "lobby"`) each entry is table membership only:
+`seat`, `conn_id`, `name` and `is_you`. Nothing has been dealt, so there is no
+`in_seat`, stack, bet, position or card; render a named entry as a taken seat.
 
 ### `you`
 
@@ -383,9 +527,10 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 | `all_in_waiting` | remove betting controls and show runout/audit progress |
 | `resolving` | betting closed; wait for street progression or settlement |
 | `hand_complete` | replace the decision card with `settlement` |
-| `voided` | show `void_reason` and that stacks were restored |
+| `voided` | show `void_reason` and `headline`: stacks were restored, or a dropped player forfeits the hand |
 | `eliminated` | spectator state; no betting or next-hand control |
 | `match_complete` | terminal winner/final-stack presentation |
+| `table_closed` | the session ended abnormally (`terminal`); show `headline` and `terminal.last_settled_stacks`; no betting, next-hand or start control |
 
 `turn.decision` is present only for `your_turn`. It includes display-ready
 pot odds, pot after calling, stack after calling, effective stack, and the
@@ -450,22 +595,27 @@ value 2–14, suit index 0–3). Shape (fields the client will use most):
   "pots": [ { "amount": 120, "eligible": [0, 1, 2] } ],
   "winners": [0],
   "runs": [ { "board": [...], "scores": {...}, "best": {...} } ],
+  "shown": [0, 1],
   "refund": null,
   "tabled": true
 }
 ```
 
 - `winners`: seat indices that won chips.
+- `shown`: seat indices tabled at a contested showdown; empty for a fold-out.
 - `pots`: each pot with its amount and eligible seats (main pot first, then
   side pots).
 - `runs`: non-empty for a **contested showdown** (two or more players saw it
   through); empty for a fold-out.
 
-**Showdown reveals.** At a contested showdown (`result.runs` non-empty) the
-post-hand audit has already made every player's cards public, so each entry
-in `seats` for a still-in player carries its `hole`. Table those cards. A
-hand that ended by folds (`result.runs` empty) reveals **no** `hole` fields —
-the winner is not shown, exactly as at a real table.
+**Showdown reveals.** At a contested showdown (`result.runs` non-empty) each
+entry in `seats` for a seat listed in `result.shown` — the seats that reached
+the showdown — carries its `hole`. Table those cards. A seat that folded on an
+earlier street never carries `hole`, even though the post-hand audit opened it
+(`POKER_RULES_PROFILE.md` D-M1-1c; a display convention, not secrecy). A hand
+that ended by folds (`result.runs` empty) reveals **no** `hole` fields — the
+winner is not shown, exactly as at a real table. Your own cards stay in
+`you.hole` and are never copied into your `seats` entry.
 
 ### Display-ready `settlement`
 

@@ -346,6 +346,11 @@ class JoinerAdmission:
     def host_pubkey(self) -> bytes:
         return self._host_pubkey
 
+    @property
+    def joiner_pubkey(self) -> bytes:
+        """The local key bound into this admission transcript."""
+        return self._joiner_pubkey
+
     def hello_payload(self) -> dict:
         self._client_nonce = new_nonce()
         self._server_nonce = None

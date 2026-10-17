@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p import inmemory_transport as _inmem
 from holdem.p2p import tcp_transport as _tcp
 from holdem.p2p import transport as _prod
@@ -62,7 +63,9 @@ class _Spy:
 
 def _session(transport, mode=None):
     s = Session(is_host=False, nickname="n", avatar_b64="",
-                transport=transport, author_mode=mode)
+                transport=transport, author_mode=mode,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "A"
     s._seat_order = ["A", "B", "C"]
     return s
@@ -84,7 +87,9 @@ def test_the_production_transport_declares_verified_envelopes():
         "the production transport no longer declares verified envelopes; "
         "Session would drop to conn_id trust in production")
     assert Session(is_host=False, nickname="n", avatar_b64="",
-                   transport=_prod).author_mode == AUTHOR_MODE_WIRE
+                   transport=_prod,
+                   clock=_DependencyClock(),
+                   master_secret=bytes(range(32))).author_mode == AUTHOR_MODE_WIRE
 
 
 @pytest.mark.parametrize("mod_or_cls, name", [
@@ -212,20 +217,22 @@ def test_the_ingress_gate_is_the_only_authorizer_on_the_hostless_path():
 def test_the_typed_handlers_do_not_repeat_authorization():
     """Handlers receive an already-admitted body."""
     handlers = ["_on_deal_message", "_on_bet_action", "_on_hand_void",
-                "_on_session_end", "_on_timeout_proposal"]
+                "_on_session_end", "_on_timeout_proposal", "_on_peer_lost",
+                "_on_hand_settled"]
     for name in handlers:
         src = _src(getattr(Session, name))
         assert "_seat_author_ok" not in src and "_author_owns_seat" not in src, (
             f"{name} re-authorizes; ingress already did")
 
 
-def test_there_is_one_hostless_type_registry_of_exactly_eight():
+def test_there_is_one_hostless_type_registry_of_exactly_ten():
     """Pinned as a literal, because a test parametrized over the registry
     cannot notice the registry shrinking -- it would simply run one case
     fewer and stay green."""
     assert _HOSTLESS_PAYLOAD_TYPES == frozenset({
         "key_announce", "deck_round", "deal_share", "audit_open",
         "bet_action", "hand_void", "session_end", "timeout_proposal",
+        "peer_lost", "hand_settled",
     })
 
 

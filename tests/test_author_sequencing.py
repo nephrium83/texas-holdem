@@ -1,7 +1,7 @@
 """Signed per-author, per-hand sequencing of hostless messages.
 
 Every hostless message carries ``author_seq``: a number the author stamps,
-counted per (hand, seat), covering all eight hostless types from one place
+counted per (hand, seat), covering every hostless type from one place
 on the send path and validated in one place on the receive path.
 
 What it is for
@@ -34,8 +34,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
+from holdem.p2p.replica_table import PHASE_BETTING
 from holdem.p2p.session import AUTHOR_SEQ_START, Session
+from holdem.p2p.session import _HOSTLESS_PAYLOAD_TYPES
 from holdem.p2p.timeout import FakeClock
 
 try:
@@ -45,8 +48,7 @@ except RuntimeError as exc:
                 allow_module_level=True)
 
 
-HOSTLESS = ("key_announce", "deck_round", "deal_share", "audit_open",
-            "bet_action", "hand_void", "session_end", "timeout_proposal")
+HOSTLESS = tuple(sorted(_HOSTLESS_PAYLOAD_TYPES))     # every one, from source
 
 
 class RecordingBus(InMemoryBus):
@@ -68,7 +70,9 @@ def make_table(n, bus=None):
     sessions = {}
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                    transport=InMemoryTransport(bus, cid))
+                    transport=InMemoryTransport(bus, cid),
+                    clock=_DependencyClock(),
+                    master_secret=bytes(range(32)))
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -130,7 +134,7 @@ def test_each_authors_numbers_start_at_zero_and_do_not_repeat():
 
 @pytest.mark.parametrize("mtype", HOSTLESS)
 def test_the_stamping_point_stamps_every_type(mtype):
-    """Every one of the eight, driven through _send_hostless directly.
+    """Every hostless type, driven through _send_hostless directly.
 
     The bus-observation test above cannot cover this: a single hand emits
     only the types that hand happens to need, so a type skipped inside the
@@ -195,6 +199,34 @@ def test_a_replayed_message_is_not_applied_twice():
     victim.handle_message(order[0], dict(fresh))
     assert len(applied) == 1, (
         "a replayed message was applied a second time")
+
+
+def test_lifecycle_messages_leave_stamped_and_are_not_applied_twice():
+    """Sent by a settle and by the host seeing a seat drop: each leaves
+    stamped, and replayed as sent, neither reaches its handler again."""
+    bus = RecordingBus()
+    _, sessions, order = make_table(3, bus=bus)
+    for cid in order:
+        sessions[cid].start_p2p_hand(hand_no=1, names=["P0", "P1", "P2"],
+                                     stacks=[500] * 3, sb=5, bb=10)
+    bus.drain()
+    host, victim, applied = sessions[order[0]], sessions[order[1]], []
+    for mtype in ("hand_settled", "peer_lost"):
+        setattr(victim, f"_on_{mtype}", lambda cid, m: applied.append(m))
+    while host.replica.phase == PHASE_BETTING:
+        seat = host.replica.actor
+        assert sessions[order[seat]].send_bet_action("call") == "applied"
+        bus.drain()
+    host.handle_disconnect(order[2])
+    bus.drain()
+    sent = [m for frm, m in bus.carried if frm == order[0]
+            and m.get("type") in ("hand_settled", "peer_lost")]
+    assert [m["type"] for m in sent] == ["hand_settled", "peer_lost"]
+    assert all("author_seq" in m for m in sent), sent
+    for m in sent:
+        victim.handle_message(order[0], dict(m))
+    assert [m for m in applied if m.get("seat") == 0] == sent, (
+        "each should reach the handler once: as sent, and not replayed")
 
 
 def test_reordering_does_not_void_the_hand():

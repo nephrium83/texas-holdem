@@ -46,6 +46,61 @@ func test_populates_occupied_seats():
 	assert_eq(table.get_node("%Seat0/Content/TurnIndicator").text, "")
 
 
+func test_own_hole_cards_render_face_up():
+	## The sidecar sends the local cards only in you.hole. Every snapshot of
+	## a live run carried them while the local seat still showed card backs.
+	var table := _table()
+	var snapshot := _heads_up_snapshot()
+	snapshot["you"] = {"hole": ["Ah", "Kd"]}
+	table.apply_snapshot(snapshot)
+	assert_true(table.get_node("%Seat0/Content/HoleCards/CardA/CardLabel").visible)
+	assert_eq(table.get_node("%Seat0/Content/HoleCards/CardA/CardLabel").text, "A♥")
+	assert_eq(table.get_node("%Seat0/Content/HoleCards/CardB/CardLabel").text, "K♦")
+
+
+func test_own_hole_cards_go_to_no_other_seat():
+	var table := _table()
+	var snapshot := _heads_up_snapshot()
+	snapshot["you"] = {"hole": ["Ah", "Kd"]}
+	table.apply_snapshot(snapshot)
+	assert_true(table.get_node("%Seat1/Content/HoleCards/CardA").visible)
+	assert_false(table.get_node("%Seat1/Content/HoleCards/CardA/CardLabel").visible,
+		"the opponent's seat showed a face")
+	assert_false(snapshot["seats"][0].has("hole"), "the snapshot itself was altered")
+
+
+func _lobby_snapshot() -> Dictionary:
+	## The shape client_view._lobby_snapshot sends: membership only.
+	return {
+		"type": "snapshot", "phase": "lobby", "hand_num": 0,
+		"seats": [
+			{"seat": 0, "conn_id": "seat0", "name": "Player", "is_you": true},
+			{"seat": 1, "conn_id": "seat1", "name": "Bot 1", "is_you": false},
+		],
+		"you": {"seat": 0},
+	}
+
+
+func test_lobby_seats_show_the_players_names():
+	## Every lobby seat used to render "Empty seat": the lobby snapshot has
+	## no in_seat, which SeatView read as an unoccupied seat.
+	var table := _table()
+	table.apply_snapshot(_lobby_snapshot())
+	assert_eq(table.get_node("%Seat0/Content/NameLabel").text, "Player (You)")
+	assert_eq(table.get_node("%Seat1/Content/NameLabel").text, "Bot 1")
+	assert_eq(table.get_node("%Seat2/Content/NameLabel").text, "Empty seat")
+
+
+func test_lobby_seats_show_no_stack_or_cards():
+	## Nothing has been dealt, so no card backs and no invented stack.
+	var table := _table()
+	table.apply_snapshot(_heads_up_snapshot())
+	table.apply_snapshot(_lobby_snapshot())
+	assert_eq(table.get_node("%Seat1/Content/InfoRow/StackLabel").text, "")
+	assert_false(table.get_node("%Seat1/Content/HoleCards/CardA").visible)
+	assert_false(table.get_node("%Seat1/Content/HoleCards/CardB").visible)
+
+
 func test_unused_seat_slots_are_cleared():
 	var table := _table()
 	table.apply_snapshot(_heads_up_snapshot())

@@ -9,6 +9,10 @@ A companion X25519 keypair is also stored in the same file. It served
 hole-card encryption in the retired commit-reveal shuffle and is kept
 for future transport-layer encryption; nothing consumes it today.
 
+Importing this module does not read or write any files. The host explicitly
+loads its Identity with load_or_create(); legacy module helpers load the
+same process default on first use.
+
 Generating the keypairs on first launch is the full "setup" the user
 performs.  The keypairs are stable across sessions so that a reconnecting
 player presents the same peer ID and pubkey the other seats already have
@@ -20,6 +24,7 @@ import base64
 import json
 import os
 import pathlib
+import threading
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -30,6 +35,8 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
+from holdem.p2p.signing import verify
+
 
 def _identity_path() -> pathlib.Path:
     """L-4: Store identity alongside other app config via settings.config_dir()."""
@@ -39,8 +46,7 @@ def _identity_path() -> pathlib.Path:
     return d / "identity.json"
 
 
-def _load_or_create() -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
-    path = _identity_path()
+def _load_keys(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
     data: dict = {}
     if path.exists():
         try:
@@ -80,9 +86,57 @@ def _load_or_create() -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
     return ed_key, x25519_key
 
 
-_private_key: Ed25519PrivateKey
-_x25519_private_key: X25519PrivateKey
-_private_key, _x25519_private_key = _load_or_create()
+class Identity:
+    """One host-owned identity, independent of the process default."""
+
+    def __init__(self, ed25519_key: Ed25519PrivateKey,
+                 x25519_key: X25519PrivateKey) -> None:
+        self._private_key = ed25519_key
+        self._x25519_private_key = x25519_key
+
+    def private_key(self) -> Ed25519PrivateKey:
+        return self._private_key
+
+    def public_key_bytes(self) -> bytes:
+        return self._private_key.public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw)
+
+    def peer_id(self) -> str:
+        return self.public_key_bytes()[:8].hex()
+
+    def sign(self, message: bytes) -> bytes:
+        return self._private_key.sign(message)
+
+    @staticmethod
+    def verify(pubkey_bytes: bytes, message: bytes, signature: bytes) -> bool:
+        return verify(pubkey_bytes, message, signature)
+
+    def x25519_private_key(self) -> X25519PrivateKey:
+        return self._x25519_private_key
+
+    def x25519_public_key_bytes(self) -> bytes:
+        return self._x25519_private_key.public_key().public_bytes(
+            Encoding.Raw, PublicFormat.Raw)
+
+
+_default_identity: Identity | None = None
+_default_lock = threading.Lock()
+
+
+def load_or_create(path: pathlib.Path | str | None = None) -> Identity:
+    """Load stored keys, creating them if absent.
+
+    Without a path, cache one identity for this process using the configured
+    identity file. An explicit path loads a separate identity, so a host can
+    own multiple identities without changing the process default.
+    """
+    if path is not None:
+        return Identity(*_load_keys(pathlib.Path(path)))
+    global _default_identity
+    with _default_lock:
+        if _default_identity is None:
+            _default_identity = Identity(*_load_keys(_identity_path()))
+        return _default_identity
 
 
 # ---------------------------------------------------------------------------
@@ -91,38 +145,22 @@ _private_key, _x25519_private_key = _load_or_create()
 
 def private_key() -> Ed25519PrivateKey:
     """Return the process-wide Ed25519 private key."""
-    return _private_key
+    return load_or_create().private_key()
 
 
 def public_key_bytes() -> bytes:
     """Return the raw 32-byte Ed25519 public key."""
-    return _private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return load_or_create().public_key_bytes()
 
 
 def peer_id() -> str:
     """Hex string of first 8 bytes of public key — used in invite codes."""
-    return public_key_bytes()[:8].hex()
+    return load_or_create().peer_id()
 
 
 def sign(message: bytes) -> bytes:
     """Sign *message* with the local private key; returns 64-byte signature."""
-    return _private_key.sign(message)
-
-
-def verify(pubkey_bytes: bytes, message: bytes, signature: bytes) -> bool:
-    """Verify *signature* over *message* using *pubkey_bytes*.
-
-    Returns ``True`` on success, ``False`` on any failure (bad signature,
-    wrong key, malformed input).
-    """
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-    try:
-        Ed25519PublicKey.from_public_bytes(pubkey_bytes).verify(signature, message)
-        return True
-    except (InvalidSignature, ValueError):
-        return False
+    return load_or_create().sign(message)
 
 
 # ---------------------------------------------------------------------------
@@ -131,11 +169,9 @@ def verify(pubkey_bytes: bytes, message: bytes, signature: bytes) -> bool:
 
 def x25519_private_key() -> X25519PrivateKey:
     """Return the process-wide X25519 private key (for hole-card decryption)."""
-    return _x25519_private_key
+    return load_or_create().x25519_private_key()
 
 
 def x25519_public_key_bytes() -> bytes:
     """Return the raw 32-byte X25519 public key (share during shuffle commit)."""
-    return _x25519_private_key.public_key().public_bytes(
-        Encoding.Raw, PublicFormat.Raw
-    )
+    return load_or_create().x25519_public_key_bytes()

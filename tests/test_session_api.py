@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 
@@ -24,6 +25,8 @@ def _make_session() -> Session:
     return Session(
         is_host=True, nickname="Test", avatar_b64="",
         transport=InMemoryTransport(bus, "host"),
+        clock=_DependencyClock(),
+        master_secret=bytes(range(32)),
     )
 
 

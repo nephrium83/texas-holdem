@@ -14,15 +14,28 @@ reveals.
 
 Hidden-information invariant (inherited and preserved): during play a
 snapshot carries hole cards for the LOCAL seat only. Other seats' cards
-appear solely in a contested-showdown 'settled' snapshot, where the
-post-hand audit has already made them public. A client physically cannot
-leak what it was never sent. Every snapshot is plain JSON-serialisable.
+appear solely in a contested-showdown 'settled' snapshot, and only for the
+seats in result['shown'] -- the ones that reached the showdown. A seat that
+folded is never tabled (POKER_RULES_PROFILE D-M1-1c), although the post-hand
+audit has opened its cards too. A client physically cannot leak what it was
+never sent. Every snapshot is plain JSON-serialisable.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 from holdem import contract, player_info
+
+# Session.ENDED_NORMAL, spelled out rather than imported so this module
+# keeps importing nothing from the p2p stack.
+_ENDED_NORMAL = "ENDED_NORMAL"
+
+# The most of terminal_reason a snapshot carries. The reason can quote a
+# peer -- POLICY_REFUSED embeds the deal policy the host's game_start
+# declared -- and Session keeps it whole, so one hostile game_start would
+# otherwise put up to a frame's worth of text into the headline of every
+# snapshot that follows. 512 is the cap Session puts on a peer's void reason.
+_MAX_REASON = 512
 
 
 def _holes_recovered(session) -> bool:
@@ -40,6 +53,14 @@ def _phase(session, dealt: bool) -> str:
     return "betting"
 
 
+def _forfeit_seat(session) -> Optional[int]:
+    """The seat whose drop stopped this hand and forfeits it, if one did."""
+    record = session.hand_record
+    if record is None or record.outcome != session.HAND_FORFEIT:
+        return None
+    return record.blamed_seat
+
+
 def snapshot(session) -> dict:
     """Everything the local player's client needs to render right now.
 
@@ -48,7 +69,7 @@ def snapshot(session) -> dict:
     """
     replica = session.replica
     if replica is None:
-        return _lobby_snapshot(session)
+        return _with_terminal(session, _lobby_snapshot(session))
 
     seat = session.local_seat
     engine = replica.engine
@@ -111,6 +132,7 @@ def snapshot(session) -> dict:
         session_winner=snap["session_winner"],
         eliminated=snap["eliminated"],
         void_reason=snap["void_reason"],
+        forfeit_seat=_forfeit_seat(session),
     )
     snap["deal_progress"] = player_info.deal_progress_view(
         phase, snap["void_reason"]
@@ -127,18 +149,61 @@ def snapshot(session) -> dict:
     )
 
     # Showdown reveals: at a contested showdown (result carries scored runs)
-    # the audit has made every hole public, so the client can table them.
+    # the seats that reached it are tabled, so the client can show them.
     # A hand that ended by folds has no runs and reveals nothing.
+    #
+    # Only the seats the engine recorded as shown. The audit opens every
+    # dealt seat, including ones that folded on an earlier street, but a
+    # folded hand is never rendered to another player (POKER_RULES_PROFILE
+    # D-M1-1c). That is display convention, not secrecy: any peer can still
+    # compute those cards from the audit.
     result = session.hand_result
     if (phase == "settled" and result and result.get("runs")
             and session._deal_driver is not None):
         revealed = session._deal_driver.all_hole_cards()
+        shown = {int(s) for s in result.get("shown", [])}
         if revealed:
             by_seat = {s: [contract.card_str(c) for c in cards]
-                       for s, cards in revealed.items()}
+                       for s, cards in revealed.items() if s in shown}
             for sv in snap["seats"]:
                 if sv["seat"] in by_seat and not sv["is_you"]:
                     sv["hole"] = by_seat[sv["seat"]]
+    return _with_terminal(session, snap)
+
+
+def _with_terminal(session, snap: dict) -> dict:
+    """Attach how the session ended, and close the table if that was abnormal.
+
+    ``terminal`` is None while the session is live. ENDED_NORMAL is a finished
+    match, which ``turn`` already presents as match_complete. Any other
+    terminal state means the table stopped under the players -- a lost host
+    or peer, a protocol abort, a local shutdown -- and was previously
+    invisible: the snapshot kept offering a hand that could never be played.
+    ``turn`` now says the table is closed, gives the reason as its headline,
+    and offers no decision.
+
+    The stacks shown are Session.last_settled_stacks, the one place that
+    says what the table owes its players: a forfeit, a cancelled hand, a
+    disputed settlement and a finished match each have their own figure
+    there, and a copy derived here would drift from it.
+    """
+    state = getattr(session, "terminal_state", None)
+    if state is None:
+        snap["terminal"] = None
+        return snap
+    reason = getattr(session, "terminal_reason", None)
+    if reason is not None:
+        reason = str(reason)[:_MAX_REASON]
+    snap["terminal"] = {
+        "state": state,
+        "reason": reason,
+        "last_settled_stacks": getattr(session, "last_settled_stacks", None),
+    }
+    if state != _ENDED_NORMAL:
+        snap["turn"]["state"] = "table_closed"
+        snap["turn"]["headline"] = reason or "Table closed"
+        snap["turn"].pop("decision", None)
+        snap["you"].pop("legal", None)
     return snap
 
 
