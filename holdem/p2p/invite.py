@@ -56,8 +56,8 @@ from __future__ import annotations
 
 import base64
 import secrets
-import socket
 import struct
+import sys
 
 # 4-byte "all zeros" sentinel meaning "not set"
 _NULL_IP   = b'\x00\x00\x00\x00'
@@ -87,6 +87,70 @@ class LegacyInviteError(ValueError):
     gibberish", and so no caller can accidentally handle it by falling back
     to an unauthenticated join.
     """
+
+
+def _pack_ipv4(address):
+    """Pack inet_aton's numeric IPv4 forms without loading networking.
+
+    One to four decimal, octal or hexadecimal components use the historic
+    32 / 8+24 / 8+8+16 / 8+8+8+8 bit layouts. ASCII whitespace ends the
+    address, as it did in inet_aton; leading whitespace is invalid.
+    See docs/INVITE_CODEC.md for the Windows broadcast spelling exception.
+    """
+    if not isinstance(address, str):
+        name = "None" if address is None else type(address).__name__
+        raise TypeError(f"inet_aton() argument must be str, not {name}")
+    # The old C API first converted the whole string to UTF-8, including
+    # ignored suffixes, and refused embedded NULs before parsing it.
+    encoded = str.encode(address, "utf-8")
+    if b"\0" in encoded:
+        raise ValueError("embedded null character")
+    # The Windows fallback also accepts precisely one ASCII space as zero.
+    if sys.platform == "win32" and encoded == b" ":
+        return _NULL_IP
+
+    def invalid():
+        raise OSError("illegal IP address string passed to inet_aton")
+
+    numeric = encoded
+    for offset, char in enumerate(encoded):
+        if char in b" \t\n\r\v\f":
+            numeric = encoded[:offset]
+            break
+    parts = numeric.split(b".")
+    if not 1 <= len(parts) <= 4:
+        invalid()
+    packed = 0
+    for index, part in enumerate(parts):
+        if part.startswith((b"0x", b"0X")):
+            base, digits, alphabet = 16, part[2:], b"0123456789abcdefABCDEF"
+        elif part.startswith(b"0"):
+            base, digits, alphabet = 8, part, b"01234567"
+        else:
+            base, digits, alphabet = 10, part, b"0123456789"
+        if not digits or any(char not in alphabet for char in digits):
+            invalid()
+        significant = digits.lstrip(b"0")
+        # A 32-bit value needs at most eleven octal digits. Discarding
+        # leading zeros avoids Python's integer-string length limit.
+        if len(significant) > 11:
+            invalid()
+        value = int(significant or b"0", base)
+        bits = 8 if index < len(parts) - 1 else 8 * (5 - len(parts))
+        if value >= 1 << bits:
+            invalid()
+        packed = (packed << bits) | value
+    # Windows' inet_addr fallback uses all-ones as its failure sentinel;
+    # CPython makes an exception only for this exact dotted-decimal text.
+    if (sys.platform == "win32" and packed == 0xFFFFFFFF
+            and encoded != b"255.255.255.255"):
+        invalid()
+    return struct.pack(">I", packed)
+
+
+def _unpack_ipv4(packed):
+    """Render the four payload bytes as canonical dotted decimal."""
+    return ".".join(str(octet) for octet in packed)
 
 
 def generate_room_code(
@@ -137,13 +201,13 @@ def generate_room_code(
             f"admission_secret must be {ADMISSION_SECRET_LEN} bytes")
 
     if public_address:
-        pub_ip_bytes   = socket.inet_aton(public_address[0])
+        pub_ip_bytes   = _pack_ipv4(public_address[0])
         pub_port_bytes = struct.pack(">H", public_address[1])
     else:
         pub_ip_bytes, pub_port_bytes = _NULL_IP, _NULL_PORT
 
     if relay_address:
-        relay_ip_bytes   = socket.inet_aton(relay_address[0])
+        relay_ip_bytes   = _pack_ipv4(relay_address[0])
         relay_port_bytes = struct.pack(">H", relay_address[1])
     else:
         relay_ip_bytes, relay_port_bytes = _NULL_IP, _NULL_PORT
@@ -208,9 +272,9 @@ def parse_room_code(code):
         "host_pubkey":      raw[_OFF_HOST:_OFF_DISCOVERY].hex(),
         "discovery_token":  raw[_OFF_DISCOVERY:_OFF_SECRET].hex(),
         "admission_secret": raw[_OFF_SECRET:_OFF_PUB_IP].hex(),
-        "public_ip":        socket.inet_ntoa(pub_ip_raw) if pub_ip_int else None,
+        "public_ip":        _unpack_ipv4(pub_ip_raw) if pub_ip_int else None,
         "public_port":      pub_port_n                   if pub_ip_int else None,
-        "relay_host":       socket.inet_ntoa(relay_ip_raw) if relay_ip_int else None,
+        "relay_host":       _unpack_ipv4(relay_ip_raw) if relay_ip_int else None,
         "relay_port":       relay_port_n                   if relay_ip_int else None,
         "flags":            raw[_OFF_FLAGS],
     }
