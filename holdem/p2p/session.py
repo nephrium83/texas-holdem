@@ -2988,16 +2988,21 @@ class Session:
             self.on_player_list_changed(snapshot)
 
     @owned
-    def add_local_player(self, conn_id: str) -> None:
-        """Register the local host player once we know our own conn_id."""
-        from holdem.p2p import identity as _id
+    def add_local_player(self, conn_id: str, *, public_key: bytes,
+                         x25519_public_key: bytes = b"") -> None:
+        """Register the local host with public keys supplied by its host app."""
+        if not isinstance(public_key, bytes) or len(public_key) != 32:
+            raise ValueError("local Ed25519 public key must be 32 bytes")
+        if (not isinstance(x25519_public_key, bytes)
+                or len(x25519_public_key) not in (0, 32)):
+            raise ValueError("local X25519 public key must be empty or 32 bytes")
         with self._lock:
             self.players[conn_id] = Player(
                 conn_id           = conn_id,
                 peer_id           = "",
                 nickname          = self.local_nickname,
                 avatar_b64        = self.local_avatar,
-                x25519_pubkey_hex = _id.x25519_public_key_bytes().hex(),
+                x25519_pubkey_hex = x25519_public_key.hex(),
                 # Through the chokepoint like every other writer, even
                 # though this one supplies OUR OWN key rather than anything
                 # a peer sent. An unconditional write here re-opens
@@ -3007,7 +3012,7 @@ class Session:
                 # in practice: the first call establishes the key and later
                 # calls present the same value.
                 ed25519_pubkey_hex = self._adopt_signing_key(
-                    conn_id, _id.public_key_bytes().hex()),
+                    conn_id, public_key.hex()),
                 is_host           = self.is_host,
                 ready             = True,
             )

@@ -27,7 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p import transport as T
-from holdem.p2p import wire
+from holdem.p2p import identity, wire
 from lifecycle import transport_threads, wait_until
 
 
@@ -60,7 +60,8 @@ def _framed(envelope: dict) -> bytes:
 
 def _signed(mtype: str, payload: dict) -> bytes:
     """A frame this process signs with its own identity, as a peer would."""
-    return _framed(json.loads(wire.pack(mtype, payload)))
+    return _framed(json.loads(wire.pack(mtype, payload,
+                                       signer=identity.load_or_create())))
 
 
 def _recv_exactly(sock: socket.socket, count: int) -> bytes:

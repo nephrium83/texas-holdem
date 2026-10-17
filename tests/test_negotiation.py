@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from holdem.p2p import wire
+from holdem.p2p import identity, wire
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import Player, Session
 
@@ -32,19 +32,21 @@ DETECTION = Session.DEAL_POLICY_DETECTION
 # --------------------------------------------------- protocol version
 
 def test_pack_uses_the_declared_version():
-    env = wire.safe_loads(wire.pack("chat", {"text": "hi"}))
+    env = wire.safe_loads(wire.pack("chat", {"text": "hi"},
+                                   signer=identity.load_or_create()))
     assert env["v"] == wire.PROTOCOL_VERSION
 
 
 def test_unpack_accepts_the_current_version():
-    assert wire.unpack(wire.pack("chat", {"text": "hi"}))["type"] == "chat"
+    assert wire.unpack(wire.pack("chat", {"text": "hi"},
+                                 signer=identity.load_or_create()))["type"] == "chat"
 
 
 @pytest.mark.parametrize("version", [0, 2, 99, -1])
 def test_unpack_rejects_an_unsupported_version(version):
     """An incompatible peer must be refused before its payload is
     interpreted under rules it may not share."""
-    raw = wire.pack("chat", {"text": "hi"})
+    raw = wire.pack("chat", {"text": "hi"}, signer=identity.load_or_create())
     env = wire.safe_loads(raw)
     env["v"] = version
     with pytest.raises(ValueError, match="version"):
@@ -53,7 +55,7 @@ def test_unpack_rejects_an_unsupported_version(version):
 
 @pytest.mark.parametrize("version", ["1", 1.0, None, [1], {"v": 1}])
 def test_unpack_rejects_a_non_integer_version(version):
-    raw = wire.pack("chat", {"text": "hi"})
+    raw = wire.pack("chat", {"text": "hi"}, signer=identity.load_or_create())
     env = wire.safe_loads(raw)
     env["v"] = version
     with pytest.raises(ValueError, match="version"):

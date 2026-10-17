@@ -35,8 +35,8 @@ import logging
 from typing import Callable, Optional
 
 from holdem.p2p import admission as _adm
-from holdem.p2p import identity as _identity
 from holdem.p2p import wire as _wire
+from holdem.p2p.signing import Signer
 
 _log = logging.getLogger(__name__)
 
@@ -47,7 +47,11 @@ class JoinAuthenticator:
     def __init__(self, transport, session, joiner_admission,
                  nickname: str = "", avatar_b64: str = "",
                  on_authenticated: Optional[Callable] = None,
-                 on_failed: Optional[Callable] = None) -> None:
+                 on_failed: Optional[Callable] = None,
+                 *, signer: Signer) -> None:
+        if signer.public_key_bytes() != joiner_admission.joiner_pubkey:
+            raise ValueError("signer does not match the joiner's admission key")
+        self._signer = signer
         self._transport = transport
         self._session = session
         self._adm = joiner_admission
@@ -146,12 +150,14 @@ class JoinAuthenticator:
         sent under a different key would be refused rather than seated.
         """
         info = _wire.pack("player_info", {
-            "nickname": self._nickname, "avatar_b64": self._avatar_b64})
+            "nickname": self._nickname, "avatar_b64": self._avatar_b64},
+            signer=self._signer)
         self._transport.send(conn_id, json.loads(info))
         self.player_info_sent = True
 
 
-def joiner_admission_from_invite(parsed: dict) -> _adm.JoinerAdmission:
+def joiner_admission_from_invite(parsed: dict, *,
+                                 joiner_pubkey: bytes) -> _adm.JoinerAdmission:
     """Build the pin from a parsed V2 invite.
 
     One place converts invite fields into a capability, so a routing choice
@@ -162,6 +168,6 @@ def joiner_admission_from_invite(parsed: dict) -> _adm.JoinerAdmission:
     return _adm.JoinerAdmission(
         admission_secret=bytes.fromhex(parsed["admission_secret"]),
         host_pubkey=bytes.fromhex(parsed["host_pubkey"]),
-        joiner_pubkey=_identity.public_key_bytes(),
+        joiner_pubkey=joiner_pubkey,
         discovery_token=bytes.fromhex(parsed["discovery_token"]),
     )

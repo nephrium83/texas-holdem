@@ -446,8 +446,11 @@ def _sign_frame(msg: dict) -> bytes:
     """
     if "sig" in msg or msg.get("type") in _RELAY_CONTROL_TYPES:
         return _frame(msg)
+    from holdem.p2p import identity as _identity
     from holdem.p2p import wire as _wire
-    signed = json.loads(_wire.pack(msg.get("type", ""), _wire_payload(msg)))
+    signer = _identity.load_or_create()
+    signed = json.loads(_wire.pack(msg.get("type", ""), _wire_payload(msg),
+                                   signer=signer))
     return _frame(signed)
 
 
@@ -811,7 +814,7 @@ async def _connect_via_relay(relay_host: str, relay_port: int,
     join_msg = {
         "type":    "relay_join",
         "room":    room_id,
-        "peer_id": _identity.peer_id(),
+        "peer_id": _identity.load_or_create().peer_id(),
     }
     try:
         writer.write(_frame(join_msg))

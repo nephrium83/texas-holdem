@@ -222,7 +222,7 @@ class TestPeerConnected:
         s.local_conn_id = "h"
         s.configure_seats(["h", "placeholder"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s.add_local_player("h")
+        s.add_local_player("h", public_key=bytes(range(32)))
         matches = sink.of_type("peer_connected")
         assert any(e["conn_id"] == "h" for e in matches)
 

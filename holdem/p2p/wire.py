@@ -22,7 +22,7 @@ import hashlib
 import json
 import time
 
-from holdem.p2p import identity
+from holdem.p2p.signing import Signer, verify
 
 
 # Bounds applied to untrusted bytes BEFORE they are parsed. A frame that
@@ -130,22 +130,24 @@ def safe_loads(raw: bytes):
     return value
 
 
-def pack(action_type: str, payload: dict, prev_hash: str = "0" * 64) -> bytes:
+def pack(action_type: str, payload: dict, prev_hash: str = "0" * 64, *,
+         signer: Signer) -> bytes:
     """Build a signed, hash-chained action envelope.
 
+    The host supplies the signer; this module never loads a local identity.
     Returns UTF-8 JSON bytes ready to send over the wire.
     """
     msg: dict = {
         "v":       PROTOCOL_VERSION,
         "type":    action_type,
         "payload": payload,
-        "pubkey":  identity.public_key_bytes().hex(),
+        "pubkey":  signer.public_key_bytes().hex(),
         "ts":      int(time.time() * 1000),
         "prev":    prev_hash,
     }
     # Sign the canonical pre-image (no "sig", no "hash")
     canonical = json.dumps(msg, sort_keys=True, separators=(",", ":")).encode()
-    msg["sig"] = identity.sign(canonical).hex()
+    msg["sig"] = signer.sign(canonical).hex()
     # Hash the full signed envelope for chain linkage
     full = json.dumps(msg, sort_keys=True, separators=(",", ":")).encode()
     msg["hash"] = hashlib.sha256(full).hexdigest()
@@ -184,7 +186,7 @@ def unpack(raw: bytes) -> dict:
     canonical = json.dumps(msg, sort_keys=True, separators=(",", ":")).encode()
     pubkey = bytes.fromhex(msg["pubkey"])
 
-    if not identity.verify(pubkey, canonical, sig):
+    if not verify(pubkey, canonical, sig):
         raise ValueError("Invalid signature in envelope from pubkey %s" % msg["pubkey"][:16])
 
     # H-6: replay protection — reject envelopes outside a ±30-second window

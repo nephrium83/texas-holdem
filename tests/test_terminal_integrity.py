@@ -100,7 +100,8 @@ MUTATORS = [
     ("reveal_board_street", lambda s: s.reveal_board_street("flop")),
     ("open_deal_audit", lambda s: s.open_deal_audit()),
     ("configure_seats", lambda s: s.configure_seats(["x", "y"])),
-    ("add_local_player", lambda s: s.add_local_player("intruder")),
+    ("add_local_player", lambda s: s.add_local_player(
+        "intruder", public_key=bytes(range(32)))),
     ("set_ready", lambda s: s.set_ready("peer2", True)),
     ("check_deadlines", lambda s: s.check_deadlines()),
     ("broadcast_game_state", lambda s: s.broadcast_game_state()),
