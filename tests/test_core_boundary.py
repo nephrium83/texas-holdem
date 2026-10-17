@@ -100,16 +100,10 @@ FORBIDDEN_MODULES = ("tkinter", "socket", "asyncio")
 IMPORTERS = frozenset({"__import__", "import_module"})
 DYNAMIC = "a module named at run time"
 
-_INET = "invite.py:59, for inet_aton/inet_ntoa at invite.py:145-218"
-
 # What a fresh import of each core module does today that it must not. A
 # write names its file, so a second file from one of these is still new, and
 # each entry allows it once, so a second write to the same file is new too.
-IMPORT_ALLOWLIST = {
-    "holdem.p2p.invite": {
-        "loads socket": _INET,
-    },
-}
+IMPORT_ALLOWLIST = {}
 
 # Every import of a host module or a FORBIDDEN_MODULES one in the core
 # today: the core module, the module imported, and the function or class
@@ -117,9 +111,7 @@ IMPORT_ALLOWLIST = {
 # wherever it is. The key is a place rather than a line, so an edit above
 # an import does not move it; the value records today's line, and a
 # failure names lines.
-GRAPH_ALLOWLIST = {
-    ("holdem.p2p.invite", "socket", "<module>"): _INET,
-}
+GRAPH_ALLOWLIST = {}
 
 # Runs in the fresh interpreter. The audit hook goes in before the import,
 # so it sees every write the import attempts wherever it points; the empty
