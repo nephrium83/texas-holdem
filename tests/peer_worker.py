@@ -129,6 +129,8 @@ def main() -> None:
 
     # ── transport ──────────────────────────────────────────────────────
     transport = SimpleTcpTransport(conn_id)
+    from holdem.p2p.timeout import RealClock
+    from holdem.p2p import device_secret
 
     # ── session ────────────────────────────────────────────────────────
     session = Session(
@@ -136,6 +138,8 @@ def main() -> None:
         nickname=conn_id.capitalize(),
         avatar_b64="",
         transport=transport,
+        clock=RealClock(),
+        secret_provider=device_secret.load_or_create,
         sink=WorkerEventSink(),
     )
     session.local_conn_id = conn_id

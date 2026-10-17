@@ -18,33 +18,49 @@ from typing import Optional, Protocol
 # ---------------------------------------------------------------------------
 
 class Clock(Protocol):
-    """Minimal clock surface: just what Session needs to decide whether its
-    own deadline has expired, which is when it reports one with a timeout
-    proposal.  What a proposal does is never the clock's to say: clocks on
-    different machines disagree, and one signed message must have the same
-    effect on every replica."""
+    """Monotonic time for deadlines and records, wall time for timestamps.
+
+    A local deadline decides when to report a timeout proposal. What a
+    proposal does is never the clock's to say: clocks on different machines
+    disagree, and one signed message must have the same effect on every
+    replica.
+    """
 
     def monotonic(self) -> float: ...
 
+    def time(self) -> float: ...
+
 
 class RealClock:
-    """Default production clock; wraps time.monotonic."""
+    """Host-supplied production clock using the system's time sources."""
 
     def monotonic(self) -> float:
         return time.monotonic()
 
+    def time(self) -> float:
+        return time.time()
+
 
 class FakeClock:
-    """Deterministic clock for tests.  Call advance() to move time forward."""
+    """Deterministic clock with independently adjustable wall time."""
 
-    def __init__(self, start: float = 0.0) -> None:
+    def __init__(self, start: float = 0.0, *,
+                 wall_start: Optional[float] = None) -> None:
         self._t = start
+        self._wall = start if wall_start is None else wall_start
 
     def monotonic(self) -> float:
         return self._t
 
+    def time(self) -> float:
+        return self._wall
+
     def advance(self, seconds: float) -> None:
         self._t += seconds
+        self._wall += seconds
+
+    def advance_wall(self, seconds: float) -> None:
+        self._wall += seconds
 
 
 # ---------------------------------------------------------------------------

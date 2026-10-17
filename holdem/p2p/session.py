@@ -71,12 +71,11 @@ import hashlib
 import json
 import logging
 import threading
-import time
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
 from holdem.p2p.timeout import (
-    Clock, DeadlineToken, RealClock, DEFAULT_PHASE_TIMEOUTS,
+    Clock, DeadlineToken, DEFAULT_PHASE_TIMEOUTS,
 )
 from holdem.p2p.admission import ADMISSION_TYPES as _ADMISSION_TYPES
 from holdem.p2p.events import EventSink, NullSink, SCHEMA_VERSION
@@ -423,11 +422,20 @@ class Session:
         return value
 
     def __init__(self, is_host: bool, nickname: str, avatar_b64: str,
-                 transport=None, clock: Optional[Clock] = None,
+                 transport, clock: Clock,
                  sink: Optional[EventSink] = None,
                  master_secret: Optional[bytes] = None,
                  author_mode: Optional[str] = None,
-                 admission=None, joiner_admission=None):
+                 admission=None, joiner_admission=None, *,
+                 secret_provider: Optional[Callable[[], bytes]] = None):
+        if transport is None:
+            raise TypeError("transport must be supplied explicitly")
+        if clock is None:
+            raise TypeError("clock must be supplied explicitly")
+        if secret_provider is not None and not callable(secret_provider):
+            raise TypeError("secret_provider must be callable")
+        if master_secret is None and secret_provider is None:
+            raise TypeError("master_secret or secret_provider must be supplied")
         # The one serialized execution context for this session's
         # protocol state. Created first: every field below is only ever
         # mutated while this is held.
@@ -446,12 +454,8 @@ class Session:
         # only wire mode forbids detection-only. That is acceptable because
         # compat is harnesses and benchmarks, but it is a subtraction, not
         # a refactor.
-        # transport module (or a mock) providing broadcast()/send().
-        # Defaults to the real global transport; tests inject an
-        # in-memory one so N sessions can run in one process.
-        if transport is None:
-            from holdem.p2p import transport as _t_module
-            transport = _t_module
+        # The host supplies the transport module (or an in-memory endpoint)
+        # providing broadcast()/send(); Session never opens its own sockets.
         self._transport = transport
 
         # Which authorization rule this session runs under, decided ONCE and
@@ -528,7 +532,7 @@ class Session:
         self._last_digest: Optional[str] = None   # previous replica digest
 
         # --- timeout machinery (Phase 3) ---
-        self._clock: Clock = clock if clock is not None else RealClock()
+        self._clock: Clock = clock
         self._deadline_started_at: Optional[float] = None
         self._current_deadline_token: Optional[DeadlineToken] = None
         self._phase_timeout: dict[str, float] = dict(DEFAULT_PHASE_TIMEOUTS)
@@ -612,11 +616,10 @@ class Session:
         self._deal_outbox: list[dict] = []      # driver emissions buffered for routing
         self._deal_hole: list = [None, None]    # this seat's hole cards (engine Cards)
         self._deal_board: list = [None] * 5     # the board (engine Cards)
-        # Local device secret for deterministic key shares. Persisted, so a
-        # crashed and reopened app rederives the SAME share for a seat --
-        # see device_secret.py. Loaded lazily on first use rather than in
-        # __init__, so merely constructing a Session touches no filesystem.
+        # The host owns secret persistence. Call its provider lazily on
+        # first use, so constructing a Session never loads key material.
         self._master_secret_override = master_secret
+        self._secret_provider = secret_provider
         self._master_secret_cache: Optional[bytes] = None
 
         # --- hostless betting (L5): per-peer replica engine + orchestration ---
@@ -704,12 +707,11 @@ class Session:
         whether logging succeeds or not.  Swallowing sink exceptions here is
         the contract; do not remove the bare except.
         """
-        import time as _time
         try:
             payload: dict = {
                 "v":     SCHEMA_VERSION,
                 "type":  "state_event",
-                "ts":    _time.time(),
+                "ts":    self._clock.time(),
                 "peer":  self.local_conn_id or "",
                 "event": event,
             }
@@ -1029,17 +1031,16 @@ class Session:
 
     @property
     def _deal_master_secret(self) -> bytes:
-        """This device's secret for deriving key shares.
+        """The supplied secret for deriving key shares.
 
-        Read from disk on first use and cached. An explicitly supplied
-        ``master_secret`` wins, which is how tests get isolation and how a
-        caller managing its own key material opts out of the file.
+        The host's provider is called on first use and a successful result
+        is cached. An explicit ``master_secret`` or later setter wins over
+        the provider. A provider failure leaves the cache empty for retry.
         """
         if self._master_secret_override is not None:
             return self._master_secret_override
         if self._master_secret_cache is None:
-            from holdem.p2p import device_secret
-            self._master_secret_cache = device_secret.load_or_create()
+            self._master_secret_cache = self._secret_provider()
         return self._master_secret_cache
 
     @_deal_master_secret.setter
@@ -3009,7 +3010,7 @@ class Session:
             outcome=outcome,
             reason=self.void_reason,
             blamed_seat=blamed_seat,
-            monotonic_ts=time.monotonic(),
+            monotonic_ts=self._clock.monotonic(),
             sequence=self._hand_seq,
         )
         if outcome == self.HAND_COMPLETED:
@@ -3564,7 +3565,7 @@ class Session:
             initiating_seat=seat,
             conn_id=conn_id,
             host_conn_id=self._host_conn_id,
-            monotonic_ts=time.monotonic(),
+            monotonic_ts=self._clock.monotonic(),
             sequence=self._terminal_seq,
             deal_policy=self._deal_policy,
         )
@@ -3878,16 +3879,21 @@ class Session:
             self.on_player_list_changed(snapshot)
 
     @owned
-    def add_local_player(self, conn_id: str) -> None:
-        """Register the local host player once we know our own conn_id."""
-        from holdem.p2p import identity as _id
+    def add_local_player(self, conn_id: str, *, public_key: bytes,
+                         x25519_public_key: bytes = b"") -> None:
+        """Register the local host with public keys supplied by its host app."""
+        if not isinstance(public_key, bytes) or len(public_key) != 32:
+            raise ValueError("local Ed25519 public key must be 32 bytes")
+        if (not isinstance(x25519_public_key, bytes)
+                or len(x25519_public_key) not in (0, 32)):
+            raise ValueError("local X25519 public key must be empty or 32 bytes")
         with self._lock:
             self.players[conn_id] = Player(
                 conn_id           = conn_id,
                 peer_id           = "",
                 nickname          = self.local_nickname,
                 avatar_b64        = self.local_avatar,
-                x25519_pubkey_hex = _id.x25519_public_key_bytes().hex(),
+                x25519_pubkey_hex = x25519_public_key.hex(),
                 # Through the chokepoint like every other writer, even
                 # though this one supplies OUR OWN key rather than anything
                 # a peer sent. An unconditional write here re-opens
@@ -3897,7 +3903,7 @@ class Session:
                 # in practice: the first call establishes the key and later
                 # calls present the same value.
                 ed25519_pubkey_hex = self._adopt_signing_key(
-                    conn_id, _id.public_key_bytes().hex()),
+                    conn_id, public_key.hex()),
                 is_host           = self.is_host,
                 ready             = True,
             )

@@ -45,6 +45,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p import admission as adm
 from holdem.p2p import invite as inv
 from holdem.p2p.session import (
@@ -397,7 +398,9 @@ def test_accept_without_a_prior_challenge_is_refused():
 
 def _joiner_session():
     s = Session(is_host=False, nickname="J", avatar_b64="",
-                transport=_Spy(), joiner_admission=_joiner_adm())
+                transport=_Spy(), joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     return s
 
@@ -516,7 +519,9 @@ def test_later_admission_traffic_cannot_repoint_the_host_hop():
 
 def _host_session(host_admission):
     s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=_Spy(), admission=host_admission)
+                transport=_Spy(), admission=host_admission,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "host"
     return s
 
@@ -587,7 +592,9 @@ def test_k2_traffic_is_rejected_before_the_hash_chain_records_it():
 def test_a_wire_mode_host_cannot_be_built_without_admission():
     """The insecure configuration is unreachable by omission."""
     with pytest.raises(ValueError, match="admission"):
-        Session(is_host=True, nickname="H", avatar_b64="", transport=_Spy())
+        Session(is_host=True, nickname="H", avatar_b64="", transport=_Spy(),
+            clock=_DependencyClock(),
+            master_secret=bytes(range(32)))
 
 
 # ══════════════════════════════════════════════ INVITE / LEAKAGE INVARIANTS
@@ -682,7 +689,9 @@ def test_a_real_host_session_answers_a_hello_with_a_challenge():
     h = _host_adm()
     t = _Spy()
     s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=t, admission=h)
+                transport=t, admission=h,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "host"
 
     s.handle_message("c1", {
@@ -702,7 +711,9 @@ def test_a_real_host_session_completes_the_whole_handshake():
     h = _host_adm()
     t = _Spy()
     s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=t, admission=h)
+                transport=t, admission=h,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "host"
 
     cn = adm.new_nonce()
@@ -725,7 +736,9 @@ def test_a_real_host_session_refuses_a_wrong_secret_and_sends_no_accept():
     h = _host_adm()
     t = _Spy()
     s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=t, admission=h)
+                transport=t, admission=h,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "host"
 
     cn = adm.new_nonce()
@@ -750,7 +763,9 @@ def test_malformed_handshake_input_is_dropped_not_raised(body):
     h = _host_adm()
     t = _Spy()
     s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=t, admission=h)
+                transport=t, admission=h,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "host"
     s.handle_message("c1", {"type": "admission_hello", "pubkey": K1.hex(),
                             "payload": body})
@@ -771,7 +786,9 @@ def test_wire_mode_refuses_to_elect_a_replacement_host():
     holds names ONE host key, so a promoted peer cannot be authenticated by
     it. Authenticated authority transfer is a separate protocol.
     """
-    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy())
+    s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
+            clock=_DependencyClock(),
+            master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s._host_conn_id = "hostconn"
     s._join_order = ["me", "other"]
@@ -799,7 +816,9 @@ def test_compat_mode_still_migrates():
         delivers_verified_envelopes = False
 
     s = Session(is_host=False, nickname="J", avatar_b64="",
-                transport=_Compat())
+                transport=_Compat(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s._host_conn_id = "hostconn"
     s._join_order = ["me", "other"]
@@ -818,7 +837,9 @@ def test_a_roster_naming_a_different_host_key_is_refused():
     invite already pinned.
     """
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("host", HOST_KEY)
 
@@ -836,7 +857,9 @@ def test_a_roster_naming_a_different_host_key_is_refused():
 def test_a_roster_naming_the_pinned_host_key_is_accepted():
     """The inverse, so the refusal above is not vacuous."""
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("host", HOST_KEY)
     s.handle_message("host", {
@@ -880,7 +903,9 @@ def test_a_roster_cannot_repoint_the_host_key_by_omitting_is_host():
     the party this check exists to constrain.
     """
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("hostc", HOST_KEY)
     evil = (bytes([0xAB]) * 32).hex()
@@ -915,7 +940,9 @@ def test_a_roster_cannot_repoint_the_host_key_by_omitting_is_host():
 def test_an_ordinary_roster_update_still_applies():
     """The inverse: refusing must not break normal roster traffic."""
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("hostc", HOST_KEY)
     s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
@@ -954,7 +981,9 @@ def test_player_info_cannot_move_an_established_signing_key():
     now goes through _adopt_signing_key.
     """
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("hostc", HOST_KEY)
     s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
@@ -986,7 +1015,7 @@ def test_a_host_never_adopts_a_roster_from_a_peer():
     """
     h = _host_adm()
     s = _host_session(h)
-    s.add_local_player("hostlocal")
+    s.add_local_player("hostlocal", public_key=HOST_KEY)
     assert _full_exchange(h, conn_id="c1", joiner=K1)[0] is True
 
     s.handle_message("c1", {"type": "player_list", "pubkey": K1.hex(),
@@ -1006,7 +1035,9 @@ def test_a_refused_host_entry_does_not_discard_the_rest_of_the_roster():
     "discard everything". Only the offending entry is dropped now.
     """
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("hostc", HOST_KEY)
     s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
@@ -1034,7 +1065,9 @@ def test_the_pin_check_still_catches_a_first_write():
     an empty field, which write-once permits. Only the pin refuses it.
     """
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-                joiner_admission=_joiner_adm())
+                joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
     s.mark_host_authenticated("hostc", HOST_KEY)
     s.handle_message("hostc", {"type": "player_list", "pubkey": HOST_KEY.hex(),
@@ -1063,7 +1096,9 @@ def test_seat_local_table_is_refused_on_a_verified_envelope_transport():
     was misconfigured into compat.
     """
     s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=_Spy(), admission=_host_adm())
+                transport=_Spy(), admission=_host_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
 
     with pytest.raises(RuntimeError, match="local tables only"):
@@ -1078,7 +1113,9 @@ def test_seat_local_table_is_refused_for_a_wire_mode_joiner_too():
     declaring a roster nobody authenticated, which is the same defect from
     the other side."""
     s = Session(is_host=False, nickname="J", avatar_b64="",
-                transport=_Spy(), joiner_admission=_joiner_adm())
+                transport=_Spy(), joiner_admission=_joiner_adm(),
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "me"
 
     with pytest.raises(RuntimeError, match="local tables only"):

@@ -38,6 +38,7 @@ from holdem import client_view
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
 from holdem.p2p.session import Player, Session
+from holdem.p2p.timeout import FakeClock
 from tests.showdown_rig import rig_showdowns
 
 import importlib
@@ -56,6 +57,7 @@ def table(n=3, stacks=None, start=True, policy=Session.DEAL_POLICY_BG):
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid),
+                    clock=FakeClock(),
                     master_secret=bytes([i + 1]) * 32)
         s.local_conn_id = cid
         s._host_conn_id = "peer0"

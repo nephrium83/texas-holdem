@@ -20,6 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p import inmemory_transport as _inmem
 from holdem.p2p import tcp_transport as _tcp
 from holdem.p2p import transport as _prod
@@ -62,7 +63,9 @@ class _Spy:
 
 def _session(transport, mode=None):
     s = Session(is_host=False, nickname="n", avatar_b64="",
-                transport=transport, author_mode=mode)
+                transport=transport, author_mode=mode,
+                clock=_DependencyClock(),
+                master_secret=bytes(range(32)))
     s.local_conn_id = "A"
     s._seat_order = ["A", "B", "C"]
     return s
@@ -84,7 +87,9 @@ def test_the_production_transport_declares_verified_envelopes():
         "the production transport no longer declares verified envelopes; "
         "Session would drop to conn_id trust in production")
     assert Session(is_host=False, nickname="n", avatar_b64="",
-                   transport=_prod).author_mode == AUTHOR_MODE_WIRE
+                   transport=_prod,
+                   clock=_DependencyClock(),
+                   master_secret=bytes(range(32))).author_mode == AUTHOR_MODE_WIRE
 
 
 @pytest.mark.parametrize("mod_or_cls, name", [

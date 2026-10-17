@@ -28,6 +28,7 @@ from .p2p import join_auth as _join_auth
 from .p2p.invite import generate_room_code, parse_room_code
 from .p2p import admission as _admission
 from .p2p import identity as _identity
+from .p2p import device_secret as _device_secret
 from .p2p import transport as _transport
 from .p2p import wire as _wire
 from .p2p import session as _session_mod
@@ -612,6 +613,7 @@ class OnboardingFlow:
         """
         # ---- 1. the capability, before anything can connect ----
         import secrets as _secrets
+        local_identity = _identity.load_or_create()
         discovery_token  = _secrets.token_bytes(_invite.DISCOVERY_TOKEN_LEN).hex()
         admission_secret = _secrets.token_bytes(_invite.ADMISSION_SECRET_LEN).hex()
 
@@ -620,7 +622,7 @@ class OnboardingFlow:
         # on this transport without one.
         host_admission = _admission.HostAdmission(
             admission_secret=bytes.fromhex(admission_secret),
-            host_pubkey=_identity.public_key_bytes(),
+            host_pubkey=local_identity.public_key_bytes(),
             discovery_token=bytes.fromhex(discovery_token),
         )
 
@@ -630,15 +632,20 @@ class OnboardingFlow:
             nickname   = self.nickname,
             avatar_b64 = getattr(self, "avatar_b64", ""),
             admission  = host_admission,
+            transport  = _transport,
+            clock      = _transport.get_clock(),
+            secret_provider = _device_secret.load_or_create,
         )
         _p2p_pkg._session = sess
 
         # H-12: register the host under a stable local ID derived from the
         # Ed25519 public key — NOT inside an on_connect callback (which fires
         # for the first *remote* peer, not for the host itself).
-        host_local_id = _identity.peer_id()
+        host_local_id = local_identity.peer_id()
         sess.local_conn_id = host_local_id
-        sess.add_local_player(host_local_id)
+        sess.add_local_player(
+            host_local_id, public_key=local_identity.public_key_bytes(),
+            x25519_public_key=local_identity.x25519_public_key_bytes())
 
         # ---- 3. callbacks, still before the listener ----
         # Cleared first so repeated dialog opens do not accumulate handlers.
@@ -670,6 +677,7 @@ class OnboardingFlow:
         # secret on refresh would silently lock out everyone holding the
         # earlier code.
         _code_ref = [generate_room_code(
+            host_pubkey=local_identity.public_key_bytes(),
             public_address=pub_addr,
             relay_address=relay_addr,
             discovery_token=discovery_token,
@@ -749,6 +757,7 @@ class OnboardingFlow:
                 # secret, so neither LAN multicast nor an already-shared
                 # invite is invalidated by STUN completing.
                 _code_ref[0] = generate_room_code(
+                    host_pubkey=local_identity.public_key_bytes(),
                     public_address=addr,
                     relay_address=relay_addr,
                     discovery_token=discovery_token,
@@ -993,12 +1002,17 @@ class OnboardingFlow:
             # The driver itself lives in holdem/p2p/join_auth.py so the
             # shipped ordering is the ordering under test; as closures in a
             # Tk callback it could only be exercised by driving the GUI.
-            joiner_admission = _join_auth.joiner_admission_from_invite(parsed)
+            local_identity = _identity.load_or_create()
+            joiner_admission = _join_auth.joiner_admission_from_invite(
+                parsed, joiner_pubkey=local_identity.public_key_bytes())
             sess = _session_mod.Session(
                 is_host    = False,
                 nickname   = self.nickname,
                 avatar_b64 = getattr(self, "avatar_b64", ""),
                 joiner_admission = joiner_admission,
+                transport  = _transport,
+                clock      = _transport.get_clock(),
+                secret_provider = _device_secret.load_or_create,
             )
             _p2p_pkg._session = sess
             _sess_ref[0] = sess              # C-2: expose to _handle_start
@@ -1032,6 +1046,8 @@ class OnboardingFlow:
                 transport=_transport,
                 session=sess,
                 joiner_admission=joiner_admission,
+                signer=local_identity,
+                clock=_transport.get_clock(),
                 nickname=self.nickname,
                 avatar_b64=getattr(self, "avatar_b64", ""),
                 on_authenticated=_authenticated,
@@ -1159,7 +1175,9 @@ class OnboardingFlow:
                 def _send_ready():
                     import json as _json
                     ready_msg = _json.loads(
-                        _wire.pack("ready", {"ready": True}))
+                        _wire.pack("ready", {"ready": True},
+                                   signer=local_identity,
+                                   clock=_transport.get_clock()))
                     _transport.broadcast(ready_msg)
                     status_lbl.config(
                         text="Ready! Waiting for host to start…",

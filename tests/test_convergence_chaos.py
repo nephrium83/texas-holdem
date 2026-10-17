@@ -24,6 +24,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import Player, Session
 
@@ -86,7 +87,8 @@ def make_table(n, rewrite=None, seed=None, prevention=False, stacks=None):
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid),
-                    master_secret=bytes([i + 1]) * 32)
+                    master_secret=bytes([i + 1]) * 32,
+                    clock=_DependencyClock())
         s.local_conn_id = cid
         if not s.is_host:
             s._host_conn_id = "peer0"

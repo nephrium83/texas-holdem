@@ -30,6 +30,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import Player, Session
 
@@ -41,7 +42,8 @@ def table(n=3, stacks=None, hand_no=1):
     for i, cid in enumerate(order):
         s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
                     transport=InMemoryTransport(bus, cid),
-                    master_secret=bytes([i + 1]) * 32)
+                    master_secret=bytes([i + 1]) * 32,
+                    clock=_DependencyClock())
         s.local_conn_id = cid
         s._host_conn_id = "peer0"
         s._join_order = list(order)
@@ -100,7 +102,8 @@ MUTATORS = [
     ("reveal_board_street", lambda s: s.reveal_board_street("flop")),
     ("open_deal_audit", lambda s: s.open_deal_audit()),
     ("configure_seats", lambda s: s.configure_seats(["x", "y"])),
-    ("add_local_player", lambda s: s.add_local_player("intruder")),
+    ("add_local_player", lambda s: s.add_local_player(
+        "intruder", public_key=bytes(range(32)))),
     ("set_ready", lambda s: s.set_ready("peer2", True)),
     ("check_deadlines", lambda s: s.check_deadlines()),
     ("broadcast_game_state", lambda s: s.broadcast_game_state()),

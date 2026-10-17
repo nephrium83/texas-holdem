@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import crypto_gate
+from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p import session as session_mod
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.session import AUTHOR_MODE_WIRE, Player, Session
@@ -314,7 +315,8 @@ def _compat_session(cid="peer0"):
     bus = InMemoryBus()
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, cid),
-                master_secret=b"\x02" * 32)
+                master_secret=b"\x02" * 32,
+                clock=_DependencyClock())
     s.local_conn_id = cid
     return s
 

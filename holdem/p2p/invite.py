@@ -59,8 +59,6 @@ import secrets
 import socket
 import struct
 
-from holdem.p2p import identity as _identity
-
 # 4-byte "all zeros" sentinel meaning "not set"
 _NULL_IP   = b'\x00\x00\x00\x00'
 _NULL_PORT = b'\x00\x00'
@@ -92,7 +90,7 @@ class LegacyInviteError(ValueError):
 
 
 def generate_room_code(
-    host_pubkey=None,
+    host_pubkey,
     flags=0,
     public_address=None,
     relay_address=None,
@@ -104,8 +102,8 @@ def generate_room_code(
     Parameters
     ----------
     host_pubkey:
-        Raw 32 bytes of the host's Ed25519 public key. Defaults to the
-        local peer's. Unlike V1 this is the WHOLE key, not a prefix.
+        Raw 32 bytes of the host's Ed25519 public key, supplied by the
+        host. Unlike V1 this is the WHOLE key, not a prefix.
     flags:
         1-byte flags field (reserved; pass 0).
     public_address, relay_address:
@@ -119,10 +117,7 @@ def generate_room_code(
         None generates a fresh one. Regenerating a code for the SAME game
         must pass both, or joiners holding the earlier code lose admission.
     """
-    if host_pubkey is None:
-        key = _identity.public_key_bytes()
-    else:
-        key = bytes(host_pubkey)
+    key = bytes(host_pubkey)
     if len(key) != HOST_PUBKEY_LEN:
         raise ValueError(
             f"host_pubkey must be exactly {HOST_PUBKEY_LEN} bytes, got "

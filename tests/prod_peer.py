@@ -174,6 +174,8 @@ def main() -> None:
     ap.add_argument("--invite", default="",
                     help="joiner: the V2 room code to pin the host with")
     args = ap.parse_args()
+    local_identity = _identity.load_or_create()
+    from holdem.p2p import device_secret
 
     is_host = (args.role == "host")
 
@@ -201,9 +203,12 @@ def main() -> None:
     joiner_admission = None
     if not is_host and args.invite:
         joiner_admission = _join_auth.joiner_admission_from_invite(
-            _invite.parse_room_code(args.invite))
+            _invite.parse_room_code(args.invite),
+            joiner_pubkey=local_identity.public_key_bytes())
 
     sess = Session(is_host=is_host, nickname=args.label, avatar_b64="",
+                   transport=transport, clock=transport.get_clock(),
+                   secret_provider=device_secret.load_or_create,
                    admission=host_admission,
                    joiner_admission=joiner_admission)
 
@@ -218,6 +223,7 @@ def main() -> None:
     if joiner_admission is not None:
         authenticator = _join_auth.JoinAuthenticator(
             transport=transport, session=sess,
+            signer=local_identity, clock=transport.get_clock(),
             joiner_admission=joiner_admission, nickname=args.label,
             on_authenticated=lambda cid: _emit(
                 {"type": "admission", "conn_id": cid, "admitted": True}),
@@ -261,7 +267,9 @@ def main() -> None:
         # key, not from a connection -- it has no inbound connection to be
         # named by. Joiners get UUIDs and learn theirs via player_ack.
         sess.local_conn_id = _identity.peer_id()
-        sess.add_local_player(sess.local_conn_id)
+        sess.add_local_player(
+            sess.local_conn_id, public_key=local_identity.public_key_bytes(),
+            x25519_public_key=local_identity.x25519_public_key_bytes())
         _emit({"type": "ready", "addr": addr,
                "peer_id": _identity.peer_id(),
                "invite": invite_code})

@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
-from holdem.p2p.timeout import DeadlineToken, FakeClock
+from holdem.p2p.timeout import DeadlineToken, FakeClock, RealClock
 
 try:
     importlib.import_module("holdem.p2p.elgamal")
@@ -53,13 +53,14 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0,
     order = [f"peer{i}" for i in range(n)]
     sessions: dict[str, Session] = {}
     for i, cid in enumerate(order):
-        clk = clocks[i] if clocks else None
+        clk = clocks[i] if clocks and clocks[i] is not None else FakeClock()
         s = Session(
             is_host   = (i == 0),
             nickname  = f"P{i}",
             avatar_b64= "",
             transport = InMemoryTransport(bus, cid),
             clock     = clk,
+            master_secret=b"test-session-secret",
         )
         s.local_conn_id = cid
         s.configure_seats(list(order))
@@ -91,6 +92,7 @@ def make_betting_table(n, clocks):
             avatar_b64= "",
             transport = InMemoryTransport(bus, cid),
             clock     = clocks[i],
+            master_secret=b"test-session-secret",
         )
         s.local_conn_id = cid
         s.configure_seats(list(order))
@@ -130,7 +132,7 @@ def session_with_deadline():
     bus = InMemoryBus()
     s = Session(is_host=True, nickname="H", avatar_b64="",
                 transport=InMemoryTransport(bus, "A"),
-                clock=FakeClock(31.0))
+                clock=FakeClock(31.0), master_secret=b"test-session-secret")
     s.local_conn_id = "A"
     s.configure_seats(["A", "B"])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -190,16 +192,26 @@ class TestClockInjection:
         clk = FakeClock()
         bus = InMemoryBus()
         s = Session(is_host=True, nickname="T", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"), clock=clk)
+                    transport=InMemoryTransport(bus, "A"), clock=clk,
+                    master_secret=b"test-session-secret")
         assert s._clock is clk
 
-    def test_session_defaults_to_real_clock(self):
+    def test_session_accepts_explicit_real_clock(self):
         bus = InMemoryBus()
+        clock = RealClock()
         s = Session(is_host=True, nickname="T", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"))
+                    transport=InMemoryTransport(bus, "A"), clock=clock,
+                    master_secret=b"test-session-secret")
         import time
-        # Real clock should return something close to time.monotonic()
+        assert s._clock is clock
         assert abs(s._clock.monotonic() - time.monotonic()) < 1.0
+        assert abs(s._clock.time() - time.time()) < 1.0
+
+    def test_session_requires_a_clock(self):
+        with pytest.raises(TypeError, match="clock"):
+            Session(is_host=True, nickname="T", avatar_b64="",
+                    transport=InMemoryTransport(InMemoryBus(), "A"),
+                    master_secret=b"test-session-secret")
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +238,8 @@ class TestDeadlineLifecycle:
         clk = FakeClock()
         bus = InMemoryBus()
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "peer0"), clock=clk)
+                    transport=InMemoryTransport(bus, "peer0"), clock=clk,
+                    master_secret=b"test-session-secret")
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -307,7 +320,8 @@ class TestBettingTimeout:
             clk = FakeClock()
         bus = InMemoryBus()
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "peer0"), clock=clk)
+                    transport=InMemoryTransport(bus, "peer0"), clock=clk,
+                    master_secret=b"test-session-secret")
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -449,7 +463,8 @@ class TestDealTimeout:
         sessions: dict[str, Session] = {}
         for i, cid in enumerate(order):
             s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                        transport=InMemoryTransport(bus, cid), clock=clk)
+                        transport=InMemoryTransport(bus, cid), clock=clk,
+                        master_secret=b"test-session-secret")
             s.local_conn_id = cid
             s.configure_seats(list(order))
             s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
@@ -500,7 +515,9 @@ class TestDealTimeout:
         """If actor is specified in the deal token, that peer is marked unavailable."""
         bus = InMemoryBus()
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "host"))
+                    transport=InMemoryTransport(bus, "host"),
+                    clock=FakeClock(),
+                    master_secret=b"test-session-secret")
         s.local_conn_id = "host"
         from holdem.p2p.session import Player
         with s._lock:
@@ -613,7 +630,9 @@ class TestProposalValidation:
     def test_proposal_dropped_when_no_hand(self):
         bus = InMemoryBus()
         s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "A"))
+                    transport=InMemoryTransport(bus, "A"),
+                    clock=FakeClock(),
+                    master_secret=b"test-session-secret")
         msg = {
             "type": "timeout_proposal",
             "hand": 1,

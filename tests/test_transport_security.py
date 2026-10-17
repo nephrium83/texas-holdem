@@ -21,6 +21,7 @@ from holdem.p2p import admission as _adm_mod
 from holdem.p2p import identity as _ident
 from holdem.p2p import transport as t, wire
 from holdem.p2p.session import Session
+from holdem.p2p.timeout import FakeClock
 from tests.admission_helpers import admit
 
 
@@ -55,14 +56,16 @@ def test_unsigned_game_message_rejected():
 
 def test_signed_message_accepted():
     signed = json.loads(wire.pack("action",
-                                  {"seat": 1, "action": "raise", "amount": 40}))
+                                  {"seat": 1, "action": "raise", "amount": 40},
+                                  signer=_ident.load_or_create(), clock=t.get_clock()))
     msg = _read(_framed(signed))
     assert msg["type"] == "action"
     assert msg["payload"]["amount"] == 40
 
 
 def test_tampered_payload_rejected():
-    env = json.loads(wire.pack("action", {"seat": 1, "amount": 40}))
+    env = json.loads(wire.pack("action", {"seat": 1, "amount": 40},
+                               signer=_ident.load_or_create(), clock=t.get_clock()))
     env["payload"]["amount"] = 999999
     with pytest.raises(ValueError):
         _read(_framed(env))
@@ -75,8 +78,19 @@ def test_relay_control_frame_allowed_unsigned():
 
 def test_sign_frame_roundtrips():
     blob = t._sign_frame({"type": "game_state", "payload": {"pot": 100}})
-    back = wire.unpack(blob[4:])
+    back = wire.unpack(blob[4:], clock=t.get_clock())
     assert back["payload"]["pot"] == 100
+
+
+def test_transport_signing_and_verification_share_the_injected_host_clock(monkeypatch):
+    clock = FakeClock(start=100.0, wall_start=2000.5)
+    monkeypatch.setattr(t, "_clock", clock)
+    assert t.get_clock() is clock
+    blob = t._sign_frame({"type": "chat", "payload": {"text": "host clock"}})
+    assert _read(blob)["ts"] == 2000500
+    clock.advance_wall(30.001)
+    with pytest.raises(ValueError, match="timestamp out of window"):
+        _read(blob)
 
 
 @pytest.mark.parametrize("message", [
@@ -103,7 +117,7 @@ def test_sign_frame_preserves_flat_hostless_fields(message):
     author is added", not bare equality.
     """
     blob = t._sign_frame(message)
-    back = wire.unpack(blob[4:])
+    back = wire.unpack(blob[4:], clock=t.get_clock())
     body = Session._hostless_body(back)
     assert {k: v for k, v in body.items() if k != "pubkey"} == message, \
         "a coordinator field was lost or altered across the boundary"
@@ -112,9 +126,10 @@ def test_sign_frame_preserves_flat_hostless_fields(message):
 
 
 def test_presigned_dict_not_double_wrapped():
-    pre = json.loads(wire.pack("chat", {"text": "hi"}))
+    pre = json.loads(wire.pack("chat", {"text": "hi"},
+                               signer=_ident.load_or_create(), clock=t.get_clock()))
     blob = t._sign_frame(pre)
-    back = wire.unpack(blob[4:])
+    back = wire.unpack(blob[4:], clock=t.get_clock())
     assert back["payload"]["text"] == "hi"
 
 
@@ -126,6 +141,7 @@ def test_action_rejects_wrong_seat_owner():
     # this suite is about frame signing, so it supplies a real one rather
     # than dodging the requirement.
     s = Session(is_host=True, nickname="H", avatar_b64="",
+                transport=t, clock=t.get_clock(), master_secret=bytes([9]) * 32,
                 admission=_adm_mod.HostAdmission(
                     admission_secret=bytes(16),
                     host_pubkey=_ident.public_key_bytes()))
@@ -161,7 +177,8 @@ def test_consecutive_signed_messages_deliver():
     # than dodging the requirement.
     secret, host_key = bytes(16), _ident.public_key_bytes()
     adm = _adm_mod.HostAdmission(admission_secret=secret, host_pubkey=host_key)
-    s = Session(is_host=True, nickname="H", avatar_b64="", admission=adm)
+    s = Session(is_host=True, nickname="H", avatar_b64="", admission=adm,
+                transport=t, clock=t.get_clock(), master_secret=bytes([9]) * 32)
     s._host_conn_id = "peerA"
     # peerA has to get through the admission gate first -- chat from an
     # unadmitted connection is now inert, which is the point of the gate.
@@ -169,8 +186,10 @@ def test_consecutive_signed_messages_deliver():
     admit(adm, "peerA", host_key, secret, host_key)
     got = []
     s._on_chat = lambda cid, msg: got.append(msg["payload"]["text"])
-    s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "one"})))
-    s.handle_message("peerA", json.loads(wire.pack("chat", {"text": "two"})))
+    s.handle_message("peerA", json.loads(wire.pack(
+        "chat", {"text": "one"}, signer=_ident.load_or_create(), clock=t.get_clock())))
+    s.handle_message("peerA", json.loads(wire.pack(
+        "chat", {"text": "two"}, signer=_ident.load_or_create(), clock=t.get_clock())))
     assert got == ["one", "two"]
 
 
