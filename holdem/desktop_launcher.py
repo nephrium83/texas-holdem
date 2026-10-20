@@ -47,16 +47,22 @@ def resolve_paths(args) -> RuntimePaths:
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Poker local preview")
+    parser = argparse.ArgumentParser(description="Poker preview")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-visible", action="store_true",
                         help="Run the play test in a rendered game window")
+    parser.add_argument("--lan-self-test-config", type=Path,
+                        help="Run a paired LAN check using a local JSON configuration file")
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument("--godot", type=Path)
     parser.add_argument("--pck", type=Path)
     parser.add_argument("--libsodium", type=Path)
     args = parser.parse_args(argv)
     args.self_test = args.self_test or args.self_test_visible
+    if args.self_test and args.lan_self_test_config is not None:
+        parser.error("Choose the local self-test or paired LAN check")
+    if args.lan_self_test_config is not None:
+        args.lan_self_test_config = args.lan_self_test_config.resolve()
     if args.log_dir is None:
         app_data = Path(os.environ.get("LOCALAPPDATA", Path.home()))
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -276,9 +282,10 @@ async def _run(args, paths: RuntimePaths) -> int:
             ready.set_result(port)
 
     sidecar = asyncio.create_task(run_sidecar(
-        seats=2, sb=25, bb=50, stack=100000 if args.self_test else 1000,
+        seats=2, sb=25, bb=50,
+        stack=100000 if args.self_test or args.lan_self_test_config else 1000,
         structure="No-Limit", port=0, seed=7 if args.self_test else None,
-        nickname="Player", ready=announce))
+        nickname="Player", ready=announce, desktop_lobby=not args.self_test))
     game = None
     session = {"game_pid": None, "sidecar_port": None, "game_exit_code": None}
     try:
@@ -293,11 +300,15 @@ async def _run(args, paths: RuntimePaths) -> int:
         session["sidecar_port"] = port
         command = [str(paths.godot), "--main-pack", str(paths.pck),
                    "--rendering-method", "gl_compatibility"]
-        if args.self_test:
+        if args.lan_self_test_config is not None:
+            command.extend(["--headless", "-s", "res://sidecar/lan_peer_e2e.gd"])
+        elif args.self_test:
             if not args.self_test_visible:
                 command.append("--headless")
             command.extend(["-s", "res://sidecar/main_e2e.gd"])
         command.extend(["--", f"--sidecar-port={port}"])
+        if args.lan_self_test_config is not None:
+            command.append(f"--lan-peer-config={args.lan_self_test_config}")
         if args.self_test:
             command.append("--hands=10")
         if args.self_test_visible:
@@ -306,13 +317,15 @@ async def _run(args, paths: RuntimePaths) -> int:
         session["game_pid"] = game.pid
         _write_json(args.log_dir / "session.json", session)
         _log.info("Game started: pid=%s sidecar_port=%s", game.pid, port)
-        deadline = time.monotonic() + 60 if args.self_test else None
+        check_timeout = 180 if args.lan_self_test_config is not None else 60
+        deadline = (time.monotonic() + check_timeout
+                    if args.self_test or args.lan_self_test_config else None)
         while game.poll() is None:
             if sidecar.done():
                 await sidecar
                 raise RuntimeError("The local game service stopped unexpectedly.")
             if deadline is not None and time.monotonic() > deadline:
-                raise TimeoutError("The game play test exceeded 60 seconds.")
+                raise TimeoutError(f"The game play test exceeded {check_timeout} seconds.")
             await asyncio.sleep(0.05)
         session["game_exit_code"] = game.poll()
         if session["game_exit_code"] != 0:
@@ -320,6 +333,13 @@ async def _run(args, paths: RuntimePaths) -> int:
         if args.self_test:
             summary = _self_test_summary(args.log_dir / "game.log")
             _write_json(args.log_dir / "self-test.json",
+                        {"ok": True, "error": None, "summary": summary})
+        if args.lan_self_test_config is not None:
+            config = json.loads(args.lan_self_test_config.read_text(encoding="utf-8"))
+            summary = json.loads(Path(config["report_path"]).read_text(encoding="utf-8"))
+            if not summary.get("ok") or summary.get("hands_settled", 0) < config.get("target_hands", 3):
+                raise RuntimeError("The paired LAN check did not complete")
+            _write_json(args.log_dir / "lan-self-test.json",
                         {"ok": True, "error": None, "summary": summary})
         return 0
     finally:

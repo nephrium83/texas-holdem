@@ -99,6 +99,17 @@ func _step() -> void:
 	if _state in ["match_complete", "eliminated", "table_closed"]:
 		_finished = true
 		return
+	var connection_lobby: Dictionary = _on_screen.get("lobby", {})
+	if not connection_lobby.is_empty():
+		var control: ConnectionLobby = _main.get_node("%ConnectionLobby")
+		if str(connection_lobby.get("mode", "")) == "menu":
+			_press(control.get_node("%LocalGameButton"), "local_game")
+			return
+		if str(connection_lobby.get("state", "")) == "lobby":
+			var desktop_start: Button = control.get_node("%LobbyStartButton")
+			if desktop_start.is_visible_in_tree() and not desktop_start.disabled:
+				_press(desktop_start, "start_game")
+			return
 	var lobby := _main.get_node("%LobbyControl")
 	var start: Button = lobby.get_node("%StartGameButton")
 	if _state == "lobby" and start.is_visible_in_tree() and not start.disabled:

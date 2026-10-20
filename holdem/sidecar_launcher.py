@@ -399,8 +399,14 @@ class BotDriver:
 
 async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
               port: int, seed: int | None, nickname: str,
-              ready: Callable[[int], None] | None = None) -> None:
+              ready: Callable[[int], None] | None = None,
+              desktop_lobby: bool = False) -> None:
     native_crypto.initialize()
+    if desktop_lobby:
+        await _run_desktop_lobby(seats=seats, sb=sb, bb=bb, stack=stack,
+                                 structure=structure, port=port, seed=seed,
+                                 nickname=nickname, ready=ready)
+        return
     bus, sessions, order = _make_sessions(seats, nickname=nickname)
     human_conn_id = order[HUMAN_SEAT]
     human_session = sessions[human_conn_id]
@@ -450,6 +456,28 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
 # Argument parsing and validation
 # ---------------------------------------------------------------------------
 
+async def _run_desktop_lobby(*, seats, sb, bb, stack, structure, port,
+                             seed, nickname, ready):
+    from holdem.desktop_table import DesktopTable
+    settings = dict(sb=sb, bb=bb, stack=stack, structure=structure,
+                    deal_policy=Session.DEAL_POLICY_BG)
+    table = DesktopTable(seats=seats, nickname=nickname, settings=settings,
+                         seed=seed, on_change=lambda: server.notify_state_changed())
+    server = ClientServer(None, host="127.0.0.1", port=port,
+                          snapshot_provider=table.snapshot,
+                          command_handler=table.apply_command)
+    await server.start()
+    try:
+        if ready is not None:
+            ready(server.port)
+        print(f"SIDECAR_PORT:{server.port}", flush=True)
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await server.stop()
+        await asyncio.to_thread(table.close)
+
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(
         prog="python -m holdem.sidecar_launcher",
@@ -468,6 +496,8 @@ def _parse_args(argv=None):
     p.add_argument("--seed",        type=int, default=None, metavar="SEED")
     p.add_argument("--nickname",    type=str, default="Player", metavar="NAME")
     p.add_argument("--log-level",   default="WARNING",      dest="log_level")
+    p.add_argument("--desktop-lobby", action="store_true",
+                   help="Choose local bots, Host LAN or Join in the Godot lobby")
     args = p.parse_args(argv)
 
     if args.seats < 2:
@@ -502,6 +532,7 @@ def main(argv=None) -> None:
             port=args.port,
             seed=args.seed,
             nickname=args.nickname,
+            desktop_lobby=args.desktop_lobby,
         ))
     except KeyboardInterrupt:
         pass

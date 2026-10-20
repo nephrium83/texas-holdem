@@ -1,0 +1,181 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://ui/connection_lobby.gd" id="1_script"]
+
+[sub_resource type="StyleBoxFlat" id="ConnectionStyle"]
+bg_color = Color(0.027, 0.071, 0.059, 1)
+border_width_left = 2
+border_width_top = 2
+border_width_right = 2
+border_width_bottom = 2
+border_color = Color(0.76, 0.52, 0.3, 0.95)
+corner_radius_top_left = 16
+corner_radius_top_right = 16
+corner_radius_bottom_left = 16
+corner_radius_bottom_right = 16
+
+[node name="ConnectionLobby" type="Control"]
+layout_mode = 0
+offset_right = 1370.0
+offset_bottom = 850.0
+mouse_filter = 2
+script = ExtResource("1_script")
+
+[node name="ConnectionShade" type="ColorRect" parent="."]
+unique_name_in_owner = true
+layout_mode = 0
+offset_right = 1370.0
+offset_bottom = 850.0
+color = Color(0.009, 0.023, 0.018, 0.86)
+
+[node name="ConnectionPanel" type="PanelContainer" parent="."]
+unique_name_in_owner = true
+layout_mode = 0
+offset_left = 300.0
+offset_top = 40.0
+offset_right = 1070.0
+offset_bottom = 810.0
+theme_override_styles/panel = SubResource("ConnectionStyle")
+
+[node name="Margin" type="MarginContainer" parent="ConnectionPanel"]
+theme_override_constants/margin_left = 32
+theme_override_constants/margin_top = 26
+theme_override_constants/margin_right = 32
+theme_override_constants/margin_bottom = 26
+
+[node name="Content" type="VBoxContainer" parent="ConnectionPanel/Margin"]
+theme_override_constants/separation = 18
+
+[node name="ConnectionTitle" type="Label" parent="ConnectionPanel/Margin/Content"]
+unique_name_in_owner = true
+theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
+theme_override_font_sizes/font_size = 34
+text = "Poker"
+
+[node name="Subtitle" type="Label" parent="ConnectionPanel/Margin/Content"]
+theme_override_colors/font_color = Color(0.66, 0.77, 0.70, 1)
+theme_override_font_sizes/font_size = 17
+text = "Play money · no account needed"
+
+[node name="NicknameRow" type="HBoxContainer" parent="ConnectionPanel/Margin/Content"]
+unique_name_in_owner = true
+theme_override_constants/separation = 16
+
+[node name="Label" type="Label" parent="ConnectionPanel/Margin/Content/NicknameRow"]
+text = "Your name"
+theme_override_font_sizes/font_size = 18
+
+[node name="NicknameInput" type="LineEdit" parent="ConnectionPanel/Margin/Content/NicknameRow"]
+unique_name_in_owner = true
+size_flags_horizontal = 3
+text = "Player"
+max_length = 32
+placeholder_text = "Your name"
+
+[node name="ModeMenu" type="VBoxContainer" parent="ConnectionPanel/Margin/Content"]
+unique_name_in_owner = true
+theme_override_constants/separation = 16
+
+[node name="ModeButtons" type="HBoxContainer" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+theme_override_constants/separation = 18
+
+[node name="LocalGameButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu/ModeButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 52)
+text = "Practice with bots"
+
+[node name="HostLanButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu/ModeButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 52)
+text = "Host LAN game"
+
+[node name="JoinLabel" type="Label" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+text = "Or paste an invite from a friend on the same network"
+autowrap_mode = 2
+
+[node name="JoinInviteInput" type="TextEdit" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 108)
+placeholder_text = "Paste invite here"
+wrap_mode = 1
+
+[node name="JoinLanButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 46)
+text = "Join LAN game"
+
+[node name="TableLobby" type="VBoxContainer" parent="ConnectionPanel/Margin/Content"]
+unique_name_in_owner = true
+visible = false
+theme_override_constants/separation = 12
+
+[node name="InviteSection" type="VBoxContainer" parent="ConnectionPanel/Margin/Content/TableLobby"]
+unique_name_in_owner = true
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="ConnectionPanel/Margin/Content/TableLobby/InviteSection"]
+text = "Send this invite to your friends"
+
+[node name="HostInviteText" type="TextEdit" parent="ConnectionPanel/Margin/Content/TableLobby/InviteSection"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 98)
+editable = false
+wrap_mode = 1
+
+[node name="CopyInviteButton" type="Button" parent="ConnectionPanel/Margin/Content/TableLobby/InviteSection"]
+unique_name_in_owner = true
+text = "Copy invite"
+
+[node name="RosterHeading" type="Label" parent="ConnectionPanel/Margin/Content/TableLobby"]
+text = "Players"
+theme_override_font_sizes/font_size = 20
+
+[node name="RosterLabel" type="RichTextLabel" parent="ConnectionPanel/Margin/Content/TableLobby"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 130)
+bbcode_enabled = false
+text = "Waiting for players..."
+scroll_active = true
+
+[node name="LobbyButtons" type="HBoxContainer" parent="ConnectionPanel/Margin/Content/TableLobby"]
+theme_override_constants/separation = 12
+
+[node name="ReadyButton" type="Button" parent="ConnectionPanel/Margin/Content/TableLobby/LobbyButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(165, 48)
+text = "Ready"
+
+[node name="LobbyStartButton" type="Button" parent="ConnectionPanel/Margin/Content/TableLobby/LobbyButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(165, 48)
+text = "Start game"
+
+[node name="LeaveLobbyButton" type="Button" parent="ConnectionPanel/Margin/Content/TableLobby/LobbyButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(165, 48)
+text = "Leave table"
+
+[node name="ConnectionStatusLabel" type="Label" parent="ConnectionPanel/Margin/Content"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 54)
+theme_override_colors/font_color = Color(0.96, 0.81, 0.59, 1)
+theme_override_font_sizes/font_size = 17
+text = "Play for fun with bots or friends on the same network."
+autowrap_mode = 2
+
+[node name="PlayingConnectionBar" type="HBoxContainer" parent="."]
+unique_name_in_owner = true
+visible = false
+offset_left = 1020.0
+offset_top = 785.0
+offset_right = 1355.0
+offset_bottom = 829.0
+theme_override_constants/separation = 10
+
+[node name="PlayingConnectionLabel" type="Label" parent="PlayingConnectionBar"]
+unique_name_in_owner = true
+text = "LAN table"
+
+[node name="LeavePlayingButton" type="Button" parent="PlayingConnectionBar"]
+unique_name_in_owner = true
+text = "Leave table"

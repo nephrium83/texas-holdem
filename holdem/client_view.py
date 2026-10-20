@@ -22,6 +22,7 @@ never sent. Every snapshot is plain JSON-serialisable.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Optional
 
 from holdem import contract, player_info
@@ -67,6 +68,14 @@ def snapshot(session) -> dict:
     Returns a lobby snapshot when no hand is in progress, otherwise a full
     in-hand snapshot for the local seat.
     """
+    with session.read_state():
+        # Results and event records contain nested mutable containers. The
+        # renderer gets an owned copy, even if a remote action arrives before
+        # the socket thread has serialized this snapshot.
+        return deepcopy(_snapshot_owned(session))
+
+
+def _snapshot_owned(session) -> dict:
     replica = session.replica
     if replica is None:
         return _with_terminal(session, _lobby_snapshot(session))
@@ -209,8 +218,8 @@ def _with_terminal(session, snap: dict) -> dict:
 
 def _lobby_snapshot(session) -> dict:
     """Table membership before a hand is running."""
-    order = list(session.seat_order)
-    players = getattr(session, "players", {}) or {}
+    players = {player.conn_id: player for player in session.player_list()}
+    order = list(session.seat_order) or list(players)
     seats = []
     for i, cid in enumerate(order):
         p = players.get(cid)
