@@ -225,7 +225,7 @@ def test_the_typed_handlers_do_not_repeat_authorization():
             f"{name} re-authorizes; ingress already did")
 
 
-def test_there_is_one_hostless_type_registry_of_exactly_ten():
+def test_there_is_one_explicit_hostless_type_registry():
     """Pinned as a literal, because a test parametrized over the registry
     cannot notice the registry shrinking -- it would simply run one case
     fewer and stay green."""
@@ -233,6 +233,8 @@ def test_there_is_one_hostless_type_registry_of_exactly_ten():
         "key_announce", "deck_round", "deal_share", "audit_open",
         "bet_action", "hand_void", "session_end", "timeout_proposal",
         "peer_lost", "hand_settled",
+        "casual_clock_fault", "casual_drop_observed", "casual_drop",
+        "casual_drop_ack", "casual_drop_dispute",
     })
 
 

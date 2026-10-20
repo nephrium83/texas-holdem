@@ -387,16 +387,25 @@ its existing `start_game` and game-command behavior is unchanged.
 | `dealing`  | the mental-poker deal is running; cards not yet in hand — show a spinner  |
 | `betting`  | a betting round is open                                                  |
 | `settled`  | the hand is over and paid out; `result` is populated                     |
-| `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand, unless a player's drop stopped it (`PEER_LOST` below) |
+| `void`     | the hand was aborted; `void_reason` says why; chips are as before the hand, unless a player's drop stopped it (casual departure rules below) |
 
 ### Continuous-session lifecycle
 
-After `settled` or `void`, every participating LAN client sends `next_hand`.
-There is no host-only advance command or automatic next-hand scheduler.
-Every participating
-sidecar derives the next hand from its identical replica: settled stacks carry
-forward, while a void redeals from the current hand's original stacks and
-position chain.
+Desktop LAN rooms enable the profile in `LAN_RELIABILITY.md`. After `settled`
+or `void`, each participating sidecar requests `next_hand` automatically after
+30 seconds; the player can request it sooner. Result agreement is required
+before advancing. There is no host-only advance command, and the renderer
+never decides when a timer expires.
+
+Every participating sidecar derives the next hand from its identical replica.
+Settled stacks carry forward. An ordinary void redeals from the current hand's
+original stacks and position chain. A casual non-host departure instead uses
+the independently computed forfeit/cancel balances and a matching signed
+continuation boundary. Fixed seat indices are preserved; departed seats are
+excluded from later deals, and protocol hand numbers can skip.
+
+Session embedders that do not opt into this profile retain manual `next_hand`
+and the legacy departure behavior described below.
 
 A busted sidecar becomes a lightweight spectator. It no longer participates in
 the mental-poker deal and ignores later hand traffic, but still follows each
@@ -421,8 +430,13 @@ was dealt from, and the replicas that settled keep their payouts. Only a
 failure every replica shares, such as a deterministic engine bug, voids the
 hand everywhere and redeals it.
 
-Two failures end the table rather than the hand. The session reaches a
-terminal state on every peer and no further hand is dealt. Chips stand at
+**Legacy departure behavior.** The `PEER_LOST` path below describes Session
+embedders without the casual LAN reliability profile. Desktop LAN rooms
+continue after an agreed non-host departure instead. Host loss closes the
+table in both profiles, and `ABORTED_PROTOCOL` remains terminal in both.
+
+In the legacy profile, two failures end the table rather than the hand. The
+session reaches a terminal state on every peer and no further hand is dealt. Chips stand at
 each game's own last settlement, which for a lost peer includes its forfeit
 (below); otherwise the pot of a hand that had not settled is discarded, not
 paid. Every later snapshot reports how the table ended in `terminal` (below).
@@ -758,9 +772,7 @@ reconnection identity, recovery and chat remain outside this delivery.
 - Internet joining, relay controls, network reconnection and host migration
   during a running game.
 - Chat.
-- Mid-hand dropout **timeout** (the void path exists; the timer for a peer
-  that simply goes silent is not yet wired).
-- Rebuys / sit-out / sit-in commands (engine supports them; not yet exposed).
+- Manual rebuys / sit-out / sit-in commands (engine supports them; not yet exposed).
 
 These will be added as message types without breaking §4–§6.
 

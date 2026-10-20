@@ -7,7 +7,8 @@ note, **this file wins**.
 
 - **Coordination issue:** see `docs/COLLABORATION.md`
 - **Base at time of writing:** `07f61a7` (origin/main)
-- **Current base:** `4b5e85a` (origin/main) — M0 and M1 merged
+- **Historical roadmap base:** `4b5e85a` — M0 and M1 merged
+- **LAN delivery base:** `7d55f09` — PR #65 merged; reliability follows in PR #66
 - **Research inputs:** `docs/research/` — dropout audit, timeout semantics,
   professional rules audit, suspension/reconnect, M2 recovery-mechanism
   threat analysis
@@ -44,12 +45,16 @@ earlier audit's six passes and known ante mismatch.
 and three-hand BWING/Unraid Windows VM acceptance. The approved next
 milestone implements visible turn/Next Hand clocks and non-host survivor
 continuation, with the ten-hand packaged gate in `LAN_RELIABILITY.md`.
+The implementation is tracked in
+[PR #66](https://github.com/nephrium83/texas-holdem/pull/66), whose validation
+records the exact source and package hashes. The profile is enabled only by
+the casual LAN adapter; default Session embedders retain their legacy policy.
 This advances the October casual profile, not the historical M2-M6 recovery
 sequence below. Seat/context redesign and real-money servers remain separate.
 
 | Ref | SHA | Status |
 |---|---|---|
-| origin/main | `4b5e85a` | canonical — M0 (PR #39) and M1 (PR #40) merged |
+| historical main | `4b5e85a` | superseded baseline — M0 (PR #39) and M1 (PR #40) merged |
 | origin/main | `07f61a7` | superseded; the base the 2026-08-18 research notes read |
 | PR #41 — M2 suspension / reconnect | — | **open**, future recovery design only; no casual v1 runtime change |
 | P2a — timeout phase ownership | `6955f4f` | **parked**, two tests red on purpose |

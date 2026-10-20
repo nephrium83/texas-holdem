@@ -50,6 +50,16 @@ identity and does not represent independent players.
 
 ## Acceptance evidence
 
+The reliability delivery gate uses three independent packaged players and
+ten completed hands, including an actual 30-second stalled action, automatic
+Next Hand, and a non-host departure. Surviving players must continue with
+identical balances, including the departure hand's forfeit. A separate
+host-loss check requires a clear explanation, disabled betting, and a way
+back to the menu. Current results, package source commits, and artifact
+hashes belong in the delivery PR and continuing handoff.
+
+### Initial LAN delivery — PR #65 (historical)
+
 Nine process and UI acceptance cases passed in
 `tests/test_lan_integration.py`. They cover independent two- and three-player
 tables playing three consistent hands, private-card separation, lobby Ready
