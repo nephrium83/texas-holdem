@@ -118,8 +118,12 @@ networking or bot strategy.
 all 86 scripted actions and the 345,500,000-chip WSOP final pot. The focused
 ante, forfeit and replay suites pass all 79 tests. Thirteen new ante tests
 cover short stacks, zero-live contestants, dead-only pots, live refunds,
-side pots, ties, two boards and drop forfeits. Full regression and packaged
-Windows validation are pending. The initial six-pass/one-mismatch results
+side pots, ties, two boards and drop forfeits. A control loads the unchanged
+v1 engine from `57b0990` and runs the 13 ante tests plus seven replays:
+12 fail and eight pass, including a failure for the WSOP final and the
+100 + 100 + 20 payout. Restoring the corrected engine makes them pass.
+Full regression and packaged Windows results are recorded with the delivery
+artifacts and pull request checks. The initial six-pass/one-mismatch results
 above remain historical evidence.
 
 ## Movie uncertainty is preserved
