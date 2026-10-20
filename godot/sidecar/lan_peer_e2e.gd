@@ -113,7 +113,7 @@ func _press(button: Button, command: String) -> bool:
 
 
 func _step() -> void:
-	if _snapshot.is_empty():
+	if _snapshot.is_empty() or not is_same(_snapshot, _on_screen):
 		return
 	var metadata: Dictionary = _snapshot.get("lobby", {})
 	var state := str(metadata.get("state", ""))
