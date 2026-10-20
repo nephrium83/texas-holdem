@@ -21,6 +21,39 @@ import pytest
 # Helpers
 # ---------------------------------------------------------------------------
 
+
+def test_readiness_failure_closes_the_assigned_listener():
+    """The native sidecar's callback contract belongs in its integration suite.
+
+    Windows launcher unit CI does not provision libsodium; the native-enabled
+    integration jobs and packaged Windows acceptance exercise this boundary.
+    """
+    import asyncio
+    from crypto_gate import require_crypto
+    from holdem import sidecar_launcher
+    require_crypto()
+    ports = []
+
+    def failed_ready(port):
+        assert 0 < port < 65536
+        ports.append(port)
+        raise RuntimeError("controlled readiness callback failure")
+
+    async def exercise():
+        before = set(asyncio.all_tasks())
+        with pytest.raises(RuntimeError, match="controlled readiness callback failure"):
+            await sidecar_launcher.run(
+                seats=2, sb=25, bb=50, stack=1000, structure="No-Limit",
+                port=0, seed=7, nickname="Player", ready=failed_ready)
+        assert len(ports) == 1
+        with socket.socket() as probe:
+            probe.settimeout(1.0)
+            assert probe.connect_ex(("127.0.0.1", ports[0])) != 0
+        assert not [task for task in asyncio.all_tasks()
+                    if task not in before and not task.done()]
+
+    asyncio.run(exercise())
+
 STARTUP_TIMEOUT = 10.0   # seconds to wait for SIDECAR_PORT line
 RECV_TIMEOUT    = 5.0    # seconds to wait for each message from the sidecar
 CHUNK           = 4096

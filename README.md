@@ -25,8 +25,12 @@ logic into the UI or trusting one machine to deal, the architecture gives every
 peer the same rules engine, signed state transitions, and cryptographically
 verifiable deal inputs.
 
-The current playable harness is Tkinter. The target client is Godot 4.7.1,
-connected to the Python sidecar through a locked newline-JSON protocol.
+The Windows preview uses Godot 4.7.1, connected to the Python sidecar through
+a locked newline-JSON protocol. Extract the complete preview ZIP and
+double-click `Poker.exe` to play a local table against a bot. Python, Godot
+and terminal setup are bundled. This checkpoint does not yet include LAN
+Host/Join. See [Windows preview builds](docs/BUILD_WINDOWS.md) for packaging
+and verification. The earlier Tkinter harness remains available for development.
 
 <table>
   <tr>
@@ -63,7 +67,7 @@ connected to the Python sidecar through a locked newline-JSON protocol.
 | Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, cheat detection, and opt-in Bayer–Groth shuffle prevention |
 | Hostless session | Implemented on the test transport | Signed betting, continuous hands, stack carry, bust-outs, spectators, and table-wide voids |
 | Godot sidecar bridge | Implemented | Versioned snapshots and commands over localhost newline-JSON |
-| Godot player experience | In progress | Godot 4.7.1 scaffold and GUT harness are in CI; the playable table is the current milestone |
+| Godot player experience | Local preview | Portable Windows launcher, real player-versus-bot table and ten-hand packaged gameplay check; LAN Host/Join remains |
 | Internet P2P transport | Planned for v1.x | Discovery, relay/NAT traversal, fragmentation, and real multi-machine play remain |
 
 > [!IMPORTANT]

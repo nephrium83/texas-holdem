@@ -109,6 +109,18 @@ jobs:
           fi
           echo "GUT run summary present and no failures."
 
+  desktop-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: python -m pip install -e .[dev]
+      - name: Verify desktop startup and owned-process cleanup
+        run: python -m pytest tests/test_desktop_launcher.py -q
+
   journal-windows:
     # The journal's access-control and durable-creation guarantees are
     # Windows-specific, so they cannot be verified by the ubuntu jobs above.

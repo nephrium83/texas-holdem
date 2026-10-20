@@ -55,12 +55,16 @@ var _face_up_failures := []
 var _lobby_names := []
 ## The latest snapshot received, which is the one Main has on screen.
 var _on_screen := {}
+var _screenshot_path := ""
+var _screenshot_requested := false
 
 
 func _initialize() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--hands="):
 			_target_hands = int(arg.substr("--hands=".length()))
+		elif arg.begins_with("--screenshot-path="):
+			_screenshot_path = arg.substr("--screenshot-path=".length())
 	_deadline_ms = Time.get_ticks_msec() + DEADLINE_MS
 	_main = load("res://main.tscn").instantiate()
 	root.add_child(_main)
@@ -189,9 +193,18 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 			for i in range(snapshot.get("seats", []).size()):
 				_lobby_names.append(_seat_view(i).get_node("%NameLabel").text)
 		_check_own_cards(snapshot)
+		if not _screenshot_path.is_empty() and not _screenshot_requested and _face_up_checks > 0:
+			_screenshot_requested = true
+			RenderingServer.frame_post_draw.connect(_capture_table, CONNECT_ONE_SHOT)
 	if _reply_seen:
 		_awaiting_reply = false
 		_reply_seen = false
+
+
+func _capture_table() -> void:
+	var image := root.get_texture().get_image()
+	if image == null or image.is_empty() or image.save_png(_screenshot_path) != OK:
+		_fail("could not save the rendered table")
 
 
 ## Ten successful button-driven hands must be one continuous match, not ten
