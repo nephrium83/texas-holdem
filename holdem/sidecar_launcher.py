@@ -32,6 +32,7 @@ import argparse
 import asyncio
 import logging
 import random
+from collections.abc import Callable
 
 from holdem import client_view
 from holdem import native_crypto
@@ -397,7 +398,8 @@ class BotDriver:
 # ---------------------------------------------------------------------------
 
 async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
-              port: int, seed: int | None, nickname: str) -> None:
+              port: int, seed: int | None, nickname: str,
+              ready: Callable[[int], None] | None = None) -> None:
     native_crypto.initialize()
     bus, sessions, order = _make_sessions(seats, nickname=nickname)
     human_conn_id = order[HUMAN_SEAT]
@@ -424,10 +426,6 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
                           start_table=start_table)
     await server.start()
 
-    # Machine-readable port announcement (parsed by tests and by Godot launcher).
-    print(f"SIDECAR_PORT:{server.port}", flush=True)
-    _log.info("sidecar ready on 127.0.0.1:%d", server.port)
-
     # The sidecar starts in lobby phase. The Godot client sends the
     # start_game command (GODOT_PROTOCOL.md section 4), which runs the
     # controller above: the host's Session broadcasts game_start, every
@@ -435,6 +433,11 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
     # quiescence. BotDriver takes over from there.
 
     try:
+        # Keep readiness inside cleanup: a launcher error must close the socket.
+        if ready is not None:
+            ready(server.port)
+        print(f"SIDECAR_PORT:{server.port}", flush=True)
+        _log.info("sidecar ready on 127.0.0.1:%d", server.port)
         await asyncio.Event().wait()
     except asyncio.CancelledError:
         pass
