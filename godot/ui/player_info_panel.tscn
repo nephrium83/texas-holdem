@@ -60,6 +60,13 @@ theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
 theme_override_font_sizes/font_size = 13
 text = "Idle | pot 0"
 
+[node name="ClockLabel" type="Label" parent="Margin/Content"]
+unique_name_in_owner = true
+visible = false
+theme_override_colors/font_color = Color(0.94, 0.72, 0.44, 1)
+theme_override_font_sizes/font_size = 14
+autowrap_mode = 2
+
 [node name="DecisionCard" type="PanelContainer" parent="Margin/Content"]
 unique_name_in_owner = true
 theme_override_styles/panel = SubResource("StyleCard")

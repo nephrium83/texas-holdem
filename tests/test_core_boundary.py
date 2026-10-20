@@ -71,6 +71,8 @@ CORE = frozenset({
     "holdem.p2p", "holdem.p2p.session", "holdem.p2p.replica_table",
     "holdem.p2p.mental_deal_driver", "holdem.p2p.timeout",
     "holdem.p2p.events", "holdem.p2p.admission", "holdem.p2p.invite",
+    "holdem.p2p.casual_clock", "holdem.p2p.casual_timing",
+    "holdem.p2p.casual_runtime", "holdem.p2p.casual_continuation",
     "holdem.p2p.wire", "holdem.p2p.join_auth",
     "holdem.p2p.inmemory_transport", "holdem.client_view",
 })

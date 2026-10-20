@@ -141,6 +141,38 @@ func test_mid_hand_state_hides_next_hand_control():
 	assert_false(main.get_node("%NextHandControl").visible)
 
 
+func test_clock_reaches_both_displays_without_sending_any_player_command():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	snapshot["turn"]["clock"] = {
+		"kind": "next_hand", "label": "Waiting for Ada and Ben", "remaining_seconds": 0,
+	}
+	main._on_snapshot_received(snapshot)
+	assert_eq(main.get_node("%PlayerInfoPanel").clock_label.text, "Waiting for Ada and Ben · 0s")
+	assert_eq(main.get_node("%NextHandControl").get_node("%MessageLabel").text, "Hand complete · next in 0s")
+	assert_eq(fake.calls, [], "the renderer made a timeout decision")
+
+
+func test_countdown_controls_fit_the_preview_window():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["state"] = "hand_complete"
+	snapshot["turn"]["clock"] = {
+		"kind": "next_hand", "label": "Next hand", "remaining_seconds": 30,
+	}
+	main._on_snapshot_received(snapshot)
+	await wait_process_frames(2)
+	var window := Rect2(0, 0, 1370, 850)
+	for path in ["%NextHandControl", "%PlayerInfoPanel"]:
+		var control: Control = main.get_node(path)
+		assert_true(window.encloses(control.get_global_rect()), "%s overflowed with a countdown" % path)
+	var next: Control = main.get_node("%NextHandControl")
+	assert_true(next.get_global_rect().encloses(next.get_node("%NextHandButton").get_global_rect()))
+
+
 func test_next_hand_pressed_calls_sidecar_next_hand():
 	var main := _main()
 	var fake: FakeSidecar = FakeSidecarScript.new()
@@ -225,6 +257,18 @@ func test_the_refusal_clears_when_the_table_moves_on():
 	moved["turn"]["state"] = "waiting"
 	main._on_snapshot_received(moved)
 	assert_eq(main.get_node("%CommandStatusLabel").text, "")
+
+
+func test_countdown_updates_do_not_hide_a_refused_player_action():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["turn"]["clock"] = {"kind": "action", "label": "Turn: Ada", "remaining_seconds": 30}
+	main._on_snapshot_received(snapshot)
+	_refuse(main, "check_call", "rejected")
+	main._on_snapshot_received(snapshot.duplicate(true))
+	snapshot["turn"]["clock"]["remaining_seconds"] = 29
+	main._on_snapshot_received(snapshot)
+	assert_ne(main.get_node("%CommandStatusLabel").text, "", "a timer refresh hid the refusal")
 
 
 func test_a_refused_click_is_reported_until_the_table_moves_on():

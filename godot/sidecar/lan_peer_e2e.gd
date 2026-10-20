@@ -25,6 +25,22 @@ var _own_seat := -1
 var _face_up_checks := 0
 var _opponent_hidden_checks := 0
 var _roster_names := []
+var _expected_players := 2
+var _expected_result := "hands"
+var _clock_seen := {}
+var _clock_render_checks := 0
+var _stall_started := 0
+var _stall_active := false
+var _stall_elapsed_ms := -1
+var _auto_next_started := 0
+var _auto_next_elapsed_ms := -1
+var _leave_requested := false
+var _left_table := false
+var _host_loss_seen := false
+var _departure_seen := false
+var _settled_names := {}
+var _forfeit_stacks := {}
+var _hand_numbers := []
 
 
 func _initialize() -> void:
@@ -45,6 +61,11 @@ func _initialize() -> void:
 		_fail("LAN test role or report path is missing")
 		return
 	_target_hands = max(1, int(_config.get("target_hands", 3)))
+	_expected_players = max(2, int(_config.get("expected_players", 2)))
+	_expected_result = str(_config.get("expected_result", "hands"))
+	if _expected_result not in ["hands", "left_table", "host_lost"]:
+		_fail("LAN test expected result is invalid")
+		return
 	_deadline = Time.get_ticks_msec() + int(_config.get("deadline_seconds", 120)) * 1000
 	_main = load("res://main.tscn").instantiate()
 	root.add_child(_main)
@@ -97,6 +118,10 @@ func _step() -> void:
 	var metadata: Dictionary = _snapshot.get("lobby", {})
 	var state := str(metadata.get("state", ""))
 	var mode := str(metadata.get("mode", ""))
+	if _leave_requested and mode == "menu":
+		_left_table = true
+		_complete()
+		return
 	if not _selected and mode == "menu":
 		_lobby().get_node("%NicknameInput").text = str(_config.get("nickname", "LAN Player"))
 		if _role == "host":
@@ -119,7 +144,10 @@ func _step() -> void:
 			output.close()
 			_invite_written = true
 	if state == "closed":
-		_fail("LAN table closed before the target hands settled")
+		if _expected_result == "host_lost" and _settled.size() >= int(_config.get("minimum_hands", 0)):
+			_check_host_loss()
+		else:
+			_fail("LAN table closed before the target hands settled")
 		return
 	if state == "lobby":
 		var players: Array = metadata.get("players", [])
@@ -129,25 +157,75 @@ func _step() -> void:
 			if bool(player.get("is_you", false)) and not bool(player.get("ready", false)):
 				_press(_lobby().get_node("%ReadyButton"), "set_ready")
 				return
-		if _role == "host" and bool(_config.get("start_when_ready", true)) and bool(metadata.get("can_start", false)):
+		if _role == "host" and players.size() == _expected_players and bool(_config.get("start_when_ready", true)) and bool(metadata.get("can_start", false)):
 			_press(_lobby().get_node("%LobbyStartButton"), "start_game")
 		return
 	if state != "playing":
 		return
 	var turn := str(_snapshot.get("turn", {}).get("state", ""))
+	var hand := int(_snapshot.get("hand_num", 0))
+	if _expected_result == "left_table" and not _leave_requested and (
+		(turn == "your_turn" and hand == int(_config.get("leave_on_turn_hand", -1))) or
+		(turn == "hand_complete" and _settled.size() >= int(_config.get("leave_after_hands", 2147483647)))
+	):
+		_leave_requested = _press(_lobby().get_node("%LeavePlayingButton"), "leave_table")
+		return
 	if turn == "your_turn":
+		if hand == int(_config.get("stall_action_hand", -1)) and _stall_elapsed_ms < 0:
+			if not _stall_active:
+				_stall_started = Time.get_ticks_msec()
+				_stall_active = true
+			return
 		_press(_main.get_node("%BettingControls").get_node("%CheckCallButton"), "check_call")
 	elif turn == "hand_complete":
-		if _settled.size() >= _target_hands:
-			if _face_up_checks == 0 or _opponent_hidden_checks == 0 or _roster_names.size() < 2:
-				_fail("Private cards or multiplayer roster were not exercised")
-			else:
-				_completed_at = Time.get_ticks_msec()
-				_write_report()
+		if _expected_result == "hands" and _settled.size() >= _target_hands:
+			_complete()
+		elif hand == int(_config.get("auto_next_wait_hand", -1)) and _auto_next_elapsed_ms < 0:
+			if _auto_next_started == 0:
+				_auto_next_started = Time.get_ticks_msec()
 		else:
 			_press(_main.get_node("%NextHandControl").get_node("%NextHandButton"), "next_hand")
+	elif turn == "voided" and bool(_config.get("allow_forfeit", false)):
+		_press(_main.get_node("%NextHandControl").get_node("%NextHandButton"), "next_hand")
 	elif turn in ["voided", "match_complete", "eliminated", "table_closed"]:
 		_fail("Unexpected poker lifecycle state: " + turn)
+
+
+func _complete() -> void:
+	if _face_up_checks == 0 or _opponent_hidden_checks == 0 or _roster_names.size() != _expected_players:
+		_fail("Private cards or the full multiplayer roster were not exercised")
+	elif int(_config.get("stall_action_hand", -1)) >= 0 and _stall_elapsed_ms < 29000:
+		_fail("The real 30 second action timeout was not observed")
+	elif int(_config.get("auto_next_wait_hand", -1)) >= 0 and _auto_next_elapsed_ms < 29000:
+		_fail("The real 30 second automatic Next Hand was not observed")
+	elif int(_config.get("stall_action_hand", -1)) >= 0 and not _saw_countdown("action"):
+		_fail("The stalled action did not display a changing countdown")
+	elif int(_config.get("auto_next_wait_hand", -1)) >= 0 and not _saw_countdown("next_hand"):
+		_fail("Automatic Next Hand did not display a changing countdown")
+	elif not str(_config.get("departed_name", "")).is_empty() and not _departure_seen:
+		_fail("The remaining table did not exclude the departed player from play")
+	else:
+		_completed_at = Time.get_ticks_msec()
+		_write_report()
+
+
+func _saw_countdown(kind: String) -> bool:
+	var seconds: Array = _clock_seen.get(kind, [])
+	return _clock_render_checks > 0 and seconds.size() >= 2 and seconds.min() <= 5 and seconds.max() >= 20
+
+
+func _check_host_loss() -> void:
+	var headline := str(_snapshot.get("turn", {}).get("headline", ""))
+	var message := str(_lobby().get_node("%ConnectionStatusLabel").text)
+	if not headline.to_lower().contains("host") or not message.to_lower().contains("host"):
+		_fail("Host loss did not name the host in the table and connection messages")
+	elif _main.get_node("%BettingControls").visible or _lobby().get_node("%LobbyStartButton").visible or not _snapshot.get("you", {}).get("legal", {}).is_empty():
+		_fail("A closed table still offered a player action")
+	elif _lobby().get_node("%LeaveLobbyButton").text != "Back to menu":
+		_fail("Host loss did not offer a return to the menu")
+	else:
+		_host_loss_seen = true
+		_complete()
 
 
 func _on_result(result: Dictionary) -> void:
@@ -161,6 +239,15 @@ func _on_result(result: Dictionary) -> void:
 
 func _on_snapshot(snapshot: Dictionary) -> void:
 	_snapshot = snapshot
+	var hand := int(snapshot.get("hand_num", 0))
+	var turn: Dictionary = snapshot.get("turn", {})
+	if _stall_active and (str(turn.get("state", "")) != "your_turn" or hand != int(_config.get("stall_action_hand", -1))):
+		_stall_elapsed_ms = Time.get_ticks_msec() - _stall_started
+		_stall_active = false
+	if _auto_next_started > 0 and _auto_next_elapsed_ms < 0 and hand != int(_config.get("auto_next_wait_hand", -1)):
+		_auto_next_elapsed_ms = Time.get_ticks_msec() - _auto_next_started
+	if hand > 0 and hand not in _hand_numbers:
+		_hand_numbers.append(hand)
 	if _reply_seen:
 		_awaiting = false
 		_reply_seen = false
@@ -169,8 +256,41 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 		for seat: Dictionary in snapshot.get("seats", []):
 			stacks.append(int(seat.get("stack", 0)))
 		_settled[str(int(snapshot.get("hand_num", 0)))] = stacks
+		_settled_names[str(hand)] = snapshot.get("seats", []).map(func(seat: Dictionary): return str(seat.get("name", "")))
+	if str(snapshot.get("phase", "")) == "void" and bool(_config.get("allow_forfeit", false)):
+		_forfeit_stacks[str(hand)] = snapshot.get("seats", []).map(func(seat: Dictionary): return int(seat.get("stack", 0)))
+	var departed_name := str(_config.get("departed_name", ""))
+	if not departed_name.is_empty() and hand > int(_config.get("departure_after_hand", 0)):
+		var remaining_names: Array = snapshot.get("lobby", {}).get("players", []).map(func(player: Dictionary): return str(player.get("name", "")))
+		if remaining_names.size() >= 2 and departed_name not in remaining_names:
+			_departure_seen = true
+		# Membership and seat indices remain fixed for signed dealing. A
+		# joiner's roster can retain the departed member while the engine
+		# excludes that seat from every subsequent hand.
+		for seat: Dictionary in snapshot.get("seats", []):
+			if str(seat.get("name", "")) == departed_name and bool(seat.get("sitting_out", false)):
+				_departure_seen = true
 	if is_same(snapshot, _on_screen):
 		_check_cards(snapshot)
+		_check_clock(snapshot)
+
+
+func _check_clock(snapshot: Dictionary) -> void:
+	var clock: Dictionary = snapshot.get("turn", {}).get("clock", {})
+	if clock.is_empty():
+		return
+	var kind := str(clock.get("kind", ""))
+	var seconds := int(clock.get("remaining_seconds", -1))
+	if not _clock_seen.has(kind):
+		_clock_seen[kind] = []
+	if seconds not in _clock_seen[kind]:
+		_clock_seen[kind].append(seconds)
+	var label: Label = _main.get_node("%PlayerInfoPanel").get_node("%ClockLabel")
+	var expected := "%s · %ds" % [str(clock.get("label", "Waiting")), max(0, seconds)]
+	if not label.visible or label.text != expected:
+		_fail("The authoritative countdown was not rendered")
+	else:
+		_clock_render_checks += 1
 
 
 func _check_cards(snapshot: Dictionary) -> void:
@@ -189,6 +309,10 @@ func _check_cards(snapshot: Dictionary) -> void:
 		if bool(seat.get("is_you", false)):
 			if index != _own_seat:
 				_fail("Own seat identity differs from the rendered table")
+				return
+			if bool(seat.get("folded", false)):
+				if view.get_node("%CardA").visible or view.get_node("%CardB").visible:
+					_fail("The folded private hand was not mucked")
 				return
 			for card_index in range(2):
 				var card: CardView = view.get_node("%CardA" if card_index == 0 else "%CardB")
@@ -212,11 +336,18 @@ func _fail(message: String) -> void:
 
 func _report() -> Dictionary:
 	return {
-		"ok": _error.is_empty() and _settled.size() >= _target_hands,
+		"ok": _error.is_empty() and (_settled.size() >= _target_hands if _expected_result == "hands" else _left_table if _expected_result == "left_table" else _host_loss_seen),
 		"error": _error, "role": _role, "hands_settled": _settled.size(),
 		"settled_stacks": _settled, "own_seat": _own_seat,
 		"face_up_checks": _face_up_checks, "opponent_hidden_checks": _opponent_hidden_checks,
 		"roster_names": _roster_names, "commands": _commands,
+		"expected_result": _expected_result, "left_table": _left_table,
+		"host_loss_seen": _host_loss_seen, "departure_seen": _departure_seen,
+		"settled_names": _settled_names, "forfeit_stacks": _forfeit_stacks,
+		"hand_numbers": _hand_numbers, "clock_seconds_seen": _clock_seen,
+		"clock_render_checks": _clock_render_checks,
+		"action_timeout_elapsed_ms": _stall_elapsed_ms,
+		"auto_next_elapsed_ms": _auto_next_elapsed_ms,
 	}
 
 

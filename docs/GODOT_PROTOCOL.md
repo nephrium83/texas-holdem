@@ -598,6 +598,17 @@ turn: enable Fold / Check-Call / Raise, using `to_call`, `can_check`,
 
 ### `turn`: render this, do not reinterpret it
 
+Casual LAN snapshots may also include `turn.clock`:
+`{kind, label, remaining_seconds, waiting_for, timekeeper_seat}`.
+`kind` is `action`, `next_hand`, or `automatic`; `label` is display-ready
+text, `remaining_seconds` is a nonnegative integer, `waiting_for` contains
+public player names, and `timekeeper_seat` is the fixed seat index or null.
+An action clock can add `timeout_action` (`check` or `fold`). The sidecar
+owns expiry and publishes updates. The renderer displays these fields and
+sends no timer command. Legacy/local snapshots may omit the object.
+It is removed when an abnormal terminal state closes the table.
+See `LAN_RELIABILITY.md` for the opted-in timing and departure profile.
+
 `turn.state` is the single source of truth for the player-information panel:
 
 | state | client treatment |

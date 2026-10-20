@@ -143,6 +143,9 @@ def _snapshot_owned(session) -> dict:
         void_reason=snap["void_reason"],
         forfeit_seat=_forfeit_seat(session),
     )
+    clock = session.reliability_view()
+    if clock is not None:
+        snap["turn"]["clock"] = clock
     snap["deal_progress"] = player_info.deal_progress_view(
         phase, snap["void_reason"]
     )
@@ -197,6 +200,8 @@ def _with_terminal(session, snap: dict) -> dict:
     there, and a copy derived here would drift from it.
     """
     state = getattr(session, "terminal_state", None)
+    if session.hand_voided:
+        _show_settled_balances(session, snap)
     if state is None:
         snap["terminal"] = None
         return snap
@@ -209,11 +214,30 @@ def _with_terminal(session, snap: dict) -> dict:
         "last_settled_stacks": getattr(session, "last_settled_stacks", None),
     }
     if state != _ENDED_NORMAL:
+        _show_settled_balances(session, snap)
         snap["turn"]["state"] = "table_closed"
         snap["turn"]["headline"] = reason or "Table closed"
         snap["turn"].pop("decision", None)
+        snap["turn"].pop("clock", None)
         snap["you"].pop("legal", None)
     return snap
+
+
+def _show_settled_balances(session, snap):
+    """Display the session's payout, never an abandoned replica's wagers."""
+    balances = session.last_settled_stacks
+    if balances is None:
+        return
+    for seat in snap.get("seats", []):
+        index = seat.get("seat", -1)
+        if 0 <= index < len(balances):
+            seat["stack"] = balances[index]
+            seat["bet"] = 0
+    mine = snap.get("seat", snap.get("you", {}).get("seat", -1))
+    if 0 <= mine < len(balances):
+        snap["turn"]["your_stack"] = balances[mine]
+    snap["pot"] = 0
+    snap["turn"]["pot"] = 0
 
 
 def _lobby_snapshot(session) -> dict:

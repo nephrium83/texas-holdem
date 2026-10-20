@@ -106,7 +106,8 @@ AUTHOR_MODE_COMPAT = "compat"   # unsigned flat dicts; conn_id stands in
 _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "session_end",
-    "timeout_proposal", "peer_lost", "hand_settled",
+    "timeout_proposal", "peer_lost", "hand_settled", "casual_clock_fault",
+    "casual_drop_observed", "casual_drop", "casual_drop_ack", "casual_drop_dispute",
 })
 
 
@@ -678,6 +679,10 @@ class Session:
         self._drop_compared: set[int] = set()
         # The stacks a drop's forfeit left, once one has; see _settle_drop.
         self._drop_stacks: list | None = None
+        # Explicitly enabled by the casual LAN adapter. Other embedders
+        # retain the existing terminate-on-peer-loss contract.
+        self._casual_reliability = False
+        self._casual_continuation = None
         # A busted seat's view of the hands played on without it: the last
         # hand every seat still playing reported settling alike, with its
         # stacks; the later reports, None for a void, by hand and then seat;
@@ -872,6 +877,21 @@ class Session:
             self._on_peer_lost(conn_id, body)
         elif t == "hand_settled":
             self._on_hand_settled(conn_id, body)
+        elif t in ("casual_drop_observed", "casual_drop", "casual_drop_ack",
+                   "casual_drop_dispute"):
+            if self._casual_continuation is not None:
+                handler = {"casual_drop_observed": "receive_observation",
+                           "casual_drop": "receive_drop",
+                           "casual_drop_ack": "receive_ack",
+                           "casual_drop_dispute": "receive_dispute"}[t]
+                getattr(self._casual_continuation, handler)(body)
+        elif t == "casual_clock_fault":
+            from holdem.p2p.casual_runtime import clock_fault
+            clock_fault(self, body)
+        elif t in ("casual_clock_request", "casual_clock_sample"):
+            if getattr(self, "_casual_reliability", False):
+                from holdem.p2p.casual_clock import lobby_clocks
+                lobby_clocks(self).receive(conn_id, msg)
 
     @staticmethod
     def _hostless_projection(msg: dict):
@@ -1613,6 +1633,9 @@ class Session:
         The single gate between the wire and the typed handlers. Everything
         past this point may assume the message is from the seat it claims.
         """
+        if (self._casual_continuation is not None
+                and ctx.seat in self._casual_continuation.departed):
+            return False
         if not ctx.local and ctx.seat is not None:
             if not self._author_owns_seat(ctx.conn_id, ctx.author, ctx.seat):
                 _log.warning(
@@ -1862,6 +1885,14 @@ class Session:
         except (TypeError, ValueError):
             _log.warning("session: malformed hand number ignored")
             return False
+        continuation = self._casual_continuation
+        if continuation is not None:
+            boundary = (continuation.pending or {}).get("notice")
+            resume = (boundary["resume_hand"] if boundary is not None else
+                      continuation.carry["resume_hand"]
+                      if continuation.carry is not None else None)
+            if resume is not None and h < resume:
+                return False
         if h > self._hand_no:
             buffered = dict(msg)
             buffered["hand"] = h
@@ -2024,7 +2055,7 @@ class Session:
         if expected_total is not None and sum(stacks) != expected_total:
             _log.warning("session: session_end has wrong chip total -- dropping")
             return
-        alive = [i for i, stack in enumerate(stacks) if stack > 0]
+        alive = self._active_seats(stacks)
         expected_winner = alive[0] if len(alive) == 1 else None
         if len(alive) > 1 or winner != expected_winner:
             return
@@ -2075,7 +2106,7 @@ class Session:
                 return
             self._followed = (self._hand_no, list(r.stacks))
         last, known = self._followed
-        playing = [s for s, chips in enumerate(known) if chips > 0]
+        playing = self._active_seats(known)
         if (len(playing) < 2 or seat not in playing
                 or not last < hand <= last + self._FOLLOW_AHEAD):
             return
@@ -2102,10 +2133,14 @@ class Session:
                 continue
             agreed = (h, digest, settled, frozenset(playing))
             last, known = h, list(settled)
-            playing = [s for s, chips in enumerate(known) if chips > 0]
+            playing = self._active_seats(known)
         if agreed is None:
             return
         self._followed = (last, known)
+        if (self._casual_continuation is not None
+                and self._casual_continuation.carry is not None
+                and last >= self._casual_continuation.carry["resume_hand"]):
+            self._casual_continuation.began()
         (self._ended_hand, self._ended_digest, self._ended_stacks,
          self._ended_seats) = agreed
         self._ended_agreed = set(self._ended_seats)
@@ -2673,6 +2708,40 @@ class Session:
         return self._seat_order.index(self.local_conn_id)
 
     @owned
+    def enable_casual_reliability(self) -> None:
+        """Enable the casual survivor protocol for this table, once."""
+        if self._casual_continuation is None:
+            from holdem.p2p.casual_continuation import CasualContinuation
+            self._casual_continuation = CasualContinuation(self)
+            self._casual_reliability = True
+
+    @property
+    def departed_seats(self) -> frozenset:
+        continuation = self._casual_continuation
+        return frozenset(continuation.departed) if continuation else frozenset()
+
+    @property
+    def casual_transition_pending(self) -> bool:
+        continuation = self._casual_continuation
+        return continuation is not None and continuation.pending is not None
+
+    @owned
+    def casual_timekeeper_seat(self):
+        continuation = self._casual_continuation
+        return continuation.timekeeper() if continuation is not None else None
+
+    @owned
+    def casual_drop(self, seat, reason="timeout", *, scope=None) -> bool:
+        continuation = self._casual_continuation
+        return (continuation.request_drop(seat, reason, scope)
+                if continuation is not None else False)
+
+    def _active_seats(self, stacks):
+        continuation = self._casual_continuation
+        return (continuation.active(stacks) if continuation is not None else
+                [seat for seat, chips in enumerate(stacks) if chips > 0])
+
+    @owned
     def start_p2p_hand(self, *, hand_no: int, names: list, stacks: list,
                        sb: int, bb: int, structure: str = "No-Limit",
                        button: int = 0) -> None:
@@ -2736,6 +2805,8 @@ class Session:
             session_id=session_id, hand_no=hand_no,
             names=list(cfg["names"]), stacks=list(stacks),
             sb=cfg["sb"], bb=cfg["bb"], structure=cfg["structure"])
+        for seat in self.departed_seats:
+            self._replica.engine.sit_out(seat)
         if positions is None:
             ok = self._replica.start_hand(cfg["button"])
         else:
@@ -2798,6 +2869,24 @@ class Session:
             return "session_over"
         if self._p2p_spectator:
             return "eliminated"
+        continuation = self._casual_continuation
+        carry = continuation.next_inputs() if continuation is not None else None
+        if carry == "not_ready":
+            return "not_ready"
+        if isinstance(carry, dict):
+            stacks, positions = list(carry["stacks"]), carry["positions"]
+            hand_no = carry["resume_hand"]
+            if len(self._active_seats(stacks)) < 2:
+                self._finish_session(stacks, announce=False)
+                return "session_over"
+            if self.local_seat not in self._active_seats(stacks):
+                self._p2p_spectator = True
+                self._notify_state_changed()
+                return "eliminated"
+            continuation.began()
+            started = self._begin_p2p_hand(hand_no=hand_no, stacks=stacks,
+                                           positions=positions)
+            return "started" if started else "session_over"
         voided = self.hand_voided
         if not voided and self.hand_result is None:
             return "not_ready"
@@ -2818,7 +2907,7 @@ class Session:
         else:
             stacks = self._replica.stacks       # settled: identical everywhere
             positions = self._replica.positions  # played chain state
-        alive = [i for i, s in enumerate(stacks) if s > 0]
+        alive = self._active_seats(stacks)
         if len(alive) < 2:
             self._finish_session(stacks, announce=True)
             return "session_over"
@@ -2844,7 +2933,7 @@ class Session:
         not at all.
         """
         final = [int(stack) for stack in stacks]
-        alive = [i for i, stack in enumerate(final) if stack > 0]
+        alive = self._active_seats(final)
         winner = alive[0] if len(alive) == 1 else None
         if self._session_over:
             if self._final_stacks is not None and self._final_stacks != final:
@@ -2886,6 +2975,10 @@ class Session:
             # desync source and not merely a local inconsistency.
             return "rejected"
         if self._replica is None or self.hand_voided:
+            return "rejected"
+        if self._casual_continuation is not None and (
+                self._casual_continuation.pending is not None
+                or self._casual_continuation.carry is not None):
             return "rejected"
         seat = self.local_seat
         seq = self._replica.next_seq
@@ -3061,6 +3154,10 @@ class Session:
         call. Re-entrant invocations (reveal/audit go through _flush_deal,
         which calls back here) are absorbed by the guard; the outermost
         pump loops until no step makes progress."""
+        if (self._casual_continuation is not None
+                and (self._casual_continuation.pending is not None
+                     or self._casual_continuation.carry is not None)):
+            return
         if self._pumping or self._replica is None:
             return
         self._pumping = True
@@ -3620,7 +3717,7 @@ class Session:
         self._clear_deadline()
 
     @owned
-    def handle_disconnect(self, conn_id: str) -> None:
+    def handle_disconnect(self, conn_id: str, reason: str = "disconnect") -> None:
         """Called by the transport on_disconnect handler for any dropped peer.
 
         Host loss is phase-dependent. In LOBBY nothing cryptographic is in
@@ -3654,6 +3751,24 @@ class Session:
 
         if self.terminal_state is not None:
             return                          # already terminal; late event
+
+        if (self._casual_continuation is not None and self.state == "PLAYING"
+                and conn_id != self._host_conn_id
+                and conn_id in self._seat_order):
+            seat = self._seat_order.index(conn_id)
+            # Publish while the roster still supplies its display name;
+            # frozen seat/key bindings stay intact for the entire table.
+            if self.is_host:
+                self.casual_drop(seat, reason if reason == "clock" else "disconnect")
+            with self._lock:
+                self.players.pop(conn_id, None)
+                if conn_id in self._join_order:
+                    self._join_order.remove(conn_id)
+            if self.is_host:
+                self._broadcast_player_list()
+            if self.on_player_list_changed:
+                self.on_player_list_changed(list(self.players.values()))
+            return
 
         # Decided, and the seat named, before the roster entry goes.
         seat = (self._seat_order.index(conn_id)
@@ -3728,10 +3843,10 @@ class Session:
         if self.hand_result is not None:
             if seat in self._ended_seats and seat not in self._ended_agreed:
                 return True
-            if sum(1 for stack in r.stacks if stack > 0) < 2:
+            if len(self._active_seats(r.stacks)) < 2:
                 return False
-            return 0 <= seat < len(r.stacks) and r.stacks[seat] > 0
-        return seat in r.seats_dealt
+            return seat in self._active_seats(r.stacks)
+        return seat in r.seats_dealt and seat not in self.departed_seats
 
     def _host_seat(self) -> Optional[int]:
         """The host's seat, or None if this peer cannot name it.
@@ -3766,7 +3881,7 @@ class Session:
         if r is None or self.hand_result is None:
             return False
         return (r.stacks[self.local_seat] == 0
-                and sum(1 for stack in r.stacks if stack > 0) >= 2)
+                and len(self._active_seats(r.stacks)) >= 2)
 
     def _seat_label(self, seat: int) -> str:
         """'seat 2 (Cara)' -- the seat as a player would recognise it."""
@@ -4144,6 +4259,9 @@ class Session:
             return list(self._drop_stacks)
         if self._final_stacks is not None:
             return list(self._final_stacks)
+        if (self._casual_continuation is not None and self._followed is not None
+                and self._eliminated()):
+            return list(self._followed[1])
         r = self._replica
         if r is not None and self.hand_result is not None:
             return list(r.stacks)
@@ -4458,3 +4576,41 @@ class Session:
     def _clear_deadline(self) -> None:
         self._current_deadline_token = None
         self._deadline_started_at   = None
+
+    @owned
+    def reliability_tick(self) -> None:
+        """Drive opted-in casual play from the host adapter's scheduler."""
+        if not getattr(self, "_casual_reliability", False):
+            return
+        if self.state == "LOBBY":
+            from holdem.p2p.casual_clock import lobby_clocks
+            lobby_clocks(self).tick()
+        else:
+            from holdem.p2p.casual_runtime import runtime
+            runtime(self).tick(self)
+
+    @owned
+    def reliability_started(self) -> None:
+        """Start the in-play wall/monotonic guard after lobby clock checks."""
+        if getattr(self, "_casual_reliability", False):
+            from holdem.p2p.casual_runtime import CasualRuntime
+            self._casual_runtime = CasualRuntime(self)
+
+    @owned
+    def reliability_view(self):
+        """Owned-copy snapshot callers read the renderer's public clock."""
+        if not getattr(self, "_casual_reliability", False):
+            return None
+        from holdem.p2p.casual_runtime import runtime
+        return runtime(self).view(self)
+
+    @owned
+    def reliability_lobby_status(self) -> dict:
+        if not getattr(self, "_casual_reliability", False):
+            return {"ready": True, "error": None}
+        from holdem.p2p.casual_clock import lobby_clocks
+        return lobby_clocks(self).status()
+
+    def _casual_validate_drop_scope(self, msg) -> bool:
+        from holdem.p2p.casual_runtime import validate_scope
+        return validate_scope(self, msg)

@@ -36,6 +36,51 @@ def _args(tmp_path, *extra):
     return launcher._parse_args(["--log-dir", str(tmp_path / "logs"), *extra])
 
 
+@pytest.mark.parametrize("seconds", [29, 901, True, "300"])
+def test_lan_diagnostic_budget_cannot_be_unbounded_or_shorter_than_a_real_turn(seconds):
+    with pytest.raises(ValueError, match="between 30 and 900"):
+        launcher._lan_check_timeout({"deadline_seconds": seconds})
+
+
+def test_lan_diagnostic_budget_allows_real_timeouts_and_report_shutdown():
+    assert launcher._lan_check_timeout({"deadline_seconds": 240}) == 255
+
+
+@pytest.mark.parametrize("expected, evidence", [
+    ("left_table", "left_table"), ("host_lost", "host_loss_seen"),
+])
+def test_departure_diagnostic_requires_its_observed_outcome(expected, evidence):
+    config = {"expected_result": expected, "minimum_hands": 2, "target_hands": 10}
+    summary = {"ok": True, "error": "", "hands_settled": 2, evidence: True}
+    launcher._validate_lan_summary(config, summary)
+    summary[evidence] = False
+    with pytest.raises(RuntimeError, match="required outcome"):
+        launcher._validate_lan_summary(config, summary)
+
+
+@pytest.mark.parametrize("field, measured", [
+    ("stall_action_hand", "action_timeout_elapsed_ms"),
+    ("auto_next_wait_hand", "auto_next_elapsed_ms"),
+])
+def test_reliability_diagnostic_rejects_a_timer_probe_that_did_not_wait_thirty_seconds(field, measured):
+    config = {"target_hands": 10, field: 2}
+    summary = {"ok": True, "error": "", "hands_settled": 10, measured: 30000}
+    launcher._validate_lan_summary(config, summary)
+    summary[measured] = 500
+    with pytest.raises(RuntimeError, match="required outcome"):
+        launcher._validate_lan_summary(config, summary)
+
+
+def test_reliability_diagnostic_requires_three_players_and_observed_departure():
+    config = {"target_hands": 10, "expected_players": 3, "departed_name": "Third"}
+    summary = {"ok": True, "error": "", "hands_settled": 10,
+               "roster_names": ["Host", "Guest", "Third"], "departure_seen": True}
+    launcher._validate_lan_summary(config, summary)
+    for changed in ({"roster_names": ["Host", "Guest"]}, {"departure_seen": False}):
+        with pytest.raises(RuntimeError, match="required outcome"):
+            launcher._validate_lan_summary(config, summary | changed)
+
+
 class Game:
     pid = 424242
 

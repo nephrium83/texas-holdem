@@ -71,7 +71,8 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 	_betting_controls.apply_legal(you.get("legal", {}))
 	var turn: Dictionary = snapshot.get("turn", {})
 	var turn_state := str(turn.get("state", "lobby"))
-	_next_hand_control.apply_turn_state(turn_state, int(snapshot.get("hand_num", 0)))
+	_next_hand_control.apply_turn_state(
+		turn_state, int(snapshot.get("hand_num", 0)), turn.get("clock", {}))
 	_lobby_control.apply_turn_state(turn_state)
 	if snapshot.get("lobby") is Dictionary:
 		_has_connection_lobby = true
@@ -143,9 +144,16 @@ func _expire_refusal(snapshot: Dictionary) -> void:
 		return
 	if _refusal_awaits_snapshot:
 		_refusal_awaits_snapshot = false
-		_refused_on = snapshot
-	elif snapshot != _refused_on:
+		_refused_on = _without_clock(snapshot)
+	elif _without_clock(snapshot) != _refused_on:
 		_command_status.text = ""
+
+
+func _without_clock(snapshot: Dictionary) -> Dictionary:
+	var position := snapshot.duplicate(true)
+	if position.get("turn") is Dictionary:
+		position["turn"].erase("clock")
+	return position
 
 
 ## Names the command and gives the sidecar's reason in its own terms

@@ -30,9 +30,12 @@ theme_override_constants/separation = 12
 
 [node name="MessageLabel" type="Label" parent="Margin/Content"]
 unique_name_in_owner = true
+custom_minimum_size = Vector2(135, 0)
+size_flags_horizontal = 3
 theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
 theme_override_font_sizes/font_size = 14
 text = ""
+autowrap_mode = 2
 
 [node name="NextHandButton" type="Button" parent="Margin/Content"]
 unique_name_in_owner = true

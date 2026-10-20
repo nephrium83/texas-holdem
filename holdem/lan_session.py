@@ -14,6 +14,7 @@ from holdem import native_crypto
 from holdem.p2p import admission, device_secret, identity, invite, transport
 from holdem.p2p.join_auth import JoinAuthenticator, joiner_admission_from_invite
 from holdem.p2p.session import Session
+from holdem.p2p.casual_clock import PROFILE
 
 _log = logging.getLogger(__name__)
 
@@ -24,7 +25,8 @@ JOIN_STARTUP_TIMEOUT = 15.0
 
 def _settings(settings: dict) -> dict:
     values = {"sb": 25, "bb": 50, "stack": 1000,
-              "structure": "No-Limit", "deal_policy": Session.DEAL_POLICY_BG}
+              "structure": "No-Limit", "deal_policy": Session.DEAL_POLICY_BG,
+              "casual_profile": PROFILE}
     values.update(settings)
     for field in ("sb", "bb", "stack"):
         if type(values[field]) is not int:
@@ -37,6 +39,8 @@ def _settings(settings: dict) -> dict:
         raise ValueError("Unsupported betting structure")
     if values["deal_policy"] != Session.DEAL_POLICY_BG:
         raise ValueError("LAN games require Bayer-Groth dealing")
+    if values["casual_profile"] != PROFILE:
+        raise ValueError("All players need the same Poker Preview version")
     return values
 
 
@@ -68,6 +72,30 @@ class LanTable:
         self._host_connection: str | None = None
         self._authenticator: JoinAuthenticator | None = None
         self._startup_watchdog: threading.Timer | None = None
+        self._ticker_stop: threading.Event | None = None
+        self._ticker_thread: threading.Thread | None = None
+
+    def _start_ticker(self, generation: int, session: Session) -> None:
+        stop = threading.Event()
+
+        def run():
+            while not stop.wait(0.25):
+                if not self._current(generation, session):
+                    return
+                try:
+                    session.reliability_tick()
+                except Exception:
+                    _log.exception("LAN reliability tick failed")
+                    session.terminate(Session.ABORTED_PROTOCOL,
+                                      "The table stopped because its clock could not advance")
+                    return
+
+        thread = threading.Thread(target=run, name="poker-lan-clock", daemon=True)
+        with self._lock:
+            if not self._current(generation, session) or self._state == "closed":
+                return
+            self._ticker_stop, self._ticker_thread = stop, thread
+        thread.start()
 
     @property
     def session(self) -> Session | None:
@@ -114,8 +142,11 @@ class LanTable:
             self._state = "closed"
             self._invite = ""
             watchdog, self._startup_watchdog = self._startup_watchdog, None
+            ticker_stop = self._ticker_stop
             if session.terminal_state != Session.ENDED_NORMAL:
                 self._error = str(session.terminal_reason or "Table closed")[:512]
+        if ticker_stop is not None:
+            ticker_stop.set()
         if watchdog is not None:
             watchdog.cancel()
         self._notify()
@@ -155,6 +186,10 @@ class LanTable:
         if not self._current(generation, session):
             return
         try:
+            if payload.get("table_settings", {}).get("casual_profile") != PROFILE:
+                raise ValueError("All players need the same Poker Preview version")
+            if not session.reliability_lobby_status()["ready"]:
+                raise ValueError("The roster clocks have not agreed")
             settings = _settings(payload.get("table_settings", {}))
             order = session.seat_order
             if not 2 <= len(order) <= 9:
@@ -168,6 +203,7 @@ class LanTable:
                 watchdog, self._startup_watchdog = self._startup_watchdog, None
             if watchdog is not None:
                 watchdog.cancel()
+            session.reliability_started()
             session.start_p2p_hand(
                 hand_no=1, names=[names.get(cid, "Player") for cid in order],
                 stacks=[settings["stack"]] * len(order),
@@ -189,6 +225,7 @@ class LanTable:
             secret_provider=device_secret.load_or_create,
             admission=host_admission, joiner_admission=joiner_admission,
         )
+        session.enable_casual_reliability()
         with self._lock:
             generation = self._generation
             self._session = session
@@ -201,7 +238,7 @@ class LanTable:
         session.on_state_changed = lambda: self._changed(generation, session)
         transport.reset_callbacks()
 
-        def disconnected(conn_id):
+        def disconnected(conn_id, reason="disconnect"):
             if not self._current(generation, session):
                 return
             with self._lock:
@@ -211,14 +248,19 @@ class LanTable:
                 # A lobby successor has no host capability for this invite.
                 # End visibly rather than letting the legacy Tk host election
                 # turn this joiner into an unarmed replacement host.
-                reason = ("The room closed or already started. Ask the host for a new invite."
+                display_reason = ("The room closed or already started. Ask the host for a new invite."
                           if connecting else
                           "The host disconnected. Leave and join a new room.")
-                session.terminate(Session.HOST_LOST, reason)
-            session.handle_disconnect(conn_id)
+                if reason == "clock":
+                    # The transport reports this only after validating the
+                    # timestamped envelope's signature and hash.
+                    display_reason = ("Clocks differ too much. Check automatic date and time "
+                              "on this computer and the host, then join again.")
+                session.terminate(Session.HOST_LOST, display_reason)
+            session.handle_disconnect(conn_id, reason=reason)
             self._changed(generation, session)
 
-        transport.on_disconnect(disconnected)
+        transport.on_disconnect(disconnected, with_reason=True)
         return generation, session
 
     def _begin(self, mode: str) -> None:
@@ -281,6 +323,7 @@ class LanTable:
                 )
                 with self._lock:
                     self._invite = code
+                self._start_ticker(generation, session)
                 self._notify()
             except Exception:
                 self._failed("Could not host a LAN game. Check your network and try again.")
@@ -322,6 +365,7 @@ class LanTable:
                     self._host_connection = cid
                 self._arm_startup_watchdog(generation, session)
                 authenticator.begin(cid)
+                self._start_ticker(generation, session)
                 self._changed(generation, session)
             except Exception:
                 self._failed("Could not join the LAN game. Check the invite and local network.")
@@ -357,7 +401,12 @@ class LanTable:
                 raise RuntimeError("Create a room first")
             if not session.is_host:
                 raise ValueError("Only the host can start the game")
-            return session.start_ready_game(dict(self.settings))
+            with session.read_state():
+                if session.state != "LOBBY" or session.terminal_state is not None:
+                    return "already_started"
+                if not session.reliability_lobby_status()["ready"]:
+                    return "not_ready"
+                return session.start_ready_game(dict(self.settings))
 
     def _close(self, *, notify: bool) -> None:
         # Invalidate callbacks first, then release metadata before waiting
@@ -371,6 +420,10 @@ class LanTable:
             self._host_connection = None
             self._authenticator = None
             watchdog, self._startup_watchdog = self._startup_watchdog, None
+            ticker_stop, self._ticker_stop = self._ticker_stop, None
+            ticker_thread, self._ticker_thread = self._ticker_thread, None
+        if ticker_stop is not None:
+            ticker_stop.set()
         if watchdog is not None:
             # Do not join here: an already-fired timer may be waiting for
             # _operations, which the caller of close/rehost currently owns.
@@ -379,6 +432,8 @@ class LanTable:
         try:
             if session is not None:
                 session.terminate(Session.LOCAL_SHUTDOWN, "You left the room")
+            if ticker_thread is not None and ticker_thread is not threading.current_thread():
+                ticker_thread.join(timeout=5.0)
         finally:
             try:
                 transport.stop()
@@ -414,6 +469,11 @@ class LanTable:
                     session.is_host and session.state == "LOBBY"
                     and session.terminal_state is None
                     and 2 <= len(result["players"]) <= 9 and session.all_ready)
+                clocks = session.reliability_lobby_status()
+                if session.state == "LOBBY":
+                    result["can_start"] = result["can_start"] and clocks["ready"]
+                    if not clocks["ready"] and len(result["players"]) > 1:
+                        result["error"] = clocks["error"]
             with self._lock:
                 changed = generation != self._generation or session is not self._session
             if changed:

@@ -40,6 +40,13 @@ earlier audit's six passes and known ante mismatch.
 
 ## Repository state
 
+**2026-10-20 casual delivery update:** PR #65 delivered packaged LAN rooms
+and three-hand BWING/Unraid Windows VM acceptance. The approved next
+milestone implements visible turn/Next Hand clocks and non-host survivor
+continuation, with the ten-hand packaged gate in `LAN_RELIABILITY.md`.
+This advances the October casual profile, not the historical M2-M6 recovery
+sequence below. Seat/context redesign and real-money servers remain separate.
+
 | Ref | SHA | Status |
 |---|---|---|
 | origin/main | `4b5e85a` | canonical — M0 (PR #39) and M1 (PR #40) merged |

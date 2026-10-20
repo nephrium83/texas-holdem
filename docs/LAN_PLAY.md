@@ -10,14 +10,18 @@ to the same local network. These rooms use play chips.
 4. Once everyone appears in the lobby, each guest selects **Ready**.
 5. The host selects **Start game** when all players are ready. A room needs
    two to nine players. The host can also switch their own Ready state.
-6. After a hand, every remaining player selects **Next hand**. If a hand is
-   still finishing on another computer, wait for its result and try again.
+6. After a hand, select **Next hand** or wait for its 30-second countdown.
+   If another computer is still confirming the result, the game waits for it.
 
 Use **Leave table** to return to the menu, or **Back to menu** if the table has
 already closed. You can immediately create or join
-another room in the same application. Leaving during play ends the current
-table under the existing disconnect rules; this version does not reconnect
-players or transfer a running game to a replacement host.
+another room in the same application. A non-host leaving during play applies
+the casual departure rule and lets survivors continue once their results agree.
+Losing the host closes the table. This version does not reconnect players or
+transfer a running game to a replacement host. Turns also show a 30-second
+clock and automatically check or fold. All players need this compatible
+preview and clocks within 20 seconds of each other before starting.
+See `LAN_RELIABILITY.md` for timing and payout details.
 
 If Windows asks whether Poker may use the network, allow it on your private
 network. A guest network that isolates devices can prevent friends from joining.
