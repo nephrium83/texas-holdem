@@ -172,8 +172,13 @@ def main(argv=None):
     (app / "README.txt").write_text(
         "Texas Hold'em - Windows preview\n\n"
         "Extract the entire ZIP, then double-click Poker.exe. Keep _internal beside it.\n"
-        "This preview plays a local table against bots. No Python or Godot installation is needed.\n"
-        "Play-money supervised preview; LAN Host/Join is not included in this build.\n\n"
+        "Play against local bots, or host/join a play-money game on your local network.\n"
+        "No Python or Godot installation is needed.\n\n"
+        "LAN: enter your name, choose Host LAN game and copy the invite.\n"
+        "Friends paste the invite, choose Join LAN game, then Ready.\n"
+        "The host selects Start game once everyone is ready.\n"
+        "After each hand, every player selects Next hand.\n"
+        "Leave table returns to the menu. No reconnect or internet joining in this preview.\n\n"
         "Diagnostic check: Poker.exe --self-test\n"
         "Source: https://github.com/nephrium83/texas-holdem\n"
         "License notices are in licenses/.\n", encoding="utf-8",

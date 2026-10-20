@@ -3,7 +3,8 @@
 The preview bundles the Python sidecar, libsodium, Godot runtime, and game
 resources. Extract the entire ZIP and launch `Poker.exe`; the destination
 machine does not need Python, Godot, a checkout, or a configured DLL path.
-The preview is a local game against bots. LAN Host/Join is a later release.
+The preview supports local bots and authenticated LAN Host/Join. See
+[`LAN_PLAY.md`](LAN_PLAY.md) for the one-invite join and Ready flow.
 The packaged preview targets 64-bit Windows 10 or newer.
 
 Build on Windows with Python 3.10 or newer, the project dependencies, and

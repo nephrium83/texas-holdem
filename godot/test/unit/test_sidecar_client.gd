@@ -92,6 +92,16 @@ func test_next_hand_builds_command_with_no_payload():
 	assert_eq(msg, {"type": "command", "command": "next_hand"})
 
 
+func test_lobby_command_payload_preserves_invite_and_ready_types():
+	var client := _client()
+	assert_eq(client._build_command_message("join_lan", {"nickname": "Ben", "invite": "exact-invite"}), {
+		"type": "command", "command": "join_lan", "payload": {"nickname": "Ben", "invite": "exact-invite"},
+	})
+	assert_eq(client._build_command_message("set_ready", {"ready": false}), {
+		"type": "command", "command": "set_ready", "payload": {"ready": false},
+	})
+
+
 func test_send_command_while_disconnected_does_not_crash():
 	var client := _client()
 	# Not connected to any sidecar; should warn, not error or throw.

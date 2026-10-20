@@ -2,27 +2,30 @@
 
 This is the contract the **Godot client** speaks to the **Python sidecar**.
 It is the source of truth for building the client. The Python reference
-implementation of every message in this document is `holdem/client_view.py`
-(snapshots + command handling) and `holdem/contract.py` (the per-seat view
-it builds on); both are covered by `tests/test_client_view.py`. If this
+implementation is `holdem/client_view.py` (game snapshots + commands),
+`holdem/contract.py` (the per-seat view), and `holdem/desktop_table.py`
+(desktop lobby composition + commands). If this
 document and that code ever disagree, the code is authoritative and this
 document is the bug.
 
 Status: v1. The message schemas mirror tested code. The transport framing
 (§2) and connection lifecycle (§7) are implemented by the sidecar's client
-server (`holdem/client_server.py`, `tests/test_client_server.py`) and are
-now locked.
+server (`holdem/client_server.py`, `tests/test_client_server.py`). Desktop
+lobby fields and commands are additive; the protocol version remains 1.
 
 ---
 
 ## 1. Architecture — why a sidecar
 
 The player runs the **Godot app**. Godot renders and takes input; it runs
-**no game logic and holds no secrets**. Alongside it runs a **Python
+**no game logic and holds no dealing or signing keys**. The lobby temporarily
+displays or accepts a private room invite. Alongside it runs a **Python
 sidecar** process that owns the `Session`: the mental-poker crypto, the
 peer-to-peer networking to the other players, and the local replica engine
 that computes betting. Godot talks only to its own local sidecar; the
-sidecar talks to the other players' sidecars over the internet.
+sidecar talks to the other players' sidecars. The desktop delivery exposes
+LAN play; internet joining and relay selection remain outside this client
+contract.
 
 ```
   [ Godot client ] <--localhost, JSON--> [ Python sidecar ] <--P2P--> [ other players' sidecars ]
@@ -79,9 +82,9 @@ The board is an array of card strings, length 0 to 5.
 
 ## 4. Client → sidecar: commands
 
-The client sends a command object. The betting commands plus `start_game` are
-defined in v1; table **creation**, seating and joining remain §8 (not yet
-finalised).
+The client sends a command object. Normal desktop launches expose both the
+lobby commands below and the existing game commands. Legacy diagnostic
+sidecars without desktop lobby mode expose only game commands.
 
 ```json
 { "type": "command", "command": "<name>", "payload": { ... } }
@@ -89,17 +92,43 @@ finalised).
 
 | command      | payload            | meaning                                        |
 |--------------|--------------------|------------------------------------------------|
-| `start_game` | (none)             | start the already-configured table (see below) |
+| `local_game` | `{"nickname": "Ada"}` | create a local practice table with bots; remain in its lobby |
+| `host_lan` | `{"nickname": "Ada"}` | create an authenticated LAN room and its invite |
+| `join_lan` | `{"nickname": "Ben", "invite": "<V2 invite>"}` | join using the whole address-bearing V2 invite |
+| `set_ready` | `{"ready": true}` | request the local LAN player's Ready state; also accepts `false` |
+| `leave_table` | (none) | leave the active table and return to the desktop menu |
+| `start_game` | (none)             | start a configured local table or a ready hosted LAN table |
 | `fold`       | (none)             | fold the current hand                          |
 | `check_call` | (none)             | check if nothing is owed, otherwise call       |
 | `raise_to`   | `{"amount": <int>}`| raise so your total this street becomes amount |
 | `next_hand`  | (none)             | advance after a settled or voided hand         |
 
-`start_game` takes **no payload**, and that is deliberate. It starts the table
-the sidecar was already configured with at launch — seat count, blinds, stack,
-betting structure, and the deal policy (§4.1). The client does not propose
-table settings and cannot alter them; it only asks the configured table to
-begin. Sending it is what moves the session out of `lobby`.
+`local_game`, `host_lan` and `join_lan` are accepted from the desktop menu.
+Leave the current table before selecting another. Names must contain 1–32
+printable characters after trimming. A successful creation does not start a
+hand: joining authenticates asynchronously, and the authoritative roster and
+connection status arrive through `snapshot.lobby` (§5).
+
+`join_lan` requires a V2 invite containing its host's address. The sidecar
+pins the full host signing key and arms admission before opening the socket.
+It accepts no separate address or legacy unauthenticated invite, and performs
+no internet relay fallback. The private invite must never be logged or added
+to process arguments.
+
+`set_ready` is valid only after the local player appears in the LAN roster.
+Guests begin unready; the host begins ready and can switch that state too.
+For a guest, `"applied"` means the request was sent; render the Ready state
+from subsequent authoritative snapshots rather than changing it locally.
+
+`start_game` takes **no payload**. Blinds, stack, betting structure, local bot
+count and the deal policy (§4.1) remain configured by the sidecar. A LAN host
+can start only with 2–9 admitted players and every player ready. The gate is
+atomic with roster changes. A guest cannot start the table. Successful start
+moves every peer into the first hand's existing mental-poker deal.
+
+`leave_table` closes the active table before returning to the menu, where
+another table may be created or joined in the same application. It does not
+offer reconnection or transfer a running table to a replacement host.
 
 `amount` in `raise_to` is an **absolute target** (your total wagered on this
 street after the raise), not a delta. Legal bounds are given to you in the
@@ -149,7 +178,7 @@ For each command the sidecar replies with:
 { "type": "command_result", "command": "fold", "ok": true, "verdict": "applied" }
 ```
 
-- `ok`: `true` iff the action was applied.
+- `ok`: `true` iff the command succeeded under the verdict rules below.
 - `verdict`: `"applied"` | `"rejected"` (not your turn / illegal) |
   `"buffered"` (accepted but queued behind an earlier action) |
   `"stale"` (a duplicate). On an unknown command, `ok` is `false` and an
@@ -160,15 +189,24 @@ For `start_game`, `verdict` is one of:
 - `"started"` — the table left the lobby and hand 1's deal is underway.
 - `"already_started"` — a hand is already in progress, or the session has
   ended; the command is a no-op.
-- `"refused"` — the table's configuration was rejected (see §4.1) and
+- `"not_ready"` — a hosted LAN lobby has fewer than 2 or more than 9 players,
+  or at least one player is not ready. No game starts.
+- `"refused"` — a local table's configuration was rejected (see §4.1) and
   **nothing was started**. The session is still in the lobby.
-- `"hand_failed"` — the table was accepted and started, but its first hand
+- `"hand_failed"` — a local table was accepted and started, but its first hand
   did not complete. The table is live; the hand is not. Distinct from
   `refused` on purpose: those are very different states to recover from,
   and reporting the second as the first tells the client the table never
   began when it in fact did.
 
 `ok` is true only for `started`.
+
+Successful `local_game`, `host_lan` and `join_lan` return `"created"`;
+`set_ready` returns `"applied"`; `leave_table` returns `"left"`. These
+results have `ok: true`. Invalid payloads, refused operations and connection
+failures return `ok: false` with an `error` string. A LAN first-hand failure
+is also visible in the terminal snapshot and lobby error; a successful start
+verdict alone is not proof that dealing completed.
 
 For `next_hand`, `verdict` is one of:
 
@@ -296,8 +334,50 @@ the latest snapshot; it never advances state on its own.
 | `eliminated`  | bool            | local seat is busted and excluded from later deals            |
 | `final_stacks`| array \| null   | final stack by seat once `session_over`                       |
 | `terminal`    | object \| null  | how the session ended (see below); `null` while it is live. Present in the lobby shape too |
+| `lobby`       | object          | desktop menu/room metadata below; absent in legacy diagnostic snapshots |
 | `seats`       | array           | one entry per seat, in seat order                            |
 | `you`         | object          | data private to the local seat                               |
+
+### Desktop `lobby` metadata
+
+Normal desktop launches and `--desktop-lobby` sidecars attach this object
+to every snapshot, including during a hand:
+
+```json
+"lobby": {
+  "mode": "host",
+  "state": "lobby",
+  "nickname": "Ada",
+  "invite": "<private V2 room invite>",
+  "players": [
+    {"seat": 0, "name": "Ada", "ready": true, "is_you": true, "is_host": true},
+    {"seat": 1, "name": "Ben", "ready": false, "is_you": false, "is_host": false}
+  ],
+  "can_start": false,
+  "error": null
+}
+```
+
+| field | meaning |
+|-------|---------|
+| `mode` | `menu`, `local`, `host` or `join` |
+| `state` | `idle` in the menu; `connecting` while joining; `lobby`, `playing` or `closed` for an active LAN table; `lobby` or `playing` for local practice |
+| `nickname` | the local player's display name |
+| `invite` | the private address-bearing V2 invite, present only in the host's open lobby; otherwise an empty string |
+| `players` | public roster in display order, with `seat`, `name`, `ready`, `is_you` and `is_host` |
+| `can_start` | whether the current local configuration permits Start; LAN host only, 2–9 players and all ready |
+| `error` | a displayable room failure, or `null`/empty string when none exists |
+
+Lobby membership is visible before playing seat order freezes. Departed
+lobby players disappear from subsequent rosters. A room's `closed` state
+offers a return to the menu; game-terminal details remain in `terminal`
+and `turn`. Rendering a Ready or Start control from metadata does not grant
+authority: the sidecar validates every command again.
+
+The first normal desktop snapshot has `phase: "lobby"`, `lobby.mode: "menu"`
+and no occupied seats. A legacy diagnostic sidecar launched without desktop
+lobby mode retains its configured local table and omits `lobby` entirely;
+its existing `start_game` and game-command behavior is unchanged.
 
 ### `phase`
 
@@ -311,7 +391,9 @@ the latest snapshot; it never advances state on its own.
 
 ### Continuous-session lifecycle
 
-After `settled` or `void`, the client sends `next_hand`. Every participating
+After `settled` or `void`, every participating LAN client sends `next_hand`.
+There is no host-only advance command or automatic next-hand scheduler.
+Every participating
 sidecar derives the next hand from its identical replica: settled stacks carry
 forward, while a void redeals from the current hand's original stacks and
 position chain.
@@ -636,7 +718,8 @@ or reproduce side-pot and odd-chip rules.
 
 As implemented by `holdem/client_server.py`:
 
-1. Sidecar starts, begins its P2P work, and listens on the local port.
+1. Sidecar starts and listens on the local port. A normal desktop launch
+   begins at the menu; no LAN listener or connection exists until Host/Join.
 2. Client connects. Sidecar sends `{"type":"hello","protocol":1}` then an
    initial `snapshot` (likely `phase: "lobby"`).
 3. Steady state: the client sends `command` messages; the sidecar answers
@@ -647,21 +730,22 @@ As implemented by `holdem/client_server.py`:
 5. An eliminated client may reconnect to its retained hand view and later
    receives the terminal winner through a pushed snapshot.
 
-Not yet specified: how a player joins/creates a table, the seating/ready
-handshake, reconnection identity, and chat. These live in `MULTIPLAYER.md`
-(the P2P lobby layer) and will be surfaced to the client as additional
-message types.
+The desktop lobby commands in §4 expose creation, authenticated LAN joining,
+Ready and leave through the existing command/snapshot framing. Host disconnect
+closes a joined LAN room, including in the lobby. Reconnecting this localhost
+rendering socket does not reconnect a lost network player. Network
+reconnection identity, recovery and chat remain outside this delivery.
 
 ---
 
 ## 8. Not yet in this contract
 
-- Lobby / table **creation** / join / ready / seat selection (P2P lobby exists
-  in the sidecar; not yet exposed as client messages here). §4's `start_game`
-  is **not** this: it starts the table the sidecar was configured with at
-  launch, and carries no settings. Choosing seats, inviting or admitting
-  remote peers, and negotiating table settings from the client all remain
-  out of contract.
+- Manual seat selection, table-setting negotiation from the client and
+  changing rules after a table starts. The desktop lobby now exposes local
+  creation, authenticated LAN Host/Join, Ready and leave (§4); settings still
+  come from the sidecar and playing seat order freezes at Start.
+- Internet joining, relay controls, network reconnection and host migration
+  during a running game.
 - Chat.
 - Mid-hand dropout **timeout** (the void path exists; the timer for a peer
   that simply goes silent is not yet wired).
@@ -681,9 +765,18 @@ These will be added as message types without breaking §4–§6.
   transitions, showdown reveals, and command verdicts over real hands.
 - `holdem/client_server.py` — the localhost server itself: §2 framing,
   §7 hello, §4 command handling, §5 unprompted pushes (coalesced, via
-  `Session.on_state_changed`).
+  `Session.on_state_changed` or a desktop controller dirty notification).
+- `holdem/desktop_table.py` — menu/local/LAN composition, desktop commands
+  and the additive `lobby` metadata.
+- `holdem/lan_session.py` — authenticated production Session setup, V2 invites,
+  Ready/start policy and room teardown. The localhost rendering server does
+  not implement a second network admission path.
 - `tests/test_client_server.py` — the whole protocol over a real socket
   against live hostless hands on the in-memory bus.
+- `tests/test_lan_session.py`, `tests/test_lan_foundation.py` — controller
+  policy, atomic state reads/start, roster continuity and desktop lifecycle.
+- `tests/test_lan_integration.py` — independent production peers and actual
+  Godot Host/Join controls, continuous hands and cleanup.
 
 Build the Godot client against these. When in doubt, run a sidecar and read
 the actual JSON.

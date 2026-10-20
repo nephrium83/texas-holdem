@@ -36,8 +36,13 @@ class ClientServer:
     """
 
     def __init__(self, session, host: str = "127.0.0.1", port: int = 0,
-                 start_table=None):
+                 start_table=None, *, snapshot_provider=None,
+                 command_handler=None):
+        if (snapshot_provider is None) != (command_handler is None):
+            raise ValueError("snapshot_provider and command_handler must be supplied together")
         self._session = session
+        self._snapshot_provider = snapshot_provider
+        self._command_handler = command_handler
         self._host = host
         self._port = port
         # Controller-owned "start the configured table" callable, forwarded
@@ -66,12 +71,14 @@ class ClientServer:
             self._accept, self._host, self._port)
         self._port = self._server.sockets[0].getsockname()[1]
         # Chain, never clobber, any state hook already installed.
-        self._prev_hook = self._session.on_state_changed
-        self._session.on_state_changed = self._installed_hook
+        if self._session is not None:
+            self._prev_hook = self._session.on_state_changed
+            self._session.on_state_changed = self._installed_hook
         _log.info("client server listening on %s:%s", self._host, self._port)
 
     async def stop(self) -> None:
-        if self._session.on_state_changed is self._installed_hook:
+        if (self._session is not None
+                and self._session.on_state_changed is self._installed_hook):
             self._session.on_state_changed = self._prev_hook
         server, self._server = self._server, None
         if server is not None:
@@ -96,6 +103,10 @@ class ClientServer:
                 self._prev_hook()
             except Exception:
                 _log.exception("previous state-change hook failed")
+        self.notify_state_changed()
+
+    def notify_state_changed(self) -> None:
+        """Request a snapshot from a controller callback on any thread."""
         loop = self._loop
         if loop is not None and not loop.is_closed():
             loop.call_soon_threadsafe(self._mark_all_dirty)
@@ -107,7 +118,8 @@ class ClientServer:
     # -- connections ---------------------------------------------------
 
     async def _accept(self, reader, writer) -> None:
-        conn = _Conn(self._session, reader, writer, self._start_table)
+        conn = _Conn(self._session, reader, writer, self._start_table,
+                     self._snapshot_provider, self._command_handler)
         self._conns.add(conn)
         try:
             await conn.run()
@@ -119,11 +131,15 @@ class ClientServer:
 class _Conn:
     """One connected client: a reader loop plus a coalescing push task."""
 
-    def __init__(self, session, reader, writer, start_table=None):
+    def __init__(self, session, reader, writer, start_table=None,
+                 snapshot_provider=None, command_handler=None):
         self._session = session
         self._reader = reader
         self._writer = writer
         self._start_table = start_table
+        self._snapshot_provider = snapshot_provider
+        self._command_handler = command_handler
+        self._operation = asyncio.Lock()
         self.dirty = asyncio.Event()
 
     def close(self) -> None:
@@ -140,7 +156,7 @@ class _Conn:
 
     async def run(self) -> None:
         self._send({"type": "hello", "protocol": PROTOCOL_VERSION})
-        self._send(client_view.snapshot(self._session))
+        self._send(await self._snapshot())
         await self._drain()
         push = asyncio.create_task(self._push_loop())
         try:
@@ -159,9 +175,17 @@ class _Conn:
         snapshot only when we wake."""
         while True:
             await self.dirty.wait()
-            self.dirty.clear()
-            self._send(client_view.snapshot(self._session))
-            await self._drain()
+            async with self._operation:
+                self.dirty.clear()
+                self._send(await self._snapshot())
+                await self._drain()
+
+    async def _snapshot(self) -> dict:
+        if self._snapshot_provider is None:
+            return client_view.snapshot(self._session)
+        # Waiting for a remote crypto operation's owner must not freeze the
+        # localhost event loop, including its disconnect/cleanup processing.
+        return await asyncio.to_thread(self._snapshot_provider)
 
     async def _read_loop(self) -> None:
         while True:
@@ -179,8 +203,12 @@ class _Conn:
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "command":
-                self._handle_command(msg)
-                await self._drain()
+                async with self._operation:
+                    if self._command_handler is None:
+                        self._handle_command(msg)
+                    else:
+                        await self._handle_controller_command(msg)
+                    await self._drain()
             # any other type: ignored (forward compatibility, section 2)
 
     def _handle_command(self, msg: dict) -> None:
@@ -215,6 +243,19 @@ class _Conn:
         # dirty-set runs after this block and is never lost.
         self.dirty.clear()
         self._send(client_view.snapshot(self._session))
+
+    async def _handle_controller_command(self, msg: dict) -> None:
+        command = str(msg.get("command", ""))
+        payload = msg.get("payload") or {}
+        try:
+            result = await asyncio.to_thread(self._command_handler, command, payload)
+        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+            _log.error("client command %r failed", command)
+            result = {"type": "command_result", "command": command,
+                      "ok": False, "error": str(exc)}
+        self._send(result)
+        self.dirty.clear()
+        self._send(await self._snapshot())
 
     def _send(self, obj: dict) -> None:
         self._writer.write(json.dumps(obj).encode("utf-8") + b"\n")

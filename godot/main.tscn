@@ -1,4 +1,4 @@
-[gd_scene load_steps=8 format=3]
+[gd_scene load_steps=9 format=3]
 
 [ext_resource type="Script" path="res://main.gd" id="1_script"]
 [ext_resource type="Script" path="res://net/sidecar_client.gd" id="2_sidecar_script"]
@@ -7,6 +7,7 @@
 [ext_resource type="PackedScene" path="res://ui/player_info_panel.tscn" id="5_panel"]
 [ext_resource type="PackedScene" path="res://ui/next_hand_control.tscn" id="6_next_hand"]
 [ext_resource type="PackedScene" path="res://ui/lobby_control.tscn" id="7_lobby"]
+[ext_resource type="PackedScene" path="res://ui/connection_lobby.tscn" id="8_connection"]
 
 [node name="Main" type="Control"]
 custom_minimum_size = Vector2(1370, 850)
@@ -55,3 +56,7 @@ theme_override_colors/font_color = Color(0.94, 0.44, 0.45, 1)
 theme_override_font_sizes/font_size = 20
 horizontal_alignment = 1
 text = ""
+
+[node name="ConnectionLobby" parent="." instance=ExtResource("8_connection")]
+unique_name_in_owner = true
+visible = false

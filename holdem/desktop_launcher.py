@@ -278,7 +278,7 @@ async def _run(args, paths: RuntimePaths) -> int:
     sidecar = asyncio.create_task(run_sidecar(
         seats=2, sb=25, bb=50, stack=100000 if args.self_test else 1000,
         structure="No-Limit", port=0, seed=7 if args.self_test else None,
-        nickname="Player", ready=announce))
+        nickname="Player", ready=announce, desktop_lobby=not args.self_test))
     game = None
     session = {"game_pid": None, "sidecar_port": None, "game_exit_code": None}
     try:

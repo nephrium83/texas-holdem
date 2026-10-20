@@ -13,6 +13,11 @@ var calls: Array = []
 var send_succeeds := true
 
 
+func send_command(command: String, payload: Dictionary = {}) -> bool:
+	calls.append([command, payload])
+	return send_succeeds
+
+
 func start_game() -> bool:
 	calls.append(["start_game"])
 	return send_succeeds

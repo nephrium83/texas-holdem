@@ -15,6 +15,7 @@ extends Control
 @onready var _lobby_control: LobbyControl = %LobbyControl
 @onready var _command_status: Label = %CommandStatusLabel
 @onready var _connection_banner: Label = %ConnectionBanner
+@onready var _connection_lobby: ConnectionLobby = %ConnectionLobby
 
 const CONNECTION_LOST_TEXT := "Connection lost — close and relaunch"
 
@@ -43,6 +44,7 @@ var _refusal_awaits_snapshot := false
 ## Set once the sidecar is gone. Nothing in this client reconnects, so the
 ## table on screen is frozen at its last state and no control may act on it.
 var _connection_lost := false
+var _has_connection_lobby := false
 
 
 func _ready() -> void:
@@ -55,6 +57,7 @@ func _ready() -> void:
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
 	_next_hand_control.next_hand_pressed.connect(_on_next_hand_pressed)
 	_lobby_control.start_game_pressed.connect(_on_start_game_pressed)
+	_connection_lobby.command_requested.connect(_on_lobby_command_requested)
 	_connect_to_sidecar_from_cmdline()
 
 
@@ -70,6 +73,21 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 	var turn_state := str(turn.get("state", "lobby"))
 	_next_hand_control.apply_turn_state(turn_state, int(snapshot.get("hand_num", 0)))
 	_lobby_control.apply_turn_state(turn_state)
+	if snapshot.get("lobby") is Dictionary:
+		_has_connection_lobby = true
+		_connection_lobby.apply_lobby(snapshot["lobby"])
+		_lobby_control.visible = false
+		# A host or joiner may leave a finished table and create another in
+		# this process. Refusals from the old table must not survive that.
+		if str(snapshot["lobby"].get("mode", "")) == "menu":
+			_command_status.text = ""
+			_betting_controls.apply_legal({})
+			_next_hand_control.visible = false
+
+
+func _on_lobby_command_requested(command: String, payload: Dictionary) -> void:
+	if _connection_lost or not _sidecar.send_command(command, payload):
+		_connection_lobby.command_failed("Not connected")
 
 
 func _on_fold_pressed() -> void:
@@ -103,6 +121,8 @@ func _on_start_game_pressed() -> void:
 func _on_command_result_received(result: Dictionary) -> void:
 	var command := str(result.get("command", ""))
 	var ok := bool(result.get("ok", false))
+	if _has_connection_lobby:
+		_connection_lobby.handle_command_result(result)
 	if command == "start_game":
 		if not ok:
 			_lobby_control.start_failed(_start_failure_text(result))
@@ -165,6 +185,7 @@ func _on_sidecar_disconnected() -> void:
 	_player_info_panel.apply_connection_lost()
 	_next_hand_control.visible = false
 	_lobby_control.visible = false
+	_connection_lobby.visible = false
 	_command_status.text = ""
 
 

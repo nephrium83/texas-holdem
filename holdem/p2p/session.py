@@ -71,6 +71,7 @@ import hashlib
 import json
 import logging
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -539,6 +540,9 @@ class Session:
         self.state      = "LOBBY"
         # conn_id -> Player (includes local player once we have a conn_id)
         self.players:   dict[str, Player] = {}
+        # Membership may shrink in the lobby. Forgetting a departed roster
+        # entry must not let the same connection id acquire a different key.
+        self._roster_signing_keys: dict[str, str] = {}
         self.local_nickname  = nickname
         self.local_avatar    = avatar_b64
         self._lock           = threading.Lock()
@@ -3155,10 +3159,14 @@ class Session:
         fatal.
         """
         existing = self.players.get(conn_id)
-        current = getattr(existing, "ed25519_pubkey_hex", "") if existing else ""
+        current = self._roster_signing_keys.get(conn_id) or (
+            getattr(existing, "ed25519_pubkey_hex", "") if existing else "")
         claimed = claimed if isinstance(claimed, str) else ""
         if not current:
+            if claimed:
+                self._roster_signing_keys[conn_id] = claimed
             return claimed
+        self._roster_signing_keys[conn_id] = current
         if claimed and claimed != current:
             _log.warning(
                 "session: refusing to move %s from signing key %s to %s -- "
@@ -3346,6 +3354,11 @@ class Session:
                     existing.ed25519_pubkey_hex = self._adopt_signing_key(
                         cid, p.get("ed25519_pubkey_hex",
                                    existing.ed25519_pubkey_hex))
+            if self.state == "LOBBY":
+                present = {p.get("conn_id", "") for p in players_data}
+                for cid in list(self.players):
+                    if cid not in present:
+                        del self.players[cid]
             # Mirror join order from the host's authoritative list (non-hosts only)
             self._join_order = [
                 p.get("conn_id", "") for p in players_data
@@ -4044,6 +4057,29 @@ class Session:
     # ------------------------------------------------------------------
     # Convenience
     # ------------------------------------------------------------------
+
+    @contextmanager
+    def read_state(self):
+        """Borrow a consistent view while the protocol owner is held.
+
+        Host adapters must copy values they retain before leaving this block.
+        Reads serialize with inbound messages and local commands using the
+        same reentrant owner; this does not create a second state owner.
+        """
+        with self._owner:
+            yield self
+
+    @owned
+    def start_ready_game(self, table_settings: dict) -> str:
+        """Start a ready lobby atomically with respect to roster changes."""
+        if self.state != "LOBBY" or self.terminal_state is not None:
+            return "already_started"
+        if not self.is_host:
+            raise RuntimeError("Only the host can start the game")
+        if not 2 <= self.peer_count() <= 9 or not self.all_ready:
+            return "not_ready"
+        self.start_game(table_settings)
+        return "started"
 
     def peer_count(self) -> int:
         """Number of players currently in the lobby."""

@@ -577,3 +577,66 @@ func test_losing_the_sidecar_mid_start_takes_the_lobby_away():
 		"a dead sidecar left Start on screen"
 	)
 	assert_true(main.get_node("%ConnectionBanner").visible)
+
+
+func test_desktop_menu_is_driven_by_snapshot_lobby_metadata():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["lobby"] = {"mode": "menu", "state": "idle"}
+	main._on_snapshot_received(snapshot)
+	assert_true(main.get_node("%ConnectionLobby").visible)
+	assert_true(main.get_node("%ConnectionLobby").get_node("%ModeMenu").visible)
+	assert_false(main.get_node("%LobbyControl").visible)
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_false(main.get_node("%NextHandControl").visible)
+
+
+func test_actual_host_button_sends_lobby_command_through_main():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["lobby"] = {"mode": "menu", "state": "idle"}
+	main._on_snapshot_received(snapshot)
+	var lobby: ConnectionLobby = main.get_node("%ConnectionLobby")
+	lobby.get_node("%NicknameInput").text = "Ada"
+	lobby.get_node("%HostLanButton").pressed.emit()
+	assert_eq(fake.calls, [["host_lan", {"nickname": "Ada"}]])
+
+
+func test_lobby_command_refusal_releases_pending_controls():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["lobby"] = {"mode": "menu", "state": "idle"}
+	main._on_snapshot_received(snapshot)
+	var lobby: ConnectionLobby = main.get_node("%ConnectionLobby")
+	lobby.get_node("%HostLanButton").pressed.emit()
+	main._on_command_result_received({"command": "host_lan", "ok": false, "error": "Cannot host"})
+	assert_false(lobby.get_node("%HostLanButton").disabled)
+	assert_eq(lobby.get_node("%ConnectionStatusLabel").text, "Cannot host")
+
+
+func test_dropped_lobby_command_releases_pending_controls():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	fake.send_succeeds = false
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["lobby"] = {"mode": "menu", "state": "idle"}
+	main._on_snapshot_received(snapshot)
+	var lobby: ConnectionLobby = main.get_node("%ConnectionLobby")
+	lobby.get_node("%HostLanButton").pressed.emit()
+	assert_false(lobby.get_node("%HostLanButton").disabled)
+	assert_eq(lobby.get_node("%ConnectionStatusLabel").text, "Not connected")
+
+
+func test_sidecar_loss_hides_the_connection_lobby():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["lobby"] = {"mode": "menu", "state": "idle"}
+	main._on_snapshot_received(snapshot)
+	main._on_sidecar_disconnected()
+	assert_false(main.get_node("%ConnectionLobby").visible)
+	assert_true(main.get_node("%ConnectionBanner").visible)
