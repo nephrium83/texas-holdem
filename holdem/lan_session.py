@@ -17,6 +17,10 @@ from holdem.p2p.session import Session
 
 _log = logging.getLogger(__name__)
 
+# Bounds only initial socket admission and roster delivery. Poker hand and
+# betting deadlines remain entirely Session-owned and are unchanged here.
+JOIN_STARTUP_TIMEOUT = 15.0
+
 
 def _settings(settings: dict) -> dict:
     values = {"sb": 25, "bb": 50, "stack": 1000,
@@ -63,6 +67,7 @@ class LanTable:
         self._error: str | None = None
         self._host_connection: str | None = None
         self._authenticator: JoinAuthenticator | None = None
+        self._startup_watchdog: threading.Timer | None = None
 
     @property
     def session(self) -> Session | None:
@@ -95,6 +100,11 @@ class LanTable:
                 return
             if present and self._state == "connecting":
                 self._state = "lobby"
+                watchdog, self._startup_watchdog = self._startup_watchdog, None
+            else:
+                watchdog = None
+        if watchdog is not None:
+            watchdog.cancel()
         self._notify()
 
     def _terminated(self, generation: int, session: Session, _record) -> None:
@@ -103,9 +113,42 @@ class LanTable:
                 return
             self._state = "closed"
             self._invite = ""
+            watchdog, self._startup_watchdog = self._startup_watchdog, None
             if session.terminal_state != Session.ENDED_NORMAL:
                 self._error = str(session.terminal_reason or "Table closed")[:512]
+        if watchdog is not None:
+            watchdog.cancel()
         self._notify()
+
+    def _arm_startup_watchdog(self, generation: int, session: Session) -> None:
+        watchdog = threading.Timer(
+            JOIN_STARTUP_TIMEOUT, self._startup_expired, args=(generation, session))
+        watchdog.daemon = True
+        with self._lock:
+            if (generation != self._generation or self._session is not session
+                    or self._state != "connecting"):
+                return
+            self._startup_watchdog = watchdog
+        watchdog.start()
+
+    def _startup_expired(self, generation: int, session: Session) -> None:
+        # This is the watchdog's own thread, not the transport consumer.
+        # It may stop and join transport after dropping the metadata lock.
+        with self._operations:
+            with self._lock:
+                expired = (generation == self._generation
+                           and self._session is session
+                           and self._state == "connecting")
+                if expired:
+                    # Claim the timeout atomically against a roster callback
+                    # just arriving. Once claimed, that callback cannot
+                    # resurrect the expired attempt while cleanup starts.
+                    self._generation += 1
+                    self._state = "closed"
+            if not expired:
+                return
+            self._failed("The room did not finish connecting. It may have already started. "
+                         "Ask the host for a new invite.")
 
     def _game_started(self, generation: int, session: Session,
                       payload: dict) -> None:
@@ -122,6 +165,9 @@ class LanTable:
                     return
                 self._state = "playing"
                 self._invite = ""
+                watchdog, self._startup_watchdog = self._startup_watchdog, None
+            if watchdog is not None:
+                watchdog.cancel()
             session.start_p2p_hand(
                 hand_no=1, names=[names.get(cid, "Player") for cid in order],
                 stacks=[settings["stack"]] * len(order),
@@ -160,12 +206,15 @@ class LanTable:
                 return
             with self._lock:
                 host_connection = self._host_connection
+                connecting = self._state == "connecting"
             if not is_host and conn_id == host_connection:
                 # A lobby successor has no host capability for this invite.
                 # End visibly rather than letting the legacy Tk host election
                 # turn this joiner into an unarmed replacement host.
-                session.terminate(Session.HOST_LOST,
-                                  "The host disconnected. Leave and join a new room.")
+                reason = ("The room closed or already started. Ask the host for a new invite."
+                          if connecting else
+                          "The host disconnected. Leave and join a new room.")
+                session.terminate(Session.HOST_LOST, reason)
             session.handle_disconnect(conn_id)
             self._changed(generation, session)
 
@@ -202,9 +251,21 @@ class LanTable:
                 )
                 generation, session = self._install(is_host=True,
                                                     host_admission=policy)
-                transport.on_message(lambda cid, message: (
-                    session.handle_message(cid, message)
-                    if self._current(generation, session) else None))
+                def route_host(cid, message):
+                    if not self._current(generation, session):
+                        return
+                    with session.read_state():
+                        if (session.state != "LOBBY"
+                                and not any(p.conn_id == cid
+                                            for p in session.player_list())):
+                            # An old invite is not a seat in a running game.
+                            # Disconnect before starting a handshake whose
+                            # later player_info Session would have to ignore.
+                            transport.disconnect(cid)
+                            return
+                        session.handle_message(cid, message)
+
+                transport.on_message(route_host)
                 address = transport.start_host(0)
                 ip, port = address.rsplit(":", 1)
                 code = invite.generate_room_code(
@@ -259,6 +320,7 @@ class LanTable:
                     f"{parsed['public_ip']}:{parsed['public_port']}")
                 with self._lock:
                     self._host_connection = cid
+                self._arm_startup_watchdog(generation, session)
                 authenticator.begin(cid)
                 self._changed(generation, session)
             except Exception:
@@ -308,6 +370,12 @@ class LanTable:
             self._error = None
             self._host_connection = None
             self._authenticator = None
+            watchdog, self._startup_watchdog = self._startup_watchdog, None
+        if watchdog is not None:
+            # Do not join here: an already-fired timer may be waiting for
+            # _operations, which the caller of close/rehost currently owns.
+            # Its generation check makes that late callback inert.
+            watchdog.cancel()
         try:
             if session is not None:
                 session.terminate(Session.LOCAL_SHUTDOWN, "You left the room")

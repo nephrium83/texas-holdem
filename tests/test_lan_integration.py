@@ -247,6 +247,33 @@ def test_lan_peer_process_loss_is_visible_and_survivor_can_leave(tmp_path):
                    description="survivor can return to menu")
 
 
+def test_late_join_closes_visibly_without_disrupting_the_playing_table(tmp_path):
+    require_crypto()
+    with ExitStack() as stack:
+        host, guest, late = [stack.enter_context(SidecarPeer(tmp_path, name))
+                             for name in ("Host", "Guest", "Late")]
+        saved_invite = _host_and_join([host, guest])
+        _ready_and_start([host, guest])
+        before = _synchronized([host, guest], hand=1, phase="betting")
+        expected = _public(before[0])
+        # The invite was legitimately shared before Start. Opening it after
+        # Start must report the closed admission window rather than wait
+        # indefinitely or add a seat to the frozen playing roster.
+        late.command("join_lan", {"nickname": "Late", "invite": saved_invite})
+        refused = late.wait(lambda snap: snap["lobby"]["state"] == "closed",
+                            timeout=20, description="late join is visibly refused")
+        assert refused["lobby"].get("error")
+        assert "legal" not in refused.get("you", {})
+        assert "hole" not in refused.get("you", {})
+        unchanged = _synchronized([host, guest], hand=1, phase="betting")
+        assert all(_public(snap) == expected for snap in unchanged)
+        assert all(len(snap["lobby"]["players"]) == 2 for snap in unchanged)
+        _play_checkdown([host, guest], 1)
+        _ok(late, "leave_table")
+        late.wait(lambda snap: snap["lobby"]["mode"] == "menu",
+                  description="refused late joiner can return to menu")
+
+
 def test_three_peer_lobby_departure_updates_every_remaining_roster(tmp_path):
     require_crypto()
     with ExitStack() as stack:

@@ -148,6 +148,16 @@ def _join_authenticated(table, fake, local):
     return host, code
 
 
+def _joined_roster(fake, host, local):
+    fake.deliver("host-hop", _packet("player_ack", host, {"your_conn_id": "you"}))
+    fake.deliver("host-hop", _packet("player_list", host, {"players": [
+        {"conn_id": "host", "nickname": "Bob", "ready": True, "is_host": True,
+         "ed25519_pubkey_hex": host.public_key_bytes().hex()},
+        {"conn_id": "you", "nickname": "Alice", "ready": False,
+         "ed25519_pubkey_hex": local.public_key_bytes().hex()},
+    ]}))
+
+
 def test_host_invite_contains_address_and_full_identity(controller):
     table, fake, local, changes = controller
     assert table.session is None
@@ -223,13 +233,7 @@ def test_join_pins_before_socket_and_does_not_ready_before_roster(controller):
     assert "ready" not in [m["type"] for _cid, m in fake.sent]
     with pytest.raises(RuntimeError, match="connecting"):
         table.set_ready(True)
-    fake.deliver("host-hop", _packet("player_ack", host, {"your_conn_id": "you"}))
-    fake.deliver("host-hop", _packet("player_list", host, {"players": [
-        {"conn_id": "host", "nickname": "Bob", "ready": True, "is_host": True,
-         "ed25519_pubkey_hex": host.public_key_bytes().hex()},
-        {"conn_id": "you", "nickname": "Alice", "ready": False,
-         "ed25519_pubkey_hex": local.public_key_bytes().hex()},
-    ]}))
+    _joined_roster(fake, host, local)
     state = table.lobby_state()
     assert state["state"] == "lobby"
     assert state["invite"] == ""
@@ -242,13 +246,125 @@ def test_join_pins_before_socket_and_does_not_ready_before_roster(controller):
 
 def test_host_disconnect_closes_joiner_without_promoting_it(controller):
     table, fake, local, _changes = controller
-    _join_authenticated(table, fake, local)
+    host, _code = _join_authenticated(table, fake, local)
+    _joined_roster(fake, host, local)
     for callback in fake.disconnects:
         callback("host-hop")
     assert table.session.terminal_state == Session.HOST_LOST
     assert not table.session.is_host
     assert table.lobby_state()["state"] == "closed"
     assert "host disconnected" in table.lobby_state()["error"]
+
+
+def test_early_disconnect_explains_that_the_room_may_have_started(controller):
+    table, fake, _local, _changes = controller
+    code = invite.generate_room_code(_identity().public_key_bytes(),
+                                     public_address=("192.168.1.23", 45678))
+    table.join(code)
+    for callback in fake.disconnects:
+        callback("host-hop")
+    assert table.lobby_state()["state"] == "closed"
+    assert "closed or already started" in table.lobby_state()["error"]
+    assert table.session.terminal_state == Session.HOST_LOST
+
+
+def test_playing_host_refuses_new_admission_without_changing_the_table(controller, monkeypatch):
+    table, fake, _local, _changes = controller
+    table.host()
+    remote = _identity()
+    cid = _admit(table, fake, remote)
+    fake.deliver(cid, _packet("ready", remote, {"ready": True}))
+    monkeypatch.setattr(Session, "start_p2p_hand", lambda self, **kw: None)
+    assert table.start() == "started"
+    previous = table.lobby_state()
+    previous_messages = len(fake.sent)
+    fake.deliver("latecomer", _packet("admission_hello", _identity(),
+                                     {"client_nonce": bytes(32).hex()}))
+    assert fake.operations[-1] == "disconnect"
+    assert len(fake.sent) == previous_messages, "late admission received a challenge"
+    assert table.lobby_state() == previous
+
+
+class ManualWatchdog:
+    def __init__(self, interval, callback, args):
+        self.interval = interval
+        self.callback = callback
+        self.args = args
+        self.daemon = False
+        self.cancelled = False
+        self.started = False
+
+    def start(self):
+        self.started = True
+
+    def cancel(self):
+        self.cancelled = True
+
+    def fire(self):
+        # Deliberately allow a canceled callback to fire. Its generation and
+        # state checks must still make it harmless after leave/rejoin.
+        self.callback(*self.args)
+
+
+@pytest.fixture
+def watchdogs(monkeypatch):
+    timers = []
+
+    def make(interval, callback, args):
+        timer = ManualWatchdog(interval, callback, args)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(lan_session.threading, "Timer", make)
+    return timers
+
+
+def test_join_startup_timeout_closes_and_releases_transport(controller, watchdogs):
+    table, fake, _local, _changes = controller
+    code = invite.generate_room_code(_identity().public_key_bytes(),
+                                     public_address=("192.168.1.23", 45678))
+    table.join(code)
+    session = table.session
+    watchdog = watchdogs[0]
+    assert watchdog.started and watchdog.daemon and watchdog.interval == 15.0
+    watchdog.fire()
+    state = table.lobby_state()
+    assert state["state"] == "closed"
+    assert "did not finish connecting" in state["error"]
+    assert code not in state["error"]
+    assert table.session is None
+    assert session.terminal_state == Session.LOCAL_SHUTDOWN
+    assert fake.operations[-1] == "stop"
+    assert not fake.messages and not fake.disconnects
+    assert watchdog.cancelled
+
+
+def test_roster_cancels_watchdog_and_late_timer_cannot_close_joined_room(controller, watchdogs):
+    table, fake, local, _changes = controller
+    host, _code = _join_authenticated(table, fake, local)
+    _joined_roster(fake, host, local)
+    watchdog = watchdogs[0]
+    assert watchdog.cancelled
+    previous = table.lobby_state()
+    watchdog.fire()
+    assert table.lobby_state() == previous
+    assert table.session.terminal_state is None
+
+
+def test_leave_cancels_watchdog_and_stale_expiry_does_not_touch_new_room(controller, watchdogs):
+    table, fake, _local, _changes = controller
+    code = invite.generate_room_code(_identity().public_key_bytes(),
+                                     public_address=("192.168.1.23", 45678))
+    table.join(code)
+    watchdog = watchdogs[0]
+    table.close()
+    assert watchdog.cancelled
+    table.host()
+    previous = table.lobby_state()
+    session = table.session
+    watchdog.fire()
+    assert table.session is session
+    assert table.lobby_state() == previous
 
 
 def test_failed_join_cleans_up_without_exposing_invite(controller, monkeypatch):

@@ -47,3 +47,13 @@ LAN functionality or clean-machine compatibility.
 
 `Poker.exe --self-test-visible --log-dir <folder>` runs the same ten-hand
 check in a rendered window and saves `table.png` alongside its reports.
+
+For a paired check on two Windows computers, `Poker.exe
+--lan-self-test-config <config.json> --log-dir <logs>` runs the real lobby and
+betting controls headlessly. Each local JSON config names `role` (`host` or
+`join`), `nickname`, `target_hands`, `report_path`, and either
+`invite_write_path` or `invite_read_path`. Transfer the host’s private invite
+file to the joining computer without logging its contents. An optional
+`finish_signal_path` keeps each app open after writing its result until the
+coordinator has compared both reports. Reports include settled stacks and
+private-card rendering check counts, but no invites or hole cards.

@@ -102,7 +102,9 @@ func _render() -> void:
 	_ready_button.disabled = busy
 	_start_button.visible = mode in ["local", "host"] and state == "lobby"
 	_start_button.disabled = busy or not bool(_metadata.get("can_start", false))
-	_leave_button.disabled = busy
+	# A join may still be awaiting peer admission after its command reply.
+	# Keep a way back to the menu while that remote connection is pending.
+	_leave_button.disabled = not _pending.is_empty()
 	_leave_button.text = "Back to menu" if state == "closed" else "Leave table"
 	if not _failure.is_empty():
 		_status.text = _failure

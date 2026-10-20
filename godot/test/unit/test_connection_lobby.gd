@@ -118,6 +118,19 @@ func test_closed_table_explains_failure_and_allows_return_to_menu():
 	assert_signal_emitted_with_parameters(control, "command_requested", ["leave_table", {}])
 
 
+func test_joiner_can_leave_while_waiting_for_remote_admission():
+	var control := _control()
+	control.apply_lobby({"mode": "menu", "state": "idle"})
+	control.get_node("%JoinInviteInput").text = "example-invite"
+	control.get_node("%JoinLanButton").pressed.emit()
+	control.apply_lobby({"mode": "join", "state": "connecting", "players": []})
+	assert_true(control.get_node("%LeaveLobbyButton").disabled)
+	control.handle_command_result({"command": "join_lan", "ok": true})
+	assert_false(control.get_node("%LeaveLobbyButton").disabled)
+	control.get_node("%LeaveLobbyButton").pressed.emit()
+	assert_signal_emitted_with_parameters(control, "command_requested", ["leave_table", {}])
+
+
 func test_host_panel_and_menu_fit_the_preview_window():
 	var control := _control()
 	for metadata in [{"mode": "menu", "state": "idle"}, _host(true)]:
