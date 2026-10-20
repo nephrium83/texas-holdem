@@ -5,6 +5,7 @@ extends PanelContainer
 @onready var state_badge: Label = %StateBadge
 @onready var status_label: Label = %StatusLabel
 @onready var street_label: Label = %StreetLabel
+@onready var clock_label: Label = %ClockLabel
 @onready var decision_card: PanelContainer = %DecisionCard
 @onready var pot_value: Label = %PotValue
 @onready var call_value: Label = %CallValue
@@ -26,6 +27,7 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 	state_badge.text = state.replace("_", " ").to_upper()
 	status_label.text = str(turn.get("headline", "Waiting for state"))
 	street_label.text = _street_context(snapshot, turn)
+	_apply_clock(turn)
 	_apply_state_color(state)
 	_apply_decision(turn)
 	_apply_hand(snapshot)
@@ -41,6 +43,21 @@ func _street_context(snapshot: Dictionary, turn: Dictionary) -> String:
 	if hand_num <= 0:
 		return "%s | pot %d" % [street, pot]
 	return "Hand #%d | %s | pot %d" % [hand_num, street, pot]
+
+
+## The sidecar owns elapsed time and every timeout consequence. Rendering a
+## new authoritative value never sends an action, even when it reaches zero.
+func _apply_clock(turn: Dictionary) -> void:
+	var clock: Dictionary = turn.get("clock", {})
+	clock_label.visible = not clock.is_empty()
+	if clock.is_empty():
+		clock_label.text = ""
+		return
+	clock_label.text = "%s · %ds" % [
+		str(clock.get("label", "Waiting")),
+		max(0, int(clock.get("remaining_seconds", 0))),
+	]
+	clock_label.modulate = Color("#ef6f72") if int(clock.get("remaining_seconds", 0)) <= 5 else Color.WHITE
 
 
 func _apply_state_color(state: String) -> void:
@@ -63,6 +80,8 @@ func apply_connection_lost() -> void:
 	status_label.text = "Connection lost"
 	_apply_state_color("connection_lost")
 	decision_card.visible = false
+	clock_label.visible = false
+	clock_label.text = ""
 
 
 func _apply_decision(turn: Dictionary) -> void:

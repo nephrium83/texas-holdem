@@ -43,7 +43,10 @@ func _initialize() -> void:
 		var sidecar: SidecarClient = main.get_node("%SidecarClient")
 		sidecar.snapshot_received.connect(func(snapshot: Dictionary): _on_screen[peer] = snapshot)
 		sidecar.snapshot_received.connect(func(snapshot: Dictionary): _on_snapshot(peer, snapshot), CONNECT_DEFERRED)
-		sidecar.command_result_received.connect(func(result: Dictionary): _on_result(peer, result))
+		# Match snapshot delivery order. A synchronous result could mark an
+		# older queued snapshot as the post-command view and send a second
+		# action before the fresh snapshot removed the previous turn.
+		sidecar.command_result_received.connect(func(result: Dictionary): _on_result(peer, result), CONNECT_DEFERRED)
 		sidecar.disconnected_from_sidecar.connect(func(): _fail("local sidecar disconnected"))
 		sidecar.connect_to_sidecar("127.0.0.1", ports[peer])
 		# Only one scene is shown at once, but both use the same real controls.
@@ -103,7 +106,7 @@ func _step() -> void:
 	if not _join_clicked:
 		return
 	for peer in range(2):
-		if _awaiting[peer]:
+		if _awaiting[peer] or not is_same(_snapshots[peer], _on_screen[peer]):
 			continue
 		var metadata := _metadata(peer)
 		var state := str(metadata.get("state", ""))
@@ -158,8 +161,12 @@ func _step() -> void:
 
 func _on_result(peer: int, result: Dictionary) -> void:
 	if not bool(result.get("ok", false)):
-		# Only the command name is reported: errors must never echo an invite.
-		_fail("command refused: " + str(result.get("command", "")))
+		# A settlement view can precede the matching signed reports. Main
+		# releases the Next Hand latch on not_ready; retry on a fresh view.
+		# Keep every refused betting action a failure, and never echo errors
+		# that might contain a room invite.
+		if str(result.get("command", "")) != "next_hand" or str(result.get("verdict", "")) != "not_ready":
+			_fail("command refused: " + str(result.get("command", "")))
 	_replied[peer] = true
 
 

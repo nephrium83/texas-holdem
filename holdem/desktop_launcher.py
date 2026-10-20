@@ -272,6 +272,39 @@ def _self_test_summary(log_path: Path) -> dict:
     return summary
 
 
+def _lan_check_timeout(config: dict) -> int:
+    """A bounded diagnostic budget, long enough for real 30-second waits."""
+    seconds = config.get("deadline_seconds", 300)
+    if type(seconds) is not int or not 30 <= seconds <= 900:
+        raise ValueError("LAN check deadline must be between 30 and 900 seconds")
+    return seconds + 15  # Give the driver time to publish its own timeout.
+
+
+def _validate_lan_summary(config: dict, summary: dict) -> None:
+    """Accept only the diagnostic outcome that this particular peer exercised."""
+    expected = config.get("expected_result", "hands")
+    minimum = (config.get("target_hands", 3) if expected == "hands"
+               else config.get("minimum_hands", 0))
+    complete = (summary.get("hands_settled", 0) >= minimum
+                and summary.get("ok") is True and not summary.get("error"))
+    if expected == "left_table":
+        complete = complete and summary.get("left_table") is True
+    elif expected == "host_lost":
+        complete = complete and summary.get("host_loss_seen") is True
+    elif expected != "hands":
+        complete = False
+    if "expected_players" in config:
+        complete = complete and len(summary.get("roster_names", [])) == config["expected_players"]
+    for field, measured in (("stall_action_hand", "action_timeout_elapsed_ms"),
+                            ("auto_next_wait_hand", "auto_next_elapsed_ms")):
+        if config.get(field, -1) >= 0:
+            complete = complete and summary.get(measured, -1) >= 29000
+    if config.get("departed_name"):
+        complete = complete and summary.get("departure_seen") is True
+    if not complete:
+        raise RuntimeError("The paired LAN check did not complete its required outcome")
+
+
 async def _run(args, paths: RuntimePaths) -> int:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HOLDEM_LIBSODIUM"] = str(paths.libsodium)
@@ -317,7 +350,9 @@ async def _run(args, paths: RuntimePaths) -> int:
         session["game_pid"] = game.pid
         _write_json(args.log_dir / "session.json", session)
         _log.info("Game started: pid=%s sidecar_port=%s", game.pid, port)
-        check_timeout = 180 if args.lan_self_test_config is not None else 60
+        lan_config = (json.loads(args.lan_self_test_config.read_text(encoding="utf-8"))
+                      if args.lan_self_test_config is not None else None)
+        check_timeout = _lan_check_timeout(lan_config) if lan_config is not None else 60
         deadline = (time.monotonic() + check_timeout
                     if args.self_test or args.lan_self_test_config else None)
         while game.poll() is None:
@@ -335,10 +370,9 @@ async def _run(args, paths: RuntimePaths) -> int:
             _write_json(args.log_dir / "self-test.json",
                         {"ok": True, "error": None, "summary": summary})
         if args.lan_self_test_config is not None:
-            config = json.loads(args.lan_self_test_config.read_text(encoding="utf-8"))
+            config = lan_config
             summary = json.loads(Path(config["report_path"]).read_text(encoding="utf-8"))
-            if not summary.get("ok") or summary.get("hands_settled", 0) < config.get("target_hands", 3):
-                raise RuntimeError("The paired LAN check did not complete")
+            _validate_lan_summary(config, summary)
             _write_json(args.log_dir / "lan-self-test.json",
                         {"ok": True, "error": None, "summary": summary})
         return 0

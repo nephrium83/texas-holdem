@@ -6,7 +6,7 @@
   <a href="https://github.com/nephrium83/texas-holdem/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/nephrium83/texas-holdem/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Godot-4.7.1-478CBF?style=flat-square&logo=godotengine&logoColor=white" alt="Godot 4.7.1">
   <img src="https://img.shields.io/badge/Python-3.10--3.13-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10 through 3.13">
-  <img src="https://img.shields.io/badge/tests-1098%20Python%20tests-1f7a5a?style=flat-square" alt="1098 Python tests">
+  <img src="https://img.shields.io/badge/tests-automated-1f7a5a?style=flat-square" alt="Automated tests">
   <a href="LICENSE"><img src="https://img.shields.io/github/license/nephrium83/texas-holdem?style=flat-square&color=c7834c" alt="MIT license"></a>
 </p>
 
@@ -27,10 +27,12 @@ verifiable deal inputs.
 
 The Windows preview uses Godot 4.7.1, connected to the Python sidecar through
 a locked newline-JSON protocol. Extract the complete preview ZIP and
-double-click `Poker.exe` to play a local table against a bot. Python, Godot
-and terminal setup are bundled. This checkpoint does not yet include LAN
-Host/Join. See [Windows preview builds](docs/BUILD_WINDOWS.md) for packaging
-and verification. The earlier Tkinter harness remains available for development.
+double-click `Poker.exe` to practice against bots or host and join a LAN table.
+No separate Python, Godot or terminal setup is needed. Casual LAN games include visible
+30-second turn clocks, automatic Next Hand, and continued play after a non-host
+leaves. See [Playing on your local network](docs/LAN_PLAY.md) and
+[Windows preview builds](docs/BUILD_WINDOWS.md). The earlier Tkinter harness
+remains available for development.
 
 <table>
   <tr>
@@ -53,7 +55,7 @@ and verification. The earlier Tkinter harness remains available for development.
     </td>
     <td width="50%">
       <strong>Built to be tested</strong><br>
-      1098 Python tests, a 15-hand GUI smoke run, and Godot GUT execute in CI
+      Python tests, a GUI smoke run, and Godot GUT execute in CI
       across Python 3.10, 3.12, and 3.13.
     </td>
   </tr>
@@ -65,10 +67,10 @@ and verification. The earlier Tkinter harness remains available for development.
 | --- | --- | --- |
 | Poker rules engine | Implemented | No-Limit, Pot-Limit, Fixed-Limit, side pots, refunds, odd chips, tournament and cash procedures |
 | Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, cheat detection, and opt-in Bayer–Groth shuffle prevention |
-| Hostless session | Implemented on the test transport | Signed betting, continuous hands, stack carry, bust-outs, spectators, and table-wide voids |
+| Hostless session | Implemented on the LAN transport | Signed betting, continuous hands, stack carry, bust-outs, spectators, and casual survivor continuation |
 | Godot sidecar bridge | Implemented | Versioned snapshots and commands over localhost newline-JSON |
-| Godot player experience | Local preview | Portable Windows launcher, real player-versus-bot table and ten-hand packaged gameplay check; LAN Host/Join remains |
-| Internet P2P transport | Planned for v1.x | Discovery, relay/NAT traversal, fragmentation, and real multi-machine play remain |
+| Godot player experience | LAN preview | Portable Windows launcher, local bots, authenticated Host/Join, Ready, visible clocks, and casual departure handling |
+| Internet P2P transport | Planned for v1.x | Joining across different networks, relay/NAT traversal, and network reconnection remain |
 
 > [!IMPORTANT]
 > This is an experimental, play-money project. The cryptographic protocol has
@@ -198,15 +200,16 @@ The crypto tests require a libsodium build exposing the Ristretto255 API. See
 - [x] Hostless betting replicas and continuous multi-hand sessions.
 - [x] Godot-sidecar protocol, socket bridge, scaffold, and CI.
 - [x] Bayer–Groth verifiable shuffle, integrated as opt-in prevention mode.
-- [ ] Playable Godot client MVP.
-- [ ] Silent-peer timeout that triggers the existing table-wide void path.
-- [ ] Real libp2p transport and proof fragmentation.
-- [ ] Two-machine join-code playtest.
+- [x] Playable portable Godot client with local bots and LAN Host/Join.
+- [x] Visible casual clocks, automatic Next Hand, and signed survivor continuation.
+- [x] Two-machine packaged LAN invite playtest.
+- [ ] Internet joining, relay/NAT traversal, and network reconnection.
 - [ ] Benchmark and optimize the complete cryptographic hand-start path ([#16](https://github.com/nephrium83/texas-holdem/issues/16)).
 
-The hard gate and deferred work are tracked in
-[L5_SCOPE.md](docs/L5_SCOPE.md). The full protocol and transport rationale live
-in [MULTIPLAYER.md](docs/MULTIPLAYER.md).
+The current delivery gate is in [LAN_RELIABILITY.md](docs/LAN_RELIABILITY.md),
+with decisions and deferred work in [ROADMAP.md](docs/ROADMAP.md).
+[L5_SCOPE.md](docs/L5_SCOPE.md) retains the earlier implementation scope.
+The protocol and transport rationale live in [MULTIPLAYER.md](docs/MULTIPLAYER.md).
 
 ## Repository map
 

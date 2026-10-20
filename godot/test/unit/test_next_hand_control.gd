@@ -119,3 +119,23 @@ func test_release_after_a_refusal_lets_the_player_press_again():
 	assert_eq(control.get_node("%MessageLabel").text, "Hand complete")
 	control.get_node("%NextHandButton").pressed.emit()
 	assert_signal_emit_count(control, "next_hand_pressed", 2)
+
+
+func test_automatic_next_hand_countdown_stays_visible_after_early_ready():
+	var control := _control()
+	var clock := {"kind": "next_hand", "remaining_seconds": 30}
+	control.apply_turn_state("hand_complete", 3, clock)
+	assert_eq(control.get_node("%MessageLabel").text, "Hand complete · next in 30s")
+	control.get_node("%NextHandButton").pressed.emit()
+	clock["remaining_seconds"] = 12
+	control.apply_turn_state("hand_complete", 3, clock)
+	assert_true(control.get_node("%NextHandButton").disabled)
+	assert_eq(control.get_node("%MessageLabel").text, "Ready · next in 12s")
+	assert_signal_emit_count(control, "next_hand_pressed", 1)
+
+
+func test_countdown_zero_does_not_send_a_next_hand_command():
+	var control := _control()
+	control.apply_turn_state("hand_complete", 3, {"kind": "next_hand", "remaining_seconds": 0})
+	assert_signal_not_emitted(control, "next_hand_pressed")
+	assert_eq(control.get_node("%MessageLabel").text, "Hand complete · next in 0s")

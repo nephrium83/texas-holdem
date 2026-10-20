@@ -91,6 +91,7 @@ import uuid
 from typing import Callable, Optional
 
 from holdem.p2p.timeout import Clock, RealClock
+from holdem.p2p.wire import ClockWindowError
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,9 @@ _writers_lock = threading.Lock()
 _msg_callbacks:   list[Callable] = []
 _conn_callbacks:  list[Callable] = []
 _disc_callbacks:  list[Callable] = []
+_reason_disc_callbacks: list[Callable] = []
+# Local close causes, protected by _writers_lock along with each writer.
+_disconnect_reasons: dict[str, str] = {}
 
 # listen address returned by start_host()
 _listen_address: str = ""
@@ -275,12 +279,19 @@ def _run_conn_callbacks(conn_id: str, address: str) -> None:
             log.exception("on_connect callback error")
 
 
-def _run_disc_callbacks(conn_id: str) -> None:
+def _run_disc_callbacks(conn_id: str, reason: str = "disconnect") -> None:
+    with _writers_lock:
+        reason = _disconnect_reasons.pop(conn_id, reason)
     for cb in _disc_callbacks:
         try:
             cb(conn_id)
         except Exception:
             log.exception("on_disconnect callback error")
+    for cb in _reason_disc_callbacks:
+        try:
+            cb(conn_id, reason)
+        except Exception:
+            log.exception("on_disconnect reason callback error")
 
 
 def _deliver_event(fn, *args) -> bool:
@@ -373,9 +384,14 @@ def on_connect(callback: Callable) -> None:
     _conn_callbacks.append(callback)
 
 
-def on_disconnect(callback: Callable) -> None:
-    """Register callback(conn_id)."""
-    _disc_callbacks.append(callback)
+def on_disconnect(callback: Callable, *, with_reason: bool = False) -> None:
+    """Register callback(conn_id), or callback(conn_id, reason) by opt-in.
+
+    Reasons describe this transport's observation: "clock", "heartbeat",
+    "protocol", or ordinary "disconnect". Existing consumers keep their
+    one-argument callback contract.
+    """
+    (_reason_disc_callbacks if with_reason else _disc_callbacks).append(callback)
 
 
 def get_public_address() -> Optional[tuple[str, int]]:
@@ -407,6 +423,7 @@ def reset_callbacks() -> None:
     _msg_callbacks.clear()
     _conn_callbacks.clear()
     _disc_callbacks.clear()
+    _reason_disc_callbacks.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +601,7 @@ async def _handle_connection(reader: asyncio.StreamReader,
     # callbacks mutate the same Session state message handlers do, and
     # handlers no longer run here. See dispatch.submit_event.
     _deliver_event(_run_conn_callbacks, conn_id, address)
+    reason = "disconnect"
     try:
         while True:
             silence = SILENCE_TIMEOUT
@@ -600,6 +618,7 @@ async def _handle_connection(reader: asyncio.StreamReader,
                 # the single on_disconnect are left to the finally below.
                 log.warning("transport: no frame from %s (%s) for %.1fs — "
                             "dropping peer", conn_id, address, silence)
+                reason = "heartbeat"
                 break
             if msg.get("type") == HEARTBEAT_TYPE:
                 # Proof of life and nothing more. Discarded here so the
@@ -621,8 +640,12 @@ async def _handle_connection(reader: asyncio.StreamReader,
                 break
     except (asyncio.IncompleteReadError, ConnectionResetError, EOFError):
         pass
+    except ClockWindowError as exc:
+        reason = "clock"
+        log.warning("transport: dropping conn %s: %s", conn_id, exc)
     except ValueError as exc:
         # C-1/C-3/M-1: bad signature, oversized frame, or malformed JSON → drop peer
+        reason = "protocol"
         log.warning("transport: dropping conn %s: %s", conn_id, exc)
     finally:
         if heartbeat is not None:
@@ -631,7 +654,7 @@ async def _handle_connection(reader: asyncio.StreamReader,
         with _writers_lock:
             _writers.pop(conn_id, None)
         log.debug("transport: disconnected %s", conn_id)
-        _deliver_event(_run_disc_callbacks, conn_id)
+        _deliver_event(_run_disc_callbacks, conn_id, reason)
 
 
 # ---------------------------------------------------------------------------
@@ -944,11 +967,13 @@ def _report_send_failure(fut) -> None:
             log.exception("transport: task-error callback failed")
 
 
-def disconnect(conn_id: str) -> None:
-    """Close the connection for a specific peer (e.g. kick from host)."""
+def disconnect(conn_id: str, *, reason: str = "disconnect") -> None:
+    """Close one peer, preserving the local cause for opt-in callbacks."""
     _ensure_loop()
     with _writers_lock:
         writer = _writers.get(conn_id)
+        if writer is not None:
+            _disconnect_reasons[conn_id] = reason
     if writer is not None:
         _loop.call_soon_threadsafe(writer.close)
 
@@ -1103,6 +1128,7 @@ def _reset_state() -> None:
     _listen_address = ""
     with _writers_lock:
         _writers.clear()
+        _disconnect_reasons.clear()
     with _tasks_lock:
         _tasks.clear()
 

@@ -298,6 +298,47 @@ class MentalDeal:
     def is_done(self) -> bool:
         return self.phase == Phase.DONE
 
+    def public_waits(self) -> List[dict]:
+        """Describe missing public contributions, without exposing secrets.
+
+        One descriptor per missing actor/protocol step keeps a silent
+        player's timer independent of other players' progress. Hole-card
+        owners never broadcast their own share: its intentional absence
+        must not be mistaken for a stalled contribution. Every replica can
+        observe the other, public shares, including for holes it cannot
+        decrypt. Session adds hand and action position to these descriptors.
+        """
+        if self.phase in (Phase.DONE, Phase.ABORTED):
+            return []
+        if self.phase == Phase.KEYGEN:
+            return [dict(phase="keygen", actor=seat, detail="")
+                    for seat in self.seats_in if seat not in self._pubkeys]
+        if self.phase == Phase.SHUFFLE:
+            round_no = self._shuffle_round + 1
+            seat = self._expected_shuffler(round_no)
+            return ([dict(phase="shuffle", actor=seat, detail=str(round_no))]
+                    if seat is not None else [])
+        if self.phase == Phase.AUDIT:
+            return [dict(phase="audit", actor=seat, detail="")
+                    for seat in self.seats_in
+                    if seat not in self._audit_shares]
+
+        missing_holes = {
+            seat for owner, positions in self._hole_pos.items()
+            for seat in self.seats_in if seat != owner
+            if any(seat not in self._shares.get(pos, {}) for pos in positions)
+        }
+        waits = [dict(phase="holes", actor=seat, detail="")
+                 for seat in sorted(missing_holes)]
+        for street in ("flop", "turn", "river"):
+            if street not in self._revealed_streets:
+                continue
+            positions = [self._board_pos[slot] for slot in _STREET_SLOTS[street]]
+            for seat in self.seats_in:
+                if any(seat not in self._shares.get(pos, {}) for pos in positions):
+                    waits.append(dict(phase="board", actor=seat, detail=street))
+        return waits
+
     # ---------------------------------------------------------------- dispatch
 
     def start(self) -> List[dict]:

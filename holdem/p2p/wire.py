@@ -43,6 +43,21 @@ PROTOCOL_VERSION = 1
 SUPPORTED_VERSIONS = frozenset({1})
 
 
+class ClockWindowError(ValueError):
+    """A fully signed envelope lies outside the permitted clock window.
+
+    Signature and hash validation run first, so callers may distinguish a
+    clock failure from unauthenticated garbage without trusting its author.
+    It remains a ValueError for existing fail-closed transport consumers.
+    """
+
+    def __init__(self, pubkey: str, skew_ms: float):
+        self.pubkey = pubkey
+        self.skew_ms = skew_ms
+        super().__init__(
+            "Envelope timestamp out of window (skew %.0f ms)" % abs(skew_ms))
+
+
 def _check_depth(raw: bytes) -> None:
     """Reject over-nested JSON with a linear scan and no allocation.
 
@@ -190,13 +205,6 @@ def unpack(raw: bytes, *, clock: Clock) -> dict:
     if not verify(pubkey, canonical, sig):
         raise ValueError("Invalid signature in envelope from pubkey %s" % msg["pubkey"][:16])
 
-    # H-6: replay protection — reject envelopes outside a ±30-second window
-    skew_ms = abs(clock.time() * 1000 - msg["ts"])
-    if skew_ms > 30_000:
-        raise ValueError(
-            "Envelope timestamp out of window (skew %.0f ms)" % skew_ms
-        )
-
     # H-7: verify the declared hash matches the recomputed one
     msg["sig"] = sig.hex()
     full = json.dumps(msg, sort_keys=True, separators=(",", ":")).encode()
@@ -205,6 +213,12 @@ def unpack(raw: bytes, *, clock: Clock) -> dict:
         raise ValueError(
             "Hash mismatch: declared %s, computed %s" % (h[:16], expected_hash[:16])
         )
+
+    # H-6: replay protection. Classify a clock failure only after the whole
+    # envelope has verified, including its hash; garbage cannot claim it.
+    skew_ms = clock.time() * 1000 - msg["ts"]
+    if abs(skew_ms) > 30_000:
+        raise ClockWindowError(msg["pubkey"], skew_ms)
 
     msg["hash"] = h
     return msg

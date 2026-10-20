@@ -292,7 +292,8 @@ def test_three_peer_lobby_departure_updates_every_remaining_roster(tmp_path):
                 == ["Host", "Guest"],
                 description="third player removed from remaining roster")
             assert len(departed["lobby"]["players"]) == 2
-        assert host.snapshot["lobby"]["can_start"]
+        host.wait(lambda snap: snap["lobby"]["can_start"],
+                  description="remaining roster completed fresh version and clock checks")
         _ok(third, "join_lan", {"nickname": "Third returns", "invite": invite})
         for peer in peers:
             returned = peer.wait(

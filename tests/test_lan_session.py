@@ -45,7 +45,7 @@ class FakeTransport:
     def on_message(self, callback):
         self.messages.append(callback)
 
-    def on_disconnect(self, callback):
+    def on_disconnect(self, callback, *, with_reason=False):
         self.disconnects.append(callback)
 
     def start_host(self, port):
@@ -66,6 +66,9 @@ class FakeTransport:
 
     def broadcast(self, message):
         self.sent.append((None, message))
+
+    def broadcast_except(self, conn_id, message):
+        self.sent.append((f"except:{conn_id}", message))
 
     def disconnect(self, conn_id):
         self.operations.append("disconnect")
@@ -102,7 +105,7 @@ def _packet(mtype, author, payload):
     return {"type": mtype, "pubkey": author.public_key_bytes().hex(), "payload": payload}
 
 
-def _admit(table, fake, remote, name="Bob", cid="remote"):
+def _admit(table, fake, remote, name="Bob", cid="remote", capable=True):
     """Earn an actual host roster seat through the production admission gate."""
     parsed = invite.parse_room_code(table.lobby_state()["invite"])
     pin = admission.JoinerAdmission(
@@ -119,6 +122,11 @@ def _admit(table, fake, remote, name="Bob", cid="remote"):
     assert response is not None
     fake.deliver(cid, _packet("admission_response", remote, response))
     fake.deliver(cid, _packet("player_info", remote, {"nickname": name}))
+    if capable:
+        table.session.reliability_tick()
+        request = fake.last("casual_clock_request")["payload"]
+        fake.deliver(cid, _packet("casual_clock_sample", remote,
+                                 dict(request, wall=fake.clock.time())))
     return cid
 
 
@@ -268,6 +276,17 @@ def test_early_disconnect_explains_that_the_room_may_have_started(controller):
     assert table.session.terminal_state == Session.HOST_LOST
 
 
+def test_signed_clock_rejection_explains_clock_settings(controller):
+    table, fake, _local, _changes = controller
+    code = invite.generate_room_code(_identity().public_key_bytes(),
+                                     public_address=("192.168.1.23", 45678))
+    table.join(code)
+    for callback in fake.disconnects:
+        callback("host-hop", "clock")
+    assert "Clocks differ" in table.lobby_state()["error"]
+    assert "date and time" in table.lobby_state()["error"]
+
+
 def test_playing_host_refuses_new_admission_without_changing_the_table(controller, monkeypatch):
     table, fake, _local, _changes = controller
     table.host()
@@ -415,6 +434,27 @@ def test_close_rehost_and_late_callbacks_do_not_reanimate_old_room(controller):
 def test_lan_refuses_crypto_downgrade():
     with pytest.raises(ValueError, match="Bayer-Groth"):
         lan_session.LanTable("Alice", {"deal_policy": Session.DEAL_POLICY_DETECTION})
+
+
+def test_old_preview_cannot_start_a_reliability_table(controller):
+    table, fake, _local, _changes = controller
+    table.host()
+    remote = _identity()
+    cid = _admit(table, fake, remote, capable=False)
+    fake.deliver(cid, _packet("ready", remote, {"ready": True}))
+    table.session.reliability_tick()
+    assert not table.lobby_state()["can_start"]
+    assert "version and clocks: Bob" in table.lobby_state()["error"]
+    assert table.start() == "not_ready"
+
+
+def test_leave_stops_the_owned_reliability_scheduler(controller):
+    table, _fake, _local, _changes = controller
+    table.host()
+    thread = table._ticker_thread
+    assert thread.is_alive()
+    table.close()
+    assert not thread.is_alive()
 
 
 @pytest.mark.parametrize("settings", [{"sb": 0}, {"bb": 25}, {"stack": 49},

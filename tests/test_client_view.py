@@ -459,7 +459,9 @@ def test_a_table_closed_mid_hand_reports_the_last_settlement_not_the_pot():
     assert snap["terminal"] == {"state": Session.ABORTED_PROTOCOL,
                                 "reason": "seat 1 disconnected",
                                 "last_settled_stacks": settled}
-    assert sum(sv["stack"] for sv in snap["seats"]) < sum(settled)
+    assert [sv["stack"] for sv in snap["seats"]] == settled
+    assert all(sv["bet"] == 0 for sv in snap["seats"])
+    assert snap["pot"] == 0
     assert snap["turn"]["state"] == "table_closed"
     assert snap["turn"]["headline"] == "seat 1 disconnected"
     assert "decision" not in snap["turn"]

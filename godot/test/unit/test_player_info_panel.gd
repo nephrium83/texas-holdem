@@ -83,6 +83,48 @@ func test_waiting_state_removes_all_decision_information():
 	assert_false(panel.decision_card.visible)
 
 
+func test_clock_shows_sidecar_label_and_countdown_for_each_wait_kind():
+	var panel: Variant = _panel()
+	for kind in ["action", "next_hand", "automatic"]:
+		var snapshot := _turn_snapshot()
+		snapshot["turn"]["clock"] = {
+			"kind": kind, "label": "Waiting for Maya", "remaining_seconds": 12,
+			"waiting_for": ["Maya"], "timekeeper_seat": 0,
+		}
+		panel.apply_snapshot(snapshot)
+		assert_true(panel.clock_label.visible)
+		assert_eq(panel.clock_label.text, "Waiting for Maya · 12s")
+
+
+func test_clock_refreshes_from_snapshots_and_clears_when_no_clock_remains():
+	var panel: Variant = _panel()
+	var snapshot := _turn_snapshot()
+	snapshot["turn"]["clock"] = {
+		"kind": "action", "label": "Your turn", "remaining_seconds": 30,
+	}
+	panel.apply_snapshot(snapshot)
+	snapshot["turn"]["clock"]["remaining_seconds"] = 5
+	panel.apply_snapshot(snapshot)
+	assert_eq(panel.clock_label.text, "Your turn · 5s")
+	assert_eq(panel.clock_label.modulate, Color("#ef6f72"))
+	snapshot["turn"].erase("clock")
+	panel.apply_snapshot(snapshot)
+	assert_false(panel.clock_label.visible)
+	assert_eq(panel.clock_label.text, "")
+
+
+func test_connection_loss_clears_the_frozen_countdown():
+	var panel: Variant = _panel()
+	var snapshot := _turn_snapshot()
+	snapshot["turn"]["clock"] = {
+		"kind": "action", "label": "Your turn", "remaining_seconds": 8,
+	}
+	panel.apply_snapshot(snapshot)
+	panel.apply_connection_lost()
+	assert_false(panel.clock_label.visible)
+	assert_eq(panel.clock_label.text, "")
+
+
 func test_settled_hand_replaces_decision_card_with_result():
 	var panel: Variant = _panel()
 	var snapshot := _turn_snapshot()
