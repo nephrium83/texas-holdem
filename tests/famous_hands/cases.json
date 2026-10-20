@@ -1,0 +1,1043 @@
+[
+  {
+    "id": "moneymaker_farha_2003_bluff",
+    "title": "Moneymaker's king-high bluff, 2003 WSOP",
+    "names": [
+      "Chris Moneymaker",
+      "Sam Farha"
+    ],
+    "stacks": [
+      4600000,
+      3700000
+    ],
+    "sb": 20000,
+    "bb": 40000,
+    "button": 0,
+    "holes": {
+      "0": [
+        "Ks",
+        "7h"
+      ],
+      "1": [
+        "Qs",
+        "9h"
+      ]
+    },
+    "coverage": "Documented betting sequence; no-ante adaptation and rounded starting stacks",
+    "notes": [
+      "Historical individual antes of 5,000 each are omitted; the public replica has no individual-ante option.",
+      "The 4.6m/3.7m stacks are published rounded estimates, not exact historical balances.",
+      "The winner is determined by Farha folding; his pair would beat king-high at showdown."
+    ],
+    "sources": [
+      "https://www.pokernews.com/strategy/analyzing-moneymaker-bluff-of-the-century-against-farha-35218.htm",
+      "https://www.pokernews.com/news/2017/11/unlit-cigarette-catching-up-with-2003-main-event-runner-up-s-29331.htm"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            0,
+            "raise",
+            100000
+          ],
+          [
+            1,
+            "call",
+            60000
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "9s",
+          "2d",
+          "6s"
+        ],
+        "actions": [
+          [
+            1,
+            "check",
+            0
+          ],
+          [
+            0,
+            "check",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "8s"
+        ],
+        "actions": [
+          [
+            1,
+            "raise",
+            300000
+          ],
+          [
+            0,
+            "raise",
+            800000
+          ],
+          [
+            1,
+            "call",
+            500000
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "3h"
+        ],
+        "actions": [
+          [
+            1,
+            "check",
+            0
+          ],
+          [
+            0,
+            "raise",
+            3700000
+          ],
+          [
+            1,
+            "fold",
+            0
+          ]
+        ]
+      }
+    ],
+    "expected": {
+      "winners": [
+        0
+      ],
+      "pots": [
+        1800000
+      ],
+      "refund": [
+        0,
+        3700000
+      ],
+      "stacks": [
+        5500000,
+        2800000
+      ]
+    }
+  },
+  {
+    "id": "hansen_negreanu_2006_quads",
+    "title": "Hansen's quad fives versus Negreanu's full house, 2006",
+    "names": [
+      "Gus Hansen",
+      "Daniel Negreanu",
+      "Folded small blind",
+      "Antonio Esfandiari"
+    ],
+    "stacks": [
+      287000,
+      500000,
+      100000,
+      100000
+    ],
+    "sb": 300,
+    "bb": 600,
+    "button": 1,
+    "holes": {
+      "0": [
+        "5d",
+        "5c"
+      ],
+      "1": [
+        "6s",
+        "6h"
+      ],
+      "3": [
+        "Ad",
+        "Qc"
+      ]
+    },
+    "coverage": "Documented heads-up betting; compressed four-seat, no-ante table",
+    "notes": [
+      "The nonparticipating seats and covering stacks are normalized, not a historical seating chart.",
+      "Individual antes are omitted. This setup produces 574,900 rather than the historical 575,700; the difference is 800.",
+      "Hansen's 287,000 effective stack follows from the documented bets; the river raise is to 232,000, not to 167,000."
+    ],
+    "sources": [
+      "https://www.cardplayer.com/cardplayer-poker-magazines/65638-max-pescatori-3-10/articles/16208-the-gus-hand",
+      "https://www.cardplayer.com/poker-news/1640563-daniel-negreanu-gus-hansen-break-down-iconic-high-stakes-poker-hand"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            0,
+            "raise",
+            2100
+          ],
+          [
+            1,
+            "raise",
+            5000
+          ],
+          [
+            2,
+            "fold",
+            0
+          ],
+          [
+            3,
+            "fold",
+            0
+          ],
+          [
+            0,
+            "call",
+            2900
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "9c",
+          "6d",
+          "5h"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            8000
+          ],
+          [
+            0,
+            "raise",
+            26000
+          ],
+          [
+            1,
+            "call",
+            18000
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "5s"
+        ],
+        "actions": [
+          [
+            0,
+            "raise",
+            24000
+          ],
+          [
+            1,
+            "call",
+            24000
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "8s"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            65000
+          ],
+          [
+            0,
+            "raise",
+            232000
+          ],
+          [
+            1,
+            "call",
+            167000
+          ]
+        ]
+      }
+    ],
+    "expected": {
+      "winners": [
+        0
+      ],
+      "pots": [
+        574900
+      ],
+      "refund": null,
+      "stacks": [
+        574900,
+        213000,
+        99700,
+        99400
+      ]
+    }
+  },
+  {
+    "id": "weinman_jones_2023_final",
+    "title": "Weinman versus Jones, 2023 WSOP final hand",
+    "names": [
+      "Steven Jones",
+      "Daniel Weinman"
+    ],
+    "stacks": [
+      171500000,
+      500000000
+    ],
+    "sb": 1250000,
+    "bb": 2500000,
+    "button": 0,
+    "bb_ante": true,
+    "holes": {
+      "0": [
+        "Jc",
+        "8d"
+      ],
+      "1": [
+        "Kc",
+        "Jd"
+      ]
+    },
+    "coverage": "Documented actions and big-blind ante; derived effective stack and assumed covering stack",
+    "notes": [
+      "Jones's starting 171.5m is derived from 7m preflop +18.5m flop +146m turn shove.",
+      "Weinman's 500m is an explicit covering-stack assumption, not a reported count.",
+      "Uses the existing Engine.bb_ante setting before replica startup; that option is absent from the public ReplicaTable constructor and desktop setup."
+    ],
+    "sources": [
+      "https://www.pokernews.com/tours/wsop/2023-wsop/main-event/chips.590268.htm?busted=1",
+      "https://www.pgt.com/news/daniel-weinman-wins-2023-wsop-main-event-for-12100000"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            0,
+            "raise",
+            7000000
+          ],
+          [
+            1,
+            "call",
+            4500000
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "Js",
+          "5s",
+          "2d"
+        ],
+        "actions": [
+          [
+            1,
+            "check",
+            0
+          ],
+          [
+            0,
+            "raise",
+            6000000
+          ],
+          [
+            1,
+            "raise",
+            18500000
+          ],
+          [
+            0,
+            "call",
+            12500000
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "4c"
+        ],
+        "actions": [
+          [
+            1,
+            "raise",
+            38000000
+          ],
+          [
+            0,
+            "raise",
+            146000000
+          ],
+          [
+            1,
+            "call",
+            108000000
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "Ah"
+        ],
+        "actions": []
+      }
+    ],
+    "expected": {
+      "winners": [
+        1
+      ],
+      "pots": [
+        345500000
+      ],
+      "refund": null,
+      "stacks": [
+        0,
+        671500000
+      ]
+    }
+  },
+  {
+    "id": "duhamel_affleck_2010_aces_cracked",
+    "title": "Duhamel cracks Affleck's aces, 2010 WSOP",
+    "names": [
+      "Jonathan Duhamel",
+      "Matt Affleck",
+      "Folded small blind",
+      "Folded big blind"
+    ],
+    "stacks": [
+      29470000,
+      20525000,
+      1000000,
+      1000000
+    ],
+    "sb": 120000,
+    "bb": 240000,
+    "button": 1,
+    "holes": {
+      "0": [
+        "Jh",
+        "Jc"
+      ],
+      "1": [
+        "Ac",
+        "As"
+      ]
+    },
+    "coverage": "Contemporaneous betting and runout; no-ante adaptation with compressed folded seats",
+    "notes": [
+      "The 30,000 individual ante is removed from both published active stacks to preserve the documented 11.6m turn shove.",
+      "Folded seats use assumed covering balances and compressed positions; this is not the historical full table.",
+      "Uses the contemporary 550,000 opening raise; some later recaps instead report 575,000."
+    ],
+    "sources": [
+      "https://www.pokernews.com/tours/wsop/2010-wsop/main-event/post.161456.htm",
+      "https://www.cardplayer.com/hand-matchups/1284"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            0,
+            "raise",
+            550000
+          ],
+          [
+            1,
+            "raise",
+            1550000
+          ],
+          [
+            2,
+            "fold",
+            0
+          ],
+          [
+            3,
+            "fold",
+            0
+          ],
+          [
+            0,
+            "raise",
+            3925000
+          ],
+          [
+            1,
+            "call",
+            2375000
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "Td",
+          "9c",
+          "7h"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            5000000
+          ],
+          [
+            0,
+            "call",
+            5000000
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "Qd"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            11600000
+          ],
+          [
+            0,
+            "call",
+            11600000
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "8d"
+        ],
+        "actions": []
+      }
+    ],
+    "expected": {
+      "winners": [
+        0
+      ],
+      "pots": [
+        41410000
+      ],
+      "refund": null,
+      "stacks": [
+        50355000,
+        0,
+        880000,
+        760000
+      ]
+    }
+  },
+  {
+    "id": "rounders_opening_full_house",
+    "title": "Rounders: Mike's opening full-house loss",
+    "names": [
+      "Mike McDermott",
+      "Teddy KGB"
+    ],
+    "stacks": [
+      30000,
+      30000
+    ],
+    "sb": 100,
+    "bb": 200,
+    "button": 0,
+    "holes": {
+      "0": [
+        "Ac",
+        "9c"
+      ],
+      "1": [
+        "Ah",
+        "Ad"
+      ]
+    },
+    "coverage": "Movie cards and reported bets; normalized blinds, equal stacks and final shove",
+    "notes": [
+      "Uses a legal modern heads-up reconstruction, not a complete film hand history.",
+      "Equal 30,000 stacks, 100/200 blinds and Mike's 27,500 river shove are fixture assumptions.",
+      "The shove is a legal short all-in raise over Teddy's 15,000 bet; aces full beats nines full."
+    ],
+    "sources": [
+      "https://www.mypokercoaching.com/teddy-kgb/",
+      "https://www.youtube.com/watch?v=MbrO-ZbuhIs"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            0,
+            "raise",
+            500
+          ],
+          [
+            1,
+            "call",
+            300
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "As",
+          "9s",
+          "8c"
+        ],
+        "actions": [
+          [
+            1,
+            "check",
+            0
+          ],
+          [
+            0,
+            "raise",
+            2000
+          ],
+          [
+            1,
+            "call",
+            2000
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "9h"
+        ],
+        "actions": [
+          [
+            1,
+            "check",
+            0
+          ],
+          [
+            0,
+            "check",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "3s"
+        ],
+        "actions": [
+          [
+            1,
+            "raise",
+            15000
+          ],
+          [
+            0,
+            "raise",
+            27500
+          ],
+          [
+            1,
+            "call",
+            12500
+          ]
+        ]
+      }
+    ],
+    "expected": {
+      "winners": [
+        1
+      ],
+      "pots": [
+        60000
+      ],
+      "refund": null,
+      "stacks": [
+        0,
+        60000
+      ]
+    }
+  },
+  {
+    "id": "rounders_final_straight",
+    "title": "Rounders: Mike traps Teddy with the nut straight",
+    "names": [
+      "Mike McDermott",
+      "Teddy KGB"
+    ],
+    "stacks": [
+      30500,
+      30500
+    ],
+    "sb": 50,
+    "bb": 100,
+    "button": 1,
+    "holes": {
+      "0": [
+        "8s",
+        "9s"
+      ],
+      "1": [
+        "Ah",
+        "Ac"
+      ]
+    },
+    "coverage": "Reported postflop sequence; inferred preflop setup and deliberately assumed villain cards",
+    "notes": [
+      "Teddy's cards are never disclosed. Ah Ac is only an illustrative losing hand, NOT a film fact.",
+      "The 50/100 limp/min-raise/call prefix and equal 30,500 stacks reproduce the reported 400 flop pot and 23,900 river shove.",
+      "A separate exhaustive test checks all 990 compatible Teddy hands, rather than relying on this chosen hand."
+    ],
+    "sources": [
+      "https://www.pokernews.com/strategy/old-school-vs-new-school-negreanu-rounders-final-hand-39254.htm",
+      "https://www.youtube.com/watch?v=LIXJaTQTDAg"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            1,
+            "call",
+            50
+          ],
+          [
+            0,
+            "raise",
+            200
+          ],
+          [
+            1,
+            "call",
+            100
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "6d",
+          "7s",
+          "Th"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            2000
+          ],
+          [
+            0,
+            "call",
+            2000
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "2c"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            4400
+          ],
+          [
+            0,
+            "call",
+            4400
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "As"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            23900
+          ],
+          [
+            0,
+            "call",
+            23900
+          ]
+        ]
+      }
+    ],
+    "expected": {
+      "winners": [
+        0
+      ],
+      "pots": [
+        61000
+      ],
+      "refund": null,
+      "stacks": [
+        61000,
+        0
+      ]
+    }
+  },
+  {
+    "id": "casino_royale_final_all_in",
+    "title": "Casino Royale: four-way straight-flush showdown",
+    "names": [
+      "James Bond",
+      "Fukutu",
+      "Infante",
+      "Le Chiffre"
+    ],
+    "stacks": [
+      46500000,
+      12000000,
+      11000000,
+      46500000
+    ],
+    "sb": 500000,
+    "bb": 1000000,
+    "button": 3,
+    "holes": {
+      "0": [
+        "7s",
+        "5s"
+      ],
+      "1": [
+        "Ks",
+        "Qs"
+      ],
+      "2": [
+        "8c",
+        "8d"
+      ],
+      "3": [
+        "Ac",
+        "6h"
+      ]
+    },
+    "coverage": "Movie showdown and reported turn/river; synthetic legal prefix and reconstructed stacks",
+    "notes": [
+      "All players contribute 6m before the turn through a synthetic limp/bet/call prefix, reproducing the reported 24m pot.",
+      "The source river bets produce 116m, not the film's spoken 115m; no chip is invented or removed to force the movie number.",
+      "Infante's second eight has conflicting suit reconstructions (8d or 8h); this fixture uses 8d and both have the same rank.",
+      "The 46.5m/12m/11m/46.5m stacks are derived fixture balances, not complete visible starting stacks."
+    ],
+    "sources": [
+      "https://wizardofodds.com/newsletter/december-30-2021/",
+      "https://www.thejamesbonddossier.com/features/the-final-poker-hand-of-casino-royale.htm",
+      "https://www.youtube.com/watch?v=3jQbXuvGR5o"
+    ],
+    "streets": [
+      {
+        "name": "preflop",
+        "board": [],
+        "actions": [
+          [
+            2,
+            "call",
+            1000000
+          ],
+          [
+            3,
+            "call",
+            1000000
+          ],
+          [
+            0,
+            "call",
+            500000
+          ],
+          [
+            1,
+            "check",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "flop",
+        "board": [
+          "Ah",
+          "8s",
+          "6s"
+        ],
+        "actions": [
+          [
+            0,
+            "raise",
+            5000000
+          ],
+          [
+            1,
+            "call",
+            5000000
+          ],
+          [
+            2,
+            "call",
+            5000000
+          ],
+          [
+            3,
+            "call",
+            5000000
+          ]
+        ]
+      },
+      {
+        "name": "turn",
+        "board": [
+          "4s"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "check",
+            0
+          ],
+          [
+            2,
+            "check",
+            0
+          ],
+          [
+            3,
+            "check",
+            0
+          ]
+        ]
+      },
+      {
+        "name": "river",
+        "board": [
+          "As"
+        ],
+        "actions": [
+          [
+            0,
+            "check",
+            0
+          ],
+          [
+            1,
+            "raise",
+            6000000
+          ],
+          [
+            2,
+            "call",
+            5000000
+          ],
+          [
+            3,
+            "raise",
+            12000000
+          ],
+          [
+            0,
+            "raise",
+            40500000
+          ],
+          [
+            3,
+            "call",
+            28500000
+          ]
+        ]
+      }
+    ],
+    "movie_claimed_pot": 115000000,
+    "expected": {
+      "winners": [
+        0
+      ],
+      "pots": [
+        44000000,
+        3000000,
+        69000000
+      ],
+      "refund": null,
+      "stacks": [
+        116000000,
+        0,
+        0,
+        0
+      ]
+    }
+  }
+]
