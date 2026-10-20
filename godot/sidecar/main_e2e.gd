@@ -196,15 +196,15 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 		if not _screenshot_path.is_empty() and not _screenshot_requested and _face_up_checks > 0:
 			_screenshot_requested = true
 			RenderingServer.frame_post_draw.connect(_capture_table, CONNECT_ONE_SHOT)
+	if _reply_seen:
+		_awaiting_reply = false
+		_reply_seen = false
 
 
 func _capture_table() -> void:
 	var image := root.get_texture().get_image()
 	if image == null or image.is_empty() or image.save_png(_screenshot_path) != OK:
 		_fail("could not save the rendered table")
-	if _reply_seen:
-		_awaiting_reply = false
-		_reply_seen = false
 
 
 ## Ten successful button-driven hands must be one continuous match, not ten
