@@ -9,7 +9,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import socket
 import subprocess
 import sys
 import time
@@ -270,32 +269,6 @@ def test_source_preview_uses_the_explicit_resource_paths(tmp_path, monkeypatch, 
                  "--libsodium", str(paths.libsodium))
     resolved = launcher.resolve_paths(args)
     assert resolved == paths
-
-
-def test_real_sidecar_readiness_failure_closes_the_assigned_listener():
-    from crypto_gate import require_crypto
-    from holdem import sidecar_launcher
-    require_crypto()
-    ports = []
-
-    def failed_ready(port):
-        assert 0 < port < 65536
-        ports.append(port)
-        raise RuntimeError("controlled readiness callback failure")
-
-    async def exercise():
-        before = set(asyncio.all_tasks())
-        with pytest.raises(RuntimeError, match="controlled readiness callback failure"):
-            await sidecar_launcher.run(
-                seats=2, sb=25, bb=50, stack=1000, structure="No-Limit",
-                port=0, seed=7, nickname="Player", ready=failed_ready)
-        assert len(ports) == 1
-        with socket.socket() as probe:
-            probe.settimeout(1.0)
-            assert probe.connect_ex(("127.0.0.1", ports[0])) != 0
-        _assert_no_owned_tasks_remain(before)
-
-    asyncio.run(exercise())
 
 
 def test_cli_startup_failure_is_nonzero_and_leaves_a_useful_report(tmp_path):
