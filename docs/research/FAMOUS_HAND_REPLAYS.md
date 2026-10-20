@@ -1,8 +1,10 @@
 # Famous poker hand replays
 
-Research and executable acceptance evidence, 2026-10-19. Baseline:
-`e504e2b0eac3985ba551a7d291f27d6499463dff`. This research does not change
-the active rules contract or production game code.
+Research and executable acceptance evidence, 2026-10-19. Initial audit baseline:
+`e504e2b0eac3985ba551a7d291f27d6499463dff`. The initial audit below made
+no production or rules-contract changes. Adam subsequently approved the
+standard WSOP ante correction; the current decision is recorded separately
+below, with active rules profile `poker.tda.2024.nlhe.v2`.
 
 Seven sourced hands are encoded in `tests/famous_hands/cases.json`. Run:
 
@@ -23,7 +25,7 @@ ranking and settlement behavior for the stated fixtures. It does not prove
 bot strategy, the Godot controls, cryptographic dealing, network delivery,
 or a verbatim replay of details that a broadcast never disclosed.
 
-## Initial results on the existing game
+## Historical audit results before the ante correction
 
 | Hand | Result | What was exercised | Reconstruction limit |
 |---|---|---|---|
@@ -35,8 +37,8 @@ or a verbatim replay of details that a broadcast never disclosed.
 | [Rounders finale](https://www.pokernews.com/strategy/old-school-vs-new-school-negreanu-rounders-final-hand-39254.htm) | PASS | Three check-calls, overbets, all-in and ten-high straight | Preflop prefix and stacks reconstructed; Teddy's exact cards unknown |
 | [Casino Royale finale](https://wizardofodds.com/newsletter/december-30-2021/) | PASS | Four-way all-in, short call, main pot plus two side pots; straight flush beats full houses and flush | Earlier action/stacks reconstructed; one eight's suit disputed; the published bet amounts imply 116m, not the film's spoken 115m |
 
-Six adapted action replays pass. The seventh reaches the correct real-life
-winner but fails the standard-ante pot oracle. This distinction matters:
+Six adapted action replays passed. The seventh reached the correct real-life
+winner but failed the standard-ante pot oracle. This distinction matters:
 matching the winner alone would miss incorrect pot ownership.
 
 The saved replays execute **86 scripted actions** across the seven fixtures.
@@ -45,14 +47,14 @@ precisely scoped expected failure**. The separate exhaustive movie comparison
 checks all 990 compatible hidden hands. Source/action and movie-assumption
 reviews found no remaining issues after narrowing the known-mismatch guard.
 
-The pytest suite records only this precisely reproduced ante discrepancy as
-a strict expected failure. A different error still fails, and a future fix
-requires removing the expected-failure marker. The audit command continues
-to return nonzero and record `RULE_MISMATCH`, including actual and expected
-pots and the complete action trace. CI success must not be read as seven
-successful historical replays.
+The initial pytest suite recorded only this precisely reproduced ante
+discrepancy as a strict expected failure. Other errors still failed. The
+initial audit command returned nonzero and recorded `RULE_MISMATCH`,
+including actual and expected pots and the complete action trace. That
+checkpoint's CI success did not mean seven successful historical replays.
+The correction removes the expected-failure marker and special mismatch guard.
 
-## Ante discrepancy and the saved contract
+## Historical finding: ante discrepancy and the v1 contract
 
 [WSOP's own big-blind ante explanation](https://www.wsop.com/news/big-blind-ante-coming-to-2018-wsop/)
 makes the entire ante available even to a short-stack winner. It is dead
@@ -62,23 +64,24 @@ can win. The 2023 final really used a big-blind ante, also confirmed by
 
 A small reachable control exposes the issue: both players commit 100 live
 chips and the big blind also posts a 20 ante. Aces beat kings on a dry board.
-Standard expected stacks are `[220, 0]`; the existing engine pays `[200, 20]`.
-It creates a 200 main pot plus a 20 pot eligible only to the ante poster.
-The forfeit helper exhibits the same underlying eligibility convention.
+Standard expected stacks are `[220, 0]`; the v1 engine paid `[200, 20]`.
+It created a 200 main pot plus a 20 pot eligible only to the ante poster.
+The forfeit helper exhibited the same underlying eligibility convention.
 
-The repository's normative `docs/POKER_RULES_PROFILE.md` explicitly adopts
+The then-active `docs/POKER_RULES_PROFILE.md` v1 explicitly adopted
 total-contribution layering and a house rule for residual dead money. Existing
-forfeit tests also explicitly expect a private dead-money layer. Consequently
-this is a confirmed mismatch with WSOP rules, but changing it is a rules
+forfeit tests also explicitly expected a private dead-money layer. Consequently
+this was a confirmed mismatch with WSOP rules, but changing it was a rules
 decision rather than an unnoticed implementation typo. No production
-settlement code has been changed during this audit.
+settlement code was changed during the initial audit.
 
-Recommended correction, awaiting Adam's decision: layer only matched live
+The audit recommended this correction: layer only matched live
 bets for side pots, put all dead ante money in the shared main pot, preserve
 uncalled live-bet refunds, and preserve the distinct casual rule forfeiting
 an unmatched raise by a dropped player. Update the versioned rules contract
 and cover both normal and forfeit settlement. This requires no new transport,
-shuffle, native runtime, scheduler or wire redesign.
+shuffle, native runtime, scheduler or wire redesign. Adam approved that
+recommendation on 2026-10-19, superseding the old rule as recorded next.
 
 The current `ReplicaTable` constructor and desktop table setup also do not
 expose ante configuration. The WSOP fixture uses the already existing
@@ -86,6 +89,38 @@ expose ante configuration. The WSOP fixture uses the already existing
 can configure and launch that tournament from its menu. Individual-player
 antes are not exposed through this path, so the older tournament fixtures
 are explicitly adaptations.
+
+## Approved correction, 2026-10-19
+
+Adam selected **"Use standard WSOP antes (Recommended)"** after reviewing
+the 100 + 100 + 20 example. The active contract is now
+[`poker.tda.2024.nlhe.v2`](../POKER_RULES_PROFILE.md); the unchanged
+[v1 contract](POKER_RULES_PROFILE_V1.md) remains historical reference.
+
+Dead ante money belongs to the shared main pot and is available to every
+non-folded contestant regardless of stack or whether its own contribution
+is entirely dead. Live wagers alone determine side-pot thresholds. The
+same main-pot allocation applies to other `total_dead` posts, including
+dead small blinds; that extension is our ruling, not an assertion about
+WSOP's ante article. Normal and forfeit settlement must agree on this
+allocation. Blind-first ante posting and refunds of uncalled live bets
+remain unchanged. The casual dropper's unmatched **live** raise remains
+forfeited to the highest matched live pot rather than being reclassified
+as ante money.
+
+The rules identifier revision changes its final ASCII byte from `31` to
+`32`. There is no runtime wire or cryptographic domain change because
+the identifier is not currently bound into the deal context. This work
+does not add ante configuration to the desktop menu or change dealing,
+networking or bot strategy.
+
+**Acceptance status:** all seven replays pass after the correction, including
+all 86 scripted actions and the 345,500,000-chip WSOP final pot. The focused
+ante, forfeit and replay suites pass all 79 tests. Thirteen new ante tests
+cover short stacks, zero-live contestants, dead-only pots, live refunds,
+side pots, ties, two boards and drop forfeits. Full regression and packaged
+Windows validation are pending. The initial six-pass/one-mismatch results
+above remain historical evidence.
 
 ## Movie uncertainty is preserved
 

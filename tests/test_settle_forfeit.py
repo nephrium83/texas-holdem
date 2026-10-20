@@ -241,8 +241,9 @@ def test_changes_none_of_its_arguments():
     args = dict(stacks=stacks, live=live, dead=dead, in_hand=in_hand,
                 dropped=2, button=1)
     first = settle_forfeit(**args)
-    # seats 0 and 1 split 200; seat 1 alone is in its own dead 10
-    assert first["stacks"] == [900, 1000, 500]
+    # seats 0 and 1 split the 200 live plus the entire dead 10;
+    # seat 1 also receives its uncalled 100 live refund.
+    assert first["stacks"] == [905, 995, 500]
     assert (stacks, live, dead, in_hand) == (
         [800, 790, 500], [100, 200, 0], [0, 10, 0], [0, 1, 2])
     assert settle_forfeit(**args) == first

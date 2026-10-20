@@ -324,6 +324,41 @@ class Player:
 
 # ----------------------------------------------------------------- engine
 
+def _pot_layers(live, dead, contenders):
+    """Build a shared dead-money main pot and live-bet side pots.
+
+    Antes do not buy a private stake for their posting seat: every remaining
+    player can win the whole dead pool, including a player with no live bet.
+    Unmatched forfeited live chips stay in the highest matched pot. Callers
+    perform their respective uncalled-live-bet refunds before reaching here.
+    """
+    pots = []
+    dead_total = sum(dead)
+    if dead_total:
+        pots.append({"amount": dead_total, "eligible": list(contenders)})
+    previous = 0
+    for level in sorted({amount for amount in live if amount > 0}):
+        amount = sum(min(stake, level) - min(stake, previous) for stake in live)
+        eligible = [seat for seat in contenders if live[seat] >= level]
+        previous = level
+        if not eligible:
+            continue
+        if pots and pots[-1]["eligible"] == eligible:
+            pots[-1]["amount"] += amount
+        else:
+            pots.append({"amount": amount, "eligible": eligible})
+
+    # A folded player's or dropper's unmatched LIVE excess has no eligible
+    # layer. Preserve its existing top-pot forfeiture; it is not an ante.
+    remaining = sum(live) + dead_total - sum(pot["amount"] for pot in pots)
+    if remaining:
+        if pots:
+            pots[-1]["amount"] += remaining
+        else:
+            pots.append({"amount": remaining, "eligible": list(contenders)})
+    return pots
+
+
 class Engine:
     """Pure game state. The GUI polls `actor`, calls `act()`, then loops."""
 
@@ -914,28 +949,13 @@ class Engine:
                 result["runs"].append({"board": b, "scores": scores,
                                        "best": best})
 
-        # 4. layered side pots (dead money plays: totals include antes)
-        levels = sorted({p.total for p in self.players if p.total > 0})
-        prev = 0
-        for lvl in levels:
-            amount = sum(min(p.total, lvl) - min(p.total, prev)
-                         for p in self.players)
-            eligible = [p.idx for p in alive if p.total >= lvl]
-            prev = lvl
-            if amount <= 0 or not eligible:
-                continue
-            if (result["pots"] and
-                    result["pots"][-1]["eligible"] == eligible):
-                result["pots"][-1]["amount"] += amount   # merge
-            else:
-                result["pots"].append({"amount": amount, "eligible": eligible})
-
-        # dead money stacked above every live stake (a folded BB's ante,
-        # say) has no eligible layer of its own; it belongs to the top pot
-        committed = sum(p.total for p in self.players)
-        built = sum(pt["amount"] for pt in result["pots"])
-        if result["pots"] and committed > built:
-            result["pots"][-1]["amount"] += committed - built
+        # 4. Antes/dead blinds belong to the main pot; only live bets
+        # determine side-pot eligibility (WSOP ante handling, profile v2).
+        result["pots"] = _pot_layers(
+            [p.total_live for p in self.players],
+            [p.total_dead for p in self.players],
+            [p.idx for p in alive],
+        )
 
         # 5. award, split across runs
         nruns = max(1, len(result["runs"])) if len(alive) > 1 else 1
@@ -1125,33 +1145,10 @@ def settle_forfeit(*, stacks, live, dead, in_hand, dropped, button):
             refund = (top[0], lives[0] - lives[1])
             live[top[0]] -= refund[1]
             after[top[0]] += refund[1]
-    committed = [c + d for c, d in zip(live, dead)]
-
-    # settle() step 4, with the dropper eligible for nothing
-    pots = []
-    prev = 0
-    for lvl in sorted({c for c in committed if c > 0}):
-        amount = sum(min(c, lvl) - min(c, prev) for c in committed)
-        eligible = [i for i in left if committed[i] >= lvl]
-        prev = lvl
-        if amount <= 0 or not eligible:
-            continue
-        if pots and pots[-1]["eligible"] == eligible:
-            pots[-1]["amount"] += amount
-        else:
-            pots.append({"amount": amount, "eligible": eligible})
-
-    # chips above every stake a seat left has matched (the dropper's
-    # uncalled raise, say) have no eligible layer of their own; like
-    # settle()'s residual dead money they join the top pot. If no seat
-    # left has put a chip in, there is no pot to join, and they share all.
-    total = sum(committed)
-    built = sum(pot["amount"] for pot in pots)
-    if total > built:
-        if pots:
-            pots[-1]["amount"] += total - built
-        else:
-            pots.append({"amount": total, "eligible": left})
+    # settle() step 4, with the dropper eligible for nothing. Shared dead
+    # money enters the main pot; the dropper's uncalled LIVE excess still
+    # joins the top matched pot, including the existing zero-live fallback.
+    pots = _pot_layers(live, dead, left)
 
     # settle() step 5: equal shares, odd chips to the first seat left of
     # the button

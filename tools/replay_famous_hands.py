@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from famous_hands.replay import AnteRuleMismatch, replay_case
+from famous_hands.replay import replay_case
 
 
 def main(argv=None):
@@ -25,11 +25,9 @@ def main(argv=None):
         except (AssertionError, ValueError, RuntimeError) as error:
             report = dict(id=case["id"], title=case["title"], passed=False,
                           names=case["names"], initial_stacks=case["stacks"], holes=case["holes"],
-                          status="RULE_MISMATCH" if isinstance(error, AnteRuleMismatch) else "FAIL",
+                          status="FAIL",
                           error=str(error), coverage=case["coverage"],
                           notes=case["notes"], sources=case["sources"])
-            if isinstance(error, AnteRuleMismatch):
-                report.update(error.evidence)
         reports.append(report)
         print(f"{'PASS' if report['passed'] else report['status']} {case['title']}"
               + (f": {report['error']}" if not report["passed"] else ""))

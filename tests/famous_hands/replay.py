@@ -22,14 +22,6 @@ _STREETS = ("preflop", "flop", "turn", "river")
 _BOARD_COUNTS = {"preflop": 0, "flop": 3, "turn": 1, "river": 1}
 
 
-class AnteRuleMismatch(AssertionError):
-    """A demonstrated disagreement between saved house rules and WSOP antes."""
-
-    def __init__(self, message: str, evidence: dict):
-        super().__init__(message)
-        self.evidence = evidence
-
-
 def _check(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -288,7 +280,6 @@ def replay_case(case: dict) -> dict:
         _check(not missing, f"{hand_id}: missing contested hole cards for seats {missing}")
     refund, independent_pots = _expected_settlement(replica)
     before_stacks = replica.stacks
-    before_live = [player.total_live for player in replica.engine.players]
     results = [replica.finish() for replica in replicas]
     _check(results[0] == results[1], f"{hand_id}: normalized settlement results differ")
     _synced(replicas, f"{hand_id} settled", bank)
@@ -309,20 +300,6 @@ def replay_case(case: dict) -> dict:
         _check(expected["stacks"] == predicted_stacks,
                f"{hand_id}: fixture stacks contradict the independent oracle")
     _check(result["refund"] == refund, f"{hand_id}: incorrect uncalled-bet refund")
-    known_legacy_pots = [
-        dict(amount=amount, eligible=eligible, winners=[1],
-             runs=[dict(amount=amount, payouts={1: amount}, winners=[1])])
-        for amount, eligible in ((343000000, [0, 1]), (2500000, [1]))
-    ]
-    if (case.get("bb_ante") and len(names) == 2
-            and before_live == [171500000, 171500000]
-            and result["pots"] == known_legacy_pots
-            and result["winners"] == [1] and replica.stacks == [0, 671500000]):
-        raise AnteRuleMismatch(
-            f"{hand_id}: saved house rules create a private ante pot; WSOP requires one shared main pot",
-            dict(actual_pots=result["pots"], expected_pots=independent_pots,
-                 stacks=replica.stacks, winners=result["winners"], action_count=sequence,
-                 trace=trace + [_snapshot(replica, "settlement", refund=refund)]))
     _check(len(result["pots"]) == len(independent_pots), f"{hand_id}: incorrect pot count")
     payouts = [0] * len(names)
     for index, (actual, predicted) in enumerate(zip(result["pots"], independent_pots)):

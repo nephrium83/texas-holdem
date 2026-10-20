@@ -1,6 +1,6 @@
 # Professional Poker Rules Profile
 
-**Profile identifier:** `poker.tda.2024.nlhe.v1`
+**Profile identifier:** `poker.tda.2024.nlhe.v2`
 **Type:** normative contract (see `docs/COLLABORATION.md`, "Research versus
 contract"). Implementation that contradicts this document is a bug in the
 implementation.
@@ -11,14 +11,25 @@ Procedures and Illustration Addendum, with provenance and hashes in
 `poker-tda-2024-v1.0-source.md`.
 **Research input:** `docs/research/professional-poker-rules-audit.md`.
 
+**Approved ruling revision, 2026-10-19:** Adam approved standard WSOP ante
+settlement after the famous-hand replay audit. Dead antes join the shared
+main pot; only live wagers establish side-pot thresholds. The prior v1
+total-contribution and residual-dead-money rulings are superseded. Their
+unchanged historical text is retained in
+[`research/POKER_RULES_PROFILE_V1.md`](research/POKER_RULES_PROFILE_V1.md).
+This changes settlement semantics, so it is v2 rather than an edit to v1.
+The identifier is still not bound into the runtime deal context; this
+revision makes no wire or cryptographic domain change.
+
 This document classifies the professional rules this game adopts, digitalizes,
 overrides, or discards, and records the rules decisions that had no home
 before it existed.
 
 Two things it deliberately does **not** do, per `docs/ROADMAP.md`:
 
-* It changes no engine behaviour. Conformance is **M7**; §7 is the gap list
-  M7 works from.
+* It does not itself implement engine behaviour. Conformance is **M7**;
+  §7 records the existing conformance inventory. The approved ante correction
+  is implemented and validated separately from this contract's text.
 * It does not bind the identifier into the live deal context. `_deal_context_bytes`
   is untouched; the binding rides **M2**'s single deliberate B7 domain and
   version break, so the wire context is redesigned once (ROADMAP Decisions,
@@ -31,7 +42,7 @@ Two things it deliberately does **not** do, per `docs/ROADMAP.md`:
 ### 1.1 The string
 
 ```
-poker.tda.2024.nlhe.v1
+poker.tda.2024.nlhe.v2
 ```
 
 Grammar: `<game>.<authority>.<edition>.<variant>.v<n>`, where
@@ -42,7 +53,7 @@ Grammar: `<game>.<authority>.<edition>.<variant>.v<n>`, where
 | authority | `tda` | Poker Tournament Directors Association |
 | edition | `2024` | the **published** ruleset edition this profile reads |
 | variant | `nlhe` | No-Limit Texas Hold'em |
-| revision | `v1` | this profile's own revision of that reading |
+| revision | `v2` | this profile's own revision, including the approved WSOP ante ruling |
 
 The character set is `[a-z0-9.]` only: ASCII lowercase letters, ASCII digits,
 and the `.` separator. No uppercase, no underscores, no hyphens, no Unicode.
@@ -55,11 +66,11 @@ normalisation to it, re-order its fields, or split it on `.` before comparing.
 A peer that does not hold these exact bytes does not hold this profile.
 
 ```
-identifier    poker.tda.2024.nlhe.v1
+identifier    poker.tda.2024.nlhe.v2
 encoding      UTF-8 (identical to ASCII for this string)
 length        22 octets
 octets        70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
-              6e 6c 68 65 2e 76 31
+              6e 6c 68 65 2e 76 32
 ```
 
 Wherever the identifier enters a hashed pre-image it is carried in exactly one
@@ -69,7 +80,7 @@ deal policy and for every seat id (`holdem/p2p/session.py:949-962`).
 
 ```
 encoded form  00 00 00 16 | 70 6f 6b 65 72 2e 74 64 61 2e 32 30 32 34 2e
-                            6e 6c 68 65 2e 76 31
+                            6e 6c 68 65 2e 76 32
 ```
 
 The length prefix is not decoration. The pre-image it will join is injective
@@ -79,15 +90,19 @@ records what a non-injective encoding cost the first time).
 
 ### 1.3 What "frozen" means
 
-Frozen means **this string and this encoding are now the definition**. They may
-not be edited in place. A change to either is a new identifier *and* a deal-context
-layout version bump (`_DEAL_CTX_VERSION`, `session.py:915`, currently `2`; M2
-takes it to `3`).
+Frozen means **each published string and its encoding keep their meaning**.
+They may not be edited in place. A changed ruling receives a new revision;
+v1 remains a historical contract and v2 is the active contract. A changed
+field encoding or position in an already bound deal-context layout also
+requires a domain version bump. The profile is not bound today, so the
+2026-10-19 semantic revision changes no runtime layout or domain version.
+The future binding still belongs to the single deliberate version break in
+§1.4 (`_DEAL_CTX_VERSION`, currently `2`; proposed future context `3`).
 
 | Change | Consequence |
 |---|---|
 | TDA publishes a 2026 ruleset and we adopt it | new identifier `poker.tda.2026.nlhe.v1`; not before TDA publishes it |
-| a ruling here changes how a hand plays | revision bump, e.g. `poker.tda.2024.nlhe.v2` |
+| a ruling here changes how a hand plays | revision bump; the 2026-10-19 ante decision advances v1 to v2 |
 | wording, citations, evidence links only | no bump; the identifier describes rulings, not prose |
 | the encoding or the field's position in the pre-image changes | new identifier **and** a domain version bump |
 
@@ -120,6 +135,7 @@ scheduled gap, not an oversight — see §9.
 |---|---|---|---|
 | **Poker TDA Rules** | **2024 v1.0, 9 Oct 2024** | primary normative base | in this repository — `docs/research/sources/poker-tda-2024-v1.0-longform.txt`, provenance and SHA-256 hashes in `poker-tda-2024-v1.0-source.md` |
 | WSOP | 2026 Main Event | cross-check, clock policy | `docs/research/professional-poker-rules-audit.md` |
+| **WSOP big-blind ante explanation** | **4 Apr 2018; checked 19 Oct 2026** | **normative ante-allocation source for v2**: dead ante in the main pot, available to every eligible player regardless of stack, blind posted first | [official WSOP article](https://www.wsop.com/news/big-blind-ante-coming-to-2018-wsop/) |
 | GGPoker house rules | current | cross-check, online disconnect/timeout | `docs/research/professional-poker-rules-audit.md` |
 
 The authoritative text — the 71 numbered rules, the 22 Recommended Procedures
@@ -130,14 +146,17 @@ the Poker TDA, Copyright 2026, <https://www.pokertda.com>, all rights reserved.
 ### 2.1 The citation rule
 
 **No ruling in this document rests on a rule number this repository cannot
-show.** Every citation resolves to a line of the pinned source, written
+show.** Every TDA citation resolves to a line of the pinned source, written
 `src:NNN`, where `src` is
 `docs/research/sources/poker-tda-2024-v1.0-longform.txt`. A reader checks a row
-by opening that line. Three markers, and only three:
+by opening that line. The separately named **WSOP 2018** ante citation
+resolves to the official article in §2: its format explanation distinguishes
+the dead ante from the live blind, then gives a short-stack main-pot example.
+It is not attributed to TDA. Three markers, and only three:
 
 | Marker | Basis |
 |---|---|
-| **[V]** | **Verbatim** at the cited line of the pinned source. |
+| **[V]** | **Verbatim** at the cited line of the pinned TDA source, or the explicitly named WSOP 2018 ante source. |
 | **[D]** | **Derived** from cited [V] provisions. The derivation is written out in the row and *is* the citation. |
 | **[H]** | **House.** The pinned source was **searched** and no provision governs this point. The row names what was searched. The ruling is ours and is not offered as a professional-rule citation. |
 
@@ -153,9 +172,11 @@ revision it meant "this repository has not established a provision", which
 recorded *our* uncertainty rather than the ruleset's content — a reviewer
 correctly refused it as a substitute for reading the source. With the text
 pinned, an [H] row must name the provisions examined and say why none governs.
-Exactly four rows survive that test: residual dead-money allocation (§3.1), one
-board per hand (§3.1), the straddle (§3.2), and timeout while cryptographically
-absent (§3.4). Attaching a contradicting provision to an [H] row later is a
+Five rows carry that basis in v2: extending main-pot treatment to dead blinds
+(§3.1), unmatched forfeited live money (§3.1), one board per hand (§3.1), the
+straddle (§3.2), and timeout while cryptographically absent (§3.4). The
+ante-main-pot ruling is now an adoption of the separately named WSOP source.
+Attaching a contradicting provision to an [H] row later is a
 ruling change and a revision bump (§1.3); attaching a *confirming* one refines
 the citation and is not.
 
@@ -171,7 +192,8 @@ however strongly the surrounding procedures assume a single board and a single
 pair of blinds. Both rulings stand; both are **ours** (§3.1, §3.2).
 
 **How the negative claims were reached.** Where this document says a subject is
-not addressed — the straddle, a second runout, the residual dead-money layer, a
+not addressed — the straddle, a second runout, dead-blind allocation,
+unmatched forfeited live-money allocation, a
 participant whose duties outlive their hand — the basis is a **complete read of
 the pinned source, first line to last** (`src:1` through `src:711`, its final
 line): 71 rules, 22 Recommended Procedures and the Illustration Addendum, which
@@ -223,10 +245,11 @@ Neither prohibits anything, and under the masthead rule above their silence
 leaves the question to us. Both are now OVERRIDE (b), with the search written
 out.
 
-**No ruling changed through any of it** — only the claim about whose rule it
-is. No profile-governed hand contained a straddle or a second board before
-these corrections and none does after. Labelling corrections are not ruling
-changes (§1.3), so the identifier does not bump.
+**No ruling changed through those earlier citation corrections** — only the
+claim about whose rule it is. No profile-governed hand contained a straddle
+or a second board before those corrections and none does after. The
+2026-10-19 ante change is different: it changes payouts, so the profile
+advances from v1 to v2 (§1.3).
 
 ---
 
@@ -284,9 +307,11 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Playing the board | 19 [V] `src:116` | **N/A** | *"To play the board, players must table all hole cards to get part of the pot."* The rule polices a player's choice of what to reveal; no such choice exists — the audit reveals the cards and the evaluator uses the best five from seven whether or not the player would have shown them | `engine.py:910-915` |
 | Odd chips | 20-A [V] `src:120` | ADOPT | *"the odd chip goes to the first seat left of the button"*, walking forward to the first winner. **Consensus-critical** — every replica must award the same chip | `engine.py:969-977` |
 | Uncalled bet returned | 15-B [V] `src:96`; 65-A [V] `src:370` | ADOPT | both provisions state the return as settled background even in the two *adverse* cases — a hand mucked by mistake and a hand killed by the dealer: *"If cards are mucked and the player initiated a bet or raise not yet called, the uncalled amount will be returned"* (15-B), *"If the player initiated a bet or raise and hasn't been called, the uncalled amount will be returned"* (65-A). **[D]:** a rule that returns the uncalled amount even to a player whose hand is dead returns it a fortiori in the ordinary case, and TDA 2024 contains no provision anywhere that keeps an uncalled wager in the pot. The engine's condition — a *single* seat strictly above the second-highest live total — is that rule and an arithmetic identity: when two seats share the top total each was called by the other, so no amount is uncalled | `engine.py:861-877` |
-| Dead money never returns | 30 [V] `src:174` | ADOPT | *"Their posted blinds and antes forfeit to the pot…"* Antes and dead blinds stay in the pot | `engine.py:861-863`, `settle` never refunds `total_dead` |
-| Side pots | 21 [V] `src:124`; addendum Rule 16 Ex. 2–3 [V] `src:562`, `src:572` | ADOPT | *"Each side pot will be split separately"* (21), and the addendum fixes eligibility by matched contribution in worked numbers: the short all-in is *"the all-in who is only in for the main pot"*, while B's 1000 bet and C's call form *"the 2000 side pot between B and C"*, awarded before the main pot. That is exactly layering by committed total with each layer contested only by the seats that matched it. **[D]** for one implementation detail: two adjacent layers with *identical* eligible sets are merged, which is invisible to Rule 21 because splitting them separately and splitting the merged layer award the same chips to the same seats | `engine.py:917-932` |
-| Residual dead money above every live stake | **[H]** | **OVERRIDE (b) — house** | a folded big blind's ante can sit above every *live* stake, funding no layer with an eligible contestant. It joins the top pot. **The search:** Rule 21 `src:124` splits side pots but does not build them; Rule 30 `src:174` forfeits blinds and antes *"to the pot"*, singular, and names no layer; Rule 20 `src:120` allocates odd chips, not dead stakes; 35-E `src:208`, 71-C `src:410` and RP-11 `src:492` create dead money without allocating it. No provision in the 2024 rules, Recommended Procedures or Addendum governs the residue. Ours, on the same arithmetic as the rows above: a stake no contesting seat matched cannot define its own eligible layer | `engine.py:933-938` |
+| Dead money is not refunded | 30 [V] `src:174` | ADOPT | *"Their posted blinds and antes forfeit to the pot…"* Antes and dead blinds stay in the pot; they do not participate in an uncalled-live-bet refund | `Engine.settle`, `Player.total_dead` |
+| Side pots | 21 [V] `src:124`; addendum Rule 16 Ex. 2–3 [V] `src:562`, `src:572` | ADOPT | *"Each side pot will be split separately"* (21), and the addendum fixes eligibility by matched contribution in worked numbers: the short all-in is *"the all-in who is only in for the main pot"*, while B's 1000 bet and C's call form *"the 2000 side pot between B and C"*, awarded before the main pot. **Live wagers**, not live-plus-dead totals, establish layer thresholds. Each layer is contested only by the non-folded seats that matched its live threshold. Dead posts do not buy side-pot eligibility. **[D]** for one implementation detail: two adjacent layers with *identical* eligible sets are merged, which is invisible to Rule 21 because splitting them separately and splitting the merged layer award the same chips to the same seats | `Engine.settle`; `engine.settle_forfeit` |
+| Dead antes in the shared main pot | **WSOP 2018 [V]**, §2 | ADOPT | The big-blind ante is dead money in the main pot, and a short-stack participant can win the entire ante. Every non-folded contestant remains eligible for that shared dead money, including a seat whose entire contribution is dead. Add dead money to the first live layer only when that layer has the same eligible set; otherwise keep a distinct main pot eligible to every non-folded contestant. No ante poster receives private eligibility or a refund just because its ante makes its total contribution exceed an opponent's. Thus two matched live wagers of 100 plus a 20 ante pay the winner all 220. This replaces v1's total-contribution and residual-ante layering | [official WSOP explanation](https://www.wsop.com/news/big-blind-ante-coming-to-2018-wsop/); approved 2026-10-19 |
+| Dead-blind allocation | **[H]** | **OVERRIDE (b) — house** | The same shared-main-pot treatment applies to dead small blinds and every other `total_dead` post. **The search:** Rule 30 `src:174` forfeits blinds and antes to the pot; 35-E `src:208`, 71-C `src:410` and RP-11 `src:492` do not specify dead-blind layer eligibility; the WSOP 2018 source addresses antes, not dead small blinds. Extending that allocation to other dead posts is explicitly this profile's decision, not a claim about WSOP or TDA text | `Engine.settle`; `engine.settle_forfeit`; approved 2026-10-19 |
+| Unmatched forfeited live money | **[H]** | **OVERRIDE (b) — house** | Live money that remains unmatched after refunds and has no eligible layer joins the highest matched live pot. If no such live pot exists it joins the pot for the remaining contestants. This is distinct from ante allocation. The casual dropper's unmatched live raise is deliberately forfeited under `CASUAL_P2P_RULES.md` rule 1; survivors' uncalled live excess is still refunded. Ordinary folded-live residue retains the same allocation. **The search:** Rule 21 `src:124` splits side pots, Rule 30 `src:174` forfeits posted money and Rules 15-B/65-A return uncalled wagers, but none specifies this casual disconnect exception or the allocation of a forfeited unmatched live layer. This profile supplies the deterministic allocation; v2 does not move that live excess into the ante main pot | `Engine.settle`; `engine.settle_forfeit`; `CASUAL_P2P_RULES.md` rule 1 |
 | Run it twice — one board per hand | **[H]** | **OVERRIDE (b) — house** | **No hand governed by this profile runs the board twice.** **The search:** Rule 38 `src:220` governs how many cards are burned off *"a normal stub"* per street; Rule 39-A/B `src:224-226` repairs a four-card flop or a missing burn and reconstructs *one* three-card flop; Rule 12 `src:78`, Rule 20 `src:120` and Rule 21 `src:124` settle a showdown and split pots without contemplating more than one board; the Rule 16 addendum `src:552-572` says *"run out the remaining cards"*, singular, in a procedure about tabling. Every one of these **assumes** a single board; **none forbids a second**, and the words *run it twice*, *multiple boards* and *multiple runouts* appear nowhere in the 71 rules, 22 Recommended Procedures or the Illustration Addendum. The previous revision read that assumption as an affirmative single-board rule; it is not one, and under §2.1 the ruleset's silence leaves the question to the house. Ours, on two grounds: this profile is a tournament base and running it twice is a cash-game courtesy that changes the variance of a settled all-in; and on the P2P path a second run must deal from the deck, which mental poker cannot produce | `engine.py:884-898`, `engine.py:947` implement the cash-game two-run path; `replica_table.py:29-31` pins `runs=1` |
 | Rabbit hunting | 28 [V] `src:164` | **OVERRIDE (a)** | *"Rabbit hunting (revealing cards that would have come if the hand had not ended) is not allowed."* This game **cannot** keep that rule. The post-hand audit opens all 52 deck positions, so after any hand — including one that ends pre-flop by folds — every peer can read the board that would have come. It is structural, not a client behaviour: the same event that proves the deck was a deck reveals the undealt stub. No client should *display* a rabbit hunt, but no client can prevent one either (§4.2b) | `mental_deal.py:766-788`, `deck_audit.py:55-69` |
 
@@ -455,12 +480,12 @@ mode" from "this institution does not exist here".
 | RP-20–RP-22 | deck preparation, spreading the pot, non-denominational items | N/A — no physical deck, pot or bounty chips |
 
 **Nothing in the 2024 ruleset is unclassified, and every entry is one of the
-four classes.** Four rulings carry the [H] house basis — §3.1 residual dead
-money, §3.1 one board per hand, §3.2 the straddle, §3.4 cryptographic absence —
-and each names the provisions searched. Two of those four are not classifications
-of any TDA rule at all: nothing in the ruleset addresses a second runout or a
-straddle, so they appear in §3.1 and §3.2 as house rulings and take no row in
-this map, which maps *rules*. Every other row rests on a cited line of the
+four classes.** Five rows carry the [H] house basis — §3.1 dead-blind
+allocation, §3.1 unmatched forfeited live money, §3.1 one board per hand,
+§3.2 the straddle, §3.4 cryptographic absence — and each names the provisions
+searched. These supplement this map rather than inventing additional TDA
+rules. The WSOP ante adoption is separately named in §3.1 and is not claimed
+as a TDA provision. Every TDA map row rests on a cited line of the pinned
 source or on a stated N/A mechanism or model.
 
 ---
@@ -743,9 +768,14 @@ Recorded in §9; it belongs to M2 and M7, not to a rules document.
 
 Read against `holdem/engine.py`, `holdem/p2p/replica_table.py`,
 `holdem/p2p/session.py`, `holdem/p2p/mental_deal.py`, `holdem/client_view.py`
-and `holdem/contract.py` at `c69a4bf`. **Nothing was changed.**
+and `holdem/contract.py` at `c69a4bf` for the original M1 inventory below.
+That historical inventory is not evidence for the 2026-10-19 ante change.
+The v2 acceptance gate separately requires normal and forfeit settlement to
+put dead money in the shared main pot, build side pots from live wagers,
+preserve uncalled-live refunds and preserve the dropper-live-excess exception.
+Validation evidence is recorded in `research/FAMOUS_HAND_REPLAYS.md`.
 
-### 7.1 Conformant today
+### 7.1 Existing M1 conformance inventory
 
 | Behaviour | Profile rule | Evidence |
 |---|---|---|
@@ -757,8 +787,8 @@ and `holdem/contract.py` at `c69a4bf`. **Nothing was changed.**
 | Cards speak; settlement scores actual cards | §3.1, R12 | `engine.py:910-915` |
 | Showdown order | §3.1, R17-A | `engine.py:984-995` |
 | Uncalled bet returned to a single top live total only | §3.1, R15-B / R65-A | `engine.py:861-877` |
-| Dead money never returns to a stack | §3.1, R30 | `engine.py:861-863` |
-| Side pots layered by matched contribution, identical-eligibility merge | §3.1, R21 | `engine.py:917-932` |
+| Dead money is not part of an uncalled-bet refund | §3.1, R30 | `engine.py:861-863` |
+| Side pots are split separately; identical-eligibility merge | §3.1, R21 | `engine.py:917-932`; v2 live-only threshold and shared-dead-main requirements are the separate ante acceptance gate above |
 | Committed chips stay committed (the engine; the session's remaining refunds deviate, §3.3, §3.4) | §3.3, R50-A | `engine.py:644-650` |
 | Big-blind ante posted after the blind (big-blind-first) | §3.2, RP-11 | `engine.py:569-571`, `621-642` |
 | One board per hand on the P2P path | §3.1 (house ruling — no TDA rule requires it) | `replica_table.py:29-31` pins `runs=1` |
@@ -810,7 +840,7 @@ list the profile requires it to carry.
 
 | Field | Bound | Note |
 |---|---|---|
-| `rules_profile` | **yes, M2** | `poker.tda.2024.nlhe.v1`, encoded per §1.2 |
+| `rules_profile` | **yes, future binding** | active `poker.tda.2024.nlhe.v2`, encoded per §1.2; not present in the runtime deal context today |
 | `T`, `delta`, `L` | **yes, M2** | timeout parameters; `T` is table policy, not a fixed rule (§3.4) |
 | `G`, `E` | **no** | strictly derived (`G = L + Δ`, `E = T + G`). Transmitting them would let two peers disagree about values that have no independent existence |
 | `timeout_policy_version` | **yes, M2** | so a future change is a clean wire break, not a silent split |
@@ -840,17 +870,19 @@ a rules-profile bump every time someone picked a different clock.
   because membership cannot shrink mid-hand (B1). A peer that voids every hand
   is a denial of service this document can classify but not answer. M2 owns
   suspension; any exclusion policy is later still.
-* **Four rulings here are ours, not TDA's** — the rows marked **[H]** in §3:
-  the allocation of dead money that sits above every live stake (§3.1), one
-  board per hand (§3.1), the exclusion of the straddle (§3.2), and timeout
-  while cryptographically absent (§3.4). Each names the provisions searched.
-  Two of the four were briefly claimed as adoptions of Rules 38/39 and 51-B;
+* **Five rows carry our house rulings** — the rows marked **[H]** in §3:
+  dead-blind allocation (§3.1), unmatched forfeited live-money allocation
+  (§3.1), one board per hand (§3.1), the exclusion of the straddle (§3.2),
+  and timeout while cryptographically absent (§3.4). Each names the
+  provisions searched. Dead-ante allocation instead adopts the separately
+  cited WSOP source; it is not a TDA attribution. One board per hand and
+  the straddle were briefly claimed as adoptions of Rules 38/39 and 51-B;
   they are not, because those rules assume a single board and a posted big
   blind without forbidding the alternatives, and the source's own masthead
   leaves what it does not address to the house (§2.1). Finding published text
-  that contradicts one of these four is a ruling change and a revision bump
+  that contradicts a house ruling is a ruling change and a revision bump
   (§1.3); text that confirms one only refines the citation.
-* **The classification rests on an extraction, not on the official PDF.** The
+* **The TDA classification rests on an extraction, not on the official PDF.** The
   pinned source is a mechanical text extraction of the official 2024 v1.0
   DOCX, with the DOCX and PDF SHA-256 hashes recorded alongside it. Paragraph
   and table order is preserved, but layout is not, so where exact layout could

@@ -6,20 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from famous_hands.replay import AnteRuleMismatch, replay_case
+from famous_hands.replay import replay_case
 from holdem.engine import Card, FULL_DECK, evaluate
 
 
 CASES = json.loads((Path(__file__).parent / "famous_hands/cases.json").read_text(encoding="utf-8"))
 
 
-@pytest.mark.parametrize("case", [
-    pytest.param(case, id=case["id"], marks=pytest.mark.xfail(
-        strict=True, raises=AnteRuleMismatch,
-        reason="Saved house ante rule differs from WSOP; payout-rule decision pending"))
-    if case["id"] == "weinman_jones_2023_final" else pytest.param(case, id=case["id"])
-    for case in CASES
-])
+@pytest.mark.parametrize("case", [pytest.param(case, id=case["id"]) for case in CASES])
 def test_sourced_hand_replay(case):
     report = replay_case(case)
     assert report["passed"]
@@ -60,9 +54,8 @@ def test_harness_rejects_duplicate_sourced_cards():
 @pytest.mark.parametrize("field,value", [
     ("winners", [0]), ("pots", [1]), ("refund", [0, 1]), ("stacks", [1, 1]),
 ])
-def test_known_ante_gap_cannot_hide_a_corrupted_fixture(field, value):
+def test_ante_replay_rejects_a_corrupted_fixture(field, value):
     case = deepcopy(next(case for case in CASES if case["id"] == "weinman_jones_2023_final"))
     case["expected"][field] = value
-    with pytest.raises(AssertionError, match="fixture") as error:
+    with pytest.raises(AssertionError, match="fixture"):
         replay_case(case)
-    assert not isinstance(error.value, AnteRuleMismatch)
