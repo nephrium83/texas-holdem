@@ -46,15 +46,24 @@ identity and does not represent independent players.
 
 ## Acceptance evidence
 
-Eight process and UI acceptance cases passed in
+Nine process and UI acceptance cases passed in
 `tests/test_lan_integration.py`. They cover independent two- and three-player
 tables playing three consistent hands, private-card separation, lobby Ready
 and leave/rehost behavior, visible connection loss, roster updates, and the
-actual Godot Host/Join controls. Local practice also passed through the
+actual Godot Host/Join controls. A late join to a running room is visibly
+refused without disturbing the existing game. Local practice also passed through the
 protocol and through Godot, including ten complete bot hands in the UI case.
 
-Those results establish the shipped process and UI paths on the development
-computer. Final acceptance with the packaged Windows application across BWING
-and a **Windows VM on Unraid** is planned. The user selected that VM as the
-second computer. Its network reachability, Windows firewall prompt and
-packaged two-computer gameplay remain to be verified there.
+On 2026-10-20, the user-selected **Windows VM on Unraid** hosted the packaged
+application while BWING joined it over the LAN. Both real Godot clients
+selected the lobby and betting controls, completed three hands, agreed on
+every settled stack, and checked own-card visibility and opponent-card
+concealment. Neither computer needed an external Python or Godot setup.
+All 93 packaged files were hash-verified on the VM. Both applications and
+their Godot children exited normally, the localhost listener closed, and
+the temporary firewall rule (restricted to BWING and the tested executable)
+was removed. The VM used the headless renderer for this automated check;
+this does not establish its interactive graphics-driver compatibility.
+
+The runtime source for that package is `261d3a2`; final delivery results and
+artifact hashes are recorded in PR #65 and the continuing delivery handoff.
