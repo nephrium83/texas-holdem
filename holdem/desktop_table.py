@@ -15,7 +15,8 @@ class DesktopTable:
     Remote callbacks only mark the client dirty, never acquire this lock.
     """
 
-    def __init__(self, *, seats, nickname, settings, seed=None, on_change):
+    def __init__(self, *, seats, nickname, settings, seed=None, on_change,
+                 local_clock=None, local_schedule=None):
         self._lock = threading.RLock()
         self._seats = seats
         self._nickname = nickname
@@ -24,6 +25,9 @@ class DesktopTable:
         self._on_change = on_change
         self._mode = "menu"
         self._local = None
+        self._local_bots = None
+        self._local_clock = local_clock
+        self._local_schedule = local_schedule
         self._lan = None
         self._start_local = None
         self._closed = False
@@ -78,8 +82,13 @@ class DesktopTable:
                     raise ValueError("The table is closed")
                 return client_view.apply_command(session, command, payload)
             human = self._local[1][self._local[2][0]]
-            return client_view.apply_command(human, command, payload,
-                                             start_table=self._start_local)
+            try:
+                return client_view.apply_command(human, command, payload,
+                                                 start_table=self._start_local)
+            finally:
+                # Start/deal and human actions drain first. Only then may
+                # bots schedule work, leaving the dealt hand visible.
+                self._local_bots.refresh()
 
     @staticmethod
     def _result(command, verdict, ok=True):
@@ -88,19 +97,35 @@ class DesktopTable:
 
     def _create_local(self):
         from holdem.sidecar_launcher import (
-            BotDriver, _make_sessions, _wrap_with_drain,
+            _make_sessions, _wrap_with_drain,
             _wire_hand_start, _make_start_table,
         )
+        from holdem.paced_bots import PacedBotDriver
         bus, sessions, order = _make_sessions(self._seats, nickname=self._nickname)
         human = sessions[order[0]]
         _wrap_with_drain(human, bus)
-        BotDriver({cid: session for cid, session in sessions.items()
-                   if cid != order[0]}, random.Random(self._seed))
+        self._local_bots = PacedBotDriver(
+            {cid: session for cid, session in sessions.items()
+             if cid != order[0]}, bus, random.Random(self._seed),
+            lock=self._lock, on_change=self._on_change,
+            on_error=self._local_bot_error,
+            clock=self._local_clock, schedule=self._local_schedule,
+        )
         _wire_hand_start(sessions, order)
         self._start_local = _make_start_table(sessions, order, bus, dict(self._settings))
         human.on_state_changed = self._on_change
         self._local = (bus, sessions, order)
         self._mode = "local"
+
+    def _local_bot_error(self):
+        """Stop an uncertain local hand, retaining its agreed chip balances."""
+        if self._local is None:
+            return
+        reason = ("A local opponent could not finish its turn. "
+                  "Leave the table and start a new game.")
+        for session in self._local[1].values():
+            session.terminate(Session.LOCAL_SHUTDOWN, reason)
+        self._on_change()
 
     def snapshot(self):
         with self._lock:
@@ -142,6 +167,9 @@ class DesktopTable:
                     deal_progress=player_info.deal_progress_view("lobby"))
 
     def _close_active(self):
+        if self._local_bots is not None:
+            self._local_bots.close()
+            self._local_bots = None
         if self._lan is not None:
             self._lan.close()
             self._lan = None

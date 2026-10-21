@@ -26,6 +26,9 @@ extends SceneTree
 
 ## Inside the Python test's own timeout, so a stuck run still reports.
 const DEADLINE_MS := 40000
+## The desktop deliberately leaves room for shuffle/deal and bot thinking.
+## Bare Session tests remain immediate and retain their shorter deadline.
+const DESKTOP_DEADLINE_MS := 100000
 ## Hands allowed past the target to find a turn on which to go all in.
 const EXTRA_HANDS := 5
 
@@ -57,6 +60,8 @@ var _lobby_names := []
 var _on_screen := {}
 var _screenshot_path := ""
 var _screenshot_requested := false
+var _presentation_was_active := false
+var _desktop_deadline_set := false
 
 
 func _initialize() -> void:
@@ -81,6 +86,11 @@ func _initialize() -> void:
 
 
 func _process(_delta: float) -> bool:
+	if _main != null:
+		var presenting := _main.is_hand_presentation_active()
+		if _presentation_was_active and not presenting and not _on_screen.is_empty():
+			_check_own_cards(_on_screen)
+		_presentation_was_active = presenting
 	if not _finished:
 		if Time.get_ticks_msec() > _deadline_ms:
 			_fail("timed out")
@@ -94,6 +104,8 @@ func _process(_delta: float) -> bool:
 
 
 func _step() -> void:
+	if _main.is_hand_presentation_active():
+		return
 	if _state.is_empty():
 		return                      # no snapshot yet: nothing is rendered
 	if _state in ["match_complete", "eliminated", "table_closed"]:
@@ -200,6 +212,9 @@ func _on_result(result: Dictionary) -> void:
 
 
 func _on_snapshot(snapshot: Dictionary) -> void:
+	if snapshot.get("lobby") is Dictionary and not _desktop_deadline_set:
+		_desktop_deadline_set = true
+		_deadline_ms = Time.get_ticks_msec() + DESKTOP_DEADLINE_MS
 	_state = str(snapshot.get("turn", {}).get("state", ""))
 	_hand_num = int(snapshot.get("hand_num", 0))
 	var phase := str(snapshot.get("phase", ""))
@@ -274,6 +289,8 @@ func _sum(values: Array) -> int:
 ## must show exactly those cards face up -- unless the seat has folded, which
 ## hides its cards by design.
 func _check_own_cards(snapshot: Dictionary) -> void:
+	if _main.is_hand_presentation_active():
+		return
 	var hole: Variant = snapshot.get("you", {}).get("hole")
 	if not (hole is Array):
 		return

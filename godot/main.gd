@@ -1,6 +1,8 @@
 class_name Main
 extends Control
 
+signal hand_presentation_finished(hand_num: int)
+
 ## Wires the Godot client together: forwards every snapshot
 ## (GODOT_PROTOCOL.md section 5) to the table, the player-info panel,
 ## the betting controls, and the next-hand control, and forwards their
@@ -16,6 +18,7 @@ extends Control
 @onready var _command_status: Label = %CommandStatusLabel
 @onready var _connection_banner: Label = %ConnectionBanner
 @onready var _connection_lobby: ConnectionLobby = %ConnectionLobby
+@onready var _deal_presentation: DealPresentation = %DealPresentation
 
 const CONNECTION_LOST_TEXT := "Connection lost — close and relaunch"
 
@@ -45,6 +48,11 @@ var _refusal_awaits_snapshot := false
 ## table on screen is frozen at its last state and no control may act on it.
 var _connection_lost := false
 var _has_connection_lobby := false
+var _latest_snapshot: Dictionary = {}
+var _presented_hand := 0
+var _presentation_active := false
+var _presentation_generation := 0
+var _shown_presentation_stage := ""
 
 
 func _ready() -> void:
@@ -58,6 +66,7 @@ func _ready() -> void:
 	_next_hand_control.next_hand_pressed.connect(_on_next_hand_pressed)
 	_lobby_control.start_game_pressed.connect(_on_start_game_pressed)
 	_connection_lobby.command_requested.connect(_on_lobby_command_requested)
+	_deal_presentation.finished.connect(_on_hand_presentation_finished)
 	_connect_to_sidecar_from_cmdline()
 
 
@@ -65,7 +74,29 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 	if _connection_lost:
 		return
 	_expire_refusal(snapshot)
+	_latest_snapshot = snapshot
+	var lobby: Dictionary = snapshot.get("lobby", {})
+	var phase := str(snapshot.get("phase", ""))
+	var state := str(snapshot.get("turn", {}).get("state", ""))
+	if str(lobby.get("mode", "")) == "menu" or phase == "lobby":
+		_cancel_hand_presentation()
+		_presented_hand = 0
+	elif state in ["table_closed", "connection_lost", "voided", "eliminated"]:
+		_cancel_hand_presentation()
+	var hand_num := int(snapshot.get("hand_num", 0))
+	# Desktop tables show a hand opening once, including hands started by LAN
+	# readiness. A clock update must never restart the animation.
+	if not lobby.is_empty() and phase in ["dealing", "betting"] and hand_num > 0 and hand_num != _presented_hand and state not in ["table_closed", "voided", "eliminated"]:
+		_cancel_hand_presentation()
+		_presented_hand = hand_num
+		_presentation_active = true
+		_play_hand_presentation.call_deferred(_presentation_generation)
+	_render_snapshot(snapshot)
+
+
+func _render_snapshot(snapshot: Dictionary) -> void:
 	_table_view.apply_snapshot(snapshot)
+	_table_view.set_deal_in_progress(_presentation_active)
 	_player_info_panel.apply_snapshot(snapshot)
 	var you: Dictionary = snapshot.get("you", {})
 	_betting_controls.apply_legal(you.get("legal", {}))
@@ -84,6 +115,63 @@ func _on_snapshot_received(snapshot: Dictionary) -> void:
 			_command_status.text = ""
 			_betting_controls.apply_legal({})
 			_next_hand_control.visible = false
+	if _presentation_active:
+		_apply_presentation_mask()
+
+
+func is_hand_presentation_active() -> bool:
+	return _presentation_active
+
+
+func presentation_stage() -> String:
+	if not _presentation_active:
+		return "idle"
+	return _deal_presentation.stage if _deal_presentation.is_playing() else "shuffling"
+
+
+func _process(_delta: float) -> void:
+	if _presentation_active and presentation_stage() != _shown_presentation_stage:
+		_apply_presentation_mask()
+
+
+func _apply_presentation_mask() -> void:
+	_shown_presentation_stage = presentation_stage()
+	_player_info_panel.apply_hand_presentation(_presented_hand, _shown_presentation_stage)
+	_betting_controls.apply_legal({})
+	_next_hand_control.visible = false
+	_lobby_control.visible = false
+
+
+func _play_hand_presentation(generation: int) -> void:
+	# Container layout must settle before card destination centers are read.
+	await get_tree().process_frame
+	if not is_inside_tree() or not _presentation_active or generation != _presentation_generation:
+		return
+	var targets: Array[Vector2] = []
+	var to_local := _deal_presentation.get_global_transform_with_canvas().affine_inverse()
+	for target: Vector2 in _table_view.deal_targets(_latest_snapshot):
+		targets.append(to_local * target)
+	if targets.is_empty():
+		_on_hand_presentation_finished()
+		return
+	_deal_presentation.start(_presented_hand, targets)
+	_apply_presentation_mask()
+
+
+func _on_hand_presentation_finished() -> void:
+	if not _presentation_active or _connection_lost:
+		return
+	_presentation_active = false
+	_render_snapshot(_latest_snapshot)
+	hand_presentation_finished.emit(_presented_hand)
+
+
+func _cancel_hand_presentation() -> void:
+	_presentation_generation += 1
+	_presentation_active = false
+	_shown_presentation_stage = ""
+	_deal_presentation.cancel()
+	_table_view.set_deal_in_progress(false)
 
 
 func _on_lobby_command_requested(command: String, payload: Dictionary) -> void:
@@ -92,22 +180,22 @@ func _on_lobby_command_requested(command: String, payload: Dictionary) -> void:
 
 
 func _on_fold_pressed() -> void:
-	if not _connection_lost:
+	if not _connection_lost and not _presentation_active:
 		_sidecar.fold()
 
 
 func _on_check_call_pressed() -> void:
-	if not _connection_lost:
+	if not _connection_lost and not _presentation_active:
 		_sidecar.check_call()
 
 
 func _on_raise_pressed(amount: int) -> void:
-	if not _connection_lost:
+	if not _connection_lost and not _presentation_active:
 		_sidecar.raise_to(amount)
 
 
 func _on_next_hand_pressed() -> void:
-	if not _connection_lost:
+	if not _connection_lost and not _presentation_active:
 		_sidecar.next_hand()
 
 
@@ -185,6 +273,7 @@ func _refusal_text(command: String, result: Dictionary) -> String:
 ## betting buttons stayed live, and a click only logged a warning. There is
 ## no reconnect, so the client says so and leaves nothing to press.
 func _on_sidecar_disconnected() -> void:
+	_cancel_hand_presentation()
 	_lobby_control.start_failed("Sidecar disconnected")
 	_connection_lost = true
 	_connection_banner.text = CONNECTION_LOST_TEXT

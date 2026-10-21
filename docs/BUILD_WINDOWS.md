@@ -48,6 +48,17 @@ LAN functionality or clean-machine compatibility.
 `Poker.exe --self-test-visible --log-dir <folder>` runs the same ten-hand
 check in a rendered window and saves `table.png` alongside its reports.
 
+`Poker.exe --presentation-self-test --log-dir <folder>` separately exercises
+the normal Local bots / Start game flow, animated shuffle and two-card deal,
+paced bot response, a single All In click, Next Hand, and leaving during a
+deal. It requires an unacted opening hand and checks that the old table stays
+closed after returning to the menu. The ten-hand check above uses the bare
+sidecar and does not establish this desktop flow.
+
+Use `--presentation-self-test-visible` instead to run that check in a rendered
+window and save shuffle, dealing, revealed-card, result, and menu frames under
+`<folder>/captures/`. The report is `presentation-self-test.json`.
+
 For a paired check on two Windows computers, `Poker.exe
 --lan-self-test-config <config.json> --log-dir <logs>` runs the real lobby and
 betting controls headlessly. Each local JSON config names `role` (`host` or

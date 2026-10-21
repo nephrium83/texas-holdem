@@ -368,6 +368,7 @@ def test_godot_host_join_controls_play_three_real_lan_hands(tmp_path):
 
 
 @pytest.mark.skipif(_GODOT is None, reason="godot binary not found in PATH")
+@pytest.mark.timeout(130)
 def test_godot_practice_menu_still_plays_ten_complete_bot_hands(tmp_path):
     require_crypto()
     with SidecarPeer(tmp_path, "Player", seats=2, stack=100000, seed=7) as peer:
@@ -375,7 +376,7 @@ def test_godot_practice_menu_still_plays_ten_complete_bot_hands(tmp_path):
             [_GODOT, "--headless", "--path", str(REPO_ROOT / "godot"),
              "-s", "res://sidecar/main_e2e.gd", "--",
              f"--sidecar-port={peer.port}", "--hands=10"],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=50,
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=115,
         )
         prefix = "E2E_SUMMARY "
         summaries = [line.removeprefix(prefix).strip()

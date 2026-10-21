@@ -1,4 +1,4 @@
-[gd_scene load_steps=9 format=3]
+[gd_scene load_steps=10 format=3]
 
 [ext_resource type="Script" path="res://main.gd" id="1_script"]
 [ext_resource type="Script" path="res://net/sidecar_client.gd" id="2_sidecar_script"]
@@ -8,6 +8,7 @@
 [ext_resource type="PackedScene" path="res://ui/next_hand_control.tscn" id="6_next_hand"]
 [ext_resource type="PackedScene" path="res://ui/lobby_control.tscn" id="7_lobby"]
 [ext_resource type="PackedScene" path="res://ui/connection_lobby.tscn" id="8_connection"]
+[ext_resource type="PackedScene" path="res://ui/deal_presentation.tscn" id="9_deal"]
 
 [node name="Main" type="Control"]
 custom_minimum_size = Vector2(1370, 850)
@@ -20,6 +21,12 @@ script = ExtResource("2_sidecar_script")
 [node name="TableView" parent="." instance=ExtResource("3_table")]
 unique_name_in_owner = true
 position = Vector2(0, 0)
+
+[node name="DealPresentation" parent="." instance=ExtResource("9_deal")]
+unique_name_in_owner = true
+offset_right = 1000.0
+offset_bottom = 700.0
+z_index = 5
 
 [node name="BettingControls" parent="." instance=ExtResource("4_betting")]
 unique_name_in_owner = true

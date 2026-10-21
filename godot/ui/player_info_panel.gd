@@ -22,6 +22,7 @@ extends PanelContainer
 
 
 func apply_snapshot(snapshot: Dictionary) -> void:
+	event_log.visible = true
 	var turn: Dictionary = snapshot.get("turn", {})
 	var state := str(turn.get("state", "lobby"))
 	state_badge.text = state.replace("_", " ").to_upper()
@@ -34,6 +35,21 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 	_apply_deal_progress(snapshot)
 	_apply_events(snapshot.get("events", []))
 	_apply_result(snapshot, state)
+
+
+## A visual hand introduction only. It never chooses or sends a poker action.
+func apply_hand_presentation(hand_num: int, stage: String) -> void:
+	var shuffling := stage == "shuffling"
+	state_badge.text = "SHUFFLING" if shuffling else "DEALING"
+	status_label.text = "Shuffling the deck" if shuffling else "Dealing the cards"
+	street_label.text = "Hand #%d | Preparing the hand" % hand_num
+	state_badge.modulate = Color("#efb76f")
+	hand_label.text = "Your cards will appear after the deal"
+	deal_progress_label.text = "Getting the table ready"
+	decision_card.visible = false
+	result_card.visible = false
+	clock_label.visible = false
+	event_log.visible = false
 
 
 func _street_context(snapshot: Dictionary, turn: Dictionary) -> String:

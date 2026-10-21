@@ -20,6 +20,10 @@ const MAX_SEATS := 9
 func apply_snapshot(snapshot: Dictionary) -> void:
 	var seats: Array = snapshot.get("seats", [])
 	var action_on := int(snapshot.get("action_on", -1))
+	var phase := str(snapshot.get("phase", "betting"))
+	var state := str(snapshot.get("turn", {}).get("state", ""))
+	if phase != "betting" or state in ["table_closed", "match_complete", "eliminated", "hand_complete", "voided"]:
+		action_on = -1
 	var you: Dictionary = snapshot.get("you", {})
 	var in_lobby := str(snapshot.get("phase", "")) == "lobby"
 	for i in range(MAX_SEATS):
@@ -40,6 +44,28 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 
 	var hand_num := int(snapshot.get("hand_num", 0))
 	_hand_label.text = ("Hand #%d" % hand_num) if hand_num > 0 else ""
+
+
+## Keep the seat layout fixed while the presentation deals its card backs.
+## The live cards remain owned by the latest snapshot and appear on reveal.
+func set_deal_in_progress(active: bool) -> void:
+	_pot_label.visible = not active
+	_hand_label.visible = not active
+	for seat: SeatView in _seat_views:
+		seat.get_node("Content/HoleCards").modulate.a = 0.0 if active else 1.0
+		seat.get_node("%TurnIndicator").modulate.a = 0.0 if active else 1.0
+	_board_view.modulate.a = 0.0 if active else 1.0
+
+
+## Centers in viewport canvas coordinates, preserving fixed seat identities.
+func deal_targets(snapshot: Dictionary) -> Array[Vector2]:
+	var targets: Array[Vector2] = []
+	var seats: Array = snapshot.get("seats", [])
+	for i in range(min(seats.size(), MAX_SEATS)):
+		if seats[i] is Dictionary and bool(seats[i].get("in_seat", false)):
+			var cards: Control = _seat_views[i].get_node("Content/HoleCards")
+			targets.append(cards.get_global_transform_with_canvas() * (cards.size / 2.0))
+	return targets
 
 
 ## The sidecar sends the local seat's cards only in you.hole, never in that

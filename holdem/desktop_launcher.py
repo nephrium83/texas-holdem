@@ -51,6 +51,10 @@ def _parse_args(argv=None):
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-visible", action="store_true",
                         help="Run the play test in a rendered game window")
+    parser.add_argument("--presentation-self-test", action="store_true",
+                        help="Check the normal desktop menu, deal animation and paced bots")
+    parser.add_argument("--presentation-self-test-visible", action="store_true",
+                        help="Render and capture the desktop deal presentation check")
     parser.add_argument("--lan-self-test-config", type=Path,
                         help="Run a paired LAN check using a local JSON configuration file")
     parser.add_argument("--log-dir", type=Path)
@@ -59,8 +63,10 @@ def _parse_args(argv=None):
     parser.add_argument("--libsodium", type=Path)
     args = parser.parse_args(argv)
     args.self_test = args.self_test or args.self_test_visible
-    if args.self_test and args.lan_self_test_config is not None:
-        parser.error("Choose the local self-test or paired LAN check")
+    args.presentation_self_test = args.presentation_self_test or args.presentation_self_test_visible
+    if sum((args.self_test, args.presentation_self_test,
+            args.lan_self_test_config is not None)) > 1:
+        parser.error("Choose one of the local, presentation, or paired LAN checks")
     if args.lan_self_test_config is not None:
         args.lan_self_test_config = args.lan_self_test_config.resolve()
     if args.log_dir is None:
@@ -305,6 +311,27 @@ def _validate_lan_summary(config: dict, summary: dict) -> None:
         raise RuntimeError("The paired LAN check did not complete its required outcome")
 
 
+def _validate_presentation_summary(summary: dict) -> None:
+    """Require the real desktop flow and visible motion, not a bare deal."""
+    counts = ("menu_fresh_checks", "opening_preaction_checks", "shuffle_frames",
+              "deal_frames", "shuffle_motion_checks", "deal_motion_checks",
+              "moving_back_checks", "masked_control_checks", "private_card_checks",
+              "next_hand_presentations", "bot_reaction_checks")
+    passed = (
+        summary.get("ok") is True and summary.get("error") == ""
+        and all(type(summary.get(key)) is int and summary[key] > 0 for key in counts)
+        and summary.get("presentations_completed", 0) >= 2
+        and summary.get("all_in_clicks") == 1
+        and summary.get("all_in_applied") is True
+        and summary.get("cancelled_during_deal") is True
+        and summary.get("returned_to_menu") is True
+        and summary.get("menu_quiet_ms", 0) >= 3200
+        and summary.get("refused") == []
+    )
+    if not passed:
+        raise RuntimeError("The desktop presentation check did not complete its required outcome")
+
+
 async def _run(args, paths: RuntimePaths) -> int:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HOLDEM_LIBSODIUM"] = str(paths.libsodium)
@@ -317,7 +344,8 @@ async def _run(args, paths: RuntimePaths) -> int:
     sidecar = asyncio.create_task(run_sidecar(
         seats=2, sb=25, bb=50,
         stack=100000 if args.self_test or args.lan_self_test_config else 1000,
-        structure="No-Limit", port=0, seed=7 if args.self_test else None,
+        structure="No-Limit", port=0,
+        seed=7 if args.self_test or args.presentation_self_test else None,
         nickname="Player", ready=announce, desktop_lobby=not args.self_test))
     game = None
     session = {"game_pid": None, "sidecar_port": None, "game_exit_code": None}
@@ -335,6 +363,10 @@ async def _run(args, paths: RuntimePaths) -> int:
                    "--rendering-method", "gl_compatibility"]
         if args.lan_self_test_config is not None:
             command.extend(["--headless", "-s", "res://sidecar/lan_peer_e2e.gd"])
+        elif args.presentation_self_test:
+            if not args.presentation_self_test_visible:
+                command.append("--headless")
+            command.extend(["-s", "res://sidecar/presentation_e2e.gd"])
         elif args.self_test:
             if not args.self_test_visible:
                 command.append("--headless")
@@ -342,6 +374,10 @@ async def _run(args, paths: RuntimePaths) -> int:
         command.extend(["--", f"--sidecar-port={port}"])
         if args.lan_self_test_config is not None:
             command.append(f"--lan-peer-config={args.lan_self_test_config}")
+        if args.presentation_self_test:
+            command.append(f"--presentation-report={args.log_dir / 'presentation.json'}")
+            if args.presentation_self_test_visible:
+                command.append(f"--presentation-capture-dir={args.log_dir / 'captures'}")
         if args.self_test:
             command.append("--hands=10")
         if args.self_test_visible:
@@ -352,9 +388,10 @@ async def _run(args, paths: RuntimePaths) -> int:
         _log.info("Game started: pid=%s sidecar_port=%s", game.pid, port)
         lan_config = (json.loads(args.lan_self_test_config.read_text(encoding="utf-8"))
                       if args.lan_self_test_config is not None else None)
-        check_timeout = _lan_check_timeout(lan_config) if lan_config is not None else 60
+        check_timeout = (_lan_check_timeout(lan_config) if lan_config is not None
+                         else 90 if args.presentation_self_test else 60)
         deadline = (time.monotonic() + check_timeout
-                    if args.self_test or args.lan_self_test_config else None)
+                    if args.self_test or args.presentation_self_test or args.lan_self_test_config else None)
         while game.poll() is None:
             if sidecar.done():
                 await sidecar
@@ -368,6 +405,11 @@ async def _run(args, paths: RuntimePaths) -> int:
         if args.self_test:
             summary = _self_test_summary(args.log_dir / "game.log")
             _write_json(args.log_dir / "self-test.json",
+                        {"ok": True, "error": None, "summary": summary})
+        if args.presentation_self_test:
+            summary = json.loads((args.log_dir / "presentation.json").read_text(encoding="utf-8"))
+            _validate_presentation_summary(summary)
+            _write_json(args.log_dir / "presentation-self-test.json",
                         {"ok": True, "error": None, "summary": summary})
         if args.lan_self_test_config is not None:
             config = lan_config
@@ -402,6 +444,10 @@ def main(argv=None) -> int:
         if args.self_test:
             if args.log_dir.is_dir():
                 _write_json(args.log_dir / "self-test.json",
+                            {"ok": False, "error": str(error), "summary": None})
+        elif args.presentation_self_test:
+            if args.log_dir.is_dir():
+                _write_json(args.log_dir / "presentation-self-test.json",
                             {"ok": False, "error": str(error), "summary": None})
         elif sys.platform == "win32":
             ctypes.windll.user32.MessageBoxW(

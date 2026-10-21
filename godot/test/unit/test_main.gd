@@ -4,6 +4,107 @@ const MainScene := preload("res://main.tscn")
 const FakeSidecarScript := preload("res://test/fixtures/fake_sidecar.gd")
 
 
+func _desktop_dealt_snapshot() -> Dictionary:
+	var snapshot := _heads_up_snapshot()
+	snapshot["phase"] = "betting"
+	snapshot["you"]["hole"] = ["Ah", "Kd"]
+	snapshot["lobby"] = {
+		"mode": "local", "state": "playing", "players": [], "can_start": false,
+	}
+	return snapshot
+
+
+func test_dealt_hand_is_presented_before_betting_and_reveals_latest_cards():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	main._on_snapshot_received(_desktop_dealt_snapshot())
+	assert_true(main.is_hand_presentation_active())
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_false(main.get_node("%NextHandControl").visible)
+	assert_eq(main.get_node("%TableView/Seat0/Content/HoleCards").modulate.a, 0.0)
+	main._on_raise_pressed(455)
+	assert_eq(fake.calls, [], "a betting command escaped during the deal")
+	await wait_process_frames(3)
+	var deal: DealPresentation = main.get_node("%DealPresentation")
+	assert_true(deal.is_playing())
+	deal._process(3.0)
+	assert_false(main.is_hand_presentation_active())
+	assert_true(main.get_node("%BettingControls").visible)
+	assert_eq(main.get_node("%TableView/Seat0/Content/HoleCards").modulate.a, 1.0)
+	assert_eq(main.get_node("%TableView/Seat0/Content/HoleCards/CardA/CardLabel").text, "A♥")
+	assert_eq(fake.calls, [], "revealing cards must not send an action")
+
+
+func test_clock_snapshots_do_not_restart_the_same_deal():
+	var main := _main()
+	var snapshot := _desktop_dealt_snapshot()
+	main._on_snapshot_received(snapshot)
+	await wait_process_frames(3)
+	var deal: DealPresentation = main.get_node("%DealPresentation")
+	deal._process(0.2)
+	var elapsed := deal._elapsed
+	snapshot = snapshot.duplicate(true)
+	snapshot["turn"]["clock"] = {"kind": "action", "remaining_seconds": 29}
+	main._on_snapshot_received(snapshot)
+	assert_eq(deal._elapsed, elapsed)
+	assert_true(main.is_hand_presentation_active())
+
+
+func test_result_arriving_during_the_deal_waits_until_the_deal_is_visible():
+	var main := _main()
+	var snapshot := _desktop_dealt_snapshot()
+	main._on_snapshot_received(snapshot)
+	await wait_process_frames(3)
+	snapshot = snapshot.duplicate(true)
+	snapshot["phase"] = "settled"
+	snapshot["turn"] = {"state": "hand_complete", "headline": "You won 50"}
+	snapshot["settlement"] = {"headline": "You won 50"}
+	snapshot["you"].erase("legal")
+	main._on_snapshot_received(snapshot)
+	assert_false(main.get_node("%PlayerInfoPanel").result_card.visible)
+	assert_false(main.get_node("%NextHandControl").visible)
+	main.get_node("%DealPresentation")._process(3.0)
+	assert_true(main.get_node("%PlayerInfoPanel").result_card.visible)
+	assert_eq(main.get_node("%PlayerInfoPanel").status_label.text, "You won 50")
+	assert_true(main.get_node("%NextHandControl").visible)
+	assert_eq(main.get_node("%TableView/Seat0/Content/TurnIndicator").text, "")
+
+
+func test_returning_to_menu_cancels_pending_and_running_deals():
+	var main := _main()
+	var menu := {
+		"phase": "lobby", "hand_num": 0, "seats": [], "you": {},
+		"turn": {"state": "lobby", "headline": "Choose a game"},
+		"lobby": {"mode": "menu", "state": "idle"},
+	}
+	main._on_snapshot_received(_desktop_dealt_snapshot())
+	main._on_snapshot_received(menu)
+	await wait_process_frames(3)
+	assert_false(main.is_hand_presentation_active())
+	assert_false(main.get_node("%DealPresentation").is_playing())
+	main._on_snapshot_received(_desktop_dealt_snapshot())
+	await wait_process_frames(3)
+	assert_true(main.get_node("%DealPresentation").is_playing())
+	main._on_snapshot_received(menu)
+	await wait_process_frames(3)
+	assert_false(main.is_hand_presentation_active())
+	assert_false(main.get_node("%DealPresentation").is_playing())
+	assert_eq(main.get_node("%TableView/Seat0/Content/NameLabel").text, "Empty seat")
+	assert_false(main.get_node("%BettingControls").visible)
+
+
+func test_disconnection_cancels_deal_without_reenabling_actions():
+	var main := _main()
+	main._on_snapshot_received(_desktop_dealt_snapshot())
+	await wait_process_frames(3)
+	main._on_sidecar_disconnected()
+	assert_false(main.is_hand_presentation_active())
+	assert_false(main.get_node("%DealPresentation").is_playing())
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_eq(main.get_node("%PlayerInfoPanel").state_badge.text, "CONNECTION LOST")
+
+
 func _main() -> Main:
 	var main: Main = MainScene.instantiate()
 	add_child_autofree(main)
