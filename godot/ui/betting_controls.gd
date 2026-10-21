@@ -115,6 +115,8 @@ func _on_preset_pot_pressed() -> void:
 func _on_preset_all_in_pressed() -> void:
 	_raise_slider.value = _raise_slider.max_value
 	_update_raise_display()
+	# Unlike the pot-size presets, this names a poker action and commits it.
+	raise_pressed.emit(current_raise_amount())
 
 
 ## Pot-fraction presets size the raise as a fraction of the pot AFTER

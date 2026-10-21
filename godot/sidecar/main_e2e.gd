@@ -144,26 +144,39 @@ func _act() -> void:
 		_press(raise, "raise")
 	elif _settled.size() >= _target_hands - 1 and _actions["all_in"] == 0 and can_raise:
 		var all_in: Button = controls.get_node("%PresetAllIn")
-		if not _usable(all_in):
-			return
-		all_in.pressed.emit()
+		_press(all_in, "all_in", true)
 		var slider: HSlider = controls.get_node("%RaiseSlider")
 		if slider.value != slider.max_value:
 			_fail("All In did not move the slider to its maximum")
 			return
-		_press(raise, "all_in")
 	else:
 		_press(controls.get_node("%CheckCallButton"), "check_call")
 
 
-func _press(button: Button, what: String) -> void:
+func _press(button: Button, what: String, mouse_click := false) -> void:
 	if not _usable(button):
 		return
 	_awaiting_reply = true
 	_reply_seen = false
 	_pending = what
 	print("E2E_PRESS %s hand=%d (%s)" % [what, _hand_num, button.text])
-	button.pressed.emit()
+	if mouse_click:
+		# Route the click through normal GUI hit testing: a visible, enabled
+		# button covered by another Control must not count as a successful click.
+		var viewport := button.get_viewport()
+		var position := button.get_global_transform_with_canvas() * (button.size / 2)
+		viewport.notify_mouse_entered()
+		for pressed in [true, false]:
+			var event := InputEventMouseButton.new()
+			event.position = position
+			event.global_position = position
+			event.button_index = MOUSE_BUTTON_LEFT
+			event.button_mask = MOUSE_BUTTON_MASK_LEFT if pressed else 0
+			event.pressed = pressed
+			viewport.push_input(event, true)
+		print("E2E_MOUSE_CLICK %s" % what)
+	else:
+		button.pressed.emit()
 
 
 ## A person cannot click what is hidden or disabled, and emitting pressed
