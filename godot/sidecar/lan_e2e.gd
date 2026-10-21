@@ -24,6 +24,7 @@ var _deadline := 0
 var _screenshot_dir := ""
 var _screenshots := {}
 var _capture_pending := false
+var _presentation_was_active := [false, false]
 
 
 func _initialize() -> void:
@@ -54,6 +55,11 @@ func _initialize() -> void:
 
 
 func _process(_delta: float) -> bool:
+	for peer in range(_mains.size()):
+		var presenting := _mains[peer].is_hand_presentation_active()
+		if _presentation_was_active[peer] and not presenting and not _on_screen[peer].is_empty():
+			_check_cards(peer, _on_screen[peer])
+		_presentation_was_active[peer] = presenting
 	if not _finished:
 		if Time.get_ticks_msec() > _deadline:
 			_fail("timed out")
@@ -106,7 +112,7 @@ func _step() -> void:
 	if not _join_clicked:
 		return
 	for peer in range(2):
-		if _awaiting[peer] or not is_same(_snapshots[peer], _on_screen[peer]):
+		if _awaiting[peer] or _mains[peer].is_hand_presentation_active() or not is_same(_snapshots[peer], _on_screen[peer]):
 			continue
 		var metadata := _metadata(peer)
 		var state := str(metadata.get("state", ""))
@@ -185,6 +191,8 @@ func _on_snapshot(peer: int, snapshot: Dictionary) -> void:
 
 
 func _check_cards(peer: int, snapshot: Dictionary) -> void:
+	if _mains[peer].is_hand_presentation_active():
+		return
 	var you: Dictionary = snapshot.get("you", {})
 	var hole: Variant = you.get("hole")
 	if not (hole is Array) or hole.size() != 2:

@@ -34,6 +34,9 @@ leaves. See [Playing on your local network](docs/LAN_PLAY.md) and
 [Windows preview builds](docs/BUILD_WINDOWS.md). The earlier Tkinter harness
 remains available for development.
 
+New hands begin with a short shuffle-and-deal animation. Local opponents
+pause before acting, so an opening fold follows a visible deal.
+
 <table>
   <tr>
     <td width="50%">

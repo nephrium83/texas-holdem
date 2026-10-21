@@ -36,6 +36,56 @@ def _args(tmp_path, *extra):
     return launcher._parse_args(["--log-dir", str(tmp_path / "logs"), *extra])
 
 
+def _presentation_summary():
+    counts = ("menu_fresh_checks", "opening_preaction_checks", "shuffle_frames",
+              "deal_frames", "shuffle_motion_checks", "deal_motion_checks",
+              "moving_back_checks", "masked_control_checks", "private_card_checks",
+              "next_hand_presentations", "bot_reaction_checks")
+    return dict.fromkeys(counts, 1) | dict(
+        ok=True, error="", presentations_completed=2, all_in_clicks=1,
+        all_in_applied=True, cancelled_during_deal=True, returned_to_menu=True,
+        menu_quiet_ms=3200, refused=[])
+
+
+@pytest.mark.parametrize("missing", ["opening_preaction_checks", "deal_motion_checks"])
+def test_presentation_diagnostic_rejects_success_without_an_observed_opening(missing):
+    summary = _presentation_summary()
+    launcher._validate_presentation_summary(summary)
+    summary[missing] = 0
+    with pytest.raises(RuntimeError, match="required outcome"):
+        launcher._validate_presentation_summary(summary)
+
+
+def test_presentation_diagnostic_launches_the_normal_desktop_flow(tmp_path, monkeypatch, paths):
+    async def exercise():
+        configured, commands, events = [], [], []
+
+        async def sidecar(*, ready, **kwargs):
+            configured.append(kwargs)
+            ready(43139)
+            await asyncio.Event().wait()
+
+        def spawn(command, log_path):
+            commands.append(command)
+            launcher._write_json(log_path.parent / "presentation.json", _presentation_summary())
+            return Game(events, code=0)
+
+        monkeypatch.setattr(launcher, "run_sidecar", sidecar)
+        monkeypatch.setattr(launcher, "_spawn_game", spawn)
+        before = set(asyncio.all_tasks())
+        args = _args(tmp_path, "--presentation-self-test")
+        assert await asyncio.wait_for(launcher._run(args, paths), timeout=3) == 0
+        assert configured[0]["desktop_lobby"] is True
+        assert configured[0]["stack"] == 1000
+        assert "res://sidecar/presentation_e2e.gd" in commands[0]
+        assert "--headless" in commands[0]
+        report = json.loads((args.log_dir / "presentation-self-test.json").read_text())
+        assert report["ok"] is True
+        _assert_no_owned_tasks_remain(before)
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("seconds", [29, 901, True, "300"])
 def test_lan_diagnostic_budget_cannot_be_unbounded_or_shorter_than_a_real_turn(seconds):
     with pytest.raises(ValueError, match="between 30 and 900"):

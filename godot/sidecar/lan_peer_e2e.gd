@@ -41,6 +41,7 @@ var _departure_seen := false
 var _settled_names := {}
 var _forfeit_stacks := {}
 var _hand_numbers := []
+var _presentation_was_active := false
 
 
 func _initialize() -> void:
@@ -79,6 +80,12 @@ func _initialize() -> void:
 
 
 func _process(_delta: float) -> bool:
+	if _main != null:
+		var presenting := _main.is_hand_presentation_active()
+		if _presentation_was_active and not presenting and not _on_screen.is_empty():
+			_check_cards(_on_screen)
+			_check_clock(_on_screen)
+		_presentation_was_active = presenting
 	if _finished:
 		_finish()
 		return false
@@ -113,6 +120,8 @@ func _press(button: Button, command: String) -> bool:
 
 
 func _step() -> void:
+	if _main.is_hand_presentation_active():
+		return
 	if _snapshot.is_empty() or not is_same(_snapshot, _on_screen):
 		return
 	var metadata: Dictionary = _snapshot.get("lobby", {})
@@ -276,6 +285,8 @@ func _on_snapshot(snapshot: Dictionary) -> void:
 
 
 func _check_clock(snapshot: Dictionary) -> void:
+	if _main.is_hand_presentation_active():
+		return
 	var clock: Dictionary = snapshot.get("turn", {}).get("clock", {})
 	if clock.is_empty():
 		return
@@ -294,6 +305,8 @@ func _check_clock(snapshot: Dictionary) -> void:
 
 
 func _check_cards(snapshot: Dictionary) -> void:
+	if _main.is_hand_presentation_active():
+		return
 	var you: Dictionary = snapshot.get("you", {})
 	var hole: Variant = you.get("hole")
 	if not hole is Array or hole.size() != 2:

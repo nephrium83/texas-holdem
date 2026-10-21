@@ -133,3 +133,17 @@ func test_seats_shrinking_across_snapshots_clears_stale_seat():
 	table.apply_snapshot({"hand_num": 0, "pot": 0, "board": [], "action_on": -1, "seats": []})
 	assert_eq(table.get_node("%Seat0/Content/NameLabel").text, "Empty seat")
 	assert_eq(table.get_node("%Seat1/Content/NameLabel").text, "Empty seat")
+
+
+func test_settled_and_closed_hands_never_keep_a_stale_acting_badge():
+	var table := _table()
+	for phase in ["settled", "void", "dealing"]:
+		var snapshot := _heads_up_snapshot()
+		snapshot["phase"] = phase
+		table.apply_snapshot(snapshot)
+		assert_eq(table.get_node("%Seat1/Content/TurnIndicator").text, "")
+	var closed := _heads_up_snapshot()
+	closed["phase"] = "betting"
+	closed["turn"] = {"state": "table_closed"}
+	table.apply_snapshot(closed)
+	assert_eq(table.get_node("%Seat1/Content/TurnIndicator").text, "")

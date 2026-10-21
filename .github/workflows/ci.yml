@@ -59,8 +59,13 @@ jobs:
         run: godot --headless --path . --import
       - name: Install Python deps
         run: python -m pip install -e .[dev]
-      - name: Run Godot sidecar integration test
-        run: pytest tests/test_godot_sidecar.py -v --timeout=$PYTEST_TIMEOUT
+      - name: Run Godot sidecar and desktop presentation integration
+        run: >-
+          pytest tests/test_godot_sidecar.py
+          tests/test_deal_presentation_integration.py
+          tests/test_lan_integration.py::test_godot_practice_menu_still_plays_ten_complete_bot_hands
+          tests/test_lan_integration.py::test_godot_host_join_controls_play_three_real_lan_hands
+          -v --timeout=$PYTEST_TIMEOUT
         env:
           GODOT_BIN: godot
 
