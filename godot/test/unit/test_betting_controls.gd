@@ -122,11 +122,37 @@ func test_preset_clamps_to_min_to():
 	assert_eq(controls.current_raise_amount(), 20)
 
 
-func test_all_in_preset_maxes_the_slider_and_does_not_emit():
+func test_all_in_submits_the_maximum_raise_once():
 	var controls := _controls()
-	controls.apply_legal(_legal({"min_to": 20, "max_to": 455}))
+	controls.apply_legal(_legal({"min_to": 100, "max_to": 1025}))
 	controls.get_node("%PresetAllIn").pressed.emit()
-	assert_eq(controls.current_raise_amount(), 455)
+	assert_eq(controls.current_raise_amount(), 1025)
+	assert_signal_emitted_with_parameters(controls, "raise_pressed", [1025])
+	assert_signal_emit_count(controls, "raise_pressed", 1)
+
+
+func test_all_in_still_submits_when_the_slider_is_already_at_maximum():
+	var controls := _controls()
+	controls.apply_legal(_legal({"min_to": 100, "max_to": 1025}))
+	controls.get_node("%RaiseSlider").value = 1025
+	controls.get_node("%PresetAllIn").pressed.emit()
+	assert_signal_emitted_with_parameters(controls, "raise_pressed", [1025])
+	assert_signal_emit_count(controls, "raise_pressed", 1)
+
+
+func test_all_in_is_disabled_when_raising_is_not_legal():
+	var controls := _controls()
+	controls.apply_legal(_legal({"can_raise": false}))
+	assert_true(controls.get_node("%PresetAllIn").disabled)
+	controls.apply_legal({})
+	assert_true(controls.get_node("%PresetAllIn").disabled)
+
+
+func test_pot_fraction_presets_only_size_the_raise():
+	var controls := _controls()
+	controls.apply_legal(_legal())
+	for preset in ["%PresetHalfPot", "%PresetTwoThirdsPot", "%PresetPot"]:
+		controls.get_node(preset).pressed.emit()
 	assert_signal_not_emitted(controls, "raise_pressed")
 
 

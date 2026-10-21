@@ -126,6 +126,23 @@ func test_raise_pressed_calls_sidecar_raise_to_with_amount():
 	assert_eq(fake.calls, [["raise_to", 120]])
 
 
+func test_one_all_in_click_sends_one_maximum_raise_to_the_sidecar():
+	var main := _main()
+	var fake: FakeSidecar = FakeSidecarScript.new()
+	main._sidecar = fake
+	var snapshot := _heads_up_snapshot()
+	snapshot["you"]["legal"] = {
+		"to_call": 25, "can_check": false, "can_raise": true,
+		"min_to": 100, "max_to": 1025, "pot": 75, "your_bet": 25,
+	}
+	main._on_snapshot_received(snapshot)
+	var controls := main.get_node("%BettingControls")
+	controls.get_node("%PresetAllIn").pressed.emit()
+	assert_eq(fake.calls, [["raise_to", 1025]],
+		"All In must submit without a separate Raise click")
+	assert_eq(controls.current_raise_amount(), 1025)
+
+
 func test_snapshot_fans_out_turn_state_to_next_hand_control():
 	var main := _main()
 	var snapshot := _heads_up_snapshot()
