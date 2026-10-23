@@ -11,6 +11,8 @@ var _awaiting := false
 var _reply_seen := false
 var _pending := ""
 var _role := ""
+var _network := "lan"
+var _network_checks := 0
 var _target_hands := 3
 var _deadline := 0
 var _error := ""
@@ -58,6 +60,10 @@ func _initialize() -> void:
 		return
 	_config = parsed
 	_role = str(_config.get("role", ""))
+	_network = str(_config.get("network", "lan"))
+	if _network not in ["lan", "internet"]:
+		_fail("Paired test network must be lan or internet")
+		return
 	if _role not in ["host", "join"] or str(_config.get("report_path", "")).is_empty():
 		_fail("LAN test role or report path is missing")
 		return
@@ -134,7 +140,9 @@ func _step() -> void:
 	if not _selected and mode == "menu":
 		_lobby().get_node("%NicknameInput").text = str(_config.get("nickname", "LAN Player"))
 		if _role == "host":
-			_selected = _press(_lobby().get_node("%HostLanButton"), "host_lan")
+			var button := "%HostInternetButton" if _network == "internet" else "%HostLanButton"
+			var command := "host_internet" if _network == "internet" else "host_lan"
+			_selected = _press(_lobby().get_node(button), command)
 		else:
 			var invite_path := str(_config.get("invite_read_path", ""))
 			if not FileAccess.file_exists(invite_path):
@@ -142,6 +150,11 @@ func _step() -> void:
 			_lobby().get_node("%JoinInviteInput").text = FileAccess.get_file_as_string(invite_path).strip_edges()
 			_selected = _press(_lobby().get_node("%JoinLanButton"), "join_lan")
 		return
+	if state in ["lobby", "playing"]:
+		if str(metadata.get("network", "lan")) != _network:
+			_fail("The table network differs from the paired test configuration")
+			return
+		_network_checks += 1
 	if _role == "host" and not _invite_written:
 		var invite := str(_lobby().get_node("%HostInviteText").text)
 		if not invite.is_empty():
@@ -201,7 +214,9 @@ func _step() -> void:
 
 
 func _complete() -> void:
-	if _face_up_checks == 0 or _opponent_hidden_checks == 0 or _roster_names.size() != _expected_players:
+	if _network_checks == 0:
+		_fail("The configured table network was not observed before play")
+	elif _face_up_checks == 0 or _opponent_hidden_checks == 0 or _roster_names.size() != _expected_players:
 		_fail("Private cards or the full multiplayer roster were not exercised")
 	elif int(_config.get("stall_action_hand", -1)) >= 0 and _stall_elapsed_ms < 29000:
 		_fail("The real 30 second action timeout was not observed")
@@ -350,7 +365,8 @@ func _fail(message: String) -> void:
 func _report() -> Dictionary:
 	return {
 		"ok": _error.is_empty() and (_settled.size() >= _target_hands if _expected_result == "hands" else _left_table if _expected_result == "left_table" else _host_loss_seen),
-		"error": _error, "role": _role, "hands_settled": _settled.size(),
+		"error": _error, "role": _role, "network": _network,
+		"network_checks": _network_checks, "hands_settled": _settled.size(),
 		"settled_stacks": _settled, "own_seat": _own_seat,
 		"face_up_checks": _face_up_checks, "opponent_hidden_checks": _opponent_hidden_checks,
 		"roster_names": _roster_names, "commands": _commands,

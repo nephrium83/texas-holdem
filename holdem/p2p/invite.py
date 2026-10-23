@@ -64,6 +64,8 @@ _NULL_IP   = b'\x00\x00\x00\x00'
 _NULL_PORT = b'\x00\x00'
 
 VERSION            = 2
+# Routing/UI hint only. Identity and capability admission are unchanged.
+FLAG_DIRECT_INTERNET = 0x01
 PAYLOAD_LEN        = 70      # V2
 PAYLOAD_LEN_V1     = 29      # legacy, refused
 HOST_PUBKEY_LEN    = 32
@@ -169,7 +171,8 @@ def generate_room_code(
         Raw 32 bytes of the host's Ed25519 public key, supplied by the
         host. Unlike V1 this is the WHOLE key, not a prefix.
     flags:
-        1-byte flags field (reserved; pass 0).
+        1-byte routing/UI flags. FLAG_DIRECT_INTERNET marks a mapped TCP
+        address; zero keeps the LAN default. It grants no authority.
     public_address, relay_address:
         (ip_str, port) pairs, or None.
     discovery_token:

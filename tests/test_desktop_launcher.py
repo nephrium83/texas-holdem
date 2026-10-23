@@ -131,6 +131,21 @@ def test_reliability_diagnostic_requires_three_players_and_observed_departure():
             launcher._validate_lan_summary(config, summary | changed)
 
 
+def test_internet_diagnostic_cannot_accept_unchecked_lan_evidence():
+    config = {"network": "internet", "target_hands": 10}
+    summary = {"ok": True, "error": "", "hands_settled": 10,
+               "network": "internet", "network_checks": 2}
+    launcher._validate_lan_summary(config, summary)
+    for changed in ({"network": "lan"}, {"network_checks": 0}):
+        with pytest.raises(RuntimeError, match="required outcome"):
+            launcher._validate_lan_summary(config, summary | changed)
+
+
+def test_connection_diagnostic_rejects_unknown_network_mode():
+    with pytest.raises(ValueError, match="LAN or Internet"):
+        launcher._validate_lan_summary({"network": "typo"}, {})
+
+
 class Game:
     pid = 424242
 

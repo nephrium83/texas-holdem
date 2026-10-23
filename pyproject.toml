@@ -17,7 +17,7 @@ classifiers = [
     "Operating System :: OS Independent",
     "Topic :: Games/Entertainment",
 ]
-dependencies = ["Pillow>=10.0", "cryptography>=41.0"]
+dependencies = ["Pillow>=10.0", "cryptography>=41.0", "miniupnpc==2.3.3"]
 
 [project.optional-dependencies]
 dev = [

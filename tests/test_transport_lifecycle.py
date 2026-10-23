@@ -187,6 +187,57 @@ def test_stop_without_start_is_harmless():
     assert not transport_threads()
 
 
+def test_stop_accepting_keeps_existing_peer_until_explicit_disconnect():
+    address = T.start_host(0)
+    port = int(address.rsplit(":", 1)[1])
+    loop = T.event_loop()
+    with socket.create_connection(("127.0.0.1", port), timeout=3):
+        wait_until(lambda: len(T.peer_ids()) == 1, timeout=3)
+        cid = T.peer_ids()[0]
+        T.stop_accepting()
+        wait_until(lambda: not _port_open(port), timeout=3)
+        assert T.event_loop() is loop and loop.is_running()
+        assert cid in T.peer_ids()
+        T.disconnect(cid)
+        wait_until(lambda: not T.peer_ids(), timeout=3)
+
+
+def test_late_disconnect_cannot_restart_a_stopped_transport():
+    T.start_host(0)
+    T.stop()
+    T.disconnect("late-mapping-callback")
+    T.stop_accepting()
+    assert T.event_loop() is None
+    assert not transport_threads()
+
+
+def test_queued_listener_close_only_closes_the_captured_server(monkeypatch):
+    callbacks = []
+
+    class Loop:
+        def is_closed(self):
+            return False
+
+        def call_soon_threadsafe(self, callback):
+            callbacks.append(callback)
+
+    class Server:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    old, replacement = Server(), Server()
+    with monkeypatch.context() as patch:
+        patch.setattr(T, "_loop", Loop())
+        patch.setattr(T, "_server", old)
+        T.stop_accepting()
+        patch.setattr(T, "_server", replacement)
+        callbacks[0]()
+        assert old.closed and not replacement.closed
+        assert T._server is replacement
+
+
 def test_start_after_stop_works():
     """Shutdown must not poison the module for a later session."""
     T.start_host(0)

@@ -90,6 +90,7 @@ HOST = frozenset({
     "holdem.p2p.identity", "holdem.p2p.device_secret",
     "holdem.p2p.tcp_transport", "holdem.native_crypto", "holdem.desktop_launcher",
     "holdem.desktop_table", "holdem.lan_session", "holdem.paced_bots",
+    "holdem.port_mapping",
 })
 
 FORBIDDEN_MODULES = ("tkinter", "socket", "asyncio")

@@ -72,15 +72,16 @@ find_peer(discovery_token: str, timeout: float = 5.0) -> str | None
 
 Internet play
 -------------
-Sprint 3A adds STUN hole-punching and relay fallback.  The host calls
-start_host() which automatically queries stun.l.google.com in the
-background.  The STUN result is embedded in the invite code so joiners
-can attempt a direct TCP connection; if that fails within 3 seconds they
-transparently fall back to the relay at 192.168.1.10:7878.
+The desktop host adapter can publish an owned TCP router mapping in its
+invite. This transport then uses the same signed direct TCP connections.
+The background STUN query discovers only a UDP mapping; it neither punches
+TCP holes nor proves Internet reachability. The legacy relay API below is
+not used by the desktop path and does not supply a deployed relay service.
 """
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import socket
@@ -706,23 +707,43 @@ async def _resolve_stun() -> None:
 
 
 def _get_lan_ip() -> str:
-    """Return the host's non-loopback IPv4 LAN address (H-1).
+    """Prefer the active IPv4 route; ignore disconnected/link-local adapters.
 
-    Tries getaddrinfo first for a real interface address; falls back to
-    gethostbyname; falls back to 127.0.0.1 so the app never crashes.
+    UDP connect only selects a local source address; no packet is sent to
+    the documentation address. Hostname enumeration can list an inactive
+    virtual adapter ahead of the Wi-Fi adapter used to reach the router.
     """
+    def usable(value):
+        try:
+            address = ipaddress.IPv4Address(value)
+            return not (address.is_loopback or address.is_link_local
+                        or address.is_unspecified or address.is_multicast)
+        except ValueError:
+            return False
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))
+            routed = probe.getsockname()[0]
+            if usable(routed):
+                return routed
+    except OSError:
+        pass
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None,
                                        socket.AF_INET):
             ip = info[4][0]
-            if not ip.startswith("127."):
+            if usable(ip):
                 return ip
     except OSError:
         pass
     try:
-        return socket.gethostbyname(socket.gethostname())
+        fallback = socket.gethostbyname(socket.gethostname())
+        if usable(fallback):
+            return fallback
     except OSError:
-        return "127.0.0.1"
+        pass
+    return "127.0.0.1"
 
 
 async def _start_server(port: int) -> str:
@@ -967,15 +988,44 @@ def _report_send_failure(fut) -> None:
             log.exception("transport: task-error callback failed")
 
 
+def stop_accepting() -> None:
+    """Close the current listener without joining the dispatch consumer.
+
+    A Session failure callback may run on that consumer. Full stop() joins
+    it, so the owner closes admission here and leaves full teardown to Leave.
+    Capture this particular server so a late callback cannot close a rehost.
+    """
+    loop, server = _loop, _server
+    if loop is None or loop.is_closed() or server is None:
+        return
+
+    def close_listener():
+        global _server
+        if _server is server:
+            _server = None
+        server.close()
+
+    try:
+        loop.call_soon_threadsafe(close_listener)
+    except RuntimeError:
+        pass  # Full stop already closed this listener.
+
+
 def disconnect(conn_id: str, *, reason: str = "disconnect") -> None:
     """Close one peer, preserving the local cause for opt-in callbacks."""
-    _ensure_loop()
+    # A late host/mapping callback must not resurrect a stopped transport.
+    loop = _loop
+    if loop is None or loop.is_closed():
+        return
     with _writers_lock:
         writer = _writers.get(conn_id)
         if writer is not None:
             _disconnect_reasons[conn_id] = reason
     if writer is not None:
-        _loop.call_soon_threadsafe(writer.close)
+        try:
+            loop.call_soon_threadsafe(writer.close)
+        except RuntimeError:
+            pass  # A concurrent stop already owns the writer's teardown.
 
 
 def stop(timeout: float = 5.0) -> None:

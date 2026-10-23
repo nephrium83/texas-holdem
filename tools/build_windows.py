@@ -56,7 +56,7 @@ def collect_licenses(destination, godot, libsodium, work):
     if not python_license.is_file():
         raise RuntimeError(f"Python license not found: {python_license}")
     shutil.copy2(python_license, destination / "Python-LICENSE.txt")
-    for package in ("cryptography", "cffi", "pycparser", "pyinstaller"):
+    for package in ("cryptography", "cffi", "pycparser", "pyinstaller", "miniupnpc"):
         distribution = importlib.metadata.distribution(package)
         package_dir = destination / package
         package_dir.mkdir()
@@ -172,16 +172,19 @@ def main(argv=None):
     (app / "README.txt").write_text(
         "Texas Hold'em - Windows preview\n\n"
         "Extract the entire ZIP, then double-click Poker.exe. Keep _internal beside it.\n"
-        "Play against local bots, or host/join a play-money game on your local network.\n"
+        "Play against local bots, or host/join a play-money game with friends.\n"
         "No Python or Godot installation is needed.\n\n"
-        "LAN: enter your name, choose Host LAN game and copy the invite.\n"
-        "Friends paste the invite, choose Join LAN game, then Ready.\n"
+        "Internet: enter your name, choose Host Internet game and copy the invite.\n"
+        "The host needs a compatible router with automatic port forwarding and public IPv4.\n"
+        "LAN: choose Host LAN game for friends on the same local network.\n"
+        "Friends paste either invite, choose Join game, then Ready.\n"
         "The host selects Start game once everyone is ready.\n"
         "Turns automatically check or fold after 30 seconds.\n"
         "After each hand, select Next hand or wait for its 30-second countdown.\n"
         "If a guest leaves, remaining players continue after their results agree.\n"
         "If the host leaves, the table closes. All players need this preview version.\n"
-        "Leave table returns to the menu. No reconnect or internet joining in this preview.\n\n"
+        "Leave table returns to the menu and releases the host's temporary port mapping.\n"
+        "No reconnect in this preview. Some networks cannot host a direct Internet game.\n\n"
         "Diagnostic check: Poker.exe --self-test\n"
         "Source: https://github.com/nephrium83/texas-holdem\n"
         "License notices are in licenses/.\n", encoding="utf-8",
