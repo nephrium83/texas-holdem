@@ -32,6 +32,11 @@ def finish(game):
 class FixedCards(random.Random):
     """Host-supplied test deck, without replacing poker rules or private state."""
 
+    def __new__(cls, first):
+        # Python 3.10's C constructor seeds before __init__; do not pass the
+        # scripted card list as its seed. __init__ supplies the integer seed.
+        return super().__new__(cls)
+
     def __init__(self, first):
         super().__init__(1)
         self.first = first

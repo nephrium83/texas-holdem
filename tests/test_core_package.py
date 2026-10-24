@@ -92,7 +92,6 @@ def test_installed_core_runs_outside_checkout_without_host_dependencies(core_whe
         cwd=work, env=_package_env(),
     )
     script = r'''
-import importlib.metadata
 import importlib.util
 import json
 from pathlib import Path
@@ -102,6 +101,9 @@ import sys
 for dependency in ("PIL", "cryptography", "miniupnpc"):
     assert importlib.util.find_spec(dependency) is None, dependency
 
+forbidden = {"tkinter", "PIL", "cryptography", "socket", "asyncio"}
+assert not (forbidden & sys.modules.keys()), "probe setup loaded host modules"
+
 import holdem
 from holdem import embedding
 from holdem.embedding import PlayerSeat, PokerTable, TableConfig
@@ -109,7 +111,6 @@ from holdem.embedding import PlayerSeat, PokerTable, TableConfig
 installed = Path(holdem.__file__).resolve()
 assert installed.is_relative_to(Path(sys.prefix).resolve()), installed
 assert Path(embedding.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-assert importlib.metadata.version("holdem") == holdem.__version__
 players = [PlayerSeat("guest", "RPG guest", 1000),
            PlayerSeat("regular", "Tavern regular", 1000)]
 table = PokerTable("installed-tavern-table", players, rng=random.Random(7),
@@ -136,7 +137,13 @@ assert receipt["final_chips"] == settlement["final_chips"]
 assert receipt["result_id"] == "installed-tavern-table/close"
 receipt["final_chips"]["guest"] = -1
 assert table.close() == repeated
-assert not ({"tkinter", "PIL", "cryptography", "socket", "asyncio"} & sys.modules.keys())
+assert not (forbidden & sys.modules.keys()), sorted(forbidden & sys.modules.keys())
+
+# Metadata inspection imports email.utils and socket on Python 3.10/3.12.
+# Inspect distribution metadata only after checking the installed core's
+# import and runtime behavior, so the probe cannot contaminate that check.
+import importlib.metadata
+assert importlib.metadata.version("holdem") == holdem.__version__
 installed_distributions = sorted(distribution.metadata["Name"].lower()
                                  for distribution in importlib.metadata.distributions())
 assert not ({"pillow", "cryptography", "miniupnpc"} & set(installed_distributions))
