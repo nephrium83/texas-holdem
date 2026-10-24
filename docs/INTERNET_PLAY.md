@@ -42,6 +42,14 @@ library with no cancellable request API: startup and Leave have bounded waits,
 and at most two mapping workers can remain while native calls finish. A late
 completed operation performs owned cleanup and does not renew after cancellation.
 
+Read-only checks must establish that a port is free before creating a mapping.
+Some routers return an empty reply for a missing specific entry. That reply is
+never treated as proof of vacancy: the adapter instead validates a complete
+mapping-table enumeration ending in the router's explicit end-of-list response.
+Malformed, duplicate, incomplete or timed-out listings are refused. Enumeration
+permits at most 64 entries and uses a six-second checked deadline; a read already
+in progress can finish after that deadline within its remaining socket timeout.
+
 This path does not implement ICE, TURN, TCP hole punching or a general solution
 for every NAT type. UDP STUN discovery alone does not establish that a TCP game
 listener is reachable from the Internet. This is a connectivity feature for the
@@ -62,3 +70,10 @@ setup and result evidence before claiming Internet play is verified.
 Live router changes during development follow the workspace owner's explicit
 router-change approval rule. This is an operator constraint, not an additional
 dialog in the game.
+
+For a bounded operator trial, `tools/check_direct_host.py` requires an explicit
+`--simulate-router` or `--allow-router-mapping` mode and a new `--run-dir`. The
+optional `--mapping-details` flag records operation counts and an exact-port
+read-only cleanup check locally. It never adds or deletes a rule independently
+of the normal host adapter. A pending or failed cleanup lookup remains unknown;
+closed local sockets alone do not establish that the router rule was removed.

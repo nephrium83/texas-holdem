@@ -37,6 +37,8 @@ _SERVICE_TYPES = (
 )
 _SOAP_TIMEOUT_SECONDS = 3.0
 _SOAP_MAX_BYTES = 65536
+_LOOKUP_TIMEOUT_SECONDS = 6.0
+_ENUMERATION_MAX_ENTRIES = 64
 
 
 class MappingError(RuntimeError):
@@ -65,19 +67,20 @@ def _open_soap(request: Request) -> Any:
     # Router traffic must not go to an environment-configured Internet proxy or
     # follow an SSDP responder's redirect to an unrelated endpoint.
     return build_opener(ProxyHandler({}), _NoRedirect()).open(
-        request, timeout=_SOAP_TIMEOUT_SECONDS
+        request, timeout=getattr(request, "_poker_timeout", _SOAP_TIMEOUT_SECONDS)
     )
 
 
 class _StrictLookup:
     """Read-only lookup preserving UPnP error codes the native binding discards.
 
-    miniupnpc 2.3.3 returns None for *every* GetSpecific lookup failure.  Only
-    fault 714 establishes vacancy, so using that None before AddPortMapping is
-    unsafe.  Discover/select/add/delete still use the maintained native library.
+    miniupnpc 2.3.3 returns None for *every* GetSpecific lookup failure. Vacancy
+    requires explicit fault 714, or a complete validated generic enumeration
+    ending in fault 713 when a router returns an empty specific response.
+    Discover/select/add/delete still use the maintained native library.
     """
 
-    def __init__(self, control_url: str) -> None:
+    def __init__(self, control_url: str, *, clock: Callable[[], float] = time.monotonic) -> None:
         try:
             if not isinstance(control_url, str) or any(ord(c) < 32 for c in control_url):
                 raise ValueError("invalid control endpoint")
@@ -96,62 +99,89 @@ class _StrictLookup:
             raise MappingError("The router returned an unsupported control URL.") from exc
         self._control_url = control_url
         self._service: str | None = None
+        self._clock = clock
 
     def lookup(self, port: int) -> tuple[str, int, str, bool, int] | None:
+        deadline = self._clock() + _LOOKUP_TIMEOUT_SECONDS
         for service in (self._service,) if self._service else _SERVICE_TYPES:
             assert service is not None
             try:
-                result = self._query(port, service)
+                result = self._query(port, service, deadline)
             except _UnknownService:
                 continue
             self._service = service
             return result
         raise MappingError("The router does not support verified TCP mapping lookup.")
 
-    def _query(self, port: int, service: str) -> tuple[str, int, str, bool, int] | None:
+    def _check_deadline(self, deadline: float) -> None:
+        if self._clock() >= deadline:
+            raise MappingError("The router mapping lookup exceeded its time limit.")
+
+    def _request(self, action: str, fields: str, service: str, deadline: float) -> ET.Element:
+        self._check_deadline(deadline)
         body = (
             '<?xml version="1.0"?>'
             f'<s:Envelope xmlns:s="{_SOAP_NAMESPACE}" '
             's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
-            f'<s:Body><u:GetSpecificPortMappingEntry xmlns:u="{service}">'
-            '<NewRemoteHost></NewRemoteHost>'
-            f'<NewExternalPort>{port}</NewExternalPort>'
-            '<NewProtocol>TCP</NewProtocol>'
-            '</u:GetSpecificPortMappingEntry></s:Body></s:Envelope>'
+            f'<s:Body><u:{action} xmlns:u="{service}">'
+            f'{fields}</u:{action}></s:Body></s:Envelope>'
         ).encode("ascii")
         request = Request(self._control_url, body, {
             "Content-Type": 'text/xml; charset="utf-8"',
-            "SOAPAction": f'"{service}#GetSpecificPortMappingEntry"',
+            "SOAPAction": f'"{service}#{action}"',
         }, method="POST")
+        request._poker_timeout = min(_SOAP_TIMEOUT_SECONDS, deadline - self._clock())
         try:
             try:
                 response = _open_soap(request)
             except HTTPError as exc:
                 response = exc  # SOAP faults normally use HTTP 500.
             with response:
-                data = response.read(_SOAP_MAX_BYTES + 1)
+                chunks = []
+                size = 0
+                while True:
+                    self._check_deadline(deadline)
+                    chunk = response.read1(min(4096, _SOAP_MAX_BYTES + 1 - size))
+                    self._check_deadline(deadline)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    size += len(chunk)
+                    if size > _SOAP_MAX_BYTES:
+                        raise MappingError("The router returned an invalid lookup response.")
+                data = b"".join(chunks)
             if (
                 len(data) > _SOAP_MAX_BYTES or b"\0" in data
                 or b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper()
             ):
                 raise MappingError("The router returned an invalid lookup response.")
             envelope = ET.fromstring(data)
+            self._check_deadline(deadline)
         except MappingError:
             raise
         except Exception as exc:
             raise MappingError("The router mapping lookup failed; no mapping was changed.") from exc
-        soap_body = envelope.find(f"{{{_SOAP_NAMESPACE}}}Body")
-        if envelope.tag != f"{{{_SOAP_NAMESPACE}}}Envelope" or soap_body is None:
+        soap_bodies = envelope.findall(f"{{{_SOAP_NAMESPACE}}}Body")
+        if envelope.tag != f"{{{_SOAP_NAMESPACE}}}Envelope" or len(soap_bodies) != 1:
             raise MappingError("The router returned an invalid lookup response.")
+        soap_body = soap_bodies[0]
+        if len(soap_body) > 1 or (soap_body.text or "").strip():
+            raise MappingError("The router returned an invalid lookup response.")
+        return soap_body
+
+    @staticmethod
+    def _fault_code(soap_body: ET.Element) -> str | None:
         fault = soap_body.find(f"{{{_SOAP_NAMESPACE}}}Fault")
         if fault is not None:
-            code = fault.findtext(f".//{{{_CONTROL_NAMESPACE}}}errorCode")
-            if code == "714":
-                return None
-            if code == "401":
-                raise _UnknownService
-            raise MappingError("The router could not verify whether the TCP port is available.")
-        result = soap_body.find(f"{{{service}}}GetSpecificPortMappingEntryResponse")
+            codes = fault.findall(f".//{{{_CONTROL_NAMESPACE}}}errorCode")
+            if len(codes) != 1 or not codes[0].text:
+                raise MappingError("The router returned an invalid lookup fault.")
+            return codes[0].text
+        return None
+
+    @staticmethod
+    def _fields(soap_body: ET.Element, action: str, service: str) -> dict[str, str]:
+        result = soap_body.find(f"{{{service}}}{action}Response")
         if result is None:
             raise MappingError("The router returned an invalid lookup response.")
         values: dict[str, str] = {}
@@ -160,6 +190,10 @@ class _StrictLookup:
             if name in values or len(child):
                 raise MappingError("The router returned an invalid port mapping.")
             values[name] = child.text or ""
+        return values
+
+    @staticmethod
+    def _mapping_fields(values: dict[str, str]) -> tuple[str, int, str, bool, int]:
         try:
             port_text = values["NewInternalPort"]
             lease_text = values["NewLeaseDuration"]
@@ -168,13 +202,78 @@ class _StrictLookup:
                 raise ValueError("invalid numeric field")
             if enabled_text not in ("0", "1", "true", "false"):
                 raise ValueError("invalid enabled flag")
-            return (
-                values["NewInternalClient"], int(port_text),
+            value = (
+                _ipv4(values["NewInternalClient"]), int(port_text),
                 values["NewPortMappingDescription"], enabled_text in ("1", "true"),
                 int(lease_text),
             )
+            _entry(value)
+            if value[-1] > 4294967295:
+                raise ValueError("invalid lease duration")
+            return value
         except (KeyError, ValueError) as exc:
             raise MappingError("The router returned an invalid port mapping.") from exc
+
+    def _query(self, port: int, service: str, deadline: float) -> tuple[str, int, str, bool, int] | None:
+        soap_body = self._request(
+            "GetSpecificPortMappingEntry",
+            '<NewRemoteHost></NewRemoteHost>'
+            f'<NewExternalPort>{port}</NewExternalPort><NewProtocol>TCP</NewProtocol>',
+            service, deadline,
+        )
+        code = self._fault_code(soap_body)
+        if code == "714":
+            return None
+        if code == "401":
+            raise _UnknownService
+        if code is not None:
+            raise MappingError("The router could not verify whether the TCP port is available.")
+        if not len(soap_body):
+            # Some routers answer absent GetSpecific keys with an empty Body.
+            # This is only a compatibility trigger, never proof of vacancy.
+            return self._enumerate(port, service, deadline)
+        return self._mapping_fields(self._fields(soap_body, "GetSpecificPortMappingEntry", service))
+
+    def _enumerate(self, port: int, service: str, deadline: float) -> tuple[str, int, str, bool, int] | None:
+        seen: set[tuple[str, int, str]] = set()
+        match = None
+        for index in range(_ENUMERATION_MAX_ENTRIES + 1):
+            soap_body = self._request(
+                "GetGenericPortMappingEntry", f"<NewPortMappingIndex>{index}</NewPortMappingIndex>",
+                service, deadline,
+            )
+            code = self._fault_code(soap_body)
+            if code == "713":
+                return match
+            if code is not None:
+                raise MappingError("The router could not complete its port mapping enumeration.")
+            if index == _ENUMERATION_MAX_ENTRIES:
+                raise MappingError("The router mapping enumeration exceeded its entry limit.")
+            values = self._fields(soap_body, "GetGenericPortMappingEntry", service)
+            if set(values) != {
+                "NewRemoteHost", "NewExternalPort", "NewProtocol", "NewInternalPort",
+                "NewInternalClient", "NewEnabled", "NewPortMappingDescription", "NewLeaseDuration",
+            }:
+                raise MappingError("The router returned an invalid generic port mapping.")
+            entry = self._mapping_fields(values)
+            external_text = values["NewExternalPort"]
+            protocol = values["NewProtocol"]
+            remote_host = values["NewRemoteHost"]
+            if remote_host:
+                remote_host = _ipv4(remote_host)
+            if (
+                not external_text.isascii() or not external_text.isdecimal()
+                or len(external_text) > 5
+                or not 1 <= int(external_text) <= 65535 or protocol not in ("TCP", "UDP")
+            ):
+                raise MappingError("The router returned an invalid generic port mapping key.")
+            key = remote_host, int(external_text), protocol
+            if key in seen:
+                raise MappingError("The router repeated a port mapping during enumeration.")
+            seen.add(key)
+            if key == ("", port, "TCP"):
+                match = entry
+        raise MappingError("The router could not complete its port mapping enumeration.")
 
 
 class _MiniupnpcBackend:
@@ -224,7 +323,10 @@ def _ipv4(value: Any, *, public: bool = False) -> str:
         address = ipaddress.IPv4Address(value)
     except (ipaddress.AddressValueError, TypeError) as exc:
         raise MappingError("The router did not report a valid IPv4 address.") from exc
-    if address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local:
+    if (
+        address.is_unspecified or address.is_loopback or address.is_multicast
+        or address.is_link_local or address.is_reserved
+    ):
         raise MappingError("A usable network IPv4 address is required.")
     if public and (not address.is_global or address.is_reserved):
         raise MappingError(

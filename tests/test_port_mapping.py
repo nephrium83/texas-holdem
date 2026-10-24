@@ -525,6 +525,188 @@ def soap_entry(**overrides):
             f'{children}</u:GetSpecificPortMappingEntryResponse></s:Body></s:Envelope>').encode()
 
 
+def soap_empty_body():
+    return f'<s:Envelope xmlns:s="{M._SOAP_NAMESPACE}"><s:Body/></s:Envelope>'.encode()
+
+
+def soap_generic(**overrides):
+    fields = dict(NewRemoteHost="", NewExternalPort="50000", NewProtocol="TCP",
+                  NewInternalClient=LOCAL, NewInternalPort=str(PORT),
+                  NewPortMappingDescription="Other app", NewEnabled="1", NewLeaseDuration="0")
+    fields.update(overrides)
+    children = "".join(f"<{key}>{value}</{key}>" for key, value in fields.items())
+    return (f'<s:Envelope xmlns:s="{M._SOAP_NAMESPACE}"><s:Body>'
+            f'<u:GetGenericPortMappingEntryResponse xmlns:u="{M._SERVICE_TYPES[0]}">'
+            f'{children}</u:GetGenericPortMappingEntryResponse></s:Body></s:Envelope>').encode()
+
+
+def canned_soap(monkeypatch, responses):
+    replies = iter(responses)
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return io.BytesIO(next(replies))
+
+    monkeypatch.setattr(M, "_open_soap", respond)
+    return requests
+
+
+def test_empty_specific_uses_complete_two_entry_enumeration_before_vacancy(monkeypatch):
+    calls = canned_soap(monkeypatch, [
+        soap_empty_body(), soap_generic(),
+        soap_generic(NewExternalPort="50001", NewProtocol="UDP", NewInternalClient="192.168.1.33"),
+        soap_fault(713),
+    ])
+    lookup = M._StrictLookup("http://192.168.1.1/control")
+    assert lookup.lookup(55000) is None
+    assert len(calls) == 4
+    assert "GetSpecificPortMappingEntry" in calls[0].get_header("Soapaction")
+    for index, request in enumerate(calls[1:]):
+        assert "GetGenericPortMappingEntry" in request.get_header("Soapaction")
+        assert f"<NewPortMappingIndex>{index}</NewPortMappingIndex>".encode() in request.data
+
+
+def test_empty_specific_enumeration_returns_exact_matching_owned_entry(monkeypatch):
+    calls = canned_soap(monkeypatch, [
+        soap_empty_body(),
+        soap_generic(NewExternalPort="55000", NewRemoteHost="8.8.8.8"),
+        soap_generic(NewExternalPort="55000", NewProtocol="UDP"),
+        soap_generic(NewExternalPort="55000", NewPortMappingDescription="Poker marker", NewLeaseDuration="299"),
+        soap_fault(713),
+    ])
+    assert M._StrictLookup("http://192.168.1.1/control").lookup(55000) == (
+        LOCAL, PORT, "Poker marker", True, 299,
+    )
+    assert len(calls) == 5
+
+
+@pytest.mark.parametrize("terminal", [soap_empty_body(), soap_fault(714), soap_fault(401),
+    soap_fault(501), b"not XML"], ids=["empty-generic", "714", "401", "unknown-fault", "malformed"])
+def test_generic_scan_needs_explicit_713_terminator(terminal, monkeypatch):
+    calls = canned_soap(monkeypatch, [soap_empty_body(), soap_generic(), terminal])
+    with pytest.raises(M.MappingError):
+        M._StrictLookup("http://192.168.1.1/control").lookup(55000)
+    assert len(calls) == 3
+
+
+def test_duplicate_generic_key_rejected_even_after_matching_entry(monkeypatch):
+    calls = canned_soap(monkeypatch, [
+        soap_empty_body(), soap_generic(NewExternalPort="55000"),
+        soap_generic(NewExternalPort="55000", NewPortMappingDescription="Other owner"), soap_fault(713),
+    ])
+    with pytest.raises(M.MappingError, match="repeated"):
+        M._StrictLookup("http://192.168.1.1/control").lookup(55000)
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("overrides", [
+    dict(NewExternalPort="0"), dict(NewExternalPort="65536"), dict(NewExternalPort="1.5"),
+    dict(NewProtocol="SCTP"), dict(NewRemoteHost="host.example"),
+    dict(NewRemoteHost="224.0.0.1"), dict(NewInternalClient="host.example"),
+    dict(NewInternalClient="127.0.0.1"), dict(NewInternalPort="0"),
+    dict(NewEnabled="maybe"), dict(NewLeaseDuration="-1"),
+    dict(NewLeaseDuration="4294967296"), dict(UnexpectedField="extra"),
+    dict(NewInternalClient="255.255.255.255"), dict(NewExternalPort="9" * 5000),
+], ids=["zero-external", "large-external", "fractional-external", "protocol", "remote-hostname",
+        "remote-multicast", "target-hostname", "target-loopback", "zero-internal", "enabled",
+        "negative-lease", "large-lease", "extra-field", "target-broadcast", "oversized-external-integer"])
+def test_every_generic_entry_key_and_target_must_be_valid(overrides, monkeypatch):
+    canned_soap(monkeypatch, [soap_empty_body(), soap_generic(**overrides), soap_fault(713)])
+    with pytest.raises(M.MappingError):
+        M._StrictLookup("http://192.168.1.1/control").lookup(55000)
+
+
+def test_generic_entry_limit_requires_terminator_within_cap(monkeypatch):
+    monkeypatch.setattr(M, "_ENUMERATION_MAX_ENTRIES", 2)
+    calls = canned_soap(monkeypatch, [
+        soap_empty_body(), soap_generic(), soap_generic(NewExternalPort="50001"),
+        soap_generic(NewExternalPort="50002"), soap_fault(713),
+    ])
+    with pytest.raises(M.MappingError, match="entry limit"):
+        M._StrictLookup("http://192.168.1.1/control").lookup(55000)
+    assert len(calls) == 4
+
+
+def test_generic_missing_and_duplicate_fields_are_rejected(monkeypatch):
+    valid = soap_generic()
+    for malformed in (
+        valid.replace(b"<NewProtocol>TCP</NewProtocol>", b""),
+        valid.replace(b"<NewProtocol>TCP</NewProtocol>", b"<NewProtocol>TCP</NewProtocol>" * 2),
+    ):
+        canned_soap(monkeypatch, [soap_empty_body(), malformed, soap_fault(713)])
+        with pytest.raises(M.MappingError):
+            M._StrictLookup("http://192.168.1.1/control").lookup(55000)
+
+
+def test_generic_scan_accepts_exact_cap_followed_by_explicit_713(monkeypatch):
+    monkeypatch.setattr(M, "_ENUMERATION_MAX_ENTRIES", 2)
+    canned_soap(monkeypatch, [
+        soap_empty_body(), soap_generic(), soap_generic(NewExternalPort="50001"), soap_fault(713),
+    ])
+    assert M._StrictLookup("http://192.168.1.1/control").lookup(55000) is None
+
+
+def test_generic_enumeration_whole_lookup_deadline_is_enforced(monkeypatch):
+    now = [0.0]
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return io.BytesIO(soap_empty_body())
+        now[0] = 6.0
+        return io.BytesIO(soap_fault(713))
+
+    monkeypatch.setattr(M, "_open_soap", respond)
+    lookup = M._StrictLookup("http://192.168.1.1/control", clock=lambda: now[0])
+    with pytest.raises(M.MappingError, match="time limit"):
+        lookup.lookup(55000)
+    assert len(calls) == 2
+
+
+def test_generic_calls_use_remaining_lookup_budget(monkeypatch):
+    now = [0.0]
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            now[0] = 4.5
+            return io.BytesIO(soap_empty_body())
+        return io.BytesIO(soap_fault(713))
+
+    monkeypatch.setattr(M, "_open_soap", respond)
+    lookup = M._StrictLookup("http://192.168.1.1/control", clock=lambda: now[0])
+    assert lookup.lookup(55000) is None
+    assert [request._poker_timeout for request in calls] == [3.0, 1.5]
+
+
+def test_generic_transport_timeout_is_not_vacancy(monkeypatch):
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return io.BytesIO(soap_empty_body())
+        raise TimeoutError("fake router timeout")
+
+    monkeypatch.setattr(M, "_open_soap", respond)
+    with pytest.raises(M.MappingError, match="lookup failed"):
+        M._StrictLookup("http://192.168.1.1/control").lookup(55000)
+    assert len(calls) == 2
+
+
+def test_unproven_enumeration_never_reaches_add_mapping(monkeypatch, leases):
+    canned_soap(monkeypatch, [soap_empty_body(), soap_generic(), soap_empty_body()])
+    lookup = M._StrictLookup("http://192.168.1.1/control")
+    router = Router()
+    router.getspecificportmapping = lambda port, *_: lookup.lookup(port)
+    with pytest.raises(M.MappingError):
+        open_fake(router, leases)
+    assert not router.adds and not router.deletes
+
+
 def test_strict_lookup_only_explicit_714_means_vacancy(monkeypatch):
     requests = []
     monkeypatch.setattr(M, "_open_soap", lambda req: (requests.append(req), io.BytesIO(soap_fault(714)))[1])
