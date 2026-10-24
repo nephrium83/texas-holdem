@@ -120,10 +120,10 @@ async def get_public_address(local_port: int = 0) -> tuple[str, int]:
     Parameters
     ----------
     local_port:
-        The local UDP port to bind (0 lets the OS pick).  When called after
-        ``transport.start_host()``, pass the TCP listen port so the STUN
-        response reflects the same NAT mapping the TCP server uses — this
-        is only a hint; most NATs will use a different port for UDP anyway.
+        The local UDP port to bind (0 lets the OS pick). The returned
+        mapping belongs to this UDP socket, not a TCP listener using the
+        same port number. Discovery alone does not establish connectivity;
+        this helper closes its UDP socket before returning.
 
     Raises
     ------

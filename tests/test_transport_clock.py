@@ -88,6 +88,9 @@ def test_transport_clock_reason_preserves_legacy_callback_contract(
 def test_explicit_disconnect_reason_is_forwarded_and_reset_clears_subscribers(
         isolated_transport, monkeypatch):
     class Loop:
+        def is_closed(self):
+            return False
+
         def call_soon_threadsafe(self, fn):
             fn()
 

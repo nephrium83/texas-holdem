@@ -192,7 +192,7 @@ def test_desktop_shutdown_cannot_be_reopened_by_late_local_commands():
     table.apply_command("local_game", {"nickname": "Alice"})
     table.close()
     table.close()
-    for command in ("local_game", "host_lan", "join_lan", "leave_table"):
+    for command in ("local_game", "host_lan", "host_internet", "join_lan", "leave_table"):
         with pytest.raises(ValueError, match="application is closing"):
             table.apply_command(command, {"nickname": "Alice"})
     assert table.snapshot()["lobby"]["mode"] == "menu"

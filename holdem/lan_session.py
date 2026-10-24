@@ -1,4 +1,4 @@
-"""One local player's authenticated LAN table, independent of the renderer.
+"""One local player's authenticated direct table, independent of the renderer.
 
 The transport is process scoped, so a sidecar owns one table at a time.
 Leaving tears it down before the same sidecar can host or join another room.
@@ -53,7 +53,8 @@ class LanTable:
     """
 
     def __init__(self, nickname: str, settings: dict,
-                 on_change: Callable[[], None] | None = None):
+                 on_change: Callable[[], None] | None = None, *,
+                 mapping_factory=None):
         if not isinstance(nickname, str) or not nickname.strip():
             raise ValueError("Enter a player name")
         if len(nickname) > 40:
@@ -66,6 +67,9 @@ class LanTable:
         self._generation = 0
         self._session: Session | None = None
         self._mode = "host"
+        self._network = "lan"
+        self._mapping_factory = mapping_factory
+        self._mapping = None
         self._state = "closed"
         self._invite = ""
         self._error: str | None = None
@@ -143,13 +147,41 @@ class LanTable:
             self._invite = ""
             watchdog, self._startup_watchdog = self._startup_watchdog, None
             ticker_stop = self._ticker_stop
+            mapping, self._mapping = self._mapping, None
             if session.terminal_state != Session.ENDED_NORMAL:
                 self._error = str(session.terminal_reason or "Table closed")[:512]
         if ticker_stop is not None:
             ticker_stop.set()
         if watchdog is not None:
             watchdog.cancel()
+        if mapping is not None:
+            # Mapping callbacks never hold the mapper's backend lock. A
+            # renewal failure can terminate here on that worker itself.
+            self._close_mapping(mapping)
+            transport.stop_accepting()
+            # Close the existing peer sockets too: deleting a forward need
+            # not close established NAT/TCP flows. Guests must see host loss.
+            for player in session.player_list():
+                if player.conn_id != session.local_conn_id:
+                    transport.disconnect(player.conn_id)
         self._notify()
+
+    @staticmethod
+    def _close_mapping(mapping) -> None:
+        try:
+            mapping.close()
+        except Exception:
+            _log.exception("Internet mapping cleanup failed")
+
+    def _mapping_lost(self, generation: int, session: Session, _reason: str) -> None:
+        with session.read_state():
+            if not self._current(generation, session):
+                return
+            session.terminate(
+                Session.HOST_LOST,
+                "The host's Internet connection could not be kept open. "
+                "Leave the table and host a new game.",
+            )
 
     def _arm_startup_watchdog(self, generation: int, session: Session) -> None:
         watchdog = threading.Timer(
@@ -263,10 +295,11 @@ class LanTable:
         transport.on_disconnect(disconnected, with_reason=True)
         return generation, session
 
-    def _begin(self, mode: str) -> None:
+    def _begin(self, mode: str, *, network: str = "lan") -> None:
         self._close(notify=False)
         with self._lock:
             self._mode = mode
+            self._network = network
             self._state = "connecting"
             self._error = None
         self._notify()
@@ -278,11 +311,11 @@ class LanTable:
             self._error = message
         self._notify()
 
-    def host(self) -> None:
-        """Open a LAN listener and expose a fresh address-bearing V2 invite."""
+    def host(self, *, internet: bool = False) -> None:
+        """Host directly over LAN or a temporary owned Internet TCP mapping."""
         with self._operations:
             try:
-                self._begin("host")
+                self._begin("host", network="internet" if internet else "lan")
                 local = identity.load_or_create()
                 first_code = invite.generate_room_code(local.public_key_bytes())
                 parsed = invite.parse_room_code(first_code)
@@ -310,23 +343,51 @@ class LanTable:
                 transport.on_message(route_host)
                 address = transport.start_host(0)
                 ip, port = address.rsplit(":", 1)
-                code = invite.generate_room_code(
-                    local.public_key_bytes(), public_address=(ip, int(port)),
-                    discovery_token=parsed["discovery_token"],
-                    admission_secret=parsed["admission_secret"],
-                )
-                session.local_conn_id = local.peer_id()
-                session.add_local_player(
-                    session.local_conn_id,
-                    public_key=local.public_key_bytes(),
-                    x25519_public_key=local.x25519_public_key_bytes(),
-                )
-                with self._lock:
-                    self._invite = code
+                advertised = (ip, int(port))
+                if internet:
+                    from holdem.port_mapping import open_tcp_mapping
+                    factory = self._mapping_factory or open_tcp_mapping
+                    mapping = factory(ip, int(port), on_lost=lambda reason: (
+                        self._mapping_lost(generation, session, reason)))
+                    with self._lock:
+                        usable = (generation == self._generation
+                                  and self._session is session
+                                  and self._state != "closed")
+                        if usable:
+                            self._mapping = mapping
+                    if not usable:
+                        self._close_mapping(mapping)
+                        raise RuntimeError("Internet hosting stopped during setup")
+                    advertised = mapping.external_address
+                with session.read_state():
+                    if session.terminal_state is not None:
+                        raise RuntimeError("Hosting stopped during setup")
+                    code = invite.generate_room_code(
+                        local.public_key_bytes(), public_address=advertised,
+                        flags=invite.FLAG_DIRECT_INTERNET if internet else 0,
+                        discovery_token=parsed["discovery_token"],
+                        admission_secret=parsed["admission_secret"],
+                    )
+                    session.local_conn_id = local.peer_id()
+                    session.add_local_player(
+                        session.local_conn_id,
+                        public_key=local.public_key_bytes(),
+                        x25519_public_key=local.x25519_public_key_bytes(),
+                    )
+                    with self._lock:
+                        self._invite = code
                 self._start_ticker(generation, session)
                 self._notify()
-            except Exception:
-                self._failed("Could not host a LAN game. Check your network and try again.")
+            except Exception as exc:
+                message = (
+                    "Could not open a direct Internet game. Your router must allow "
+                    "temporary automatic port forwarding and have a public IPv4 address. "
+                    "Try another host, or choose Host LAN game on the same network."
+                    if internet else
+                    "Could not host a LAN game. Check your network and try again.")
+                self._failed(message)
+                if internet:
+                    raise RuntimeError(message) from exc
                 raise
 
     def join(self, code: str) -> None:
@@ -335,10 +396,11 @@ class LanTable:
         # in particular, before any socket can be opened.
         parsed = invite.parse_room_code(code)
         if not parsed["public_ip"] or not parsed["public_port"]:
-            raise ValueError("This invite has no LAN address. Ask the host for a new invite.")
+            raise ValueError("This invite has no connection address. Ask the host for a new invite.")
         with self._operations:
             try:
-                self._begin("join")
+                self._begin("join", network="internet" if (
+                    parsed["flags"] & invite.FLAG_DIRECT_INTERNET) else "lan")
                 local = identity.load_or_create()
                 pin = joiner_admission_from_invite(
                     parsed, joiner_pubkey=local.public_key_bytes())
@@ -368,7 +430,8 @@ class LanTable:
                 self._start_ticker(generation, session)
                 self._changed(generation, session)
             except Exception:
-                self._failed("Could not join the LAN game. Check the invite and local network.")
+                self._failed("Could not join the game. Check the invite and ask the host "
+                             "to check that their game is still open.")
                 raise
 
     def set_ready(self, ready: bool) -> None:
@@ -419,6 +482,7 @@ class LanTable:
             self._error = None
             self._host_connection = None
             self._authenticator = None
+            mapping, self._mapping = self._mapping, None
             watchdog, self._startup_watchdog = self._startup_watchdog, None
             ticker_stop, self._ticker_stop = self._ticker_stop, None
             ticker_thread, self._ticker_thread = self._ticker_thread, None
@@ -436,9 +500,13 @@ class LanTable:
                 ticker_thread.join(timeout=5.0)
         finally:
             try:
-                transport.stop()
+                if mapping is not None:
+                    self._close_mapping(mapping)
             finally:
-                transport.reset_callbacks()
+                try:
+                    transport.stop()
+                finally:
+                    transport.reset_callbacks()
         if notify:
             self._notify()
 
@@ -454,6 +522,7 @@ class LanTable:
             session = self._session
             generation = self._generation
             result = {"mode": self._mode, "state": self._state,
+                      "network": self._network,
                       "invite": self._invite if self._mode == "host" else "",
                       "nickname": self.nickname, "players": [],
                       "can_start": False, "error": self._error}

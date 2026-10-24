@@ -1,4 +1,4 @@
-"""Desktop composition: choose a local bot table or an authenticated LAN table."""
+"""Desktop composition: local bots or an authenticated direct network table."""
 from __future__ import annotations
 
 import random
@@ -50,7 +50,7 @@ class DesktopTable:
                 self._close_active()
                 self._on_change()
                 return self._result(command, "left")
-            if command in ("local_game", "host_lan", "join_lan"):
+            if command in ("local_game", "host_lan", "host_internet", "join_lan"):
                 if self._mode != "menu":
                     raise ValueError("Leave the current table before choosing another game")
                 self._nickname = self._name(payload)
@@ -59,8 +59,10 @@ class DesktopTable:
                 else:
                     from holdem.lan_session import LanTable
                     self._lan = LanTable(self._nickname, dict(self._settings), self._on_change)
-                    self._mode = "host" if command == "host_lan" else "join"
-                    if command == "host_lan":
+                    self._mode = "join" if command == "join_lan" else "host"
+                    if command == "host_internet":
+                        self._lan.host(internet=True)
+                    elif command == "host_lan":
                         self._lan.host()
                     else:
                         self._lan.join(payload.get("invite", ""))
@@ -70,7 +72,7 @@ class DesktopTable:
                 raise ValueError("Choose a game first")
             if command == "set_ready":
                 if self._lan is None or type(payload.get("ready")) is not bool:
-                    raise ValueError("Ready requires a LAN table and a true/false value")
+                    raise ValueError("Ready requires a network table and a true/false value")
                 self._lan.set_ready(payload["ready"])
                 return self._result(command, "applied")
             if self._lan is not None:

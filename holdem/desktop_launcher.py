@@ -288,11 +288,17 @@ def _lan_check_timeout(config: dict) -> int:
 
 def _validate_lan_summary(config: dict, summary: dict) -> None:
     """Accept only the diagnostic outcome that this particular peer exercised."""
+    network = config.get("network", "lan")
+    if network not in ("lan", "internet"):
+        raise ValueError("Choose LAN or Internet for the connection check")
     expected = config.get("expected_result", "hands")
     minimum = (config.get("target_hands", 3) if expected == "hands"
                else config.get("minimum_hands", 0))
     complete = (summary.get("hands_settled", 0) >= minimum
                 and summary.get("ok") is True and not summary.get("error"))
+    if network == "internet":
+        complete = (complete and summary.get("network") == "internet"
+                    and summary.get("network_checks", 0) > 0)
     if expected == "left_table":
         complete = complete and summary.get("left_table") is True
     elif expected == "host_lost":

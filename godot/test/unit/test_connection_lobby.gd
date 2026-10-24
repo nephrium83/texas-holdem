@@ -22,7 +22,7 @@ func _host(can_start := false) -> Dictionary:
 
 
 func test_menu_actions_carry_the_entered_name():
-	for pair in [["LocalGameButton", "local_game"], ["HostLanButton", "host_lan"]]:
+	for pair in [["LocalGameButton", "local_game"], ["HostLanButton", "host_lan"], ["HostInternetButton", "host_internet"]]:
 		var control := _control()
 		control.apply_lobby({"mode": "menu", "state": "idle"})
 		control.get_node("%NicknameInput").text = " Ada "
@@ -60,6 +60,74 @@ func test_pending_command_cannot_be_duplicated_and_failure_allows_retry():
 	assert_false(control.get_node("%HostLanButton").disabled)
 	control.get_node("%HostLanButton").pressed.emit()
 	assert_signal_emit_count(control, "command_requested", 2)
+
+
+func test_internet_host_pending_disables_all_menu_actions_and_failure_allows_retry():
+	var control := _control()
+	control.apply_lobby({"mode": "menu", "state": "idle"})
+	control.get_node("%JoinInviteInput").text = "example-invite"
+	control.get_node("%HostInternetButton").pressed.emit()
+	for button in ["LocalGameButton", "HostLanButton", "HostInternetButton", "JoinLanButton"]:
+		assert_true(control.get_node("%" + button).disabled, button + " must wait for hosting")
+		control.get_node("%" + button).pressed.emit()
+	assert_signal_emit_count(control, "command_requested", 1)
+	assert_eq(control.get_node("%ConnectionStatusLabel").text, "Connecting...")
+	assert_false(control.get_node("%JoinInviteInput").editable)
+	control.handle_command_result({
+		"command": "host_internet", "ok": false,
+		"error": "Automatic hosting is unavailable. You can still join a friend's game.",
+	})
+	assert_string_contains(control.get_node("%ConnectionStatusLabel").text, "You can still join")
+	for button in ["LocalGameButton", "HostLanButton", "HostInternetButton", "JoinLanButton"]:
+		assert_false(control.get_node("%" + button).disabled)
+	assert_true(control.get_node("%JoinInviteInput").editable)
+	control.get_node("%HostInternetButton").pressed.emit()
+	assert_signal_emit_count(control, "command_requested", 2)
+
+
+func test_internet_host_and_join_labels_follow_the_sidecar_network():
+	var control := _control()
+	var metadata := _host(true)
+	metadata["network"] = "internet"
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%ConnectionTitle").text, "Your Internet table")
+	assert_string_contains(control.get_node("%ConnectionStatusLabel").text, "friends outside your home")
+	metadata["mode"] = "join"
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%ConnectionTitle").text, "Internet table")
+	assert_false(control.get_node("%InviteSection").visible)
+	metadata["state"] = "playing"
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%PlayingConnectionLabel").text, "Internet table")
+
+
+func test_existing_metadata_without_a_network_remains_a_lan_table():
+	var control := _control()
+	var metadata := _host(true)
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%ConnectionTitle").text, "Your LAN table")
+	assert_string_contains(control.get_node("%ConnectionStatusLabel").text, "same network")
+	metadata["state"] = "playing"
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%PlayingConnectionLabel").text, "LAN table")
+	metadata["mode"] = "local"
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%PlayingConnectionLabel").text, "Local bots")
+
+
+func test_failed_internet_host_can_leave_closed_table_without_pending_lock():
+	var control := _control()
+	control.apply_lobby({"mode": "menu", "state": "idle"})
+	control.get_node("%HostInternetButton").pressed.emit()
+	control.apply_lobby({
+		"mode": "host", "state": "closed", "network": "internet",
+		"error": "Automatic hosting is unavailable.",
+	})
+	assert_false(control.get_node("%LeaveLobbyButton").disabled)
+	assert_false(control.get_node("%InviteSection").visible)
+	assert_eq(control.get_node("%LeaveLobbyButton").text, "Back to menu")
+	control.get_node("%LeaveLobbyButton").pressed.emit()
+	assert_signal_emitted_with_parameters(control, "command_requested", ["leave_table", {}])
 
 
 func test_host_roster_and_start_follow_sidecar_readiness():
@@ -133,7 +201,9 @@ func test_joiner_can_leave_while_waiting_for_remote_admission():
 
 func test_host_panel_and_menu_fit_the_preview_window():
 	var control := _control()
-	for metadata in [{"mode": "menu", "state": "idle"}, _host(true)]:
+	var internet_host := _host(true)
+	internet_host["network"] = "internet"
+	for metadata in [{"mode": "menu", "state": "idle"}, _host(true), internet_host]:
 		control.apply_lobby(metadata)
 		await wait_process_frames(2)
 		var panel: Control = control.get_node("%ConnectionPanel")
