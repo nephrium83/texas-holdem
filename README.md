@@ -104,6 +104,15 @@ does not recalculate legal actions, pots, winners, or card state. See the
 
 ## Poker engine
 
+The public Python embedding interface lets another game host a poker minigame
+with its own presentation, player IDs and play-currency integration. The
+dependency-free rules installation is `python -m pip install .`; the
+[RPG tavern example and integration guide](docs/EMBEDDING.md) demonstrate
+independent tables, private player views and retry-safe mock-wallet cashout.
+The standalone Godot host uses the public `SessionPlayer` adapter over its
+existing cryptographic sessions. See [package options](docs/PACKAGING.md).
+Unity/Unreal adapters and a production MMO or money service are not provided.
+
 - No-Limit, Pot-Limit, and Fixed-Limit betting with correct raise reopening.
 - Two to nine seats, including correct heads-up position and action order.
 - Layered side pots, uncalled-bet refunds, and odd chips left of the button.
@@ -159,7 +168,7 @@ targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md), the
 git clone https://github.com/nephrium83/texas-holdem.git
 cd texas-holdem
 python -m venv .venv
-python -m pip install -e .
+python -m pip install -e ".[desktop]"
 python -m holdem
 ```
 

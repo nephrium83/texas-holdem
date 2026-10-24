@@ -4,7 +4,8 @@ from __future__ import annotations
 import random
 import threading
 
-from holdem import client_view, player_info
+from holdem import player_info
+from holdem.embedding import SessionPlayer
 from holdem.p2p.session import Session
 
 
@@ -80,11 +81,10 @@ class DesktopTable:
                 session = self._lan.session
                 if session is None:
                     raise ValueError("The table is closed")
-                return client_view.apply_command(session, command, payload)
+                return SessionPlayer(session).command(command, payload)
             human = self._local[1][self._local[2][0]]
             try:
-                return client_view.apply_command(human, command, payload,
-                                                 start_table=self._start_local)
+                return SessionPlayer(human, start_table=self._start_local).command(command, payload)
             finally:
                 # Start/deal and human actions drain first. Only then may
                 # bots schedule work, leaving the dealt hand visible.
@@ -133,7 +133,7 @@ class DesktopTable:
                 session = self._lan.session
                 if session is not None:
                     with session.read_state():
-                        snap = client_view.snapshot(session)
+                        snap = SessionPlayer(session).view()
                         lobby = self._lan.lobby_state()
                 else:
                     snap = self._empty_snapshot()
@@ -141,7 +141,7 @@ class DesktopTable:
             elif self._local is not None:
                 human = self._local[1][self._local[2][0]]
                 with human.read_state():
-                    snap = client_view.snapshot(human)
+                    snap = SessionPlayer(human).view()
                     lobby = dict(
                         mode="local", state="lobby" if human.state == "LOBBY" else "playing",
                         nickname=self._nickname, invite="", error="",

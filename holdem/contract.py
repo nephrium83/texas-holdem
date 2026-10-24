@@ -103,8 +103,9 @@ def apply_command(engine, seat: int, command: str, payload: dict | None = None):
     if command == "fold":
         return engine.act(seat, "fold")
     if command == "check_call":
-        lg = engine.legal(seat)
-        return engine.act(seat, "check" if lg["can_check"] else "call")
+        # Engine records a zero-to-call "call" as a check. It has no
+        # separate "check" action; sending that silently skips narration.
+        return engine.act(seat, "call")
     if command == "raise_to":
         return engine.act(seat, "raise", int(payload["amount"]))
     if command == "sit_out":

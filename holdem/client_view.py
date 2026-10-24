@@ -72,7 +72,20 @@ def snapshot(session) -> dict:
         # Results and event records contain nested mutable containers. The
         # renderer gets an owned copy, even if a remote action arrives before
         # the socket thread has serialized this snapshot.
-        return deepcopy(_snapshot_owned(session))
+        snap = deepcopy(_snapshot_owned(session))
+        # The protocol retains every contested score for replica agreement.
+        # A renderer may see only shown hands and its own hand, including in
+        # the raw result's best-five/score maps. Filter the owned copy so this
+        # display policy never changes the Session's settlement or digest.
+        result = snap.get("result")
+        if result is not None:
+            visible = {snap["seat"], *(int(value) for value in result.get("shown", []))}
+            for run in result.get("runs", []):
+                for field in ("scores", "best"):
+                    if field in run:
+                        run[field] = {key: value for key, value in run[field].items()
+                                      if int(key) in visible}
+        return snap
 
 
 def _snapshot_owned(session) -> dict:

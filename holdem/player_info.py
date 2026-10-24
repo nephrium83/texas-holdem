@@ -363,6 +363,11 @@ def settlement_view(
     for player_seat in order:
         hands = []
         for run_index, run in enumerate(runs):
+            # A mucked opponent's score and best five can reveal its cards
+            # even when the seat's hole-card field is absent. Its own viewer
+            # may still inspect that hand; other viewers see the muck only.
+            if player_seat != seat and player_seat not in shown:
+                continue
             score = _mapping_value(run.get("scores", {}), player_seat)
             best = _mapping_value(run.get("best", {}), player_seat, [])
             if score is None:

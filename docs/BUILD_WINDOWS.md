@@ -11,7 +11,7 @@ Build on Windows with Python 3.10 or newer, the project dependencies, and
 PyInstaller 6 installed:
 
 ```powershell
-python -m pip install -e . pyinstaller
+python -m pip install -e ".[desktop]" pyinstaller
 python tools/build_windows.py --godot "C:/path/to/Godot.exe" --libsodium "C:/path/to/libsodium.dll" --self-test
 ```
 
