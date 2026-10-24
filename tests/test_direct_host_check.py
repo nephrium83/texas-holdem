@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from functools import partial
 import json
+import os
 import threading
 from types import SimpleNamespace
 
@@ -198,6 +199,11 @@ def _fake_main(monkeypatch):
     from holdem import lan_session
     from holdem.p2p import invite, transport
 
+    # The standalone CLI mutates these directly. Register their prior state
+    # so its in-process test cannot affect the next transport/config user.
+    monkeypatch.setattr(transport, "_resolve_stun", transport._resolve_stun)
+    monkeypatch.setenv("HOLDEM_CONFIG_DIR", os.environ.get("HOLDEM_CONFIG_DIR", ""))
+
     class Table:
         def __init__(self, _nickname, _settings, *, mapping_factory):
             self.factory, self.lease = mapping_factory, None
@@ -231,6 +237,30 @@ def test_simulation_stays_offline_without_mapping_diagnostics(tmp_path, monkeypa
     assert "mapping_diagnostics" not in report
     assert "invite" not in json.loads(capsys.readouterr().out)
     assert not (tmp_path / "run/private-invite.txt").exists()
+
+
+@pytest.mark.parametrize("existing_config", [False, True], ids=["absent-config", "existing-config"])
+def test_simulation_restores_stun_and_environment_before_the_next_user(
+        tmp_path, monkeypatch, existing_config):
+    from holdem.p2p import transport
+
+    with monkeypatch.context() as baseline:
+        if existing_config:
+            baseline.setenv("HOLDEM_CONFIG_DIR", str(tmp_path / "previous-config"))
+        else:
+            baseline.delenv("HOLDEM_CONFIG_DIR", raising=False)
+        previous_config = os.environ.get("HOLDEM_CONFIG_DIR")
+        previous_stun = transport._resolve_stun
+        with monkeypatch.context() as cli:
+            _fake_main(cli)
+            assert D.main(["--simulate-router", "--seconds", "1",
+                           "--run-dir", str(tmp_path / "run")]) == 0
+            assert transport._resolve_stun is not previous_stun
+            assert os.environ["HOLDEM_CONFIG_DIR"] != previous_config
+        # Check after the CLI's own fixture scope, before pytest's outer
+        # autouse environment fixture could conceal either leaked mutation.
+        assert transport._resolve_stun is previous_stun
+        assert os.environ.get("HOLDEM_CONFIG_DIR") == previous_config
 
 
 def test_detailed_real_mode_with_fake_backend_keeps_details_local(tmp_path, monkeypatch, capsys):
