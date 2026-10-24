@@ -59,6 +59,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 CORE = frozenset({
     # rules
     "holdem", "holdem.engine", "holdem.player_info", "holdem.contract",
+    "holdem.embedding",
     # crypto
     "holdem.p2p.ristretto", "holdem.p2p.elgamal", "holdem.p2p.pedersen",
     "holdem.p2p.dleq", "holdem.p2p.keygen_pop", "holdem.p2p.shuffle_mp",

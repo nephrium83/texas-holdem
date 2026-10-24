@@ -123,6 +123,36 @@ def test_settlement_summary_accounts_for_every_awarded_chip():
     json.dumps(summary)
 
 
+def test_mucked_opponents_have_no_hand_description_or_best_five_in_summary():
+    from copy import deepcopy
+
+    from holdem.engine import Deck, FULL_DECK
+
+    first = ["As", "Ks", "Ah", "Kd", "2c", "4d", "7h", "9s", "Jc"]
+    indices = [next(i for i, card in enumerate(FULL_DECK)
+                    if player_info.card_str(card) == label)
+               for label in first]
+    indices += [i for i in range(52) if i not in indices]
+    engine = Engine([Player(0, "Kings", 500), Player(1, "Aces", 500)], sb=5, bb=10)
+    assert engine.start_hand(deck=Deck.from_indices(indices))
+    result = _check_down(engine)
+    assert result["shown"] == {1} and result["mucked"] == {0}
+    original = deepcopy(player_info.event_views([result]))[0]
+    summaries = [player_info.settlement_view(engine, result, seat=seat,
+                                            starting_stacks=[500, 500])
+                 for seat in (0, 1)]
+    for seat, summary in enumerate(summaries):
+        showdown = {item["seat"]: item for item in summary["showdown"]}
+        assert showdown[0]["mucked"] and not showdown[0]["shown"]
+        assert bool(showdown[0]["hands"]) == (seat == 0)
+        assert showdown[1]["hands"][0]["description"].startswith("Pair of Aces")
+        assert summary["total_pot"] == 20
+        assert summary["winners"] == [{"seat": 1, "name": "Aces", "won": 20}]
+        json.dumps(summary)
+    assert player_info.event_views([result])[0] == original
+    assert [player.stack for player in engine.players] == [490, 510]
+
+
 def test_deal_progress_labels_make_no_cryptographic_claim():
     assert player_info.deal_progress_view("dealing")["state"] == "dealing"
     assert player_info.deal_progress_view("betting")["state"] == "in_hand"

@@ -7,7 +7,10 @@ sessions playing real hands. Every snapshot must be plain JSON.
 import importlib
 import json
 import sys
+from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -222,6 +225,78 @@ def test_foldout_settled_snapshot_reveals_nothing():
     assert snap["phase"] == "settled"
     for sv in snap["seats"]:
         assert "hole" not in sv                         # no showdown -> no reveal
+
+
+@pytest.mark.parametrize("string_keys", [False, True])
+def test_untabled_showdown_filters_mucked_scores_and_best_without_changing_result(string_keys):
+    """The view supports an engine's non-tabled showdown, even though the
+    current P2P Session policy forces all contested hands to be tabled.
+
+    Build a real legal checkdown and real settlement, then adapt that result
+    to the view's Session interface. A JSON round trip also covers map keys
+    received as strings rather than the protocol's in-process integer keys.
+    """
+    from holdem.engine import Deck, Engine, FULL_DECK, Player
+    from holdem.p2p.replica_table import _normalize_result
+
+    first = ["As", "Ks", "Ah", "Kd", "2c", "4d", "7h", "9s", "Jc"]
+    indices = [next(i for i, card in enumerate(FULL_DECK)
+                    if client_view.contract.card_str(card) == label)
+               for label in first]
+    indices += [i for i in range(52) if i not in indices]
+    engine = Engine([Player(0, "Kings", 500), Player(1, "Aces", 500)], sb=5, bb=10)
+    assert engine.start_hand(deck=Deck.from_indices(indices))
+    while engine.street != "showdown":
+        if engine.actor is None:
+            engine.next_street()
+        else:
+            engine.act(engine.actor, "call")
+    result = _normalize_result(engine.settle())
+    assert result["shown"] == [1] and result["mucked"] == [0]
+    assert result["tabled"] is False
+    if string_keys:
+        result = json_safe(result)
+    original = deepcopy(result)
+    stacks = [player.stack for player in engine.players]
+    holes = {player.idx: list(player.hole) for player in engine.players}
+    key = str if string_keys else lambda value: value
+
+    views = []
+    for seat in (0, 1):
+        session = SimpleNamespace(
+            replica=SimpleNamespace(engine=engine), local_seat=seat,
+            _hand_no=engine.hand_no, deal_policy=Session.DEAL_POLICY_DETECTION,
+            proofs_verified=False, deal_hole_cards=holes[seat],
+            hand_voided=False, void_reason=None, hand_result=result,
+            hand_record=None, _hand_stacks=[500, 500],
+            _deal_driver=SimpleNamespace(all_hole_cards=lambda: holes),
+            read_state=nullcontext, reliability_view=lambda: None,
+        )
+        snap = client_view.snapshot(session)
+        visible = {seat, 1}
+        for run in snap["result"]["runs"]:
+            assert {int(value) for value in run["scores"]} == visible
+            assert {int(value) for value in run["best"]} == visible
+        summaries = {item["seat"]: item for item in snap["settlement"]["showdown"]}
+        assert bool(summaries[0]["hands"]) == (seat == 0)
+        assert summaries[1]["hands"]
+        assert snap["result"]["pots"] == original["pots"]
+        assert snap["settlement"]["total_pot"] == 20
+        json_safe(snap)
+        assert result == original
+        assert [player.stack for player in engine.players] == stacks == [490, 510]
+        views.append(snap)
+
+    # The winner never gets the mucked kings through card strings, a score
+    # description, or the numeric best-five representation in the raw result.
+    assert not {"Ks", "Kd"} & set(all_card_strings(views[1]))
+    assert key(0) not in views[1]["result"]["runs"][0]["scores"]
+    assert key(0) not in views[1]["result"]["runs"][0]["best"]
+    assert key(0) in views[0]["result"]["runs"][0]["scores"]
+    # Returned values are owned even after filtering; mutation cannot alter
+    # the protocol settlement or a later viewer's result.
+    views[0]["result"]["runs"][0]["best"][key(0)].clear()
+    assert result == original
 
 
 def test_void_snapshot_reports_reason():
