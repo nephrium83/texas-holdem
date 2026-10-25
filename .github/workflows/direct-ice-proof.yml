@@ -1,0 +1,145 @@
+name: Packaged direct ICE proof
+run-name: Direct ICE ${{ inputs.source_ref }} ${{ inputs.nonce }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Immutable 40-character source commit in this repository
+        required: true
+        type: string
+      nonce:
+        description: Fresh 64-character hexadecimal proof nonce
+        required: true
+        type: string
+      mailbox_gist_id:
+        description: Encrypted proof mailbox gist ID (32 hexadecimal characters)
+        required: true
+        type: string
+      host_signing_public:
+        description: Host Ed25519 public key (64 hexadecimal characters)
+        required: true
+        type: string
+      host_encryption_public:
+        description: Host X25519 public key (64 hexadecimal characters)
+        required: true
+        type: string
+
+# The runner reads an encrypted mailbox anonymously. It never receives a
+# mailbox token, writes to GitHub, or gets permission to modify this repo.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  packaged-guest:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      ICE_SOURCE_REF: ${{ inputs.source_ref }}
+      ICE_NONCE: ${{ inputs.nonce }}
+      ICE_MAILBOX_GIST_ID: ${{ inputs.mailbox_gist_id }}
+      ICE_HOST_SIGNING_PUBLIC: ${{ inputs.host_signing_public }}
+      ICE_HOST_ENCRYPTION_PUBLIC: ${{ inputs.host_encryption_public }}
+    steps:
+      - name: Validate dispatch input before checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = @{
+            ICE_SOURCE_REF = '^[0-9a-f]{40}$'
+            ICE_NONCE = '^[0-9a-f]{64}$'
+            ICE_MAILBOX_GIST_ID = '^[0-9a-f]{32}$'
+            ICE_HOST_SIGNING_PUBLIC = '^[0-9a-f]{64}$'
+            ICE_HOST_ENCRYPTION_PUBLIC = '^[0-9a-f]{64}$'
+          }
+          foreach ($name in $rules.Keys) {
+            if ([Environment]::GetEnvironmentVariable($name) -cnotmatch $rules[$name]) {
+              throw "Invalid proof input: $name"
+            }
+          }
+      - name: Check out immutable probe source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+      - name: Create isolated build environment
+        shell: pwsh
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'ice-build-venv'
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated build environment failed' }
+          (Join-Path $venv 'Scripts') | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Install explicit native build tools
+        shell: pwsh
+        run: |
+          python -m pip install --only-binary=:all: setuptools==84.2.1 Cython==3.2.9 wheel==0.48.0 delvewheel==1.13.2 pyinstaller==6.20.0
+          if ($LASTEXITCODE -ne 0) { throw 'Native build tool installation failed' }
+      - name: Build the minimal native runtime from pinned sources
+        shell: pwsh
+        run: |
+          python tools/build_ice_native.py --install --cache-dir "$env:RUNNER_TEMP/ice-native-inputs" --output-dir "$env:RUNNER_TEMP/ice-native-output" --result-json "$env:RUNNER_TEMP/ice-native-build-result.json" *> "$env:RUNNER_TEMP/ice-native-private.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Minimal native runtime build failed' }
+          Write-Host 'Minimal shared runtime built; private compiler logs withheld.'
+      - name: Install pinned probe dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --only-binary=:all: -c packaging/ice-probe-constraints.txt '.[internet]'
+          if ($LASTEXITCODE -ne 0) { throw 'Probe dependency installation failed' }
+      - name: Build and self-test the one-folder probe
+        shell: pwsh
+        run: |
+          python tools/build_ice_probe.py --self-test --output-dir "$env:RUNNER_TEMP/ice-package" --result-json "$env:RUNNER_TEMP/ice-build-result.json" *> "$env:RUNNER_TEMP/ice-build-private.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Probe package build failed' }
+          Write-Host 'Packaged probe self-test passed; private build logs withheld.'
+      - name: Prepare the packaged guest
+        shell: pwsh
+        run: ./tools/run_ice_guest.ps1 -Phase Prepare
+      - name: Publish the exact package used by both computers
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: direct-ice-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ice-artifact/DirectConnectProbe.zip
+            ${{ runner.temp }}/ice-artifact/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Publish public guest keys
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: direct-ice-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/direct-ice-proof/public/ready.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Start guest and wait for encrypted answer
+        shell: pwsh
+        run: ./tools/run_ice_guest.ps1 -Phase Start
+      - name: Publish encrypted answer while guest is running
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: direct-ice-answer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/direct-ice-proof/public/answer.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Wait for the bounded guest result
+        shell: pwsh
+        run: ./tools/run_ice_guest.ps1 -Phase Complete
+      - name: Clean up the owned guest process
+        if: always()
+        shell: pwsh
+        run: ./tools/run_ice_guest.ps1 -Phase Cleanup
+      - name: Publish sanitized public result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: direct-ice-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/direct-ice-proof/public/report.json
+            ${{ runner.temp }}/direct-ice-proof/public/status.json
+          if-no-files-found: warn
+          retention-days: 1
