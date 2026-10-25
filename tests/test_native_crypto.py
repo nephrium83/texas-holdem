@@ -288,6 +288,80 @@ def test_missing_and_unsupported_libraries_have_a_typed_diagnosis(tmp_path):
     ''', tmp_path)
 
 
+def test_explicit_missing_library_cannot_fall_back_to_developer_runtime(tmp_path):
+    _run('''
+        import ctypes
+        from pathlib import Path
+        from holdem import native_crypto as N
+        from holdem.p2p import ristretto as R
+        def forbidden(*args):
+            raise AssertionError('explicit selection attempted native discovery')
+        N._candidate_paths = forbidden
+        N._load_backend = forbidden
+        ctypes.CDLL = forbidden
+        try:
+            N.initialize(library_path=Path('missing-packaged.dll'))
+        except N.NativeCryptoUnavailable:
+            pass
+        else:
+            raise AssertionError('missing packaged library used a fallback')
+        assert N._backend is None and not R.is_initialized()
+    ''', tmp_path)
+
+
+def test_explicit_library_loads_only_the_selected_absolute_file(tmp_path):
+    _run('''
+        import ctypes
+        from pathlib import Path
+        from holdem import native_crypto as N
+        from holdem.p2p import ristretto as R
+        selected = Path('packaged.dll')
+        selected.write_bytes(b'controlled fixture')
+        calls = []
+        def load(path):
+            calls.append(path)
+            return object()
+        ctypes.CDLL = load
+        N._candidate_paths = lambda: (_ for _ in ()).throw(AssertionError('discovery'))
+        try:
+            N.initialize(library_path=selected)
+        except N.NativeCryptoUnavailable as exc:
+            assert 'missing required API' in str(exc)
+        else:
+            raise AssertionError('incompatible selected runtime accepted')
+        assert calls == [str(selected.resolve())]
+        assert N._backend is None and not R.is_initialized()
+    ''', tmp_path)
+
+
+def test_explicit_runtime_is_idempotent_and_cannot_replace_another_path(tmp_path):
+    _run(_FAKE_BACKEND + '''
+from pathlib import Path
+from holdem import native_crypto as N
+selected = Path('selected.dll').resolve()
+other = Path('other.dll').resolve()
+selected.write_bytes(b'selected')
+other.write_bytes(b'other')
+loads = []
+def load(path):
+    loads.append(path)
+    return selected, object()
+N._selected_library = load
+N._LibsodiumBackend = lambda library: FakeBackend()
+backend = N.initialize(library_path=selected)
+assert N.initialize() is backend
+assert N.initialize(library_path=selected) is backend
+try:
+    N.initialize(library_path=other)
+except N.NativeCryptoInitializationError as exc:
+    assert 'replacement is forbidden' in str(exc)
+else:
+    raise AssertionError('explicit runtime replaced an initialized backend')
+assert loads == [selected]
+assert N.initialize() is backend
+''', tmp_path)
+
+
 @pytest.mark.parametrize("mode", ["sodium-init", "abi-size", "version", "signature"])
 def test_present_but_broken_native_runtime_is_never_optional(mode, tmp_path):
     _run(f'''

@@ -152,3 +152,19 @@ def test_safe_report_rejects_private_fields_and_false_success(setup):
             validate_report(changed, context)
     failed = {**original, "status": "failed", "failure_code": "connect_timeout"}
     assert validate_report(failed, context) == failed
+
+
+def test_public_poker_receipt_requires_exact_settled_public_balances(setup):
+    _, _, context = setup
+    poker = {"hands": 10, "balances": [[10000, 10000]] * 10, "proofs_verified": 2,
+             "deal_policy": "bayer-groth-v1", "matching_balances": True}
+    original = {**_report(context), "sent_messages": 300, "received_messages": 300, "poker": poker}
+    assert validate_report(original, context) == original
+    for key, value in [("hands", True), ("hands", 11), ("proofs_verified", 0), ("proofs_verified", 1),
+                       ("deal_policy", "commit-reveal"), ("matching_balances", False),
+                       ("balances", [[10000, 10000]] * 9), ("balances", [[10000, 9999]] * 10),
+                       ("balances", [[True, 19999]] * 10), ("hole", ["AS", "AH"])]:
+        changed = copy.deepcopy(original)
+        changed["poker"][key] = value
+        with pytest.raises(SetupError):
+            validate_report(changed, context)

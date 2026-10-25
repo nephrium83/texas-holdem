@@ -15,33 +15,13 @@ from holdem.p2p import admission, device_secret, identity, invite, transport
 from holdem.p2p.join_auth import JoinAuthenticator, joiner_admission_from_invite
 from holdem.p2p.session import Session
 from holdem.p2p.casual_clock import PROFILE
+from holdem.peer_rules import table_settings as _settings
 
 _log = logging.getLogger(__name__)
 
 # Bounds only initial socket admission and roster delivery. Poker hand and
 # betting deadlines remain entirely Session-owned and are unchanged here.
 JOIN_STARTUP_TIMEOUT = 15.0
-
-
-def _settings(settings: dict) -> dict:
-    values = {"sb": 25, "bb": 50, "stack": 1000,
-              "structure": "No-Limit", "deal_policy": Session.DEAL_POLICY_BG,
-              "casual_profile": PROFILE}
-    values.update(settings)
-    for field in ("sb", "bb", "stack"):
-        if type(values[field]) is not int:
-            raise ValueError(f"{field} must be a whole number")
-    if values["sb"] <= 0 or values["bb"] <= values["sb"]:
-        raise ValueError("Blinds must be positive and the big blind must be larger")
-    if values["stack"] < values["bb"]:
-        raise ValueError("Starting chips must cover the big blind")
-    if values["structure"] not in ("No-Limit", "Pot-Limit", "Fixed-Limit"):
-        raise ValueError("Unsupported betting structure")
-    if values["deal_policy"] != Session.DEAL_POLICY_BG:
-        raise ValueError("LAN games require Bayer-Groth dealing")
-    if values["casual_profile"] != PROFILE:
-        raise ValueError("All players need the same Poker Preview version")
-    return values
 
 
 class LanTable:

@@ -331,7 +331,7 @@ def open_description(value: dict, context: dict, keys: ProbeKeys,
 
 def validate_report(value: dict, context: dict) -> dict:
     validate_context(context)
-    _fields(value, REPORT_FIELDS)
+    _fields(value, REPORT_FIELDS | ({"poker"} if type(value) is dict and "poker" in value else set()))
     if (type(value["v"]) is not int or value["v"] != 1 or value["context"] != context or
             value["role"] not in ("host", "guest") or
             value["status"] not in ("connected", "failed", "cancelled") or
@@ -343,7 +343,7 @@ def validate_report(value: dict, context: dict) -> dict:
         # accidentally appear as success merely because no exception was raised.
         raise SetupError("inconsistent report outcome")
     for name in ("sent_messages", "received_messages"):
-        if type(value[name]) is not int or not 0 <= value[name] <= 20:
+        if type(value[name]) is not int or not 0 <= value[name] <= (10000 if "poker" in value else 20):
             raise SetupError("invalid report count")
     if type(value["direct"]) is not bool or value["protocol"] not in ("udp", None):
         raise SetupError("invalid report route")
@@ -361,4 +361,17 @@ def validate_report(value: dict, context: dict) -> dict:
             value["sent_messages"] >= 3 and value["received_messages"] >= 3 and
             cleanup["peer_closed"] and cleanup["owned_tasks_pending"] == 0):
         raise SetupError("incomplete successful proof")
+    if "poker" in value:
+        poker = value["poker"]
+        _fields(poker, frozenset({"hands", "balances", "proofs_verified", "deal_policy", "matching_balances"}))
+        if (type(poker["hands"]) is not int or not 1 <= poker["hands"] <= 10 or
+                type(poker["proofs_verified"]) is not int or poker["proofs_verified"] != 2 or
+                poker["deal_policy"] != "bayer-groth-v1" or poker["matching_balances"] is not True or
+                type(poker["balances"]) is not list or len(poker["balances"]) != poker["hands"]):
+            raise SetupError("invalid public poker receipt")
+        for vector in poker["balances"]:
+            if (type(vector) is not list or len(vector) != 2 or
+                    any(type(chips) is not int or not 0 <= chips <= 20000 for chips in vector) or
+                    sum(vector) != 20000):
+                raise SetupError("invalid settled poker balances")
     return value

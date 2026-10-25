@@ -25,7 +25,7 @@ def test_real_probe_exchange_and_public_artifact_validation(tmp_path, monkeypatc
     offer_path = tmp_path / "offer.json"
     answer_path = tmp_path / "answer.json"
     common = dict(context_file=context_path, answer_file=answer_path, cancel_file=None,
-                  timeout=45, no_stun=True)
+                  timeout=45, no_stun=True, game_hands=0)
     host_args = argparse.Namespace(**common, command="offer", key_dir=tmp_path / "host-keys",
                                   guest_ready_file=ready_path, offer_file=offer_path,
                                   report_file=tmp_path / "host-report.json")
@@ -118,7 +118,7 @@ def test_stalled_setup_reserves_cleanup_inside_process_deadline(tmp_path, monkey
                               key_dir=tmp_path / "host", guest_ready_file=tmp_path / "ready.json",
                               offer_file=tmp_path / "offer.json", answer_file=tmp_path / "answer.json",
                               report_file=tmp_path / "report.json", cancel_file=None,
-                              timeout=30, no_stun=True)
+                              timeout=30, no_stun=True, game_hands=0)
     started = time.monotonic()
     assert asyncio.run(ice_probe._run(args)) == 1
     elapsed = time.monotonic() - started

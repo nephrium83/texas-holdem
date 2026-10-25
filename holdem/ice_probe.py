@@ -237,6 +237,8 @@ async def _run(args) -> int:
     async def connect():
         if role == "host":
             ready = validate_ready(read_json(args.guest_ready_file), context)
+            remote_signing = ready["guest_signing_public"]
+            remote_encryption = ready["guest_encryption_public"]
             description = await peer.create_offer()
             envelope = seal_description(description, context, keys, ready["guest_encryption_public"])
             write_json(args.offer_file, envelope)
@@ -245,6 +247,8 @@ async def _run(args) -> int:
                                            signer=ready["guest_signing_public"])
             await peer.accept_answer(description)
         else:
+            remote_signing = context["host_signing_public"]
+            remote_encryption = context["host_encryption_public"]
             envelope = await _wait_offer(args.mailbox_gist_id)
             description = open_description(envelope, context, keys, kind="offer",
                                            signer=context["host_signing_public"])
@@ -264,7 +268,15 @@ async def _run(args) -> int:
                                 route["remote_type"] in ("host", "srflx", "prflx"))
         if not report["direct"]:
             raise ProbeFailure("not_direct")
-        await _exchange(peer, role, context["nonce"], report)
+        if args.game_hands:
+            from .ice_poker_probe import exchange
+            poker, diagnostics = await exchange(peer, role, context, keys, remote_signing,
+                                                 remote_encryption, args.game_hands)
+            report["poker"] = poker
+            report.update(sent_messages=diagnostics["sent_messages"],
+                          received_messages=diagnostics["received_messages"])
+        else:
+            await _exchange(peer, role, context["nonce"], report)
 
     async def cancellation():
         while args.cancel_file is None or not args.cancel_file.exists():
@@ -356,6 +368,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     checks = parser.add_mutually_exclusive_group()
     checks.add_argument("--self-test", action="store_true")
+    checks.add_argument("--poker-self-test", action="store_true")
     checks.add_argument("--mailbox-self-test", action="store_true",
                         help="Check bounded verified HTTPS to the engineering mailbox API")
     sub = parser.add_subparsers(dest="command")
@@ -386,6 +399,7 @@ def main(argv=None) -> int:
         command.add_argument("--cancel-file", type=Path)
         command.add_argument("--timeout", type=timeout_value, default=300, metavar="30..300")
         command.add_argument("--no-stun", action="store_true", help=argparse.SUPPRESS)
+        command.add_argument("--game-hands", type=int, choices=range(0, 11), default=0)
         if name == "offer":
             command.add_argument("--guest-ready-file", type=Path, required=True)
             command.add_argument("--offer-file", type=Path, required=True)
@@ -393,10 +407,13 @@ def main(argv=None) -> int:
             command.add_argument("--mailbox-gist-id", required=True)
     args = parser.parse_args(argv)
     try:
-        if args.self_test or args.mailbox_self_test:
+        if args.self_test or args.mailbox_self_test or args.poker_self_test:
             if args.command:
                 raise SetupError("self-test cannot be combined with a subcommand")
-            if args.mailbox_self_test:
+            if args.poker_self_test:
+                from .ice_poker_probe import _self_test as poker_self_test
+                result = asyncio.run(poker_self_test())
+            elif args.mailbox_self_test:
                 if asyncio.run(_read_mailbox("0" * 32)) is not None:
                     raise SetupError("unexpected mailbox self-test contents")
                 result = {"schema": "direct-ice-mailbox-check-v1", "status": "passed"}

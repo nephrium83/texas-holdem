@@ -3,7 +3,9 @@
 Install this build environment using binary wheels only, for example::
 
     python -m pip install --only-binary=:all: .[internet] pyinstaller==6.20.0
-    python tools/build_ice_probe.py --self-test --result-json build/probe-result.json
+    python tools/prepare_ice_sodium.py --result build/sodium-result.json
+    python tools/build_ice_probe.py --sodium-result build/sodium-result.json \
+        --self-test --poker-self-test --result-json build/probe-result.json
 
 This tool never installs dependencies, changes the normal Poker preview, edits
 router/firewall rules, or overwrites a previous application/ZIP. It intentionally
@@ -239,6 +241,54 @@ def cold_environment():
     return environment
 
 
+def collect_sodium_licenses(application, sodium):
+    """Copy the verified official ISC notice and portable source provenance."""
+    destination = application / "licenses" / "libsodium"
+    destination.mkdir(parents=True, exist_ok=False)
+    for source, name in (("license", "LICENSE.txt"), ("attribution", "SOURCE.txt"),
+                         ("manifest", "provenance.json")):
+        shutil.copy2(sodium[source], destination / name)
+    return {"version": sodium["version"], "dll_sha256": sodium["dll_sha256"],
+            "license_sha256": sodium["license_sha256"],
+            "attribution_sha256": sodium["attribution_sha256"],
+            "provenance_sha256": sodium["manifest_sha256"]}
+
+
+def verify_sodium_bundle(application, sodium):
+    """Do not let a developer DLL or an omitted frozen dependency pass."""
+    fields = ("dll_sha256", "license_sha256", "attribution_sha256", "provenance_sha256")
+    if any(type(sodium.get(field)) is not str or len(sodium[field]) != 64 or
+           any(character not in "0123456789abcdef" for character in sodium[field])
+           for field in fields):
+        raise RuntimeError("Frozen libsodium coverage/hash metadata is incomplete")
+    required = {
+        "_internal/native/libsodium.dll": sodium["dll_sha256"],
+        "licenses/libsodium/LICENSE.txt": sodium["license_sha256"],
+        "licenses/libsodium/SOURCE.txt": sodium["attribution_sha256"],
+        "licenses/libsodium/provenance.json": sodium["provenance_sha256"],
+    }
+    for relative, expected in required.items():
+        path = application / relative
+        if not path.is_file() or sha256(path) != expected:
+            raise RuntimeError(f"Frozen libsodium coverage/hash mismatch: {relative}")
+
+
+def validate_poker_self_test(report, *, hands=10):
+    """Require real matching hands, proofs and complete native/worker cleanup."""
+    if (not isinstance(report, dict) or
+            report.get("schema") != "direct-poker-self-test-v1" or
+            report.get("status") != "passed" or
+            type(report.get("hands")) is not int or report["hands"] != hands or
+            report.get("matching_balances") is not True or
+            type(report.get("proofs_verified")) is not int or report["proofs_verified"] != 2 or
+            report.get("deal_policy") != "bayer-groth-v1" or
+            report.get("peer_closed") is not True or
+            type(report.get("owned_tasks_pending")) is not int or report["owned_tasks_pending"] != 0 or
+            type(report.get("callback_workers_alive")) is not int or report["callback_workers_alive"] != 0):
+        raise RuntimeError("Frozen poker self-test did not prove matching hands/proofs and cleanup")
+    return report
+
+
 def verify_manifest(application):
     """Verify exact file coverage, so a missing DLL cannot be passed as portable."""
     manifest_path = application / "build-manifest.json"
@@ -254,6 +304,13 @@ def verify_manifest(application):
               if Path(name).suffix.lower() in (".exe", ".dll", ".pyd")}
     if native != manifest["native_files_sha256"]:
         raise RuntimeError("Native dependency hashes disagree with the manifest")
+    if "authenticated-poker" in manifest.get("capabilities", []):
+        sodium = manifest.get("libsodium")
+        if not isinstance(sodium, dict):
+            raise RuntimeError("Authenticated poker package is missing libsodium provenance")
+        verify_sodium_bundle(application, sodium)
+        if manifest.get("poker_self_test") is not None:
+            validate_poker_self_test(manifest["poker_self_test"])
     return manifest
 
 
@@ -264,6 +321,10 @@ def main(argv=None):
                         help="Write output paths/hashes here; an existing file is not overwritten")
     parser.add_argument("--self-test", action="store_true",
                         help="Require the frozen local-pair check with STUN disabled")
+    parser.add_argument("--poker-self-test", action="store_true",
+                        help="Require ten real frozen local poker hands and clean shutdown")
+    parser.add_argument("--sodium-result", type=Path,
+                        help="Verified result from tools/prepare_ice_sodium.py (required)")
     args = parser.parse_args(argv)
     if sys.platform != "win32":
         parser.error("Build this Windows probe using Windows Python")
@@ -273,6 +334,10 @@ def main(argv=None):
         args.result_json = args.result_json.expanduser().resolve()
         if args.result_json.exists():
             parser.error("--result-json already exists; use a fresh path")
+    if args.sodium_result is None:
+        parser.error("--sodium-result is required for the authenticated poker runtime")
+    from prepare_ice_sodium import verify_result as verify_sodium_result
+    sodium = verify_sodium_result(args.sodium_result.expanduser().resolve())
     source = source_snapshot()
     distributions = runtime_distributions()
     minimal_provenance, _, _ = verify_minimal_runtime(distributions["av"])
@@ -295,6 +360,7 @@ def main(argv=None):
         raise RuntimeError("Loaded FFmpeg libraries disagree with the minimal source build")
     environment = dict(os.environ)
     environment["POKER_PROJECT_ROOT"] = str(ROOT)
+    environment["POKER_ICE_SODIUM_DLL"] = sodium["dll"]
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
          "--distpath", output, "--workpath", work / "pyinstaller",
          ROOT / "packaging" / "ice_probe.spec"],
@@ -304,6 +370,12 @@ def main(argv=None):
     if not executable.is_file():
         raise RuntimeError("PyInstaller did not create DirectConnectProbe.exe")
     licenses = collect_licenses(application / "licenses", distributions)
+    sodium_coverage = collect_sodium_licenses(application, sodium)
+    licenses["native"] = [*licenses["native"], {
+        "name": "libsodium", "version": sodium["version"], "license": "ISC",
+        "source": "libsodium/provenance.json", "notices": ["libsodium/LICENSE.txt", "libsodium/SOURCE.txt"],
+    }]
+    verify_sodium_bundle(application, sodium_coverage)
     (application / "README.txt").write_text(
         "DirectConnectProbe - engineering connectivity proof\n\n"
         "Extract the complete ZIP and keep _internal beside DirectConnectProbe.exe.\n"
@@ -311,6 +383,7 @@ def main(argv=None):
         "This is a separate diagnostic; it does not install or update Poker Preview.\n"
         "Run DirectConnectProbe.exe --help for the reviewed test modes.\n"
         "Run DirectConnectProbe.exe --self-test for a local pair without STUN.\n"
+        "Run DirectConnectProbe.exe --poker-self-test for ten real local poker hands.\n"
         "Local-pair success does not prove Internet hole punching.\n"
         "Public Internet proof requires this same ZIP/SHA at both endpoints.\n\n"
         "Dependency notices and native source provenance are in licenses/.\n"
@@ -319,9 +392,11 @@ def main(argv=None):
         encoding="utf-8",
     )
     self_test = None
-    if args.self_test:
+    poker_self_test = None
+    if args.self_test or args.poker_self_test:
         outside = work / "unrelated-working-folder"
         outside.mkdir()
+    if args.self_test:
         text = run([executable, "--self-test"], cwd=outside,
                    env=cold_environment(), log=work / "frozen-self-test.log", timeout=60)
         self_test = json.loads(text)
@@ -330,6 +405,10 @@ def main(argv=None):
                 self_test.get("owned_tasks_pending") != 0 or
                 self_test.get("sizes") != [4096, 32768, 524288]):
             raise RuntimeError(f"Frozen local pair failed; see {work / 'frozen-self-test.log'}")
+    if args.poker_self_test:
+        text = run([executable, "--poker-self-test"], cwd=outside,
+                   env=cold_environment(), log=work / "frozen-poker-self-test.log", timeout=180)
+        poker_self_test = validate_poker_self_test(json.loads(text))
     if source_snapshot() != source:
         raise RuntimeError("Source changed while freezing the probe; rebuild the final revision")
     files = {
@@ -343,6 +422,8 @@ def main(argv=None):
         "pyinstaller_version": importlib.metadata.version("pyinstaller"),
         "package_versions": {name: dist.version for name, dist in distributions.items()},
         "native_import_check": native_report, "license_coverage": licenses,
+        "capabilities": ["direct-udp", "authenticated-poker"],
+        "libsodium": sodium_coverage, "poker_self_test": poker_self_test,
         "self_test": self_test, "files_sha256": files,
         "native_files_sha256": {name: digest for name, digest in files.items()
                                 if Path(name).suffix.lower() in (".exe", ".dll", ".pyd")},
@@ -360,6 +441,7 @@ def main(argv=None):
         "application": str(executable), "zip": str(archive), "zip_sha256": sha256(archive),
         "manifest": str(manifest_path), "manifest_sha256": sha256(manifest_path),
         "build_logs": str(work), "self_test": self_test,
+        "poker_self_test": poker_self_test,
     }
     if args.result_json is not None:
         args.result_json.parent.mkdir(parents=True, exist_ok=True)
