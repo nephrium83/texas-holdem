@@ -1,0 +1,559 @@
+[
+  {
+    "name": "cisco/libsrtp/LICENSE",
+    "source_url": "https://github.com/cisco/libsrtp/blob/v2.7.0/LICENSE",
+    "git_blob": "af0a2ac312708a0f9d15aa68472e6863de0156ff",
+    "files": [
+      "native/libsrtp/LICENSE"
+    ],
+    "sha256": "8e19d42a1eec9561f3f347253ddf2e385c55f392f025bb0fd41b88dbf38db5ae"
+  },
+  {
+    "name": "openssl/openssl/LICENSE.txt",
+    "source_url": "https://github.com/openssl/openssl/blob/openssl-4.0.3/LICENSE.txt",
+    "git_blob": "49cc83d2ee29d13453188217f0e4edd70c7f842f",
+    "files": [
+      "native/openssl-4.0.3/LICENSE.txt"
+    ],
+    "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+  },
+  {
+    "name": "openssl/openssl/LICENSE.txt",
+    "source_url": "https://github.com/openssl/openssl/blob/openssl-3.5.4/LICENSE.txt",
+    "git_blob": "49cc83d2ee29d13453188217f0e4edd70c7f842f",
+    "files": [
+      "native/openssl-3.5.4/LICENSE.txt"
+    ],
+    "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+  },
+  {
+    "name": "rthalley/dnspython/LICENSE",
+    "source_url": "https://github.com/rthalley/dnspython/blob/v2.9.0/LICENSE",
+    "git_blob": "390a726dceb02e67bae01849000eb44632f01703",
+    "files": [
+      "python-source/dnspython/LICENSE"
+    ],
+    "sha256": "c3ea3ff5654b329c19d3bc5f7481af623c3dded4a6145585499f843ad3d741cd"
+  },
+  {
+    "name": "google/crc32c/LICENSE",
+    "source_url": "https://github.com/google/crc32c/blob/1.1.2/LICENSE",
+    "git_blob": "8c8735cf123cee0e410583fe9af785cb424b835b",
+    "files": [
+      "native/crc32c/LICENSE"
+    ],
+    "sha256": "a1f30b77c01e0995fa32a00119e00749e8731ee8a3c4c3549bce74083c72b0b6"
+  },
+  {
+    "name": "cffi",
+    "version": "2.1.1",
+    "source_url": "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz",
+    "sha256": "dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be",
+    "files": [
+      "python-source/cffi/LICENSE"
+    ]
+  },
+  {
+    "name": "google-crc32c",
+    "version": "1.9.0",
+    "source_url": "https://files.pythonhosted.org/packages/fa/25/9cb0c1c31c45b893eb8f11ae70b3f4309432d59b5acaebca5dbe791729a4/google_crc32c-1.9.0.tar.gz",
+    "sha256": "7b8c84c3d159ab6817fe3f74e6e6cef099c3f95dcec3abc0d8afb1404642efbe",
+    "files": [
+      "python-source/google-crc32c/LICENSE"
+    ]
+  },
+  {
+    "name": "asn1",
+    "version": "0.24.1",
+    "source_url": "https://static.crates.io/crates/asn1/asn1-0.24.1.crate",
+    "sha256": "c9795210620c0cb3f9a7ce4f882808c38e1ef7b347c90591dceae0886e031fb1",
+    "license": [
+      {
+        "expression": "BSD-3-Clause"
+      }
+    ],
+    "files": [
+      "native/rust/asn1/LICENSE"
+    ]
+  },
+  {
+    "name": "asn1_derive",
+    "version": "0.24.1",
+    "source_url": "https://static.crates.io/crates/asn1_derive/asn1_derive-0.24.1.crate",
+    "sha256": "909e307f1cc32bb8bccbd98f446e6d1bf03fa30f7b53a4337da7181ad30fa11a",
+    "license": [
+      {
+        "expression": "BSD-3-Clause"
+      }
+    ],
+    "files": [
+      "native/rust/asn1_derive/LICENSE"
+    ]
+  },
+  {
+    "name": "base64",
+    "version": "0.23.0",
+    "source_url": "https://static.crates.io/crates/base64/base64-0.23.0.crate",
+    "sha256": "b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/base64/LICENSE-APACHE",
+      "native/rust/base64/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "bitflags",
+    "version": "2.13.1",
+    "source_url": "https://static.crates.io/crates/bitflags/bitflags-2.13.1.crate",
+    "sha256": "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/bitflags/LICENSE-APACHE",
+      "native/rust/bitflags/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "cc",
+    "version": "1.4.0",
+    "source_url": "https://static.crates.io/crates/cc/cc-1.4.0.crate",
+    "sha256": "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/cc/LICENSE-APACHE",
+      "native/rust/cc/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "cfg-if",
+    "version": "1.0.4",
+    "source_url": "https://static.crates.io/crates/cfg-if/cfg-if-1.0.4.crate",
+    "sha256": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/cfg-if/LICENSE-APACHE",
+      "native/rust/cfg-if/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "find-msvc-tools",
+    "version": "0.1.9",
+    "source_url": "https://static.crates.io/crates/find-msvc-tools/find-msvc-tools-0.1.9.crate",
+    "sha256": "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/find-msvc-tools/LICENSE-APACHE",
+      "native/rust/find-msvc-tools/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "foreign-types-shared",
+    "version": "0.1.1",
+    "source_url": "https://static.crates.io/crates/foreign-types-shared/foreign-types-shared-0.1.1.crate",
+    "sha256": "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/foreign-types-shared/LICENSE-APACHE",
+      "native/rust/foreign-types-shared/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "foreign-types",
+    "version": "0.3.2",
+    "source_url": "https://static.crates.io/crates/foreign-types/foreign-types-0.3.2.crate",
+    "sha256": "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/foreign-types/LICENSE-APACHE",
+      "native/rust/foreign-types/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "heck",
+    "version": "0.5.0",
+    "source_url": "https://static.crates.io/crates/heck/heck-0.5.0.crate",
+    "sha256": "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/heck/LICENSE-APACHE",
+      "native/rust/heck/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "itoa",
+    "version": "1.0.18",
+    "source_url": "https://static.crates.io/crates/itoa/itoa-1.0.18.crate",
+    "sha256": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/itoa/LICENSE-APACHE",
+      "native/rust/itoa/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "libc",
+    "version": "0.2.189",
+    "source_url": "https://static.crates.io/crates/libc/libc-0.2.189.crate",
+    "sha256": "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/libc/LICENSE-APACHE",
+      "native/rust/libc/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "once_cell",
+    "version": "1.21.4",
+    "source_url": "https://static.crates.io/crates/once_cell/once_cell-1.21.4.crate",
+    "sha256": "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/once_cell/LICENSE-APACHE",
+      "native/rust/once_cell/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "openssl-macros",
+    "version": "0.1.1",
+    "source_url": "https://static.crates.io/crates/openssl-macros/openssl-macros-0.1.1.crate",
+    "sha256": "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/openssl-macros/LICENSE-APACHE",
+      "native/rust/openssl-macros/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "openssl-sys",
+    "version": "0.9.117",
+    "source_url": "https://static.crates.io/crates/openssl-sys/openssl-sys-0.9.117.crate",
+    "sha256": "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695",
+    "license": [
+      {
+        "expression": "MIT"
+      }
+    ],
+    "files": [
+      "native/rust/openssl-sys/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "openssl",
+    "version": "0.10.81",
+    "source_url": "https://static.crates.io/crates/openssl/openssl-0.10.81.crate",
+    "sha256": "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45",
+    "license": [
+      {
+        "expression": "Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/openssl/LICENSE",
+      "native/rust/openssl/LICENSE-APACHE"
+    ]
+  },
+  {
+    "name": "pem",
+    "version": "4.0.0",
+    "source_url": "https://static.crates.io/crates/pem/pem-4.0.0.crate",
+    "sha256": "d354a98a3d1251555de99e8fdd8afda05573c31b82f59063a7b0a29b5527f120",
+    "license": [
+      {
+        "expression": "MIT"
+      }
+    ],
+    "files": [
+      "native/rust/pem/LICENSE.md"
+    ]
+  },
+  {
+    "name": "pkg-config",
+    "version": "0.3.33",
+    "source_url": "https://static.crates.io/crates/pkg-config/pkg-config-0.3.33.crate",
+    "sha256": "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/pkg-config/LICENSE-APACHE",
+      "native/rust/pkg-config/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "portable-atomic",
+    "version": "1.14.0",
+    "source_url": "https://static.crates.io/crates/portable-atomic/portable-atomic-1.14.0.crate",
+    "sha256": "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3",
+    "license": [
+      {
+        "expression": "Apache-2.0 OR MIT"
+      }
+    ],
+    "files": [
+      "native/rust/portable-atomic/LICENSE-APACHE",
+      "native/rust/portable-atomic/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "proc-macro2",
+    "version": "1.0.107",
+    "source_url": "https://static.crates.io/crates/proc-macro2/proc-macro2-1.0.107.crate",
+    "sha256": "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/proc-macro2/LICENSE-APACHE",
+      "native/rust/proc-macro2/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "pyo3-build-config",
+    "version": "0.29.2",
+    "source_url": "https://static.crates.io/crates/pyo3-build-config/pyo3-build-config-0.29.2.crate",
+    "sha256": "f41027e41b4bd03f6e60f9f417fe24a6341a6bb744edd62b6f709f2a52ea30e9",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/pyo3-build-config/LICENSE-APACHE",
+      "native/rust/pyo3-build-config/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "pyo3-ffi",
+    "version": "0.29.2",
+    "source_url": "https://static.crates.io/crates/pyo3-ffi/pyo3-ffi-0.29.2.crate",
+    "sha256": "e591a95526fead067432c3b3a33fc74770b87b1e04e73671090d9c2055a2b327",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/pyo3-ffi/LICENSE-APACHE",
+      "native/rust/pyo3-ffi/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "pyo3-macros-backend",
+    "version": "0.29.2",
+    "source_url": "https://static.crates.io/crates/pyo3-macros-backend/pyo3-macros-backend-0.29.2.crate",
+    "sha256": "571575aa3749fa6216757dd47d2a3e7ef360f329a40f0666a9fbd14889024952",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/pyo3-macros-backend/LICENSE-APACHE",
+      "native/rust/pyo3-macros-backend/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "pyo3-macros",
+    "version": "0.29.2",
+    "source_url": "https://static.crates.io/crates/pyo3-macros/pyo3-macros-0.29.2.crate",
+    "sha256": "73225868fc1cd84eef2c3c230ddb91273bf1de46aeb8a4248da76d32a0924a1c",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/pyo3-macros/LICENSE-APACHE",
+      "native/rust/pyo3-macros/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "pyo3",
+    "version": "0.29.2",
+    "source_url": "https://static.crates.io/crates/pyo3/pyo3-0.29.2.crate",
+    "sha256": "4688ddedf473e32662b9b067670129a8afb8c18e351482c70d62ba4a88171e8b",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/pyo3/LICENSE-APACHE",
+      "native/rust/pyo3/LICENSE-MIT",
+      "native/rust/pyo3/pyo3-runtime/LICENSE-APACHE",
+      "native/rust/pyo3/pyo3-runtime/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "quote",
+    "version": "1.0.47",
+    "source_url": "https://static.crates.io/crates/quote/quote-1.0.47.crate",
+    "sha256": "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/quote/LICENSE-APACHE",
+      "native/rust/quote/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "self_cell",
+    "version": "1.3.0",
+    "source_url": "https://static.crates.io/crates/self_cell/self_cell-1.3.0.crate",
+    "sha256": "2ab42ca02749e120097e328d91d415325bdf43b1c72c4c8badf37375fe40a813",
+    "license": [
+      {
+        "expression": "Apache-2.0 OR GPL-2.0-only"
+      }
+    ],
+    "files": [
+      "native/rust/self_cell/LICENSE-APACHE",
+      "native/rust/self_cell/LICENSE-GPLv2"
+    ]
+  },
+  {
+    "name": "shlex",
+    "version": "2.0.1",
+    "source_url": "https://static.crates.io/crates/shlex/shlex-2.0.1.crate",
+    "sha256": "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/shlex/LICENSE-APACHE",
+      "native/rust/shlex/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "syn",
+    "version": "2.0.119",
+    "source_url": "https://static.crates.io/crates/syn/syn-2.0.119.crate",
+    "sha256": "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/syn/LICENSE-APACHE",
+      "native/rust/syn/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "target-lexicon",
+    "version": "0.13.5",
+    "source_url": "https://static.crates.io/crates/target-lexicon/target-lexicon-0.13.5.crate",
+    "sha256": "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca",
+    "license": [
+      {
+        "expression": "Apache-2.0 WITH LLVM-exception"
+      }
+    ],
+    "files": [
+      "native/rust/target-lexicon/LICENSE"
+    ]
+  },
+  {
+    "name": "unicode-ident",
+    "version": "1.0.24",
+    "source_url": "https://static.crates.io/crates/unicode-ident/unicode-ident-1.0.24.crate",
+    "sha256": "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75",
+    "license": [
+      {
+        "expression": "(MIT OR Apache-2.0) AND Unicode-3.0"
+      }
+    ],
+    "files": [
+      "native/rust/unicode-ident/LICENSE-APACHE",
+      "native/rust/unicode-ident/LICENSE-MIT",
+      "native/rust/unicode-ident/LICENSE-UNICODE"
+    ]
+  },
+  {
+    "name": "vcpkg",
+    "version": "0.2.15",
+    "source_url": "https://static.crates.io/crates/vcpkg/vcpkg-0.2.15.crate",
+    "sha256": "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426",
+    "license": [
+      {
+        "expression": "MIT OR Apache-2.0"
+      }
+    ],
+    "files": [
+      "native/rust/vcpkg/LICENSE-APACHE",
+      "native/rust/vcpkg/LICENSE-MIT"
+    ]
+  },
+  {
+    "name": "libffi bundled by cffi2.1.1 Windows x64",
+    "source_url": "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz",
+    "sha256": "dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be",
+    "files": [
+      "native/libffi/ffi.c",
+      "native/libffi/ffi.h",
+      "native/libffi/ffi_common.h",
+      "native/libffi/fficonfig.h",
+      "native/libffi/ffitarget.h",
+      "native/libffi/prep_cif.c",
+      "native/libffi/types.c",
+      "native/libffi/win32.c",
+      "native/libffi/win64.asm"
+    ]
+  }
+]
