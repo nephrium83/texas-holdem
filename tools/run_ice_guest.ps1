@@ -98,6 +98,16 @@ function Get-OwnedSupervisorProcess($State) {
     }
 }
 
+function Start-OwnedSupervisor([string] $PowerShell, [string] $Script, [string] $RequestFile) {
+    $arguments = @('-NoProfile', '-NonInteractive', '-File', $Script, '-RequestFile', $RequestFile)
+    $quoted = @($arguments | ForEach-Object { '"' + $_ + '"' })
+    # Redirection here makes Windows inherit the workflow's pipe handles.
+    # The runner then cannot finish this step until the guest exits, which
+    # prevents uploading its answer while it can still connect. The detached
+    # supervisor records its own private transcript instead.
+    return Start-Process -FilePath $PowerShell -ArgumentList $quoted -WindowStyle Hidden -PassThru
+}
+
 function Read-NativeOwnership($Paths, $State) {
     $receipt = Read-ProofJson (Join-Path $Paths.private 'process.json')
     $fields = @('schema', 'nonce', 'executable', 'process_id', 'process_start_ticks')
@@ -227,11 +237,7 @@ function Invoke-ProofGuest([string] $SelectedPhase) {
         } $requestFile
         $state.supervisor_executable = (Get-Process -Id $PID).Path
         $supervisorScript = Join-Path $PSScriptRoot 'run_ice_guest_supervisor.ps1'
-        $supervisorArguments = @('-NoProfile', '-NonInteractive', '-File', $supervisorScript, '-RequestFile', $requestFile)
-        $quoted = @($supervisorArguments | ForEach-Object { '"' + $_ + '"' })
-        $supervisor = Start-Process -FilePath $state.supervisor_executable -ArgumentList $quoted -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput (Join-Path $paths.private 'supervisor.stdout.log') `
-            -RedirectStandardError (Join-Path $paths.private 'supervisor.stderr.log')
+        $supervisor = Start-OwnedSupervisor $state.supervisor_executable $supervisorScript $requestFile
         $state.supervisor_id = $supervisor.Id
         $state.supervisor_start_ticks = $supervisor.StartTime.ToUniversalTime().Ticks.ToString()
         $state.phase = 'starting'

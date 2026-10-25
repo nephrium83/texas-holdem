@@ -27,12 +27,15 @@ function Assert-RequestChild([string] $Path, [string] $Root) {
 }
 
 $native = $null
+$transcribing = $false
 try {
     if (-not $env:RUNNER_TEMP -or -not [IO.Path]::IsPathFullyQualified($env:RUNNER_TEMP)) {
         throw 'Absolute runner directory required'
     }
     $root = Join-Path $env:RUNNER_TEMP 'direct-ice-proof'
     $private = Join-Path $root 'private'
+    Start-Transcript -LiteralPath (Join-Path $private 'supervisor.session.log') | Out-Null
+    $transcribing = $true
     $requestPath = Assert-RequestChild $RequestFile $private
     $item = Get-Item -LiteralPath $requestPath
     if ($item.PSIsContainer -or $item.Length -gt 32768) { throw 'Invalid supervisor request size' }
@@ -94,4 +97,6 @@ try {
     }
     Write-Error 'Owned proof supervisor failed; private details withheld.'
     exit 1
+} finally {
+    if ($transcribing) { Stop-Transcript | Out-Null }
 }

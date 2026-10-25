@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import textwrap
 
 import pytest
@@ -263,6 +264,64 @@ def test_native_exit_receipt_is_bound_to_nonce_process_and_creation_time(tmp_pat
         }
     """, {"ICE_TEST_ROOT": str(tmp_path)})
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows detached process lifetime")
+def test_supervisor_and_native_survive_the_starting_shell_exit(tmp_path):
+    import json
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    root = tmp_path / "direct-ice-proof"
+    private = root / "private"
+    package = root / "package" / "DirectConnectProbe"
+    private.mkdir(parents=True)
+    package.mkdir(parents=True)
+    executable = package / "DirectConnectProbe.exe"
+    base = Path(getattr(sys, "_base_executable", sys.executable))
+    shutil.copy2(base, executable)
+    for pattern in ("python*.dll", "vcruntime*.dll"):
+        for library in base.parent.glob(pattern):
+            shutil.copy2(library, package / library.name)
+    request_file = private / "supervisor-request.json"
+    request_file.write_text(json.dumps({
+        "schema": "direct-ice-supervisor-request-v1", "nonce": "a" * 64,
+        "executable": str(executable),
+        "arguments": ["-c", "import time;time.sleep(3);raise SystemExit(0)"],
+        "deadline_utc": (datetime.now(timezone.utc) + timedelta(seconds=20)).isoformat(),
+    }))
+    env = dict(os.environ, RUNNER_TEMP=str(tmp_path), PYTHONHOME=str(base.parent),
+               ICE_SUPERVISOR=str(ROOT / "tools/run_ice_guest_supervisor.ps1"),
+               ICE_REQUEST=str(request_file), ICE_PRIVATE=str(private), ICE_PWSH=PWSH,
+               ICE_HELPER=str(HELPER))
+    code = r'''
+        $ErrorActionPreference = 'Stop'
+        . $env:ICE_HELPER -Phase Prepare
+        $child = Start-OwnedSupervisor $env:ICE_PWSH $env:ICE_SUPERVISOR $env:ICE_REQUEST
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(8)
+        while (-not (Test-Path -LiteralPath (Join-Path $env:ICE_PRIVATE 'process.json'))) {
+            if ([DateTimeOffset]::UtcNow -gt $deadline -or $child.HasExited) { exit 3 }
+            Start-Sleep -Milliseconds 50
+        }
+        exit 0
+    '''
+    # A workflow captures pipes. Its start step must finish and drain those
+    # pipes while the actual native peer is still alive for answer exchange.
+    parent = subprocess.Popen([PWSH, "-NoProfile", "-NonInteractive", "-Command", code],
+                              env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    parent.wait(timeout=15)
+    try:
+        output, error = parent.communicate(timeout=0.5)
+    except subprocess.TimeoutExpired:
+        parent.communicate(timeout=10)
+        pytest.fail("Detached supervisor/native retained the workflow stdout/stderr pipes")
+    assert parent.returncode == 0, (output + error).decode(errors="replace")
+    deadline = time.monotonic() + 10
+    while not (private / "exit.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    diagnostics = "\n".join(path.read_text(errors="replace") for path in private.glob("*.log"))
+    assert (private / "exit.json").exists(), diagnostics
+    assert json.loads((private / "exit.json").read_text())["exit_code"] == 0
 
 
 def test_workflow_uploads_only_explicit_public_files_and_pinned_actions():
