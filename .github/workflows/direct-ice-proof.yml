@@ -213,15 +213,6 @@ jobs:
         run: |
           python tools/internet_desktop_acceptance.py prepare --root "$env:RUNNER_TEMP/desktop-proof"
           if ($LASTEXITCODE -ne 0) { throw 'Desktop courier preparation failed' }
-      - name: Download the selected immutable desktop ZIP
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download "$env:ICE_DESKTOP_PACKAGE_TAG" --repo "$env:GITHUB_REPOSITORY" --pattern Poker.zip --dir "$env:RUNNER_TEMP/desktop-proof"
-          if ($LASTEXITCODE -ne 0) { throw 'Desktop ZIP download failed' }
-          $hash = (Get-FileHash -LiteralPath "$env:RUNNER_TEMP/desktop-proof/Poker.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($hash -cne $env:ICE_DESKTOP_PACKAGE_SHA256) { throw 'Desktop ZIP hash differs' }
       - name: Publish the public courier key
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

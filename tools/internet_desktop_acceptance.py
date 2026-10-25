@@ -17,6 +17,7 @@ import socket
 import subprocess
 import time
 import urllib.request
+from urllib.parse import urlsplit
 import zipfile
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
@@ -78,29 +79,41 @@ def courier_key(key, remote_public, context):
                 info=b"poker-desktop-invite-courier-v1").derive(shared)
 
 
-def seal_invite(invite, key, context):
+def validate_delivery(value):
+    if not isinstance(value, dict) or set(value) != {"invite", "package_url"}:
+        raise ValueError("Invalid private delivery")
+    invite, url = value["invite"], value["package_url"]
     if not isinstance(invite, str) or not invite.startswith("poker3:") or len(invite) > 4096:
         raise ValueError("Invalid private invite")
+    if not isinstance(url, str) or len(url) > 8192:
+        raise ValueError("Invalid package delivery URL")
+    parsed = urlsplit(url)
+    if (parsed.scheme != "https" or parsed.hostname != "release-assets.githubusercontent.com"
+            or parsed.port not in (None, 443) or parsed.username or parsed.password or parsed.fragment
+            or not parsed.path.startswith("/github-production-release-asset/")):
+        raise ValueError("Package delivery must use the official signed release asset origin")
+    return value
+
+
+def seal_delivery(delivery, key, context):
+    validate_delivery(delivery)
     if public(key) != context["host_public"]:
         raise ValueError("Host courier identity differs")
     nonce = os.urandom(12)
     cipher = AESGCM(courier_key(key, context["guest_public"], context)).encrypt(
-        nonce, invite.encode("ascii"), canonical(context))
+        nonce, canonical(delivery), canonical(context))
     return {"context": context, "nonce": nonce.hex(), "ciphertext": base64.b64encode(cipher).decode("ascii")}
 
 
-def open_invite(envelope, key, context):
+def open_delivery(envelope, key, context):
     if (not isinstance(envelope, dict) or set(envelope) != {"context", "nonce", "ciphertext"}
             or envelope["context"] != context or public(key) != context["guest_public"]
             or re.fullmatch("[0-9a-f]{24}", envelope["nonce"]) is None
-            or not isinstance(envelope["ciphertext"], str) or len(envelope["ciphertext"]) > 6000):
+            or not isinstance(envelope["ciphertext"], str) or len(envelope["ciphertext"]) > 24000):
         raise ValueError("Invalid encrypted invite envelope")
     plain = AESGCM(courier_key(key, context["host_public"], context)).decrypt(
         bytes.fromhex(envelope["nonce"]), base64.b64decode(envelope["ciphertext"], validate=True), canonical(context))
-    invite = plain.decode("ascii")
-    if not invite.startswith("poker3:") or len(invite) > 4096:
-        raise ValueError("Invalid decrypted invite")
-    return invite
+    return validate_delivery(json.loads(plain))
 
 
 def extract_package(archive, destination, source_commit, package_sha256):
@@ -227,12 +240,11 @@ def guest_run(root):
         nonce=os.environ["ICE_NONCE"], source_commit=os.environ["ICE_SOURCE_REF"],
         package_sha256=os.environ["ICE_DESKTOP_PACKAGE_SHA256"], host_public=os.environ["ICE_HOST_ENCRYPTION_PUBLIC"],
         guest_public=public(key))
-    app = extract_package(root / "Poker.zip", root / "private/package", context["source_commit"], context["package_sha256"])
     gist = os.environ["ICE_MAILBOX_GIST_ID"]
     if re.fullmatch("[0-9a-f]{32}", gist) is None:
         raise ValueError("Invalid encrypted mailbox ID")
     deadline = time.monotonic() + 180
-    invite = None
+    delivery = None
     while time.monotonic() < deadline:
         request = urllib.request.Request("https://api.github.com/gists/" + gist,
                                          headers={"User-Agent": "poker-desktop-acceptance", "Accept": "application/vnd.github+json"})
@@ -242,14 +254,25 @@ def guest_run(root):
             raise ValueError("Mailbox exceeds bound")
         file = json.loads(raw).get("files", {}).get("invite.json")
         if file and not file.get("truncated"):
-            invite = open_invite(json.loads(file["content"]), key, context)
+            delivery = open_delivery(json.loads(file["content"]), key, context)
             break
         time.sleep(3)
-    if invite is None:
+    if delivery is None:
         raise TimeoutError("Encrypted invite did not arrive")
+    # The signed asset URL is encrypted along with the invite. The runner
+    # gets temporary read access to this one ZIP, without a write token or
+    # access to unpublished releases. Bound the response before extracting.
+    with urllib.request.urlopen(delivery["package_url"], timeout=60) as response, (root / "Poker.zip").open("xb") as output:
+        total = 0
+        while chunk := response.read(1024 * 1024):
+            total += len(chunk)
+            if total > 512 * 1024 * 1024:
+                raise ValueError("Desktop ZIP download exceeds bound")
+            output.write(chunk)
+    app = extract_package(root / "Poker.zip", root / "private/package", context["source_commit"], context["package_sha256"])
     desktop = DesktopRun(app, root / "private/desktop", "join")
     try:
-        desktop.invite.write_text(invite, encoding="ascii")
+        desktop.invite.write_text(delivery["invite"], encoding="ascii")
         receipt = desktop.complete()
         write(root / "public/result.json", {"context": context, "receipt": receipt})
     finally:
