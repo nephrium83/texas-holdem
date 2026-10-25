@@ -91,6 +91,12 @@ source build. The guest has one 300-second budget,
 including the answer upload interval; later workflow steps do not reset it.
 Start-Process -WindowStyle Hidden starts the one-use supervisor and its
 owned frozen executable.
+The outer launcher uses a separate hidden Windows process without redirected
+standard streams. Redirecting them there inherits the workflow's pipe handles
+and can prevent the answer-upload step from starting while the peer is alive.
+The supervisor writes its own private transcript and owns the native child's
+redirected streams. A real regression fixture checks that the launching shell's
+captured pipes close while its three-second native child remains alive.
 A one-use PowerShell supervisor keeps the native process handle across
 workflow steps. It publishes private, atomic ownership and exit receipts,
 bound to the run nonce, native PID, and kernel process creation time. The

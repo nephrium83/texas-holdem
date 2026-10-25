@@ -62,7 +62,7 @@ def core_wheel(tmp_path_factory):
     return work, wheels[0]
 
 
-def test_wheel_exposes_optional_desktop_and_p2p_dependencies(core_wheel):
+def test_wheel_exposes_optional_desktop_p2p_and_internet_dependencies(core_wheel):
     _, wheel = core_wheel
     with zipfile.ZipFile(wheel) as archive:
         metadata_path, = (name for name in archive.namelist()
@@ -71,10 +71,11 @@ def test_wheel_exposes_optional_desktop_and_p2p_dependencies(core_wheel):
         assert "holdem/embedding.py" in archive.namelist()
     requirements = metadata.get_all("Requires-Dist") or []
     assert all("extra ==" in requirement for requirement in requirements), requirements
-    assert {"desktop", "p2p", "dev"} <= set(metadata.get_all("Provides-Extra") or [])
+    assert {"desktop", "p2p", "internet", "dev"} <= set(metadata.get_all("Provides-Extra") or [])
     for package, extra in (("Pillow", "desktop"),
                            ("cryptography", "desktop"),
-                           ("cryptography", "p2p")):
+                           ("cryptography", "p2p"),
+                           ("aiortc==1.15.0", "internet")):
         assert any(requirement.lower().startswith(package.lower())
                    and f'extra == "{extra}"' in requirement
                    for requirement in requirements), requirements
@@ -98,10 +99,10 @@ from pathlib import Path
 import random
 import sys
 
-for dependency in ("PIL", "cryptography", "miniupnpc"):
+for dependency in ("PIL", "cryptography", "miniupnpc", "aiortc", "av", "aioice"):
     assert importlib.util.find_spec(dependency) is None, dependency
 
-forbidden = {"tkinter", "PIL", "cryptography", "socket", "asyncio"}
+forbidden = {"tkinter", "PIL", "cryptography", "socket", "asyncio", "aiortc", "av", "aioice"}
 assert not (forbidden & sys.modules.keys()), "probe setup loaded host modules"
 
 import holdem
@@ -146,7 +147,8 @@ import importlib.metadata
 assert importlib.metadata.version("holdem") == holdem.__version__
 installed_distributions = sorted(distribution.metadata["Name"].lower()
                                  for distribution in importlib.metadata.distributions())
-assert not ({"pillow", "cryptography", "miniupnpc"} & set(installed_distributions))
+assert not ({"pillow", "cryptography", "miniupnpc", "aiortc", "av", "aioice"}
+            & set(installed_distributions))
 print(json.dumps({"holdem_path": str(installed), "hand_settled": True,
                   "stable_close_receipt": True,
                   "installed_distributions": installed_distributions}))
