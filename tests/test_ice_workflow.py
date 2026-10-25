@@ -339,10 +339,14 @@ def test_workflow_uploads_only_explicit_public_files_and_pinned_actions():
     assert all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40}", action) for action in actions)
     upload_blocks = [block for block in source.split("      - name:")
                      if "uses: actions/upload-artifact@" in block]
-    assert len(upload_blocks) == 4
+    assert len(upload_blocks) == 6
     for block in upload_blocks:
         assert "/private" not in block
         assert "*.json" not in block and "**" not in block
+    desktop_uploads = [block for block in upload_blocks if "desktop-proof" in block]
+    assert len(desktop_uploads) == 2
+    assert {match for block in desktop_uploads for match in
+            re.findall(r"desktop-proof/public/([a-z.]+)", block)} == {"ready.json", "result.json"}
     assert source.index("Validate dispatch input") < source.index("uses: actions/checkout@")
     assert source.index("Build the minimal native runtime") < source.index("Install pinned probe dependencies")
     assert source.index("Publish encrypted answer while guest is running") < source.index("-Phase Complete")
