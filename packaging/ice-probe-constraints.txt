@@ -12,3 +12,4 @@ pyee==15.0.0
 pylibsrtp==1.0.0
 pyopenssl==26.4.0
 typing-extensions==4.16.0
+websockets==16.1.1

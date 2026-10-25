@@ -33,6 +33,8 @@ def application(request, tmp_path):
         executable = Path(selected).resolve(strict=True)
         relocated = tmp_path / "Relocated Internet Poker"
         shutil.copytree(executable.parent, relocated)
+        from tests.test_windows_package import build
+        build.verify_manifest(relocated)
         return {"mode": "frozen", "executable": relocated / executable.name}
     if GODOT is None:
         pytest.skip("set GODOT_BIN for source three-player Internet UI acceptance")

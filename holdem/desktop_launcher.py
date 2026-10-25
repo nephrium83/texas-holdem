@@ -386,6 +386,8 @@ async def _run(args, paths: RuntimePaths) -> int:
     peer_config = json.loads(peer_path.read_text(encoding="utf-8")) if peer_path is not None else None
     if peer_config is not None and not isinstance(peer_config, dict):
         raise ValueError("The private peer test configuration must be an object")
+    if args.lan_self_test_config is not None and peer_config.get("network", "lan") != "lan":
+        raise ValueError("The LAN UI check requires network: lan")
     test_services = _internet_test_services(peer_config) if args.internet_self_test_config is not None else None
     ready = asyncio.get_running_loop().create_future()
 

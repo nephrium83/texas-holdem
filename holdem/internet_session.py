@@ -20,9 +20,9 @@ from .introduction_client import IntroductionConnection, validate_endpoint
 
 def configured_services():
     # A containing game may supply its own trusted map. No URL is taken from
-    # an invite. A production default is added only after deployment review.
+    # an invite. This hostname routes only the bounded introduction service.
     selected = os.environ.get("HOLDEM_INTRODUCTION_URL", "")
-    return {"poker": validate_endpoint(selected)} if selected else {}
+    return {"poker": validate_endpoint(selected or "wss://poker.errantsaints.space/v1")}
 
 
 def _empty_snapshot():

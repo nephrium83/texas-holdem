@@ -89,8 +89,9 @@ callbacks. Leave cancels pending setup before disposing the room.
 Internet invitations use explicit version3 and the `direct-udp-v1` profile.
 They carry a trusted service identifier, full host pin, routing token, room
 generation, expiry and private capability. The identifier selects a configured
-WSS origin; an invite cannot choose a URL. `HOLDEM_INTRODUCTION_URL` lets a host
-application configure its trusted WSS `/v1` endpoint. Plain WebSockets are
+WSS origin; an invite cannot choose a URL. The desktop's configured default is
+`wss://poker.errantsaints.space/v1`; `HOLDEM_INTRODUCTION_URL` lets a containing
+application select its own trusted WSS `/v1` endpoint. Plain WebSockets are
 confined to explicitly injected literal-loopback acceptance fixtures.
 
 The introduction service authenticates one-use socket challenges and signed

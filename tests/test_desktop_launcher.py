@@ -85,6 +85,18 @@ def test_private_loopback_service_is_explicit_and_scoped_to_internet_diagnostic(
         launcher._internet_test_services({"network": "lan", "test_service_endpoint": "ws://127.0.0.1:8080/v1"})
 
 
+def test_lan_diagnostic_cannot_publish_an_internet_result(tmp_path, monkeypatch, paths):
+    config = tmp_path / "private-config.json"
+    config.write_text(json.dumps({"network": "internet"}))
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("A mismatched diagnostic must fail before starting sidecar or Godot")
+    monkeypatch.setattr(launcher, "run_sidecar", forbidden)
+    monkeypatch.setattr(launcher, "_spawn_game", forbidden)
+    args = _args(tmp_path, "--lan-self-test-config", str(config))
+    with pytest.raises(ValueError, match="network: lan"):
+        asyncio.run(launcher._run(args, paths))
+
+
 def test_internet_ui_check_supplies_trusted_test_service_and_uses_real_peer_driver(tmp_path, monkeypatch, paths):
     async def exercise():
         config = {"network": "internet", "target_hands": 10, "expected_players": 3,

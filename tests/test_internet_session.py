@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from crypto_gate import require_crypto
 from holdem.internet_invite import encode_invite, parse_invite, InviteError
-from holdem.internet_session import InternetSession
+from holdem.internet_session import InternetSession, configured_services
 from holdem.introduction_client import validate_endpoint
 from holdem.introduction_service import IntroductionService
 from holdem.p2p.identity import Identity
@@ -24,6 +24,11 @@ def session(endpoint):
                            services={"test": endpoint},
                            identity=Identity(Ed25519PrivateKey.generate(), X25519PrivateKey.generate()),
                            master_secret=secrets.token_bytes(32), stun_urls=())
+
+
+def test_desktop_has_a_trusted_default_without_player_configuration(monkeypatch):
+    monkeypatch.delenv("HOLDEM_INTRODUCTION_URL", raising=False)
+    assert configured_services() == {"poker": "wss://poker.errantsaints.space/v1"}
 
 
 async def wait(operation, predicate, label, timeout=20):
