@@ -57,6 +57,10 @@ def _parse_args(argv=None):
                         help="Render and capture the desktop deal presentation check")
     parser.add_argument("--lan-self-test-config", type=Path,
                         help="Run a paired LAN check using a local JSON configuration file")
+    parser.add_argument("--internet-self-test-config", type=Path,
+                        help="Run a direct Internet UI check using a private JSON configuration file")
+    parser.add_argument("--internet-runtime-self-test", action="store_true",
+                        help="Verify packaged direct poker dependencies and cleanup before opening a window")
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument("--godot", type=Path)
     parser.add_argument("--pck", type=Path)
@@ -65,10 +69,13 @@ def _parse_args(argv=None):
     args.self_test = args.self_test or args.self_test_visible
     args.presentation_self_test = args.presentation_self_test or args.presentation_self_test_visible
     if sum((args.self_test, args.presentation_self_test,
-            args.lan_self_test_config is not None)) > 1:
-        parser.error("Choose one of the local, presentation, or paired LAN checks")
+            args.lan_self_test_config is not None, args.internet_self_test_config is not None,
+            args.internet_runtime_self_test)) > 1:
+        parser.error("Choose one local, presentation, paired LAN, or Internet runtime check")
     if args.lan_self_test_config is not None:
         args.lan_self_test_config = args.lan_self_test_config.resolve()
+    if args.internet_self_test_config is not None:
+        args.internet_self_test_config = args.internet_self_test_config.resolve()
     if args.log_dir is None:
         app_data = Path(os.environ.get("LOCALAPPDATA", Path.home()))
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -311,6 +318,36 @@ def _validate_lan_summary(config: dict, summary: dict) -> None:
         raise RuntimeError("The paired LAN check did not complete its required outcome")
 
 
+def _internet_test_services(config):
+    """A private diagnostic may inject only a literal loopback test service."""
+    if config.get("network") != "internet":
+        raise ValueError("The Internet UI check requires network: internet")
+    if "test_service_endpoint" not in config:
+        return None
+    import ipaddress
+    from urllib.parse import urlsplit
+    from .introduction_client import validate_endpoint
+    endpoint = config["test_service_endpoint"]
+    if type(endpoint) is not str:
+        raise ValueError("The diagnostic test service must use a literal loopback address")
+    try:
+        parsed = urlsplit(endpoint)
+        if (parsed.scheme != "ws" or parsed.port is None or
+                not ipaddress.ip_address(parsed.hostname).is_loopback):
+            raise ValueError()
+        return {"test": validate_endpoint(endpoint, allow_loopback=True)}
+    except (ValueError, TypeError):
+        raise ValueError("The diagnostic test service must use a literal loopback address") from None
+
+
+def _validate_internet_summary(config, summary):
+    _validate_lan_summary(config, summary)
+    if (summary.get("network") != "internet" or summary.get("network_verified") is not True or
+            summary.get("proofs_verified") != config.get("expected_players", 2) or
+            summary.get("face_up_checks", 0) < 1 or summary.get("opponent_hidden_checks", 0) < 1):
+        raise RuntimeError("The Internet UI check did not verify its network, private views and shuffle proofs")
+
+
 def _validate_presentation_summary(summary: dict) -> None:
     """Require the real desktop flow and visible motion, not a bare deal."""
     counts = ("menu_fresh_checks", "opening_preaction_checks", "shuffle_frames",
@@ -335,6 +372,21 @@ def _validate_presentation_summary(summary: dict) -> None:
 async def _run(args, paths: RuntimePaths) -> int:
     args.log_dir.mkdir(parents=True, exist_ok=True)
     os.environ["HOLDEM_LIBSODIUM"] = str(paths.libsodium)
+    if getattr(sys, "frozen", False):
+        from .native_crypto import initialize
+        initialize(library_path=paths.libsodium)
+    if args.internet_runtime_self_test:
+        from .ice_poker_probe import _self_test
+        summary = await _self_test()
+        _write_json(args.log_dir / "internet-runtime-self-test.json", {"ok": True, "summary": summary})
+        return 0
+    peer_path = args.internet_self_test_config or args.lan_self_test_config
+    if args.internet_self_test_config is not None and peer_path.stat().st_size > 256 * 1024:
+        raise ValueError("The private Internet test configuration is too large")
+    peer_config = json.loads(peer_path.read_text(encoding="utf-8")) if peer_path is not None else None
+    if peer_config is not None and not isinstance(peer_config, dict):
+        raise ValueError("The private peer test configuration must be an object")
+    test_services = _internet_test_services(peer_config) if args.internet_self_test_config is not None else None
     ready = asyncio.get_running_loop().create_future()
 
     def announce(port):
@@ -343,10 +395,11 @@ async def _run(args, paths: RuntimePaths) -> int:
 
     sidecar = asyncio.create_task(run_sidecar(
         seats=2, sb=25, bb=50,
-        stack=100000 if args.self_test or args.lan_self_test_config else 1000,
+        stack=100000 if args.self_test or peer_path else 1000,
         structure="No-Limit", port=0,
         seed=7 if args.self_test or args.presentation_self_test else None,
-        nickname="Player", ready=announce, desktop_lobby=not args.self_test))
+        nickname="Player", ready=announce, desktop_lobby=not args.self_test,
+        **({"internet_services": test_services} if test_services is not None else {})))
     game = None
     session = {"game_pid": None, "sidecar_port": None, "game_exit_code": None}
     try:
@@ -361,7 +414,7 @@ async def _run(args, paths: RuntimePaths) -> int:
         session["sidecar_port"] = port
         command = [str(paths.godot), "--main-pack", str(paths.pck),
                    "--rendering-method", "gl_compatibility"]
-        if args.lan_self_test_config is not None:
+        if peer_path is not None:
             command.extend(["--headless", "-s", "res://sidecar/lan_peer_e2e.gd"])
         elif args.presentation_self_test:
             if not args.presentation_self_test_visible:
@@ -372,8 +425,9 @@ async def _run(args, paths: RuntimePaths) -> int:
                 command.append("--headless")
             command.extend(["-s", "res://sidecar/main_e2e.gd"])
         command.extend(["--", f"--sidecar-port={port}"])
-        if args.lan_self_test_config is not None:
-            command.append(f"--lan-peer-config={args.lan_self_test_config}")
+        if peer_path is not None:
+            command.append(f"--peer-config={peer_path}" if args.internet_self_test_config is not None else
+                           f"--lan-peer-config={peer_path}")
         if args.presentation_self_test:
             command.append(f"--presentation-report={args.log_dir / 'presentation.json'}")
             if args.presentation_self_test_visible:
@@ -386,12 +440,10 @@ async def _run(args, paths: RuntimePaths) -> int:
         session["game_pid"] = game.pid
         _write_json(args.log_dir / "session.json", session)
         _log.info("Game started: pid=%s sidecar_port=%s", game.pid, port)
-        lan_config = (json.loads(args.lan_self_test_config.read_text(encoding="utf-8"))
-                      if args.lan_self_test_config is not None else None)
-        check_timeout = (_lan_check_timeout(lan_config) if lan_config is not None
+        check_timeout = (_lan_check_timeout(peer_config) if peer_config is not None
                          else 90 if args.presentation_self_test else 60)
         deadline = (time.monotonic() + check_timeout
-                    if args.self_test or args.presentation_self_test or args.lan_self_test_config else None)
+                    if args.self_test or args.presentation_self_test or peer_path else None)
         while game.poll() is None:
             if sidecar.done():
                 await sidecar
@@ -411,11 +463,14 @@ async def _run(args, paths: RuntimePaths) -> int:
             _validate_presentation_summary(summary)
             _write_json(args.log_dir / "presentation-self-test.json",
                         {"ok": True, "error": None, "summary": summary})
-        if args.lan_self_test_config is not None:
-            config = lan_config
+        if peer_path is not None:
+            config = peer_config
             summary = json.loads(Path(config["report_path"]).read_text(encoding="utf-8"))
-            _validate_lan_summary(config, summary)
-            _write_json(args.log_dir / "lan-self-test.json",
+            if args.internet_self_test_config is not None:
+                _validate_internet_summary(config, summary)
+            else:
+                _validate_lan_summary(config, summary)
+            _write_json(args.log_dir / ("internet-self-test.json" if args.internet_self_test_config else "lan-self-test.json"),
                         {"ok": True, "error": None, "summary": summary})
         return 0
     finally:
@@ -441,7 +496,15 @@ def main(argv=None) -> int:
         return asyncio.run(_run(args, resolve_paths(args)))
     except Exception as error:
         _log.exception("Could not run the game")
-        if args.self_test:
+        if args.internet_runtime_self_test:
+            if args.log_dir.is_dir():
+                _write_json(args.log_dir / "internet-runtime-self-test.json",
+                            {"ok": False, "error": "Packaged Internet runtime verification failed", "summary": None})
+        elif args.internet_self_test_config is not None:
+            if args.log_dir.is_dir():
+                _write_json(args.log_dir / "internet-self-test.json",
+                            {"ok": False, "error": "Internet UI verification failed", "summary": None})
+        elif args.self_test:
             if args.log_dir.is_dir():
                 _write_json(args.log_dir / "self-test.json",
                             {"ok": False, "error": str(error), "summary": None})

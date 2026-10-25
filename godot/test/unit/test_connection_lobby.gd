@@ -22,7 +22,8 @@ func _host(can_start := false) -> Dictionary:
 
 
 func test_menu_actions_carry_the_entered_name():
-	for pair in [["LocalGameButton", "local_game"], ["HostLanButton", "host_lan"]]:
+	for pair in [["LocalGameButton", "local_game"], ["HostLanButton", "host_lan"],
+			["HostInternetButton", "host_internet"]]:
 		var control := _control()
 		control.apply_lobby({"mode": "menu", "state": "idle"})
 		control.get_node("%NicknameInput").text = " Ada "
@@ -31,14 +32,15 @@ func test_menu_actions_carry_the_entered_name():
 
 
 func test_join_sends_the_pasted_invite_without_changing_it():
-	var control := _control()
-	control.apply_lobby({"mode": "menu", "state": "idle"})
-	control.get_node("%NicknameInput").text = "Ben"
-	control.get_node("%JoinInviteInput").text = "  exact-invite-value  "
-	control.get_node("%JoinLanButton").pressed.emit()
-	assert_signal_emitted_with_parameters(control, "command_requested", [
-		"join_lan", {"nickname": "Ben", "invite": "exact-invite-value"},
-	])
+	for pair in [["JoinLanButton", "join_lan"], ["JoinInternetButton", "join_internet"]]:
+		var control := _control()
+		control.apply_lobby({"mode": "menu", "state": "idle"})
+		control.get_node("%NicknameInput").text = "Ben"
+		control.get_node("%JoinInviteInput").text = "  exact-invite-value  "
+		control.get_node("%" + pair[0]).pressed.emit()
+		assert_signal_emitted_with_parameters(control, "command_requested", [
+			pair[1], {"nickname": "Ben", "invite": "exact-invite-value"},
+		])
 
 
 func test_empty_invite_gives_an_actionable_message_without_sending():
@@ -140,3 +142,39 @@ func test_host_panel_and_menu_fit_the_preview_window():
 		assert_true(Rect2(0, 0, 1370, 850).encloses(panel.get_rect()))
 		var content: Control = panel.get_node("Margin/Content")
 		assert_true(panel.get_global_rect().encloses(content.get_global_rect()), "lobby controls overflow the panel")
+
+
+func test_internet_host_uses_authoritative_status_roster_and_start():
+	var control := _control()
+	var metadata := _host(true)
+	metadata["network"] = "internet"
+	metadata["status"] = "Invite ready. Waiting for your friends."
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%ConnectionTitle").text, "Your Internet table")
+	assert_eq(control.get_node("%ConnectionStatusLabel").text, metadata["status"])
+	assert_false(control.get_node("%LobbyStartButton").disabled)
+	assert_true(control.get_node("%InviteSection").visible)
+	metadata["state"] = "playing"
+	control.apply_lobby(metadata)
+	assert_eq(control.get_node("%PlayingConnectionLabel").text, "Internet table")
+	assert_false(control.get_node("%ConnectionPanel").visible)
+
+
+func test_internet_setup_can_be_cancelled_even_before_command_reply():
+	var control := _control()
+	control.apply_lobby({"mode": "menu", "state": "idle"})
+	control.get_node("%JoinInviteInput").text = "private-internet-invite"
+	control.get_node("%JoinInternetButton").pressed.emit()
+	control.apply_lobby({"mode": "join", "network": "internet", "state": "connecting",
+		"status": "Connecting to your friend...", "players": []})
+	assert_false(control.get_node("%LeaveLobbyButton").disabled)
+	assert_false(control.get_node("%ReadyButton").visible)
+	assert_eq(control.get_node("%ConnectionStatusLabel").text, "Connecting to your friend...")
+	control.get_node("%LeaveLobbyButton").pressed.emit()
+	assert_signal_emitted_with_parameters(control, "command_requested", ["leave_table", {}])
+	assert_true(control.get_node("%LeaveLobbyButton").disabled)
+	control.handle_command_result({"command": "join_internet", "ok": true})
+	assert_true(control.get_node("%LeaveLobbyButton").disabled)
+	control.handle_command_result({"command": "leave_table", "ok": true})
+	control.apply_lobby({"mode": "menu", "state": "idle"})
+	assert_false(control.get_node("%HostInternetButton").disabled)

@@ -1,4 +1,4 @@
-"""Desktop composition: choose a local bot table or an authenticated LAN table."""
+"""Desktop composition for bots, authenticated LAN and direct Internet play."""
 from __future__ import annotations
 
 import random
@@ -17,7 +17,7 @@ class DesktopTable:
     """
 
     def __init__(self, *, seats, nickname, settings, seed=None, on_change,
-                 local_clock=None, local_schedule=None):
+                 local_clock=None, local_schedule=None, loop=None, internet_services=None):
         self._lock = threading.RLock()
         self._seats = seats
         self._nickname = nickname
@@ -30,6 +30,9 @@ class DesktopTable:
         self._local_clock = local_clock
         self._local_schedule = local_schedule
         self._lan = None
+        self._internet = None
+        self._loop = loop
+        self._internet_services = internet_services
         self._start_local = None
         self._closed = False
 
@@ -51,14 +54,34 @@ class DesktopTable:
                 self._close_active()
                 self._on_change()
                 return self._result(command, "left")
-            if command in ("local_game", "host_lan", "join_lan"):
+            if command in ("local_game", "host_lan", "join_lan", "host_internet", "join_internet"):
                 if self._mode != "menu":
                     raise ValueError("Leave the current table before choosing another game")
-                self._nickname = self._name(payload)
-                if command == "local_game":
+                nickname = self._name(payload)
+                if command in ("host_internet", "join_internet"):
+                    if self._loop is None:
+                        raise ValueError("Internet play is unavailable. Restart Poker and try again.")
+                    from holdem.internet_session import InternetTable
+                    candidate = InternetTable(loop=self._loop, nickname=nickname,
+                                              settings=dict(self._settings), on_change=self._on_change,
+                                              services=self._internet_services)
+                    try:
+                        if command == "host_internet":
+                            candidate.host()
+                        else:
+                            candidate.join(payload.get("invite", ""))
+                    except BaseException:
+                        candidate.close()
+                        raise
+                    self._internet = candidate
+                    self._nickname = nickname
+                    self._mode = "host" if command == "host_internet" else "join"
+                elif command == "local_game":
+                    self._nickname = nickname
                     self._create_local()
                 else:
                     from holdem.lan_session import LanTable
+                    self._nickname = nickname
                     self._lan = LanTable(self._nickname, dict(self._settings), self._on_change)
                     self._mode = "host" if command == "host_lan" else "join"
                     if command == "host_lan":
@@ -70,10 +93,16 @@ class DesktopTable:
             if self._mode == "menu":
                 raise ValueError("Choose a game first")
             if command == "set_ready":
-                if self._lan is None or type(payload.get("ready")) is not bool:
-                    raise ValueError("Ready requires a LAN table and a true/false value")
-                self._lan.set_ready(payload["ready"])
+                peer_table = self._internet if self._internet is not None else self._lan
+                if peer_table is None or type(payload.get("ready")) is not bool:
+                    raise ValueError("Ready requires a peer table and a true/false value")
+                peer_table.set_ready(payload["ready"])
                 return self._result(command, "applied")
+            if self._internet is not None:
+                if command == "start_game":
+                    verdict = self._internet.start()
+                    return self._result(command, verdict, verdict == "started")
+                return self._internet.command(command, payload)
             if self._lan is not None:
                 if command == "start_game":
                     verdict = self._lan.start()
@@ -129,6 +158,8 @@ class DesktopTable:
 
     def snapshot(self):
         with self._lock:
+            if self._internet is not None:
+                return self._internet.snapshot()
             if self._lan is not None:
                 session = self._lan.session
                 if session is not None:
@@ -173,6 +204,9 @@ class DesktopTable:
         if self._lan is not None:
             self._lan.close()
             self._lan = None
+        if self._internet is not None:
+            self._internet.close()
+            self._internet = None
         if self._local is not None:
             for session in self._local[1].values():
                 session.on_state_changed = None

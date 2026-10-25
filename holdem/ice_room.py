@@ -295,8 +295,10 @@ class DirectPokerRoom:
             with self.session.read_state():
                 players = self.session.player_list()
                 status = self.session.reliability_lobby_status()
-                return {"players": [{"conn_id": p.conn_id, "nickname": p.nickname, "ready": p.ready}
-                                    for p in players],
+                return {"players": [{"conn_id": p.conn_id, "nickname": p.nickname, "ready": p.ready,
+                                     "seat": index, "is_you": p.conn_id == self.session.local_conn_id,
+                                     "is_host": bool(p.is_host)}
+                                    for index, p in enumerate(players)],
                         "can_start": (self.session.is_host and self.session.state == "LOBBY" and
                                       self.session.terminal_state is None and 2 <= len(players) <= 9 and
                                       self.session.all_ready and status["ready"]),

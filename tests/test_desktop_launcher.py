@@ -36,6 +36,90 @@ def _args(tmp_path, *extra):
     return launcher._parse_args(["--log-dir", str(tmp_path / "logs"), *extra])
 
 
+def test_internet_runtime_diagnostic_owns_no_game_or_sidecar(tmp_path, monkeypatch, paths):
+    from holdem import ice_poker_probe
+    summary = {"status": "passed", "hands": 10, "matching_balances": True}
+    async def check():
+        return summary
+    def forbidden(*args, **kwargs):
+        raise AssertionError("diagnostic must finish before a game or sidecar starts")
+    monkeypatch.setattr(ice_poker_probe, "_self_test", check)
+    monkeypatch.setattr(launcher, "run_sidecar", forbidden)
+    monkeypatch.setattr(launcher, "_spawn_game", forbidden)
+    args = _args(tmp_path, "--internet-runtime-self-test")
+    assert asyncio.run(launcher._run(args, paths)) == 0
+    assert json.loads((args.log_dir / "internet-runtime-self-test.json").read_text()) == {"ok": True, "summary": summary}
+    with pytest.raises(SystemExit):
+        _args(tmp_path, "--internet-runtime-self-test", "--self-test")
+
+
+def test_internet_runtime_startup_failure_writes_fixed_receipt_without_dialog(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    def fail(*args, **kwargs):
+        raise RuntimeError("private native failure")
+    def forbidden(*args, **kwargs):
+        raise AssertionError("diagnostic failures must not open a modal window")
+    monkeypatch.setattr(launcher, "resolve_paths", fail)
+    monkeypatch.setattr(launcher, "ctypes", SimpleNamespace(windll=SimpleNamespace(
+        user32=SimpleNamespace(MessageBoxW=forbidden))))
+    logs = tmp_path / "logs"
+    assert launcher.main(["--internet-runtime-self-test", "--log-dir", str(logs)]) == 1
+    receipt = json.loads((logs / "internet-runtime-self-test.json").read_text())
+    assert receipt == {"ok": False, "error": "Packaged Internet runtime verification failed", "summary": None}
+
+
+@pytest.mark.parametrize("endpoint", [
+    "ws://example.com:80/v1", "ws://192.168.1.10:8080/v1", "wss://127.0.0.1:8080/v1",
+    "ws://localhost:8080/v1", "ws://127.0.0.1/v1", "ws://user@127.0.0.1:8080/v1", 5, None,
+])
+def test_private_internet_diagnostic_cannot_downgrade_a_production_service(endpoint):
+    with pytest.raises(ValueError, match="literal loopback"):
+        launcher._internet_test_services({"network": "internet", "test_service_endpoint": endpoint})
+
+
+def test_private_loopback_service_is_explicit_and_scoped_to_internet_diagnostic():
+    assert launcher._internet_test_services({"network": "internet"}) is None
+    assert launcher._internet_test_services({"network": "internet", "test_service_endpoint": "ws://127.0.0.1:8080/v1"}) == {
+        "test": "ws://127.0.0.1:8080/v1"}
+    with pytest.raises(ValueError, match="network: internet"):
+        launcher._internet_test_services({"network": "lan", "test_service_endpoint": "ws://127.0.0.1:8080/v1"})
+
+
+def test_internet_ui_check_supplies_trusted_test_service_and_uses_real_peer_driver(tmp_path, monkeypatch, paths):
+    async def exercise():
+        config = {"network": "internet", "target_hands": 10, "expected_players": 3,
+                  "report_path": str(tmp_path / "private-report.json"),
+                  "test_service_endpoint": "ws://127.0.0.1:8080/v1"}
+        config_path = tmp_path / "private-config.json"
+        config_path.write_text(json.dumps(config))
+        captured, commands = [], []
+        async def sidecar(*, ready, **kwargs):
+            captured.append(kwargs)
+            ready(43139)
+            await asyncio.Event().wait()
+        def spawn(command, _log_path):
+            commands.append(command)
+            Path(config["report_path"]).write_text(json.dumps({
+                "ok": True, "error": "", "hands_settled": 10,
+                "network": "internet", "network_verified": True, "proofs_verified": 3,
+                "face_up_checks": 1, "opponent_hidden_checks": 1, "roster_names": ["Host", "Guest", "Third"]}))
+            return Game([], code=0)
+        monkeypatch.setattr(launcher, "run_sidecar", sidecar)
+        monkeypatch.setattr(launcher, "_spawn_game", spawn)
+        args = _args(tmp_path, "--internet-self-test-config", str(config_path))
+        before = set(asyncio.all_tasks())
+        assert await launcher._run(args, paths) == 0
+        assert captured[0]["internet_services"] == {"test": "ws://127.0.0.1:8080/v1"}
+        assert captured[0]["stack"] == 100000 and captured[0]["desktop_lobby"] is True
+        assert "res://sidecar/lan_peer_e2e.gd" in commands[0]
+        assert f"--peer-config={config_path}" in commands[0]
+        assert json.loads((args.log_dir / "internet-self-test.json").read_text())["ok"] is True
+        _assert_no_owned_tasks_remain(before)
+        with pytest.raises(SystemExit):
+            _args(tmp_path, "--internet-self-test-config", str(config_path), "--self-test")
+    asyncio.run(exercise())
+
+
 def _presentation_summary():
     counts = ("menu_fresh_checks", "opening_preaction_checks", "shuffle_frames",
               "deal_frames", "shuffle_motion_checks", "deal_motion_checks",

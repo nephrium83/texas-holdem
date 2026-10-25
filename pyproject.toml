@@ -33,6 +33,11 @@ internet = [
     # Optional host adapter only; the portable rules/API need no WebRTC stack.
     "aiortc==1.15.0",
     "aioice==0.10.2",
+    "websockets==16.1.1",
+]
+introducer = [
+    "cryptography>=41.0",
+    "websockets==16.1.1",
 ]
 dev = [
     # Keep the existing full application test environment available via [dev].

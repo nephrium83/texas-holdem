@@ -6,15 +6,157 @@ and launcher have actually been delivered together.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
 import subprocess
+import sys
 import time
 
 import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
+SPEC = importlib.util.spec_from_file_location("windows_preview_build", ROOT / "tools" / "build_windows.py")
+build = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(build)
+
+
+def _manifest(application, **overrides):
+    path = application / "build-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.update(overrides)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return manifest
+
+
+def _rehash_inventory(application):
+    files = {str(p.relative_to(application)).replace("\\", "/"): build.sha256(p)
+             for p in application.rglob("*") if p.is_file() and p.name != "build-manifest.json"}
+    return _manifest(application, files=files, native_files_sha256={
+        name: digest for name, digest in files.items() if Path(name).suffix in (".exe", ".dll", ".pyd")})
+
+
+def _application(tmp_path):
+    application = tmp_path / "Poker"
+    paths = {
+        "Poker.exe": b"launcher", "_internal/assets/PokerRuntime.exe": b"Godot runtime",
+        "_internal/assets/poker.pck": b"game resources", "_internal/native/libsodium.dll": b"official sodium",
+        "_internal/av/minimal.pyd": b"minimal PyAV binding", "licenses/libsodium/LICENSE.txt": b"ISC notice",
+        "licenses/libsodium/SOURCE.txt": b"source pin", "licenses/libsodium/provenance.json": b"native provenance",
+    }
+    for relative, contents in paths.items():
+        path = application / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+    digest = lambda name: build.sha256(application / name)
+    sodium = {"version": "1.0.22", "dll_sha256": digest("_internal/native/libsodium.dll"),
+              "license_sha256": digest("licenses/libsodium/LICENSE.txt"),
+              "attribution_sha256": digest("licenses/libsodium/SOURCE.txt"),
+              "provenance_sha256": digest("licenses/libsodium/provenance.json")}
+    manifest = {"godot_sha256": digest("_internal/assets/PokerRuntime.exe"),
+                "pck_sha256": digest("_internal/assets/poker.pck"), "libsodium": sodium,
+                "libsodium_sha256": sodium["dll_sha256"], "package_versions": {"websockets": "16.1.1"},
+                "license_coverage": {"minimal_runtime": {"native_files_sha256": {
+                    "av/minimal.pyd": digest("_internal/av/minimal.pyd")}}}}
+    (application / "build-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    _rehash_inventory(application)
+    build.verify_manifest(application)
+    return application
+
+
+@pytest.mark.parametrize("mutation", ["remove", "replace", "extra", "native-inventory"])
+def test_desktop_manifest_refuses_incomplete_or_modified_closure(tmp_path, mutation):
+    application = _application(tmp_path)
+    library = application / "_internal" / "av" / "minimal.pyd"
+    if mutation == "remove":
+        library.unlink()
+    elif mutation == "replace":
+        library.write_bytes(b"other binding")
+    elif mutation == "extra":
+        (application / "_internal" / "unknown.dll").write_bytes(b"unreviewed DLL")
+    else:
+        _manifest(application, native_files_sha256={})
+    with pytest.raises(RuntimeError, match="hashes/coverage"):
+        build.verify_manifest(application)
+
+
+@pytest.mark.parametrize(("relative", "error"), [
+    ("_internal/assets/PokerRuntime.exe", "Godot runtime/resources"),
+    ("_internal/assets/poker.pck", "Godot runtime/resources"),
+    ("_internal/native/libsodium.dll", "libsodium coverage/hash"),
+    ("licenses/libsodium/LICENSE.txt", "libsodium coverage/hash"),
+    ("_internal/av/minimal.pyd", "minimal PyAV native files"),
+])
+def test_generic_inventory_cannot_override_reviewed_game_native_or_notice_inputs(tmp_path, relative, error):
+    application = _application(tmp_path)
+    (application / relative).write_bytes(b"replacement")
+    _rehash_inventory(application)
+    with pytest.raises(RuntimeError, match=error):
+        build.verify_manifest(application)
+
+
+def test_desktop_requires_exact_websocket_client_and_launcher(tmp_path):
+    application = _application(tmp_path)
+    _manifest(application, package_versions={"websockets": "17.0"})
+    with pytest.raises(RuntimeError, match="reviewed version"):
+        build.verify_manifest(application)
+    (application / "Poker.exe").unlink()
+    _rehash_inventory(application)
+    with pytest.raises(RuntimeError, match="missing its launcher"):
+        build.verify_manifest(application)
+
+
+def test_desktop_rejects_stock_pyav_before_creating_an_artifact(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    godot, sodium, result = (tmp_path / name for name in ("Godot.exe", "libsodium.dll", "sodium.json"))
+    for path in (godot, sodium, result):
+        path.write_bytes(b"fixture")
+    monkeypatch.setattr(build.sys, "platform", "win32")
+    monkeypatch.setattr(build, "verify_sodium_result", lambda _path: {"dll": str(sodium), "dll_sha256": build.sha256(sodium)})
+    monkeypatch.setattr(build, "runtime_distributions", lambda: {"av": SimpleNamespace(version="17.1.0")})
+    monkeypatch.setattr(build.ice_build, "source_snapshot", lambda: {})
+    output = tmp_path / "output"
+    with pytest.raises(RuntimeError, match="minimal PyAV"):
+        build.main(["--godot", str(godot), "--sodium-result", str(result), "--output-dir", str(output)])
+    assert not output.exists()
+
+
+def test_desktop_result_file_cannot_overwrite_an_existing_reviewed_result(tmp_path, monkeypatch):
+    result = tmp_path / "reviewed.json"
+    result.write_text("old result", encoding="utf-8")
+    monkeypatch.setattr(build.sys, "platform", "win32")
+    with pytest.raises(SystemExit) as error:
+        build.main(["--godot", "unused.exe", "--sodium-result", "unused.json", "--result-json", str(result)])
+    assert error.value.code == 2 and result.read_text(encoding="utf-8") == "old result"
+
+
+def test_desktop_runtime_requires_the_complete_matching_hand_receipt():
+    summary = {"schema": "direct-poker-self-test-v1", "status": "passed", "hands": 10,
+               "matching_balances": True, "proofs_verified": 2, "deal_policy": "bayer-groth-v1",
+               "peer_closed": True, "owned_tasks_pending": 0, "callback_workers_alive": 0}
+    report = {"ok": True, "summary": summary}
+    assert build.validate_internet_self_test(report) == report
+    with pytest.raises(RuntimeError, match="runtime check failed"):
+        build.validate_internet_self_test({"ok": False, "summary": summary})
+    for field, value in (("hands", 9), ("matching_balances", False), ("proofs_verified", 0),
+                         ("owned_tasks_pending", 1), ("callback_workers_alive", 1)):
+        with pytest.raises(RuntimeError, match="matching hands/proofs and cleanup"):
+            build.validate_internet_self_test({"ok": True, "summary": {**summary, field: value}})
+
+
+def test_desktop_runtime_closure_requires_pinned_setup_library(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(build.ice_build, "runtime_distributions", lambda: {"aiortc": object()})
+    monkeypatch.setattr(build.importlib.metadata, "distribution", lambda _name: SimpleNamespace(version="16.1.1"))
+    assert build.runtime_distributions()["websockets"].version == "16.1.1"
+    monkeypatch.setattr(build.importlib.metadata, "distribution", lambda _name: SimpleNamespace(version="17.0"))
+    with pytest.raises(RuntimeError, match="websockets==16.1.1"):
+        build.runtime_distributions()
 
 
 def _packaged_executable():
@@ -126,11 +268,12 @@ def portable_preview(tmp_path):
     home = tmp_path / "fresh home"
     home.mkdir()
     env = dict(os.environ)
-    for name in ("GODOT_BIN", "PYTHONPATH", "PYTHONHOME", "HOLDEM_LIBSODIUM"):
+    for name in ("GODOT_BIN", "PYTHONPATH", "PYTHONHOME", "HOLDEM_LIBSODIUM", "HOLDEM_INTRODUCTION_URL"):
         env.pop(name, None)
     env.update(HOME=str(home), USERPROFILE=str(home),
                HOLDEM_CONFIG_DIR=str(home / "holdem-config"),
                PATH=str(Path(env.get("SYSTEMROOT", "C:/Windows")) / "System32"))
+    build.verify_manifest(relocated)
     return relocated / executable.name, working, env, tmp_path / "preview logs"
 
 
@@ -173,6 +316,36 @@ def test_packaged_preview_plays_ten_hands_after_relocation(portable_preview):
     assert session["game_exit_code"] == 0, session
     assert not _process_is_running(int(session["game_pid"])), session
     _assert_listener_closed(int(session["sidecar_port"]))
+
+
+@pytest.mark.timeout(190)
+def test_packaged_internet_runtime_plays_ten_real_hands_after_relocation(portable_preview):
+    copied, working, env, log_dir = portable_preview
+    result = subprocess.run(
+        [str(copied), "--internet-runtime-self-test", "--log-dir", str(log_dir)],
+        cwd=working, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=180)
+    output = result.stdout + "\n" + result.stderr + "\n" + _logs(log_dir)
+    assert result.returncode == 0, output[-16000:]
+    report = json.loads((log_dir / "internet-runtime-self-test.json").read_text(encoding="utf-8"))
+    build.validate_internet_self_test(report)
+    assert not (log_dir / "session.json").exists(), "Runtime verification unexpectedly launched Godot"
+
+
+@pytest.mark.timeout(40)
+def test_packaged_desktop_never_falls_back_when_bundled_sodium_is_missing(portable_preview):
+    copied, working, env, log_dir = portable_preview
+    external = _packaged_executable().parent / "_internal" / "native" / "libsodium.dll"
+    assert external.is_file()
+    (copied.parent / "_internal" / "native" / "libsodium.dll").unlink()
+    env["HOLDEM_LIBSODIUM"] = str(external)
+    result = subprocess.run(
+        [str(copied), "--internet-runtime-self-test", "--log-dir", str(log_dir)],
+        cwd=working, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=30)
+    assert result.returncode != 0, "The portable game silently used an external libsodium DLL"
+    report = json.loads((log_dir / "internet-runtime-self-test.json").read_text(encoding="utf-8"))
+    assert report["ok"] is False and report["summary"] is None
 
 
 @pytest.mark.timeout(90)

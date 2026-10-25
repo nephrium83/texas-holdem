@@ -400,12 +400,12 @@ class BotDriver:
 async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
               port: int, seed: int | None, nickname: str,
               ready: Callable[[int], None] | None = None,
-              desktop_lobby: bool = False) -> None:
+              desktop_lobby: bool = False, internet_services=None) -> None:
     native_crypto.initialize()
     if desktop_lobby:
         await _run_desktop_lobby(seats=seats, sb=sb, bb=bb, stack=stack,
                                  structure=structure, port=port, seed=seed,
-                                 nickname=nickname, ready=ready)
+                                 nickname=nickname, ready=ready, internet_services=internet_services)
         return
     bus, sessions, order = _make_sessions(seats, nickname=nickname)
     human_conn_id = order[HUMAN_SEAT]
@@ -457,12 +457,13 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
 # ---------------------------------------------------------------------------
 
 async def _run_desktop_lobby(*, seats, sb, bb, stack, structure, port,
-                             seed, nickname, ready):
+                             seed, nickname, ready, internet_services=None):
     from holdem.desktop_table import DesktopTable
     settings = dict(sb=sb, bb=bb, stack=stack, structure=structure,
                     deal_policy=Session.DEAL_POLICY_BG)
     table = DesktopTable(seats=seats, nickname=nickname, settings=settings,
-                         seed=seed, on_change=lambda: server.notify_state_changed())
+                         seed=seed, on_change=lambda: server.notify_state_changed(),
+                         loop=asyncio.get_running_loop(), internet_services=internet_services)
     server = ClientServer(None, host="127.0.0.1", port=port,
                           snapshot_provider=table.snapshot,
                           command_handler=table.apply_command)
