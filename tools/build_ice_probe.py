@@ -275,7 +275,7 @@ def main(argv=None):
             parser.error("--result-json already exists; use a fresh path")
     source = source_snapshot()
     distributions = runtime_distributions()
-    verify_minimal_runtime(distributions["av"])
+    minimal_provenance, _, _ = verify_minimal_runtime(distributions["av"])
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     build_id = f"{stamp}-{uuid.uuid4().hex[:8]}"
     work = ROOT / "build" / "ice-probe" / build_id
@@ -289,6 +289,10 @@ def main(argv=None):
     native_report = json.loads(native_probe)
     if not native_report.get("ok"):
         raise RuntimeError("Native WebRTC dependency check failed")
+    if (native_report.get("av_version") != minimal_provenance["version"] or
+            native_report.get("ffmpeg_license") != "LGPL version 2.1 or later" or
+            native_report.get("ffmpeg_configuration", "").split() != minimal_provenance["ffmpeg_flags"]):
+        raise RuntimeError("Loaded FFmpeg libraries disagree with the minimal source build")
     environment = dict(os.environ)
     environment["POKER_PROJECT_ROOT"] = str(ROOT)
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
