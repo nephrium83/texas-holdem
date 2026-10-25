@@ -229,6 +229,10 @@ function Invoke-ProofGuest([string] $SelectedPhase) {
             '--report-file', (Join-Path $paths.private 'report.json'),
             '--cancel-file', $paths.cancel, '--timeout', '300'
         )
+        $gameHands = if ($env:ICE_GAME_HANDS) { $env:ICE_GAME_HANDS } else { '0' }
+        if ($gameHands -cnotin @('0', '10')) { throw 'Invalid proof input: ICE_GAME_HANDS' }
+        $arguments += @('--game-hands', $gameHands)
+        $state.game_hands = [int]$gameHands
         $state.deadline_utc = [DateTimeOffset]::UtcNow.AddSeconds(300).ToString('o')
         $requestFile = Join-Path $paths.private 'supervisor-request.json'
         Write-ProofJson @{
@@ -275,6 +279,9 @@ function Invoke-ProofGuest([string] $SelectedPhase) {
         Publish-ProofArtifact $paths $state 'report'
         $report = Read-ProofJson (Join-Path $paths.public 'report.json')
         Assert-ProofPassed $report
+        if ($state.game_hands -gt 0 -and (-not $report.ContainsKey('poker') -or $report.poker.hands -ne $state.game_hands)) {
+            throw 'Requested poker hands did not complete'
+        }
         $state.phase = 'completed'
         Write-ProofJson $state $paths.state
         Write-Host 'Packaged guest report validated.'

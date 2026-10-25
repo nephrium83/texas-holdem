@@ -24,6 +24,14 @@ on:
         description: Host X25519 public key (64 hexadecimal characters)
         required: true
         type: string
+      game_hands:
+        description: Real peer-verified poker hands (0 runs byte delivery only)
+        required: true
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '10'
 
 # The runner reads an encrypted mailbox anonymously. It never receives a
 # mailbox token, writes to GitHub, or gets permission to modify this repo.
@@ -41,6 +49,7 @@ jobs:
       ICE_MAILBOX_GIST_ID: ${{ inputs.mailbox_gist_id }}
       ICE_HOST_SIGNING_PUBLIC: ${{ inputs.host_signing_public }}
       ICE_HOST_ENCRYPTION_PUBLIC: ${{ inputs.host_encryption_public }}
+      ICE_GAME_HANDS: ${{ inputs.game_hands }}
     steps:
       - name: Validate dispatch input before checkout
         shell: pwsh
@@ -58,6 +67,7 @@ jobs:
               throw "Invalid proof input: $name"
             }
           }
+          if ($env:ICE_GAME_HANDS -cnotin @('0', '10')) { throw 'Invalid proof input: ICE_GAME_HANDS' }
       - name: Check out immutable probe source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # verified v4
         with:
@@ -94,7 +104,9 @@ jobs:
       - name: Build and self-test the one-folder probe
         shell: pwsh
         run: |
-          python tools/build_ice_probe.py --self-test --output-dir "$env:RUNNER_TEMP/ice-package" --result-json "$env:RUNNER_TEMP/ice-build-result.json" *> "$env:RUNNER_TEMP/ice-build-private.log"
+          python tools/prepare_ice_sodium.py --output-dir "$env:RUNNER_TEMP/ice-sodium" --result "$env:RUNNER_TEMP/ice-sodium-result.json" *> "$env:RUNNER_TEMP/ice-sodium-private.log"
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned poker crypto runtime preparation failed' }
+          python tools/build_ice_probe.py --sodium-result "$env:RUNNER_TEMP/ice-sodium-result.json" --self-test --poker-self-test --output-dir "$env:RUNNER_TEMP/ice-package" --result-json "$env:RUNNER_TEMP/ice-build-result.json" *> "$env:RUNNER_TEMP/ice-build-private.log"
           if ($LASTEXITCODE -ne 0) { throw 'Probe package build failed' }
           Write-Host 'Packaged probe self-test passed; private build logs withheld.'
       - name: Prepare the packaged guest

@@ -47,6 +47,7 @@ def test_dispatch_accepts_valid_fixed_width_inputs():
         "ICE_MAILBOX_GIST_ID": "c" * 32,
         "ICE_HOST_SIGNING_PUBLIC": "d" * 64,
         "ICE_HOST_ENCRYPTION_PUBLIC": "e" * 64,
+        "ICE_GAME_HANDS": "10",
     })
     assert result.returncode == 0, result.stderr
 
@@ -63,6 +64,7 @@ def test_dispatch_rejects_shell_payload_as_data(field, tmp_path):
         "ICE_MAILBOX_GIST_ID": "c" * 32,
         "ICE_HOST_SIGNING_PUBLIC": "d" * 64,
         "ICE_HOST_ENCRYPTION_PUBLIC": "e" * 64,
+        "ICE_GAME_HANDS": "10",
     }
     values[field] = f"'; New-Item -Path '{marker}'; #"
     result = _powershell(_dispatch_validation(), values)
@@ -203,6 +205,7 @@ def test_supervisor_records_actual_native_exit_before_complete_can_pass(tmp_path
         if ($exitReceipt.exit_code -ne [int]$env:ICE_TEST_EXIT -or $exitReceipt.forced_stop) { exit 5 }
         $state = @{
             executable = $request.executable; phase = 'running'; proof_nonce = $request.nonce
+            game_hands = 0
             deadline_utc = $request.deadline_utc
         }
         Read-NativeOwnership $paths $state | Out-Null

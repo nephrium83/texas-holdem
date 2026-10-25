@@ -97,6 +97,69 @@ def test_result_path_refuses_overwriting_before_build(tmp_path, monkeypatch):
     assert result.read_text(encoding="utf-8") == "old artifact"
 
 
+def _poker_report():
+    return {"schema": "direct-poker-self-test-v1", "status": "passed", "hands": 10,
+            "matching_balances": True, "proofs_verified": 2,
+            "deal_policy": "bayer-groth-v1", "peer_closed": True,
+            "owned_tasks_pending": 0, "callback_workers_alive": 0}
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("schema", "raw-payload-probe"), ("status", "failed"), ("hands", 9),
+    ("hands", True), ("matching_balances", False), ("proofs_verified", 0),
+    ("proofs_verified", 1), ("proofs_verified", 20),
+    ("proofs_verified", True), ("deal_policy", "test-deck"), ("peer_closed", False),
+    ("owned_tasks_pending", 1), ("owned_tasks_pending", False),
+    ("callback_workers_alive", 1), ("callback_workers_alive", False),
+])
+def test_frozen_poker_acceptance_rejects_incomplete_game_or_cleanup(field, value):
+    report = _poker_report()
+    assert build.validate_poker_self_test(report) == report
+    report[field] = value
+    with pytest.raises(RuntimeError, match="matching hands/proofs and cleanup"):
+        build.validate_poker_self_test(report)
+
+
+def test_poker_manifest_cannot_claim_capability_without_exact_native_provenance(tmp_path):
+    application, _ = _application(tmp_path)
+    path = application / "build-manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["capabilities"] = ["authenticated-poker"]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="libsodium provenance"):
+        build.verify_manifest(application)
+
+
+def test_sodium_bundle_rejects_missing_replaced_and_unnoticed_native_file(tmp_path):
+    application = tmp_path / "DirectConnectProbe"
+    required = {
+        "_internal/native/libsodium.dll": ("dll_sha256", b"reviewed DLL"),
+        "licenses/libsodium/LICENSE.txt": ("license_sha256", b"official ISC notice"),
+        "licenses/libsodium/SOURCE.txt": ("attribution_sha256", b"pinned source"),
+        "licenses/libsodium/provenance.json": ("provenance_sha256", b"source manifest"),
+    }
+    coverage = {}
+    for relative, (field, contents) in required.items():
+        path = application / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+        coverage[field] = build.sha256(path)
+    build.verify_sodium_bundle(application, coverage)
+    for relative, (_, contents) in required.items():
+        path = application / relative
+        path.write_bytes(b"modified")
+        with pytest.raises(RuntimeError, match="libsodium coverage/hash"):
+            build.verify_sodium_bundle(application, coverage)
+        path.unlink()
+        with pytest.raises(RuntimeError, match="libsodium coverage/hash"):
+            build.verify_sodium_bundle(application, coverage)
+        path.write_bytes(contents)
+    incomplete = dict(coverage)
+    incomplete.pop("license_sha256")
+    with pytest.raises(RuntimeError, match="metadata is incomplete"):
+        build.verify_sodium_bundle(application, incomplete)
+
+
 @pytest.mark.timeout(90)
 def test_frozen_probe_runs_after_relocation_without_host_runtime(tmp_path):
     configured = os.environ.get("HOLDEM_ICE_PROBE_EXE")
@@ -121,3 +184,37 @@ def test_frozen_probe_runs_after_relocation_without_host_runtime(tmp_path):
     assert report["direct"] is True and report["protocol"] == "udp", report
     assert report["peer_closed"] is True and report["owned_tasks_pending"] == 0, report
     assert report["sizes"] == [4096, 32768, 524288], report
+
+
+@pytest.mark.timeout(240)
+def test_frozen_real_poker_and_missing_bundled_library_after_relocation(tmp_path):
+    configured = os.environ.get("HOLDEM_ICE_PROBE_EXE")
+    if not configured:
+        pytest.skip("set HOLDEM_ICE_PROBE_EXE to test frozen authenticated poker")
+    if sys.platform != "win32":
+        pytest.skip("the frozen engineering probe runs on Windows")
+    source = Path(configured).resolve(strict=True)
+    copied = tmp_path / "Relocated authenticated poker proof"
+    shutil.copytree(source.parent, copied)
+    manifest = build.verify_manifest(copied)
+    assert "authenticated-poker" in manifest["capabilities"]
+    outside = tmp_path / "unrelated working folder"
+    outside.mkdir()
+    result = subprocess.run(
+        [str(copied / source.name), "--poker-self-test"], cwd=outside,
+        env=build.cold_environment(), capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=180,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    build.validate_poker_self_test(json.loads(result.stdout))
+    # A valid external override must not rescue an incomplete portable package.
+    # The source copy remains intact; only this test-owned relocated DLL is removed.
+    (copied / "_internal" / "native" / "libsodium.dll").unlink()
+    environment = build.cold_environment()
+    environment["HOLDEM_LIBSODIUM"] = str(source.parent / "_internal" / "native" / "libsodium.dll")
+    missing = subprocess.run(
+        [str(copied / source.name), "--poker-self-test"], cwd=outside,
+        env=environment, capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=30,
+    )
+    assert missing.returncode != 0, "Missing bundled libsodium silently used an external DLL"
