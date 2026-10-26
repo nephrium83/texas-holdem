@@ -3,6 +3,7 @@ import base64
 import copy
 from pathlib import Path
 import sys
+import zipfile
 
 import pytest
 
@@ -75,3 +76,18 @@ def test_courier_refuses_oversized_envelope_before_decrypt(courier):
 def test_delivery_rejects_untrusted_or_credential_bearing_download_origins(url):
     with pytest.raises(ValueError):
         acceptance.validate_delivery({"invite": "poker3:private", "package_url": url})
+
+
+def test_actual_desktop_zip_layout_is_flat_and_complete(tmp_path):
+    import hashlib
+    payload = b"test launcher; never executed"
+    source = "a" * 40
+    manifest = {"files": {"Poker.exe": hashlib.sha256(payload).hexdigest()},
+                "source_commit": source, "source_dirty": False, "package_versions": {"websockets": "16.1.1"}}
+    archive = tmp_path / "Poker.zip"
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("Poker.exe", payload)
+        zipped.writestr("build-manifest.json", acceptance.canonical(manifest))
+    app = acceptance.extract_package(archive, tmp_path / "relocated", source, acceptance.digest(archive))
+    assert app == (tmp_path / "relocated").resolve()
+    assert (app / "Poker.exe").read_bytes() == payload

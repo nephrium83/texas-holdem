@@ -8,12 +8,59 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import ssl
+import sys
 import time
 from urllib.parse import urlsplit
 
 
 class IntroductionError(ConnectionError):
     pass
+
+
+def _active_trust_context(source):
+    """Exclude expired local anchors that shadow valid server cross-signs.
+
+    Windows' CA store can retain an expired cross-signed intermediate. OpenSSL
+    prefers that cached copy over the valid chain supplied by the server.
+    Keep only currently valid certificates already trusted by the default
+    context; do not add trust, change hostname checks or relax verification.
+    """
+    from datetime import datetime, timezone
+    import warnings
+    from cryptography import x509
+    from cryptography.utils import CryptographyDeprecationWarning
+
+    if source.verify_mode != ssl.CERT_REQUIRED or not source.check_hostname:
+        raise ValueError("Introduction TLS requires certificate and hostname verification")
+    now = datetime.now(timezone.utc)
+    active = []
+    for raw in source.get_ca_certs(binary_form=True):
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", CryptographyDeprecationWarning)
+                certificate = x509.load_der_x509_certificate(raw)
+            before = (certificate.not_valid_before_utc if hasattr(certificate, "not_valid_before_utc")
+                      else certificate.not_valid_before.replace(tzinfo=timezone.utc))
+            after = (certificate.not_valid_after_utc if hasattr(certificate, "not_valid_after_utc")
+                     else certificate.not_valid_after.replace(tzinfo=timezone.utc))
+            if before <= now <= after:
+                active.append(ssl.DER_cert_to_PEM_cert(raw))
+        except (ValueError, CryptographyDeprecationWarning):
+            continue  # Malformed local certificates cannot establish trust.
+    if not active:
+        raise IntroductionError("No valid trusted certificate authorities are available")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.verify_flags = source.verify_flags
+    context.minimum_version = source.minimum_version
+    context.maximum_version = source.maximum_version
+    context.options = source.options
+    context.load_verify_locations(cadata="".join(active))
+    return context
+
+
+def secure_context():
+    source = ssl.create_default_context()
+    return _active_trust_context(source) if sys.platform == "win32" else source
 
 
 def validate_endpoint(endpoint: str, *, allow_loopback=False) -> str:
@@ -48,7 +95,7 @@ class IntroductionConnection:
                        write_limit=32768, open_timeout=10, close_timeout=2,
                        ping_interval=20, ping_timeout=20, proxy=None)
         if endpoint.startswith("wss:"):
-            options["ssl"] = ssl.create_default_context()
+            options["ssl"] = secure_context()
         websocket = await connect(endpoint, **options)
         try:
             raw = await asyncio.wait_for(websocket.recv(), 10)
@@ -58,7 +105,10 @@ class IntroductionConnection:
                     challenge["type"] != "challenge" or challenge["service"] != service or
                     type(challenge["challenge"]) is not str or len(challenge["challenge"]) != 64 or
                     any(c not in "0123456789abcdef" for c in challenge["challenge"]) or
-                    type(challenge["expires_at"]) is not int or not now <= challenge["expires_at"] <= now + 30):
+                    # The service owns its actual 30-second timeout. Accept
+                    # the same bounded 30-second future clock skew used by
+                    # signed setup records, rather than requiring equal clocks.
+                    type(challenge["expires_at"]) is not int or not now < challenge["expires_at"] <= now + 60):
                 raise IntroductionError("The introduction service returned an invalid challenge")
             return cls(websocket, service, challenge["challenge"])
         except BaseException:

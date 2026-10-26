@@ -129,7 +129,8 @@ def extract_package(archive, destination, source_commit, package_sha256):
             if not target.is_relative_to(destination) or (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError("Unsafe desktop archive member")
         zipped.extractall(destination)
-    app = destination / "Poker"
+    # build_windows.py archives the application contents at the ZIP root.
+    app = destination
     manifest = read(app / "build-manifest.json")
     actual = {p.relative_to(app).as_posix(): digest(p) for p in app.rglob("*")
               if p.is_file() and p != app / "build-manifest.json"}
