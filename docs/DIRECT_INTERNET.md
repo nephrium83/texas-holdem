@@ -76,5 +76,41 @@ mailbox is removed before gameplay. Both native exits, ten per-hand public
 balance vectors, direct UDP route and normal cleanup must pass.
 
 Home-to-cloud evidence proves that route. It does not establish compatibility
-with every NAT/firewall pair. Automatic introduction and the single-invite
-player flow are the next delivery gate; no router mapping is part of this path.
+with every NAT/firewall pair. No router mapping is part of this path.
+
+## Automatic introductions and the desktop
+
+The desktop now offers Internet Host/Join alongside LAN and local bots. The
+containing desktop supplies its existing asyncio loop to `InternetTable`;
+its asynchronous `InternetSession` composes `DirectPokerRoom` after signed,
+encrypted setup. The synchronous facade is used only by off-loop desktop
+callbacks. Leave cancels pending setup before disposing the room.
+
+Internet invitations use explicit version3 and the `direct-udp-v1` profile.
+They carry a trusted service identifier, full host pin, routing token, room
+generation, expiry and private capability. The identifier selects a configured
+WSS origin; an invite cannot choose a URL. The desktop's configured default is
+`wss://poker.errantsaints.space/v1`; `HOLDEM_INTRODUCTION_URL` lets a containing
+application select its own trusted WSS `/v1` endpoint. Plain WebSockets are
+confined to explicitly injected literal-loopback acceptance fixtures.
+
+The introduction service authenticates one-use socket challenges and signed
+room/guest records, then forwards one encrypted offer and answer per attempt.
+The host checks a capability proof before allocating a native peer. Capabilities
+and complete invites never reach the service. It does not run a Session or carry
+gameplay. A successful Start closes setup only after the serialized game core
+accepts readiness, excluding new attachments during that transition.
+
+The service has room/socket/challenge/attempt/rate/expiry limits and bounded
+JSON/queues. Its retained-byte counter covers records and outgoing messages;
+native WebSocket input buffers are additional, so deployment also limits the
+container's memory/CPU and may lower service capacities. Trusted proxy headers
+are accepted only from exact configured proxy IPs. See
+[`deploy/introduction/README.md`](../deploy/introduction/README.md).
+
+Acceptance covers three independent clients joining from one invite, ten
+matching real hands after the service stops, wrong capability/pin, replay,
+expiry, malformed input, Leave, readiness races and cleanup faults. A separate
+three-process Godot test drives the actual Internet buttons and verifies normal
+launcher/child exit. Final public-route and frozen desktop evidence is recorded
+per delivered source/package; implementation alone is not a completed release.

@@ -766,6 +766,24 @@ func test_actual_host_button_sends_lobby_command_through_main():
 	assert_eq(fake.calls, [["host_lan", {"nickname": "Ada"}]])
 
 
+func test_internet_buttons_route_through_main_without_interpreting_private_invite():
+	for pair in [["HostInternetButton", "host_internet"], ["JoinInternetButton", "join_internet"]]:
+		var main := _main()
+		var fake: FakeSidecar = FakeSidecarScript.new()
+		main._sidecar = fake
+		var snapshot := _heads_up_snapshot()
+		snapshot["lobby"] = {"mode": "menu", "state": "idle"}
+		main._on_snapshot_received(snapshot)
+		var lobby: ConnectionLobby = main.get_node("%ConnectionLobby")
+		lobby.get_node("%NicknameInput").text = "Ada"
+		lobby.get_node("%JoinInviteInput").text = "private-internet-invite"
+		lobby.get_node("%" + pair[0]).pressed.emit()
+		var payload := {"nickname": "Ada"}
+		if pair[1] == "join_internet":
+			payload["invite"] = "private-internet-invite"
+		assert_eq(fake.calls, [[pair[1], payload]])
+
+
 func test_lobby_command_refusal_releases_pending_controls():
 	var main := _main()
 	var fake: FakeSidecar = FakeSidecarScript.new()

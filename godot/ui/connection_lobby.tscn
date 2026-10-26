@@ -89,8 +89,13 @@ unique_name_in_owner = true
 custom_minimum_size = Vector2(260, 52)
 text = "Host LAN game"
 
+[node name="HostInternetButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(0, 48)
+text = "Host Internet game"
+
 [node name="JoinLabel" type="Label" parent="ConnectionPanel/Margin/Content/ModeMenu"]
-text = "Or paste an invite from a friend on the same network"
+text = "Or paste an invite from a friend"
 autowrap_mode = 2
 
 [node name="JoinInviteInput" type="TextEdit" parent="ConnectionPanel/Margin/Content/ModeMenu"]
@@ -99,9 +104,19 @@ custom_minimum_size = Vector2(0, 108)
 placeholder_text = "Paste invite here"
 wrap_mode = 1
 
-[node name="JoinLanButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+[node name="JoinButtons" type="HBoxContainer" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+theme_override_constants/separation = 18
+
+[node name="JoinInternetButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu/JoinButtons"]
 unique_name_in_owner = true
-custom_minimum_size = Vector2(0, 46)
+custom_minimum_size = Vector2(260, 46)
+size_flags_horizontal = 3
+text = "Join Internet game"
+
+[node name="JoinLanButton" type="Button" parent="ConnectionPanel/Margin/Content/ModeMenu/JoinButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(260, 46)
+size_flags_horizontal = 3
 text = "Join LAN game"
 
 [node name="TableLobby" type="VBoxContainer" parent="ConnectionPanel/Margin/Content"]
@@ -160,7 +175,7 @@ unique_name_in_owner = true
 custom_minimum_size = Vector2(0, 54)
 theme_override_colors/font_color = Color(0.96, 0.81, 0.59, 1)
 theme_override_font_sizes/font_size = 17
-text = "Play for fun with bots or friends on the same network."
+text = "Play for fun with bots or invite friends over the Internet or LAN."
 autowrap_mode = 2
 
 [node name="PlayingConnectionBar" type="HBoxContainer" parent="."]

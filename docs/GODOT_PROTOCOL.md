@@ -23,9 +23,9 @@ displays or accepts a private room invite. Alongside it runs a **Python
 sidecar** process that owns the `Session`: the mental-poker crypto, the
 peer-to-peer networking to the other players, and the local replica engine
 that computes betting. Godot talks only to its own local sidecar; the
-sidecar talks to the other players' sidecars. The desktop delivery exposes
-LAN play; internet joining and relay selection remain outside this client
-contract.
+sidecar talks to the other players' sidecars. Desktop controls expose local
+practice, LAN rooms and direct Internet rooms. Internet introduction exchanges
+encrypted connection setup; established poker traffic stays between players.
 
 ```
   [ Godot client ] <--localhost, JSON--> [ Python sidecar ] <--P2P--> [ other players' sidecars ]
@@ -95,15 +95,18 @@ sidecars without desktop lobby mode expose only game commands.
 | `local_game` | `{"nickname": "Ada"}` | create a local practice table with bots; remain in its lobby |
 | `host_lan` | `{"nickname": "Ada"}` | create an authenticated LAN room and its invite |
 | `join_lan` | `{"nickname": "Ben", "invite": "<V2 invite>"}` | join using the whole address-bearing V2 invite |
-| `set_ready` | `{"ready": true}` | request the local LAN player's Ready state; also accepts `false` |
+| `host_internet` | `{"nickname": "Ada"}` | create a direct Internet room through the configured introduction service |
+| `join_internet` | `{"nickname": "Ben", "invite": "<V3 invite>"}` | join the private V3 Internet invite |
+| `set_ready` | `{"ready": true}` | request the local peer player's Ready state; also accepts `false` |
 | `leave_table` | (none) | leave the active table and return to the desktop menu |
-| `start_game` | (none)             | start a configured local table or a ready hosted LAN table |
+| `start_game` | (none)             | start a configured local table or a ready hosted peer table |
 | `fold`       | (none)             | fold the current hand                          |
 | `check_call` | (none)             | check if nothing is owed, otherwise call       |
 | `raise_to`   | `{"amount": <int>}`| raise so your total this street becomes amount |
 | `next_hand`  | (none)             | advance after a settled or voided hand         |
 
-`local_game`, `host_lan` and `join_lan` are accepted from the desktop menu.
+`local_game`, `host_lan`, `join_lan`, `host_internet` and `join_internet`
+are accepted from the desktop menu.
 Leave the current table before selecting another. Names must contain 1–32
 printable characters after trimming. A successful creation does not start a
 hand: joining authenticates asynchronously, and the authoritative roster and
@@ -115,13 +118,22 @@ It accepts no separate address or legacy unauthenticated invite, and performs
 no internet relay fallback. The private invite must never be logged or added
 to process arguments.
 
-`set_ready` is valid only after the local player appears in the LAN roster.
+`join_internet` requires a V3 direct invite containing the full host key pin,
+service identifier, room generation and private admission capability. Service
+origins come from trusted sidecar configuration; an invite cannot select an
+arbitrary URL. Setup runs asynchronously on the sidecar's existing event loop,
+and Host/Join return promptly with `"created"`. Connection progress and failures
+arrive through `snapshot.lobby`. Leave remains available while setup is pending.
+An unavailable configured service is reported as a connection failure; there
+is no automatic router change, VPN setup or gameplay relay fallback.
+
+`set_ready` is valid only after the local player appears in the peer roster.
 Guests begin unready; the host begins ready and can switch that state too.
 For a guest, `"applied"` means the request was sent; render the Ready state
 from subsequent authoritative snapshots rather than changing it locally.
 
 `start_game` takes **no payload**. Blinds, stack, betting structure, local bot
-count and the deal policy (§4.1) remain configured by the sidecar. A LAN host
+count and the deal policy (§4.1) remain configured by the sidecar. A peer host
 can start only with 2–9 admitted players and every player ready. The gate is
 atomic with roster changes. A guest cannot start the table. Successful start
 moves every peer into the first hand's existing mental-poker deal.
@@ -189,7 +201,7 @@ For `start_game`, `verdict` is one of:
 - `"started"` — the table left the lobby and hand 1's deal is underway.
 - `"already_started"` — a hand is already in progress, or the session has
   ended; the command is a no-op.
-- `"not_ready"` — a hosted LAN lobby has fewer than 2 or more than 9 players,
+- `"not_ready"` — a hosted peer lobby has fewer than 2 or more than 9 players,
   or at least one player is not ready. No game starts.
 - `"refused"` — a local table's configuration was rejected (see §4.1) and
   **nothing was started**. The session is still in the lobby.
@@ -201,7 +213,8 @@ For `start_game`, `verdict` is one of:
 
 `ok` is true only for `started`.
 
-Successful `local_game`, `host_lan` and `join_lan` return `"created"`;
+Successful `local_game`, `host_lan`, `join_lan`, `host_internet` and
+`join_internet` return `"created"`;
 `set_ready` returns `"applied"`; `leave_table` returns `"left"`. These
 results have `ok: true`. Invalid payloads, refused operations and connection
 failures return `ok: false` with an `error` string. A LAN first-hand failure
@@ -346,9 +359,10 @@ to every snapshot, including during a hand:
 ```json
 "lobby": {
   "mode": "host",
+  "network": "internet",
   "state": "lobby",
   "nickname": "Ada",
-  "invite": "<private V2 room invite>",
+  "invite": "<private V3 room invite>",
   "players": [
     {"seat": 0, "name": "Ada", "ready": true, "is_you": true, "is_host": true},
     {"seat": 1, "name": "Ben", "ready": false, "is_you": false, "is_host": false}
@@ -361,12 +375,14 @@ to every snapshot, including during a hand:
 | field | meaning |
 |-------|---------|
 | `mode` | `menu`, `local`, `host` or `join` |
-| `state` | `idle` in the menu; `connecting` while joining; `lobby`, `playing` or `closed` for an active LAN table; `lobby` or `playing` for local practice |
+| `network` | `internet` for direct Internet rooms; absent or `lan` for LAN rooms; `mode: local` identifies local practice |
+| `state` | `idle` in the menu; `connecting` during host/join setup; `lobby`, `playing` or `closed` for a peer table; `lobby` or `playing` for local practice |
 | `nickname` | the local player's display name |
-| `invite` | the private address-bearing V2 invite, present only in the host's open lobby; otherwise an empty string |
+| `invite` | the private V2 LAN or V3 Internet invite, present only in the host's open lobby; otherwise an empty string |
 | `players` | public roster in display order, with `seat`, `name`, `ready`, `is_you` and `is_host` |
-| `can_start` | whether the current local configuration permits Start; LAN host only, 2–9 players and all ready |
+| `can_start` | whether the current local configuration permits Start; peer host only, 2–9 players and all ready |
 | `error` | a displayable room failure, or `null`/empty string when none exists |
+| `status` | optional displayable setup/connection progress; errors take precedence |
 
 Lobby membership is visible before playing seat order freezes. Departed
 lobby players disappear from subsequent rosters. A room's `closed` state
@@ -755,9 +771,10 @@ As implemented by `holdem/client_server.py`:
 5. An eliminated client may reconnect to its retained hand view and later
    receives the terminal winner through a pushed snapshot.
 
-The desktop lobby commands in §4 expose creation, authenticated LAN joining,
+The desktop lobby commands in §4 expose creation, authenticated LAN/Internet joining,
 Ready and leave through the existing command/snapshot framing. Host disconnect
-closes a joined LAN room, including in the lobby. Reconnecting this localhost
+closes a joined peer room, including in the lobby. Internet setup service loss
+does not end an established direct game. Reconnecting this localhost
 rendering socket does not reconnect a lost network player. Network
 reconnection identity, recovery and chat remain outside this delivery.
 
@@ -767,9 +784,9 @@ reconnection identity, recovery and chat remain outside this delivery.
 
 - Manual seat selection, table-setting negotiation from the client and
   changing rules after a table starts. The desktop lobby now exposes local
-  creation, authenticated LAN Host/Join, Ready and leave (§4); settings still
+  creation, authenticated LAN/Internet Host/Join, Ready and leave (§4); settings still
   come from the sidecar and playing seat order freezes at Start.
-- Internet joining, relay controls, network reconnection and host migration
+- Gameplay relay controls, network reconnection and host migration
   during a running game.
 - Chat.
 - Manual rebuys / sit-out / sit-in commands (engine supports them; not yet exposed).
@@ -789,11 +806,13 @@ These will be added as message types without breaking §4–§6.
 - `holdem/client_server.py` — the localhost server itself: §2 framing,
   §7 hello, §4 command handling, §5 unprompted pushes (coalesced, via
   `Session.on_state_changed` or a desktop controller dirty notification).
-- `holdem/desktop_table.py` — menu/local/LAN composition, desktop commands
+- `holdem/desktop_table.py` — menu/local/LAN/Internet composition, desktop commands
   and the additive `lobby` metadata.
 - `holdem/lan_session.py` — authenticated production Session setup, V2 invites,
   Ready/start policy and room teardown. The localhost rendering server does
   not implement a second network admission path.
+- `holdem/internet_session.py` — direct Internet setup and loop-owned room facade;
+  desktop composition delegates snapshots and actions through that facade.
 - `tests/test_client_server.py` — the whole protocol over a real socket
   against live hostless hands on the in-memory bus.
 - `tests/test_lan_session.py`, `tests/test_lan_foundation.py` — controller

@@ -94,6 +94,8 @@ HOST = frozenset({
     "holdem.ice_peer", "holdem.ice_probe", "holdem.ice_signaling",
     "holdem.ice_transport",
     "holdem.ice_room", "holdem.ice_poker_probe", "holdem.peer_rules",
+    "holdem.internet_invite", "holdem.ice_setup", "holdem.introduction_client",
+    "holdem.introduction_service", "holdem.internet_session",
 })
 
 FORBIDDEN_MODULES = ("tkinter", "socket", "asyncio")

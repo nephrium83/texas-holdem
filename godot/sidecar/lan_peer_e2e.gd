@@ -11,6 +11,10 @@ var _awaiting := false
 var _reply_seen := false
 var _pending := ""
 var _role := ""
+var _network := "lan"
+var _network_verified := false
+var _minimum_proofs := -1
+var _ready_written := false
 var _target_hands := 3
 var _deadline := 0
 var _error := ""
@@ -49,6 +53,8 @@ func _initialize() -> void:
 	for argument in OS.get_cmdline_user_args():
 		if argument.begins_with("--lan-peer-config="):
 			config_path = argument.trim_prefix("--lan-peer-config=")
+		elif argument.begins_with("--peer-config="):
+			config_path = argument.trim_prefix("--peer-config=")
 	if not FileAccess.file_exists(config_path):
 		_fail("LAN test configuration is missing")
 		return
@@ -57,6 +63,10 @@ func _initialize() -> void:
 		_fail("LAN test configuration is invalid")
 		return
 	_config = parsed
+	_network = str(_config.get("network", "lan"))
+	if _network not in ["lan", "internet"]:
+		_fail("Peer test network is invalid")
+		return
 	_role = str(_config.get("role", ""))
 	if _role not in ["host", "join"] or str(_config.get("report_path", "")).is_empty():
 		_fail("LAN test role or report path is missing")
@@ -80,6 +90,9 @@ func _initialize() -> void:
 
 
 func _process(_delta: float) -> bool:
+	var abort_path := str(_config.get("abort_signal_path", ""))
+	if not abort_path.is_empty() and FileAccess.file_exists(abort_path) and _completed_at == 0:
+		_fail("Peer test coordinator requested shutdown")
 	if _main != null:
 		var presenting := _main.is_hand_presentation_active()
 		if _presentation_was_active and not presenting and not _on_screen.is_empty():
@@ -127,6 +140,11 @@ func _step() -> void:
 	var metadata: Dictionary = _snapshot.get("lobby", {})
 	var state := str(metadata.get("state", ""))
 	var mode := str(metadata.get("mode", ""))
+	if _selected and mode in ["host", "join"]:
+		if str(metadata.get("network", "lan")) != _network:
+			_fail("The selected network differs from the authoritative table")
+			return
+		_network_verified = state in ["lobby", "playing"] or _network_verified
 	if _leave_requested and mode == "menu":
 		_left_table = true
 		_complete()
@@ -134,13 +152,13 @@ func _step() -> void:
 	if not _selected and mode == "menu":
 		_lobby().get_node("%NicknameInput").text = str(_config.get("nickname", "LAN Player"))
 		if _role == "host":
-			_selected = _press(_lobby().get_node("%HostLanButton"), "host_lan")
+			_selected = _press(_lobby().get_node("%HostInternetButton" if _network == "internet" else "%HostLanButton"), "host_internet" if _network == "internet" else "host_lan")
 		else:
 			var invite_path := str(_config.get("invite_read_path", ""))
 			if not FileAccess.file_exists(invite_path):
 				return
 			_lobby().get_node("%JoinInviteInput").text = FileAccess.get_file_as_string(invite_path).strip_edges()
-			_selected = _press(_lobby().get_node("%JoinLanButton"), "join_lan")
+			_selected = _press(_lobby().get_node("%JoinInternetButton" if _network == "internet" else "%JoinLanButton"), "join_internet" if _network == "internet" else "join_lan")
 		return
 	if _role == "host" and not _invite_written:
 		var invite := str(_lobby().get_node("%HostInviteText").text)
@@ -166,7 +184,21 @@ func _step() -> void:
 			if bool(player.get("is_you", false)) and not bool(player.get("ready", false)):
 				_press(_lobby().get_node("%ReadyButton"), "set_ready")
 				return
+		var everyone_ready := players.size() == _expected_players and players.all(func(player: Dictionary): return bool(player.get("ready", false)))
+		if everyone_ready and (_role != "host" or bool(metadata.get("can_start", false))) and not _ready_written:
+			var ready_path := str(_config.get("ready_signal_path", ""))
+			if not ready_path.is_empty():
+				var marker := FileAccess.open(ready_path, FileAccess.WRITE)
+				if marker == null:
+					_fail("Could not write peer readiness marker")
+					return
+				marker.store_string(JSON.stringify({"network": _network, "players": players.size(), "hand_num": int(_snapshot.get("hand_num", 0)), "ready": true}))
+				marker.close()
+			_ready_written = true
 		if _role == "host" and players.size() == _expected_players and bool(_config.get("start_when_ready", true)) and bool(metadata.get("can_start", false)):
+			var start_path := str(_config.get("start_signal_path", ""))
+			if not start_path.is_empty() and not FileAccess.file_exists(start_path):
+				return
 			_press(_lobby().get_node("%LobbyStartButton"), "start_game")
 		return
 	if state != "playing":
@@ -201,7 +233,9 @@ func _step() -> void:
 
 
 func _complete() -> void:
-	if _face_up_checks == 0 or _opponent_hidden_checks == 0 or _roster_names.size() != _expected_players:
+	if not _network_verified or (_network == "internet" and _minimum_proofs != _expected_players):
+		_fail("The selected network and shuffle proofs were not verified")
+	elif _face_up_checks == 0 or _opponent_hidden_checks == 0 or _roster_names.size() != _expected_players:
 		_fail("Private cards or the full multiplayer roster were not exercised")
 	elif int(_config.get("stall_action_hand", -1)) >= 0 and _stall_elapsed_ms < 29000:
 		_fail("The real 30 second action timeout was not observed")
@@ -248,6 +282,12 @@ func _on_result(result: Dictionary) -> void:
 
 func _on_snapshot(snapshot: Dictionary) -> void:
 	_snapshot = snapshot
+	if _network == "internet" and (str(snapshot.get("phase", "")) == "settled" or (str(snapshot.get("phase", "")) == "betting" and int(snapshot.get("action_on", -1)) >= 0)):
+		var proofs := int(snapshot.get("proofs_verified", 0))
+		if str(snapshot.get("deal_policy", "")) != "bayer-groth-v1" or proofs != _expected_players:
+			_fail("Internet poker did not verify every player's shuffle")
+			return
+		_minimum_proofs = proofs if _minimum_proofs < 0 else min(_minimum_proofs, proofs)
 	var hand := int(snapshot.get("hand_num", 0))
 	var turn: Dictionary = snapshot.get("turn", {})
 	if _stall_active and (str(turn.get("state", "")) != "your_turn" or hand != int(_config.get("stall_action_hand", -1))):
@@ -351,6 +391,7 @@ func _report() -> Dictionary:
 	return {
 		"ok": _error.is_empty() and (_settled.size() >= _target_hands if _expected_result == "hands" else _left_table if _expected_result == "left_table" else _host_loss_seen),
 		"error": _error, "role": _role, "hands_settled": _settled.size(),
+		"network": _network, "network_verified": _network_verified, "proofs_verified": _minimum_proofs,
 		"settled_stacks": _settled, "own_seat": _own_seat,
 		"face_up_checks": _face_up_checks, "opponent_hidden_checks": _opponent_hidden_checks,
 		"roster_names": _roster_names, "commands": _commands,
@@ -382,5 +423,5 @@ func _finish() -> void:
 		return
 	_reported = true
 	_write_report()
-	print("LAN_PEER_E2E_SUMMARY " + JSON.stringify(_report()))
+	print(("INTERNET_PEER_E2E_SUMMARY " if _network == "internet" else "LAN_PEER_E2E_SUMMARY ") + JSON.stringify(_report()))
 	quit(0 if bool(_report()["ok"]) else 1)
