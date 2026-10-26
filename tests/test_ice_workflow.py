@@ -21,6 +21,18 @@ HELPER = ROOT / "tools" / "run_ice_guest.ps1"
 PWSH = shutil.which("pwsh")
 
 
+def test_dispatch_workflow_is_valid_yaml_with_two_independent_jobs():
+    import yaml
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assert "workflow_dispatch" in workflow["on"]
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"packaged-guest", "desktop-guest"}
+    assert any(step.get("name") == "Start guest and wait for encrypted answer"
+               for step in jobs["packaged-guest"]["steps"])
+    assert any(step.get("name") == "Join through the production invite service and play ten hands"
+               for step in jobs["desktop-guest"]["steps"])
+
+
 def _powershell(code: str, extra_env=None):
     if PWSH is None:
         pytest.skip("PowerShell is required for Windows proof orchestration guards")
