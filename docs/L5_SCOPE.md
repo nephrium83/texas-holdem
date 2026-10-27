@@ -1,7 +1,13 @@
 # L5 scope — wiring the mental-poker crypto into the deal flow
 
+This is the historical L5 design/integration record. Current delivery is
+recorded in [CURRENT_DELIVERY.md](CURRENT_DELIVERY.md); the dated gates below
+must not be read as the current release checklist. The prevention proof
+actually wired into `MentalDeal` is `bg_shuffle` (Bayer–Groth), not the
+unwired `shuffle_proof` cut-and-choose reference.
+
 **Status (2026-07-24): core integration complete and CI-green.** The crypto
-stack (`ristretto`, `elgamal`, `dleq`, `shuffle_mp`, `shuffle_proof`,
+stack (`ristretto`, `elgamal`, `dleq`, `shuffle_mp`, `bg_shuffle`,
 `deck_audit`, `keygen_pop`) now drives the hostless deal through
 `holdem/p2p/session.py`; replica betting, continuous play, table-wide voids,
 and terminal spectator delivery are implemented. The old commit-reveal

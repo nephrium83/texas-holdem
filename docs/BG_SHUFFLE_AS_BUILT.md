@@ -10,9 +10,12 @@ Paper references are to the 30-page `MinimalShuffle.pdf`
 (`www0.cs.ucl.ac.uk/staff/J.Groth/MinimalShuffle.pdf`). Section and
 theorem numbers differ in the EUROCRYPT proceedings version.
 
-Status: implemented, integrated opt-in, benchmarked. Detection-only
-remains the `MentalDeal` default and the default wire format is
-byte-identical to the pre-prevention protocol.
+Status: implemented and mandatory for production peer-to-peer play through
+the explicit `bayer-groth-v1` table policy. The standalone `MentalDeal`
+constructor retains detection-only for explicit in-process harnesses; that
+does not select a network table policy. Historical timing notes below do
+not establish the current transport performance gate; see the measurement
+correction in `BG_SHUFFLE_BENCHMARK.md`.
 
 ---
 
@@ -291,19 +294,23 @@ every seat in-process, every message delivered to every seat:
 
 | Seats | Detection p50 | Prevention p50 | Prevention p95 | Budget |
 |---:|---:|---:|---:|---|
-| 2 | 24.9 ms | 452 ms | 456 ms | p95 < 5 s — pass |
-| 4 | 88.5 ms | 1,267 ms | 1,272 ms | p95 < 5 s — pass |
-| 9 | 623 ms | 5,075 ms | 5,095 ms | p95 < 10 s — pass |
+| 2 | 24.9 ms | 452 ms | 456 ms | historical in-process report |
+| 4 | 88.5 ms | 1,267 ms | 1,272 ms | historical in-process report |
+| 9 | 623 ms | 5,075 ms | 5,095 ms | historical in-process report |
 
 Figures in `docs/BG_SHUFFLE_BENCHMARK.md` were re-measured after the
 soundness fix (`a2d7599`, `3e1a7a3`); the fix added a real
 multi-exponentiation to every verification, so pre-fix numbers are not
 comparable and must not be cited.
 
-For context, the cut-and-choose shadow-deck proof it replaces measured
-**19.02 s** at nine seats. Prevention at nine seats is roughly **3.7×
-cheaper** than that, on the integrated path, measured rather than
-estimated.
+For context, the earlier **19.02 s** cut-and-choose figure used a different
+verification-count model. Cut-and-choose was never wired into this
+coordinator, so it was not a measured integrated nine-seat hand. The later
+roughly 91 s value in `BG_SHUFFLE_BENCHMARK.md` is also a projection, not a
+transport measurement. Neither establishes a measured 3.7× full-path ratio.
+The integrated Bayer–Groth timing above excludes transport and remains
+historical; its reported p95 also needs the estimator correction described
+in the benchmark document.
 
 §4.1 (FFT) and §4.2 (multi-round folding) remain out of scope. The
 paper's Table 2 settles it: FFT is *slower* than plain

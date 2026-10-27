@@ -69,7 +69,7 @@ pause before acting, so an opening fold follows a visible deal.
 | Layer | Status | What that means |
 | --- | --- | --- |
 | Poker rules engine | Implemented | No-Limit, Pot-Limit, Fixed-Limit, side pots, refunds, odd chips, tournament and cash procedures |
-| Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, cheat detection, and opt-in Bayer–Groth shuffle prevention |
+| Mental-poker core | Implemented and tested | Distributed key ceremony, shuffle chain, selective decryption, audit, cheat detection, and mandatory Bayer–Groth prevention for production P2P tables |
 | Hostless session | Implemented on the LAN transport | Signed betting, continuous hands, stack carry, bust-outs, spectators, and casual survivor continuation |
 | Godot sidecar bridge | Implemented | Versioned snapshots and commands over localhost newline-JSON |
 | Godot player experience | LAN preview | Portable Windows launcher, local bots, authenticated Host/Join, Ready, visible clocks, and casual departure handling |
@@ -134,7 +134,7 @@ Implemented building blocks include:
 - Threshold ElGamal encryption and re-encryption.
 - Schnorr proof-of-possession for key shares.
 - DLEQ-proven partial decryptions.
-- Bayer–Groth verifiable shuffle (opt-in prevention) plus mandatory post-hand audit.
+- Bayer–Groth verifiable shuffle for production P2P tables plus mandatory post-hand audit.
 - Cut-and-choose shadow-deck shuffle proof, available standalone.
 - Signed hostless wire messages and hand-scoped buffering.
 
@@ -155,10 +155,11 @@ the only value accepted — a host cannot downgrade a table by omitting a
 setting. `"detection-only-v1"` stays available for in-process harnesses and
 benchmarks, and must be declared explicitly there too.
 
-**Performance policy:** measured end to end at 0.40 s (2 seats), 1.06 s
-(4 seats), and 4.11 s (9 seats) against budget targets of p95 under 5 s and
-10 s respectively. Security parameters are not reduced to satisfy timing
-targets. See [the performance budget](docs/PERFORMANCE_BUDGET.md), the
+**Performance policy:** the published coordinator timings are historical,
+exclude real transport, and do not establish the current product timing
+gate. Earlier figures also predate the shuffle-verifier soundness fix.
+Security parameters are not reduced to satisfy timing targets.
+See [the performance budget](docs/PERFORMANCE_BUDGET.md), the
 [shuffle benchmark](docs/BG_SHUFFLE_BENCHMARK.md), and the
 [L5 performance baseline](docs/L5_SCOPE.md).
 
@@ -211,7 +212,7 @@ The crypto tests require a libsodium build exposing the Ristretto255 API. See
 - [x] Mental-poker key ceremony, shuffle, deal, and audit.
 - [x] Hostless betting replicas and continuous multi-hand sessions.
 - [x] Godot-sidecar protocol, socket bridge, scaffold, and CI.
-- [x] Bayer–Groth verifiable shuffle, integrated as opt-in prevention mode.
+- [x] Bayer–Groth verifiable shuffle, integrated with a mandatory production P2P policy.
 - [x] Playable portable Godot client with local bots and LAN Host/Join.
 - [x] Visible casual clocks, automatic Next Hand, and signed survivor continuation.
 - [x] Two-machine packaged LAN invite playtest.

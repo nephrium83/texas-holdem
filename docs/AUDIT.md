@@ -1,4 +1,11 @@
 # Texas Hold'em — Code Audit Report
+
+**Historical report, superseded.** [The July 17 audit](AUDIT-2026-07-17.md)
+supersedes this July 16 report and records that its three critical findings
+were fixed. The original findings below are retained as history, not a
+statement about current code. See [current delivery](CURRENT_DELIVERY.md)
+for the baseline that later reviews must assess.
+
 **Date:** 2026-07-16  
 **Repo:** github.com/nephrium83/texas-holdem  
 **Audited by:** Static analysis of all source files  

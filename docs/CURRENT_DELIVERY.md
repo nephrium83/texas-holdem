@@ -52,9 +52,13 @@ platform support also need their own approved scope.
 
 ## Work selection and review
 
-The current approved tooling milestone is AI Pair reliability. This record
-does not activate a new poker feature or a friends beta. A subsequent delivery
-task needs a fresh main SHA, a concrete owner-approved goal and acceptance gate.
+Adam subsequently approved remediation of all 212 entries from the
+historical audit on October 27. Each entry must be checked against current
+source before a fix or resolution is claimed; already-fixed behavior,
+approved policy exceptions and historical designs must be recorded honestly.
+The remediation preserves the modular core and approved casual rules. It
+does not activate a new poker feature, relay fallback or friends beta.
+AI Pair reliability remains a separate approved tooling milestone.
 
 The old issue #58 / PR #52 AI Pair profile is already merged. Its queue must
 be reconciled instead of resumed. Signing identity, explicit resources,
@@ -66,4 +70,5 @@ The comprehensive audit completed on October 26 covers historical SHA
 `53261f2959451f61b8fbd32fddf189563ba06c71`. Its findings remain historical
 evidence and require revalidation against this newer delivered baseline.
 Completion of that audit does not claim that current main has been reviewed,
-and it does not authorize automatic poker fixes.
+and does not by itself authorize fixes. Adam's subsequent approval supplies
+the authority for the current-code remediation described above.

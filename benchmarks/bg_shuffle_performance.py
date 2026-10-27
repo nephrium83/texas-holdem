@@ -9,8 +9,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import platform
 import statistics
+import subprocess
 import time
 from pathlib import Path
 
@@ -78,7 +80,7 @@ def _summary(records: list[dict]) -> dict:
         return {
             "mean": round(statistics.mean(values), 3),
             "p50": round(statistics.median(values), 3),
-            "p95": round(sorted(values)[max(0, int(len(values) * .95) - 1)], 3),
+            "p95": round(sorted(values)[math.ceil(len(values) * .95) - 1], 3),
             "max": round(max(values), 3),
         }
 
@@ -88,6 +90,15 @@ def _summary(records: list[dict]) -> dict:
         "verify_ms": metric("verify_ms"),
         "proof_bytes": metric("proof_bytes"),
     }
+
+
+def _commit() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=10)
+        return (result.stdout.strip() or "unknown") if result.returncode == 0 else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
 
 
 def main() -> None:
@@ -117,7 +128,8 @@ def main() -> None:
         "metadata": {
             "python": platform.python_version(),
             "platform": platform.platform(),
-            "commit": "working-tree",
+            "commit": _commit(),
+            "quantile_method": "nearest rank: ceil(p * sample_count)",
             "proof": "bayer-groth shuffle prevention",
         },
         "summary": summary,
@@ -125,7 +137,7 @@ def main() -> None:
             str(seats): {
                 "serial_prove_plus_verify_ms": round(seats * (prove + verify), 3),
                 "serial_prove_plus_all_verifiers_ms": round(
-                    seats * (prove + (seats - 1) * verify), 3),
+                    seats * (prove + seats * verify), 3),
             }
             for seats in (2, 4, 9)
         },
