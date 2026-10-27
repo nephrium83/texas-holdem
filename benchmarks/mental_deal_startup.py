@@ -4,19 +4,20 @@ Unlike ``bg_shuffle_performance.py``, which times one proof in isolation,
 this drives a whole peer-symmetric hand through the MentalDeal
 coordinator -- distributed key ceremony, the full shuffle chain, and the
 selective deal down to recovered hole cards -- in both detection-only and
-Bayer-Groth prevention modes. That is the number docs/PERFORMANCE_BUDGET.md
-actually gates on, and the comparison isolates what prevention costs.
+Bayer-Groth prevention modes. This isolates coordinator/proof costs; the
+product performance gate also requires measurements over the real transport.
 
 Every seat is simulated in-process and every message is delivered to every
 seat (including its sender), so the proof-verification column reflects the
 real n-verifiers-per-round load rather than a single check. Transport is
-excluded by construction: this measures crypto and orchestration only, and
-the reported byte counts are what a real transport would have to carry.
+excluded by construction. Byte counts identify logical JSON messages and
+simulated deliveries, excluding signatures, framing and transport topology.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import platform
 import statistics
@@ -95,7 +96,7 @@ def _run_hand(seats: list[int], prevention: bool, hand_no: int) -> dict:
     # mark yields orchestration time that is comparable across modes,
     # while total_ms stays true wall clock.
     marks: dict[str, tuple[float, float]] = {}
-    wire_bytes = 0
+    message_bytes = 0
     proof_bytes = 0
 
     with _Instrumented() as probes:
@@ -107,7 +108,7 @@ def _run_hand(seats: list[int], prevention: bool, hand_no: int) -> dict:
         while queue:
             msg = queue.pop(0)
             encoded = json.dumps(msg)
-            wire_bytes += len(encoded)
+            message_bytes += len(encoded.encode("utf-8"))
             if "proof" in msg:
                 proof_bytes += len(json.dumps(msg["proof"]))
             for s in seats:
@@ -153,13 +154,16 @@ def _run_hand(seats: list[int], prevention: bool, hand_no: int) -> dict:
         "verify_ms": round(probes.verify.ms, 3),
         "verify_calls": probes.verify.calls,
         "serialize_ms": round(probes.encode.ms + probes.decode.ms, 3),
-        "wire_bytes": wire_bytes,
+        "message_bytes": message_bytes,
+        "remote_payload_bytes": message_bytes * (len(seats) - 1),
+        "simulated_delivery_bytes": message_bytes * len(seats),
         "proof_bytes": proof_bytes,
     }
 
 
 _METRICS = ("total_ms", "keygen_ms", "shuffle_ms", "deal_ms", "prove_ms",
-            "verify_ms", "serialize_ms", "wire_bytes", "proof_bytes")
+            "verify_ms", "serialize_ms", "message_bytes",
+            "remote_payload_bytes", "simulated_delivery_bytes", "proof_bytes")
 
 
 def _summary(records: list[dict]) -> dict:
@@ -168,7 +172,7 @@ def _summary(records: list[dict]) -> dict:
         return {
             "mean": round(statistics.mean(values), 3),
             "p50": round(statistics.median(values), 3),
-            "p95": round(values[max(0, int(len(values) * .95) - 1)], 3),
+            "p95": round(values[math.ceil(len(values) * .95) - 1], 3),
             "max": round(max(values), 3),
         }
 
@@ -177,16 +181,16 @@ def _summary(records: list[dict]) -> dict:
 
 def _configuration(count: int, prevention: bool, hands: int) -> dict:
     seats = list(range(count))
-    # The first hand is the cold run: NUMS generator derivation, the
-    # commitment-key cache, and libsodium's own warmup all land on it.
-    cold = _run_hand(seats, prevention, hand_no=1)
+    # Configurations share one process and its native/commitment caches.
+    # This is a configuration's first hand, not a cold-process observation.
+    first = _run_hand(seats, prevention, hand_no=1)
     warm = [_run_hand(seats, prevention, hand_no=h)
             for h in range(2, hands + 1)]
     return {
         "seats": count,
         "prevention": prevention,
         "hands": hands,
-        "cold": cold,
+        "first_hand": first,
         "warm_summary": _summary(warm),
         "warm_records": warm,
     }
@@ -209,6 +213,14 @@ def _metadata() -> dict:
         "cpu_count": os.cpu_count(),
         "libsodium": R.libsodium_version(),
         "commit": _commit(),
+        "metrics_schema": 2,
+        "quantile_method": "nearest rank: ceil(p * sample_count)",
+        "warmup_scope": "first hand per configuration in a shared process; not cold-process timing",
+        "byte_scope": (
+            "message_bytes counts each logical JSON message once; "
+            "remote_payload_bytes multiplies by seats-1; "
+            "simulated_delivery_bytes includes self-delivery. "
+            "All exclude signed envelopes, framing and topology overhead."),
         "m": md.BG_M,
         "n": md.BG_N,
         "proof": "bayer-groth shuffle prevention",
@@ -225,12 +237,12 @@ def main() -> None:
     native_crypto.initialize()
     parser = argparse.ArgumentParser()
     parser.add_argument("--hands", type=int, default=20,
-                        help="hands per configuration, including the cold one")
+                        help="hands per configuration, including its first hand")
     parser.add_argument("--seats", type=int, nargs="+", default=[2, 4, 9])
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.hands < 2:
-        raise SystemExit("use --hands 2 or more (one cold plus warm runs)")
+        raise SystemExit("use --hands 2 or more (first hand plus warm runs)")
     if any(count < 2 or count > 9 for count in args.seats):
         raise SystemExit("seat counts must be between 2 and 9")
 

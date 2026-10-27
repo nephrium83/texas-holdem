@@ -1,9 +1,14 @@
 # Roadmap
 
-Canonical milestone ordering for the P2 workstream and everything
-downstream of it. This file is the source of truth for sequencing.
-Where it disagrees with a chat transcript, an artifact, or a research
-note, **this file wins**.
+For verified delivery status, start with [CURRENT_DELIVERY.md](CURRENT_DELIVERY.md).
+Main was verified at PR #74 on October 27, 2026; PR #66 and PR #70 are already
+delivered. The repository snapshot below is historical, not the next task.
+
+This file preserves dated milestone ordering and decisions for their stated
+profiles. Active normative rules retain precedence within those profiles.
+Historical sequencing does not override newer delivered source or activate
+future recovery work. Reconcile apparent conflicts with the current delivery
+record and the owner before selecting a new task.
 
 - **Coordination issue:** see `docs/COLLABORATION.md`
 - **Base at time of writing:** `07f61a7` (origin/main)
@@ -39,9 +44,9 @@ earlier audit's six passes and known ante mismatch.
 
 ---
 
-## Repository state
+## Historical repository snapshot — October 20, 2026
 
-**2026-10-20 casual delivery update:** PR #65 delivered packaged LAN rooms
+**Historical 2026-10-20 casual delivery update:** PR #65 delivered packaged LAN rooms
 and three-hand BWING/Unraid Windows VM acceptance. The approved next
 milestone implements visible turn/Next Hand clocks and non-host survivor
 continuation, with the ten-hand packaged gate in `LAN_RELIABILITY.md`.

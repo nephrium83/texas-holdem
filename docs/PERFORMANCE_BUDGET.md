@@ -4,7 +4,7 @@ This document defines the initial performance contract for serverless, cryptogra
 
 ## Product policy
 
-- **Detection-only** is the v1 default: the hand is audited and cheats are detected without making every shuffle carry a prevention proof.
+- Production tables have **no implicit default**. Detection-only is an explicit in-process harness/benchmark policy, not a production peer-to-peer option.
 - **Prevention** is MANDATORY for peer-to-peer play, set table-wide by the host via `deal_policy: "bayer-groth-v1"`. Proof generation and verification are integrated into `MentalDeal` and the complete path is benchmarked below.
 - No mode may reveal cards or accept a deal that failed its required verification.
 - Security parameters are not reduced to meet a timing target.
@@ -23,13 +23,17 @@ These are engineering targets for the next integrated proof path, not claims abo
 | Prevention hand startup at nine seats | p95 under 10 s |
 | Typical hand startup above 20 s | performance failure requiring investigation |
 
-The Bayer–Groth prevention path is now integrated into `MentalDeal` behind a default-off flag and has been measured end to end. Against the targets above:
+The Bayer–Groth path is integrated into `MentalDeal` and mandatory on a
+production wire transport. The table below preserves historical
+coordinator-only measurements, not full-transport acceptance. Their p95
+used the former undercounting index; a current nearest-rank p95 must be
+recomputed from samples before claiming the corresponding gate passes.
 
 | Seats | Detection p50 | Prevention p50 | Prevention p95 | Target | |
 | ---: | ---: | ---: | ---: | --- | :-- |
-| 2 | 24.9 ms | 452 ms | 456 ms | p95 under 5 s | pass |
-| 4 | 88.5 ms | 1,267 ms | 1,272 ms | p95 under 5 s | pass |
-| 9 | 623 ms | 5,075 ms | 5,095 ms | p95 under 10 s | pass |
+| 2 | 24.9 ms | 452 ms | 456 ms | p95 under 5 s | historical only |
+| 4 | 88.5 ms | 1,267 ms | 1,272 ms | p95 under 5 s | historical only |
+| 9 | 623 ms | 5,075 ms | 5,095 ms | p95 under 10 s | historical only |
 
 These supersede an earlier 399 / 1,062 / 4,106 ms measurement taken before the
 shuffle-argument soundness fix; see [`BG_SHUFFLE_BENCHMARK.md`](BG_SHUFFLE_BENCHMARK.md).
@@ -41,7 +45,7 @@ Method, per-phase breakdown, and byte counts are in
 seat in one process and counts all peers' work, not one peer's.
 
 The cut-and-choose path is now measured too, on a per-round basis and projected
-with a seat-chain model validated against the Bayer–Groth figures above: about
+with an unvalidated seat-chain model compared with historical Bayer–Groth data: about
 91 seconds of proof work at nine seats, and 650 KB per proof against 3 KB. The
 roughly 20 second figure previously carried for it understates the cost by
 about 4.5x — 20 seconds is closer to its four-seat cost. Details in
@@ -88,6 +92,6 @@ Run the benchmark on the target hardware as well as CI hardware. CI should publi
 3. Optimize the dominant phase without changing the security contract.
 4. Re-run the same benchmark matrix.
 5. Consider native or batched implementations only when the measured hot path justifies them.
-6. Revisit the default prevention policy only after the results meet the targets.
+6. Preserve the mandatory production prevention policy; timing results do not authorize a downgrade.
 
 A benchmark result is not complete until it includes both a timing result and a statement that the proof and verification behavior is unchanged.

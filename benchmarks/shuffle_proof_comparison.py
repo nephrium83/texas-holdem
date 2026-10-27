@@ -12,10 +12,10 @@ projects each to a full hand with the seat-chain model:
 
     proof work = seats * prove + seats^2 * verify
 
-one proof per shuffler, verified by every peer. The model is not assumed --
-``--validate`` checks it against the measured Bayer-Groth figures from the
-integrated run, so the cut-and-choose projection rests on a model shown to
-hold for the arm we can measure directly.
+one proof per shuffler, verified by every peer. These are unvalidated
+projections, not full-hand measurements or a conservative bound. The report
+compares them with a historical Bayer-Groth sample for context; it does not
+establish that the same error applies to another construction or machine.
 
 Security note: DEFAULT_K = 128 is a full security parameter for the
 cut-and-choose path, not a statistical one (see shuffle_proof.py). It is
@@ -28,6 +28,7 @@ import hashlib
 import json
 import platform
 import statistics
+import subprocess
 import time
 from pathlib import Path
 
@@ -110,8 +111,8 @@ def _chain(prove_ms: float, verify_ms: float, seats: int) -> dict:
     }
 
 
-def _validate_model(bg: dict) -> list:
-    """Check the seat-chain model against the measured integrated run."""
+def _compare_historical_model(bg: dict) -> list:
+    """Describe error against historical data without asserting acceptance."""
     rows = []
     for seats, measured in MEASURED_BG.items():
         predicted = _chain(bg["prove_ms"], bg["verify_ms"], seats)
@@ -128,6 +129,15 @@ def _validate_model(bg: dict) -> list:
     return rows
 
 
+def _commit() -> str:
+    try:
+        result = subprocess.run(["git", "rev-parse", "HEAD"],
+                                capture_output=True, text=True, timeout=10)
+        return (result.stdout.strip() or "unknown") if result.returncode == 0 else "unknown"
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
 def main() -> None:
     from holdem import native_crypto
     native_crypto.initialize()
@@ -138,6 +148,8 @@ def main() -> None:
     parser.add_argument("--seats", type=int, nargs="+", default=[2, 4, 9])
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    if args.samples < 1 or not args.seats or any(s < 2 or s > 9 for s in args.seats):
+        raise SystemExit("use positive samples and seat counts between 2 and 9")
     if args.k < shuffle_proof.DEFAULT_K:
         raise SystemExit(
             f"--k below DEFAULT_K={shuffle_proof.DEFAULT_K} would weaken the "
@@ -157,11 +169,16 @@ def main() -> None:
             "platform": platform.platform(),
             "libsodium": R.libsodium_version(),
             "samples": args.samples,
+            "commit": _commit(),
             "cut_and_choose_k": args.k,
             "bg_layout": f"{BG_M}x{BG_N}",
         },
         "per_round": {"bayer_groth": bg, "cut_and_choose": cc},
-        "model_validation": _validate_model(bg),
+        "model_validation": {
+            "status": "not_validated",
+            "comparison_to_historical_bg": _compare_historical_model(bg),
+            "scope": "Historical comparison only; no validated error bound or transport measurement.",
+        },
         "projected_proof_work": {
             str(seats): {
                 "bayer_groth": _chain(bg["prove_ms"], bg["verify_ms"], seats),

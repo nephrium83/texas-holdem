@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import statistics
 import threading
@@ -51,12 +52,27 @@ def _sample_latency(loop, stop_event, out: list) -> None:
             loop.call_soon_threadsafe(_mark)
         except RuntimeError:
             return
-        if not done.wait(timeout=10):
-            return
+        while not done.wait(timeout=0.05):
+            if stop_event.is_set():
+                return
         time.sleep(0.002)
 
 
-def measure(verifications: int) -> dict:
+def _stats(values) -> dict:
+    if not values:
+        return {"n": 0}
+    ordered = sorted(values)
+    return {
+        "n": len(ordered),
+        "p50": round(statistics.median(ordered), 3),
+        "p95": round(ordered[math.ceil(len(ordered) * .95) - 1], 3),
+        "max": round(max(ordered), 3),
+    }
+
+
+def measure(verifications: int, *, completion_timeout: float = 120) -> dict:
+    if isinstance(verifications, bool) or not isinstance(verifications, int) or verifications < 1:
+        raise ValueError("verifications must be a positive integer")
     pk, in_deck, out_deck, ctx, proof = _statement()
     T.stop()
     T.start_host(0)
@@ -67,47 +83,53 @@ def measure(verifications: int) -> dict:
     sampler = threading.Thread(target=_sample_latency,
                                args=(loop, stop_event, latencies),
                                daemon=True)
-    sampler.start()
-    time.sleep(0.2)                      # baseline while the loop is idle
-    baseline = list(latencies)
-
     # Run the verifications ON the loop, exactly as an inline on_message
     # callback would.
     done = threading.Event()
     verify_ms: list = []
+    failures: list[Exception] = []
 
     def _work():
-        for _ in range(verifications):
-            started = time.perf_counter()
-            bg_shuffle.verify(pk, bg_commitment_key(), in_deck, out_deck,
-                              BG_M, BG_N, ctx, proof)
-            verify_ms.append((time.perf_counter() - started) * 1000)
-        done.set()
+        try:
+            for _ in range(verifications):
+                started = time.perf_counter()
+                if not bg_shuffle.verify(pk, bg_commitment_key(), in_deck, out_deck,
+                                         BG_M, BG_N, ctx, proof):
+                    raise RuntimeError("benchmark proof failed verification")
+                verify_ms.append((time.perf_counter() - started) * 1000)
+        except Exception as exc:
+            failures.append(exc)
+        finally:
+            done.set()
 
-    loop.call_soon_threadsafe(_work)
-    done.wait(timeout=120)
-    time.sleep(0.05)
-    stop_event.set()
-    sampler.join(timeout=5)
-    under_load = latencies[len(baseline):]
-    T.stop()
-
-    def stats(values):
-        if not values:
-            return {"n": 0}
-        ordered = sorted(values)
-        return {
-            "n": len(values),
-            "p50": round(statistics.median(ordered), 3),
-            "p95": round(ordered[max(0, int(len(ordered) * .95) - 1)], 3),
-            "max": round(max(ordered), 3),
-        }
+    sampler_started = False
+    try:
+        sampler.start()
+        sampler_started = True
+        time.sleep(0.2)                  # baseline while the loop is idle
+        baseline = list(latencies)
+        loop.call_soon_threadsafe(_work)
+        if not done.wait(timeout=completion_timeout):
+            raise TimeoutError("verification workload did not finish")
+        if failures:
+            raise RuntimeError("verification workload failed") from failures[0]
+        if len(verify_ms) != verifications:
+            raise RuntimeError("verification workload was incomplete")
+        time.sleep(0.05)
+        under_load = latencies[len(baseline):]
+    finally:
+        stop_event.set()
+        if sampler_started:
+            sampler.join(timeout=5)
+        T.stop()
+    if sampler.is_alive():
+        raise RuntimeError("latency sampler did not stop")
 
     return {
         "verifications": verifications,
-        "verify_ms": stats(verify_ms),
-        "loop_latency_idle_ms": stats(baseline),
-        "loop_latency_under_load_ms": stats(under_load),
+        "verify_ms": _stats(verify_ms),
+        "loop_latency_idle_ms": _stats(baseline),
+        "loop_latency_under_load_ms": _stats(under_load),
     }
 
 

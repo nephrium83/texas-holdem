@@ -13,11 +13,17 @@ the canonical issue — otherwise it does not exist.
 
 | Surface | Role |
 |---|---|
-| `docs/ROADMAP.md` | canonical milestone ordering and status |
+| `docs/CURRENT_DELIVERY.md` | verified delivered baseline, status and current work-selection boundaries |
+| `docs/ROADMAP.md` | dated decisions and historical/future milestone ordering within the stated profile |
 | `docs/research/` | evidence and candidate designs, clearly marked as research |
 | `docs/*_SPEC.md`, `docs/POKER_RULES_PROFILE.md` | normative contracts |
 | Canonical GitHub issue | durable handoffs, decisions, current state |
 | Chat / artifacts | working surface only — **never** the only home for a finding |
+
+Check the current delivery record before acting on an older handoff or issue.
+Normative contracts keep their profile-specific authority. A historical audit
+or roadmap snapshot does not establish the state of a newer main revision or
+authorize a new feature.
 
 ## Roles
 
