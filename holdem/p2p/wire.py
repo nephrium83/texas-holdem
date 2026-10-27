@@ -196,6 +196,24 @@ def unpack(raw: bytes, *, clock: Clock) -> dict:
             f"unsupported protocol version {version!r} "
             f"(this build speaks {sorted(SUPPORTED_VERSIONS)})")
 
+    if not isinstance(msg["type"], str) or not isinstance(msg["payload"], dict):
+        raise ValueError("envelope type must be a string and payload an object")
+    if (not isinstance(msg["ts"], int) or isinstance(msg["ts"], bool)
+            or not -(1 << 63) <= msg["ts"] < (1 << 63)):
+        raise ValueError("envelope timestamp must be an integer")
+    # Validate representations before decoding, slicing or arithmetic. These
+    # failures must follow the transport's peer-local ValueError path.
+    for field, size in (("pubkey", 32), ("sig", 64), ("prev", 32), ("hash", 32)):
+        value = msg[field]
+        if not isinstance(value, str) or len(value) != size * 2:
+            raise ValueError("invalid envelope %s" % field)
+        try:
+            decoded = bytes.fromhex(value)
+        except ValueError as exc:
+            raise ValueError("invalid envelope %s" % field) from exc
+        if len(decoded) != size:
+            raise ValueError("invalid envelope %s" % field)
+
     sig  = bytes.fromhex(msg.pop("sig"))
     h    = msg.pop("hash")
 

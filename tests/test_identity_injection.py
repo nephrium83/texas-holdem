@@ -207,7 +207,13 @@ def test_host_refuses_ack_before_parsing_payload(payload):
     host, _, _, _, _, _, joiner_wire = _signed_pair()
     raw = wire.pack("player_ack", payload,
                     signer=joiner_wire.signer, clock=joiner_wire.clock)
-    host.handle_message("joiner", wire.unpack(raw, clock=joiner_wire.clock))
+    if isinstance(payload, dict):
+        host.handle_message("joiner", wire.unpack(raw, clock=joiner_wire.clock))
+    else:
+        with pytest.raises(ValueError, match="payload an object"):
+            wire.unpack(raw, clock=joiner_wire.clock)
+    # Hosts must also reject direct adapter calls before parsing a payload.
+    host._on_player_ack("joiner", {"payload": payload})
     assert host.local_conn_id == "host"
 
 

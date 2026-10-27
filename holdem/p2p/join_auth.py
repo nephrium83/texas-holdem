@@ -68,12 +68,12 @@ class JoinAuthenticator:
     # ------------------------------------------------------------------
     def route(self, conn_id: str, msg: dict) -> None:
         """Transport on_message hook. Handshake here, everything else down."""
+        if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
+            return
         mtype = msg.get("type")
         if mtype in _adm.ADMISSION_TYPES:
             payload = msg.get("payload", msg)
-            self._step(conn_id, mtype,
-                       payload if isinstance(payload, dict) else {},
-                       msg.get("pubkey", ""))
+            self._step(conn_id, mtype, payload, msg.get("pubkey", ""))
             return
         # Pre-auth traffic is refused by the Session's own gate rather than
         # here, so there is exactly one place that decides what a
@@ -111,9 +111,13 @@ class JoinAuthenticator:
             # connection that replaced it.
             return
         try:
-            author = bytes.fromhex(author_hex or "")
-            client_nonce = bytes.fromhex(body.get("client_nonce", "") or "")
-            server_nonce = bytes.fromhex(body.get("server_nonce", "") or "")
+            if not isinstance(body, dict):
+                raise ValueError("admission payload must be an object")
+            values = (author_hex, body.get("client_nonce", ""),
+                      body.get("server_nonce", ""))
+            if not all(isinstance(value, str) for value in values):
+                raise ValueError("admission fields must be hex strings")
+            author, client_nonce, server_nonce = map(bytes.fromhex, values)
         except ValueError:
             self._fail("malformed admission message")
             return
