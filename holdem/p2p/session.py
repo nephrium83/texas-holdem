@@ -3468,9 +3468,9 @@ class Session:
     def _on_player_ack(self, conn_id: str, msg: dict) -> None:
         """Peer receives its own host-side conn_id from the host.
 
-        This is the ONLY other writer of _host_conn_id besides the (now
-        lobby-gated) election, and it previously accepted the assignment
-        from any sender in any state. Host identity is the authorization
+        This assigns local_conn_id for a joiner. It previously also wrote
+        _host_conn_id and accepted assignments from any sender in any
+        state. Host identity is the authorization
         token for every host-gated handler -- pause, resume, kick,
         adjust_blinds, and session_end all check
         ``conn_id == self._host_conn_id`` -- so one unsolicited player_ack
@@ -3479,8 +3479,10 @@ class Session:
         overwrote local_conn_id, which feeds the seat-spoof check and
         _deal_session_id.
 
-        Three conditions now, all necessary:
+        Four conditions now, all necessary:
 
+        * Joiners only. A host establishes its identity locally and must
+          never adopt an identifier supplied by a remote acknowledgement.
         * LOBBY only. Host identity is immutable once play begins.
         * From the host, or from anyone only while the host is still
           unknown -- this message is legitimately how a joining peer first
@@ -3488,6 +3490,9 @@ class Session:
         * A usable conn_id, so a malformed payload cannot blank out this
           peer's own identity.
         """
+        if self.is_host:
+            _log.warning("session: player_ack from %s ignored by host", conn_id)
+            return
         if self.terminal_state is not None or self.state != "LOBBY":
             _log.warning("session: player_ack from %s ignored in state %s",
                          conn_id, self.terminal_state or self.state)
