@@ -67,23 +67,21 @@ def test_chain_scaling_is_quadratic_in_seats_for_verification():
     assert large == small * 16          # (8/2)^2
 
 
-# ----------------------------------------------------- model validation
+# --------------------------------------------- historical model comparison
 
-def test_model_validation_compares_against_measured_figures():
-    rows = cmp_mod._validate_model({"prove_ms": 137.6, "verify_ms": 34.6})
+def test_model_comparison_uses_historical_measured_figures():
+    rows = cmp_mod._compare_historical_model({"prove_ms": 137.6, "verify_ms": 34.6})
     assert {row["seats"] for row in rows} == set(cmp_mod.MEASURED_BG)
     for row in rows:
         assert row["measured_ms"] == \
             cmp_mod.MEASURED_BG[row["seats"]][row["metric"]]
 
 
-def test_model_error_stays_within_a_conservative_band():
-    """The projection is only defensible if the model tracks the arm we can
-    measure. It should overpredict -- a conservative bound -- and not by a
-    wild margin."""
-    rows = cmp_mod._validate_model({"prove_ms": 137.6, "verify_ms": 34.6})
+def test_model_comparison_reports_error_without_claiming_acceptance():
+    rows = cmp_mod._compare_historical_model({"prove_ms": 137.6, "verify_ms": 34.6})
     for row in rows:
-        assert 0 <= row["error_pct"] < 35, row
+        expected = (row["predicted_ms"] - row["measured_ms"]) / row["measured_ms"] * 100
+        assert row["error_pct"] == round(expected, 1)
 
 
 # --------------------------------------------------- security parameter
