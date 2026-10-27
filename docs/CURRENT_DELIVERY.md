@@ -5,9 +5,11 @@ not change poker rules, protocol contracts, or authorize another feature.
 
 ## Delivered baseline
 
-GitHub main is `32a9966175d604ff3f5fe004dcd76070193f7d62`, the merge of
-[PR #74](https://github.com/nephrium83/texas-holdem/pull/74). Recheck main before
-starting new work; this SHA records what was verified here.
+The last verified packaged baseline is
+`32a9966175d604ff3f5fe004dcd76070193f7d62`, the merge of
+[PR #74](https://github.com/nephrium83/texas-holdem/pull/74). Later source fixes
+do not automatically update the installed preview. Recheck main before
+starting work; this SHA identifies the packaged baseline recorded here.
 
 | Delivered work | Evidence |
 | --- | --- |
@@ -60,8 +62,9 @@ The remediation preserves the modular core and approved casual rules. It
 does not activate a new poker feature, relay fallback or friends beta.
 AI Pair reliability remains a separate approved tooling milestone.
 
-The old issue #58 / PR #52 AI Pair profile is already merged. Its queue must
-be reconciled instead of resumed. Signing identity, explicit resources,
+The old issue #58 / PR #52 AI Pair profile is already merged. AI Pair retired
+that profile and reconciled its queue on October 27; automatic work remains
+stopped. Signing identity, explicit resources,
 native crypto and casual clocks were delivered by the PRs above. The old
 public read-model and protocol-handshake requests are deferred for fresh
 design against the current embedding architecture; they are not marked done.
@@ -72,3 +75,8 @@ evidence and require revalidation against this newer delivered baseline.
 Completion of that audit does not claim that current main has been reviewed,
 and does not by itself authorize fixes. Adam's subsequent approval supplies
 the authority for the current-code remediation described above.
+
+The first current-source fix, [PR #75](https://github.com/nephrium83/texas-holdem/pull/75),
+prevents guest acknowledgements from replacing a host's local identity.
+Its source is merged at `d7812ffca5d83ce07af57b7a83da0f74990c44b4` after nine
+successful CI checks. It is not yet part of the packaged baseline above.
