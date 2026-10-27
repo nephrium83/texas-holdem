@@ -174,6 +174,54 @@ def test_importing_host_identity_does_not_create_key_files(tmp_path):
     assert report["threads"] == 0
 
 
+@pytest.mark.parametrize("assigned", ["joiner", "host", "another-connection"])
+def test_admitted_guest_ack_cannot_rename_host_or_gain_self_delivery(assigned):
+    host, joiner, policy, auth, events, host_wire, joiner_wire = _signed_pair()
+    assert events == {"authenticated": ["host"], "failed": []}
+    assert policy.is_admitted("joiner")
+    host.configure_seats(["host", "joiner"])
+    host._bind_seat_keys()
+
+    raw = wire.pack("player_ack", {"your_conn_id": assigned},
+                    signer=joiner_wire.signer, clock=joiner_wire.clock)
+    host.handle_message("joiner", wire.unpack(raw, clock=host_wire.clock))
+
+    assert host.local_conn_id == "host", "a guest renamed the host"
+    forged = wire.unpack(wire.pack(
+        "bet_action", {"seat": 0, "hand": host._hand_no,
+                       "author_seq": 0, "action": "fold"},
+        signer=joiner_wire.signer, clock=joiner_wire.clock),
+        clock=host_wire.clock)
+    incoming = host._normalize_hostless("joiner", forged)
+    assert not incoming.local
+    assert not host._admit_hostless(incoming), "guest acquired host-seat authority"
+    assert host._author_seq_seen == {}, "refused claims consumed a sequence"
+    local = host._normalize_hostless("host", {
+        "type": "bet_action", "seat": 0, "hand": host._hand_no})
+    assert local.local and host._admit_hostless(local)
+    assert joiner.local_conn_id == "joiner"
+
+
+@pytest.mark.parametrize("payload", [None, [], "not-a-payload", {}])
+def test_host_refuses_ack_before_parsing_payload(payload):
+    host, _, _, _, _, _, joiner_wire = _signed_pair()
+    raw = wire.pack("player_ack", payload,
+                    signer=joiner_wire.signer, clock=joiner_wire.clock)
+    host.handle_message("joiner", wire.unpack(raw, clock=joiner_wire.clock))
+    assert host.local_conn_id == "host"
+
+
+def test_authenticated_joiner_still_adopts_host_acknowledgement():
+    host, joiner, _, _, _, host_wire, _ = _signed_pair()
+    joiner.local_conn_id = "pending-assignment"
+    raw = wire.pack("player_ack", {"your_conn_id": "assigned-by-host"},
+                    signer=host_wire.signer, clock=host_wire.clock)
+    joiner.handle_message("host", wire.unpack(raw, clock=host_wire.clock))
+    assert joiner.local_conn_id == "assigned-by-host"
+    assert joiner._host_conn_id == "host"
+    assert host.local_conn_id == "host"
+
+
 def test_tk_action_sender_supplies_the_host_identity(monkeypatch):
     from holdem.p2p import identity, transport
 
