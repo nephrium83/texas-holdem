@@ -88,7 +88,7 @@ HOST = frozenset({
     "holdem.hand_history", "holdem.notes", "holdem.onboarding",
     "holdem.session_stats", "holdem.settings", "holdem.sidecar_launcher",
     "holdem.p2p.transport", "holdem.p2p.stun", "holdem.p2p.dispatch",
-    "holdem.p2p.identity", "holdem.p2p.device_secret",
+    "holdem.p2p.identity", "holdem.p2p.device_secret", "holdem.p2p.private_storage",
     "holdem.p2p.tcp_transport", "holdem.native_crypto", "holdem.desktop_launcher",
     "holdem.desktop_table", "holdem.lan_session", "holdem.paced_bots",
     "holdem.ice_peer", "holdem.ice_probe", "holdem.ice_signaling",
