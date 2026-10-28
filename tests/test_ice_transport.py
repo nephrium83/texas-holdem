@@ -159,6 +159,43 @@ def test_hostile_or_stale_envelopes_close_before_session_delivery(attack, reason
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("attack", ["payload", "timestamp", "type"])
+def test_malformed_signed_message_cannot_interrupt_healthy_channel(attack):
+    async def run():
+        import hashlib
+        keys = [identity(), identity(), identity()]
+        peers = [await channels(), await channels()]
+        transport = DirectSessionTransport(signer=keys[0], clock=RealClock(), allow_forwarding=True)
+        messages, closed, errors = [], [], []
+        transport.on_message(lambda cid, msg: messages.append((cid, msg)))
+        transport.on_disconnect(lambda cid, why: closed.append((cid, why)), with_reason=True)
+        transport.on_task_error(errors.append)
+        try:
+            for i, pair in enumerate(peers):
+                await transport.attach_peer(pair[0], remote_key=keys[i + 1].public_key_bytes(), conn_id=f"guest-{i}")
+            message = json.loads(wire.pack("chat", {"text": "hello"}, signer=keys[1], clock=RealClock()))
+            message[{"payload": "payload", "timestamp": "ts", "type": "type"}[attack]] = None if attack == "payload" else []
+            message.pop("sig")
+            message.pop("hash")
+            message["sig"] = keys[1].sign(json.dumps(message, sort_keys=True, separators=(",", ":")).encode()).hex()
+            message["hash"] = hashlib.sha256(json.dumps(message, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            await peers[0][1].send(json.dumps(message).encode())
+            await until(lambda: bool(closed))
+            assert closed == [("guest-0", "protocol")]
+            assert transport.peer_ids() == ["guest-1"] and messages == []
+            raw = wire.pack("chat", {"text": "still playing"}, signer=keys[2], clock=RealClock())
+            await peers[1][1].send(raw)
+            await until(lambda: bool(messages))
+            assert messages == [("guest-1", json.loads(raw))]
+            assert errors == [] and transport.diagnostics()["last_error"] is None
+        finally:
+            await transport.aclose()
+            await asyncio.gather(*(pair[1].close() for pair in peers))
+        assert transport.diagnostics()["owned_tasks_pending"] == 0
+        assert not transport.diagnostics()["callback_worker_alive"]
+    asyncio.run(run())
+
+
 def test_signed_heartbeats_keep_idle_peer_alive_and_silent_peer_expires():
     async def run():
         keys = [identity(), identity()]

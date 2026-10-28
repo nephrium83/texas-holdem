@@ -733,9 +733,23 @@ class Session:
     # Message dispatch (called by transport on_message handler)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _control_payload(msg) -> Optional[dict]:
+        """Reject malformed objects, preserving handlers' payload-only API."""
+        if not isinstance(msg, dict):
+            return None
+        payload = msg.get("payload", {})
+        return payload if isinstance(payload, dict) else None
+
     @owned
     def handle_message(self, conn_id: str, msg: dict) -> None:
         """Route an incoming transport message to the appropriate handler."""
+        if (self._control_payload(msg) is None
+                or not isinstance(msg.get("type"), str)
+                or any(key in msg and not isinstance(msg[key], str)
+                       for key in ("pubkey", "hash", "prev"))):
+            _log.warning("session: dropping malformed message from %s", conn_id)
+            return
         if self.terminal_state is not None and not (
                 (self._ended_on_report and msg.get("type") == "peer_lost")
                 or (self.terminal_state == self.ENDED_NORMAL
@@ -3298,7 +3312,13 @@ class Session:
                 "is established in LOBBY (state=%s, terminal=%s)",
                 conn_id, self.state, self.terminal_state)
             return
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None or any(
+                key in payload and not isinstance(payload[key], str)
+                for key in ("nickname", "avatar_b64", "x25519_pubkey_hex")):
+            return
+        if not isinstance(msg.get("pubkey", ""), str):
+            return
         nickname = payload.get("nickname", "Player")
         with self._lock:
             self.players[conn_id] = Player(
@@ -3353,8 +3373,22 @@ class Session:
                          "is the roster's author, not a recipient", conn_id)
             return
 
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None:
+            return
         players_data = payload.get("players", [])
+        # Validate the whole roster before applying any entry. A late bad
+        # row must not leave earlier identities partially overwritten.
+        if not isinstance(players_data, list):
+            return
+        for player in players_data:
+            if (not isinstance(player, dict)
+                    or any(key in player and not isinstance(player[key], str)
+                           for key in ("conn_id", "peer_id", "nickname", "avatar_b64",
+                                       "x25519_pubkey_hex", "ed25519_pubkey_hex"))
+                    or any(key in player and not isinstance(player[key], bool)
+                           for key in ("is_host", "ready"))):
+                return
 
         # Close the chain. The roster is host-authoritative, so without this
         # a joiner's seat keys are whatever the host asserted -- including
@@ -3501,7 +3535,10 @@ class Session:
             _log.warning("session: player_ack from non-host %s — ignoring",
                          conn_id)
             return
-        assigned = msg.get("payload", {}).get("your_conn_id")
+        payload = self._control_payload(msg)
+        if payload is None:
+            return
+        assigned = payload.get("your_conn_id")
         if not isinstance(assigned, str) or not assigned:
             _log.warning("session: player_ack from %s carried no usable "
                          "conn_id — ignoring", conn_id)
@@ -3538,7 +3575,13 @@ class Session:
         answerable for a hand -- before discovering it disagreed about how
         cards would be dealt.
         """
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None:
+            return
+        order = payload.get("seat_order", [])
+        if not isinstance(order, (list, tuple)) or not all(
+                isinstance(cid, str) for cid in order):
+            return
         if self._host_conn_id and conn_id != self._host_conn_id:
             _log.warning("session: game_start from non-host %s — ignoring",
                          conn_id)
@@ -3614,22 +3657,33 @@ class Session:
             self.on_game_start(payload)
 
     def _on_ready(self, conn_id: str, msg: dict) -> None:
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None or not isinstance(payload.get("ready", False), bool):
+            return
         self.set_ready(conn_id, payload.get("ready", False))
 
     def _on_game_state(self, msg: dict) -> None:
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None:
+            return
         # H-11: keep the most recent game state for use by host-migration engine rebuild
         self._last_game_state = payload
         if self.on_game_state:
             self.on_game_state(payload)
 
     def _on_deal_private(self, msg: dict) -> None:
+        payload = self._control_payload(msg)
+        if payload is None:
+            return
         if self.on_deal_private:
-            self.on_deal_private(msg.get("payload", {}))
+            self.on_deal_private(payload)
 
     def _on_chat(self, conn_id: str, msg: dict) -> None:
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None or any(
+                key in payload and not isinstance(payload[key], str)
+                for key in ("nickname", "text")):
+            return
         nickname = payload.get("nickname", "Player")
         text = payload.get("text", "")
         if self.on_chat:
@@ -4156,13 +4210,16 @@ class Session:
         """Host only: validate and route an action from a peer."""
         if not self.is_host or self._engine is None:
             return
-        payload = msg.get("payload", {})
+        payload = self._control_payload(msg)
+        if payload is None:
+            return
         seat   = payload.get("seat",   -1)
         action = payload.get("action", "fold")
         amount = payload.get("amount", 0)
 
         # M-9: reject unrecognised action strings before they reach the engine
-        if action not in self._VALID_ACTIONS:
+        if (not isinstance(action, str) or action not in self._VALID_ACTIONS
+                or not _is_seat(seat) or not _is_seat(amount) or amount < 0):
             return
 
         # H-5: inverted guard — reject out-of-range seats AND wrong owner

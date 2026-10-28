@@ -495,6 +495,8 @@ async def _read_msg(reader: asyncio.StreamReader) -> dict:
     # escape _handle_connection entirely as an uncaught task exception.
     from holdem.p2p import wire as _wire_mod
     msg = _wire_mod.safe_loads(body)
+    if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
+        raise ValueError("message must be an object with a string type")
     # C-1: every peer message MUST be a valid signed envelope. Relay-control
     # frames are the sole exception (addressed to the relay, not a session).
     if msg.get("type") in _RELAY_CONTROL_TYPES:
