@@ -71,6 +71,7 @@ import hashlib
 import json
 import logging
 import threading
+from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, List, Optional
@@ -92,6 +93,14 @@ AUTHOR_SEQ_START = 0
 # chip, so this budget does not impose a new No-Limit raise cap.
 AUTHOR_SEQ_LIMIT = 4096
 AUTHOR_SEQ_LOOKAHEAD = 1024
+FUTURE_HAND_WINDOW = 1
+FUTURE_PER_AUTHOR = 16
+FUTURE_BUFFER_MESSAGES = 128
+FUTURE_BUFFER_BYTES = 2 * 1024 * 1024
+_DEFERRED_HAND_TYPES = frozenset({
+    "key_announce", "deck_round", "deal_share", "audit_open",
+    "bet_action", "hand_void", "hand_settled",
+})
 
 # Authorization modes for the peer-authored, host-relayed path.
 #
@@ -336,6 +345,12 @@ class HostlessInbound:
     verified:    bool            # arrived inside a verified wire envelope
     local:       bool            # self-delivery: no wire round-trip
     envelope:    dict            # original, forwarded unchanged when relaying
+
+
+@dataclass(frozen=True)
+class DeferredHostless:
+    incoming: HostlessInbound
+    byte_size: int
 
 
 class Session:
@@ -648,7 +663,10 @@ class Session:
         # replayed when that hand begins (else an early key_announce is dropped
         # and the deal deadlocks); ones for a past hand are ignored.
         self._hand_no = 0                       # current hand (0 = none begun)
-        self._msg_buffer: list = []             # [(conn_id, msg)] for future hands
+        self._msg_buffer: list[DeferredHostless] = []
+        # Views of already-owned drain lists, for reentrant transport/UI
+        # callbacks. They retain no messages beyond their replay call.
+        self._active_replays: list[list[DeferredHostless]] = []
         # Continuous-session state (next_p2p_hand): the shared table
         # config, the CURRENT hand's inputs (the revert point for a
         # voided hand's redeal), and the terminal flags.
@@ -881,21 +899,14 @@ class Session:
         elif t == "adjust_blinds":
             self._on_adjust_blinds(conn_id, msg)
         # --- mental-poker deal (L5, hostless) ---
-        elif t in ("key_announce", "deck_round", "deal_share", "audit_open"):
-            self._on_deal_message(conn_id, body)
-        # --- hostless betting (L5): replica action ---
-        elif t == "bet_action":
-            self._on_bet_action(conn_id, body)
-        elif t == "hand_void":
-            self._on_hand_void(conn_id, body)
+        elif t in _DEFERRED_HAND_TYPES:
+            self._deliver_hand_message(conn_id, body)
         elif t == "session_end":
             self._on_session_end(conn_id, body)
         elif t == "timeout_proposal":
             self._on_timeout_proposal(conn_id, body)
         elif t == "peer_lost":
             self._on_peer_lost(conn_id, body)
-        elif t == "hand_settled":
-            self._on_hand_settled(conn_id, body)
         elif t in ("casual_drop_observed", "casual_drop", "casual_drop_ack",
                    "casual_drop_dispute"):
             if self._casual_continuation is not None:
@@ -911,6 +922,18 @@ class Session:
             if getattr(self, "_casual_reliability", False):
                 from holdem.p2p.casual_clock import lobby_clocks
                 lobby_clocks(self).receive(conn_id, msg)
+
+    def _deliver_hand_message(self, conn_id: str, body: dict) -> None:
+        """Apply hand traffic after ingress, including deferred arrivals."""
+        kind = body.get("type")
+        if kind in ("key_announce", "deck_round", "deal_share", "audit_open"):
+            self._on_deal_message(conn_id, body)
+        elif kind == "bet_action":
+            self._on_bet_action(conn_id, body)
+        elif kind == "hand_void":
+            self._on_hand_void(conn_id, body)
+        elif kind == "hand_settled":
+            self._on_hand_settled(conn_id, body)
 
     @staticmethod
     def _hostless_projection(msg: dict):
@@ -1275,13 +1298,76 @@ class Session:
         if not self._msg_buffer:
             return
         pending, self._msg_buffer = self._msg_buffer, []
-        for cid, m in pending:
-            h = m.get("hand", self._hand_no)
-            if h == self._hand_no:
-                self.handle_message(cid, m)
-            elif h > self._hand_no:
-                self._msg_buffer.append((cid, m))
-            # h < current: stale, dropped
+        self._active_replays.append(pending)
+        try:
+            for item in pending:
+                if self.terminal_state is not None:
+                    break
+                ctx = item.incoming
+                if ctx.hand == self._hand_no:
+                    # Honor any intervening revocation, without replaying the
+                    # transport hash chain, normalization, handshake or relay.
+                    if (self._admission_ok(ctx.conn_id, ctx.mtype, ctx.author)
+                            and self._admit_hostless(ctx, relay=False)):
+                        self._deliver_hand_message(ctx.conn_id, ctx.body)
+                elif self._can_queue_hostless(ctx, item.byte_size):
+                    self._msg_buffer.append(item)
+        finally:
+            self._active_replays.pop()
+
+    def _resume_hand_boundary(self):
+        continuation = self._casual_continuation
+        if continuation is None:
+            return None
+        boundary = (continuation.pending or {}).get("notice")
+        return (boundary["resume_hand"] if boundary is not None else
+                continuation.carry["resume_hand"] if continuation.carry is not None else None)
+
+    def _future_hand_allowed(self, hand) -> bool:
+        if hand is None or hand <= self._hand_no:
+            return False
+        resume = self._resume_hand_boundary()
+        if resume is not None and hand < resume:
+            return False
+        if self._hand_no == 0:
+            # Embedding hosts may start at an arbitrary positive hand id.
+            # Before one begins, retain only one agreed startup bucket.
+            first = self._msg_buffer[0].incoming.hand if self._msg_buffer else hand
+            return hand == first
+        # A completed casual cancellation can reserve a fresh hand beyond
+        # current+1. Only that agreed target is allowed across the jump.
+        return hand <= self._hand_no + FUTURE_HAND_WINDOW or hand == resume
+
+    def _can_queue_hostless(self, ctx: HostlessInbound, byte_size: int) -> bool:
+        if ctx.mtype not in _DEFERRED_HAND_TYPES or not self._future_hand_allowed(ctx.hand):
+            return False
+        key = (ctx.seat, ctx.author) if ctx.seat is not None else (ctx.conn_id,)
+        count = 0
+        size = 0
+        for item in self._msg_buffer:
+            kept = item.incoming
+            if (kept.hand, kept.seat, kept.fingerprint) == (ctx.hand, ctx.seat, ctx.fingerprint):
+                return False
+            owner = (kept.seat, kept.author) if kept.seat is not None else (kept.conn_id,)
+            count += owner == key
+            size += item.byte_size
+        if count >= FUTURE_PER_AUTHOR or len(self._msg_buffer) >= FUTURE_BUFFER_MESSAGES:
+            return False
+        return size + byte_size <= FUTURE_BUFFER_BYTES
+
+    def _queue_future_hostless(self, ctx: HostlessInbound) -> bool:
+        """Keep a private snapshot only within the next-hand resource budget."""
+        if not self._can_queue_hostless(ctx, 0):
+            return False
+        try:
+            byte_size = len(json.dumps(ctx.envelope, sort_keys=True, separators=(",", ":"),
+                                       allow_nan=False).encode("utf-8"))
+        except (TypeError, ValueError, RecursionError):
+            return False
+        if not self._can_queue_hostless(ctx, byte_size):
+            return False
+        self._msg_buffer.append(DeferredHostless(deepcopy(ctx), byte_size))
+        return True
 
     def _send_hostless(self, m: dict) -> None:
         """The ONE place a local hostless message leaves this peer.
@@ -1675,7 +1761,7 @@ class Session:
             envelope    = msg,
         )
 
-    def _admit_hostless(self, ctx: HostlessInbound) -> bool:
+    def _admit_hostless(self, ctx: HostlessInbound, *, relay: bool = True) -> bool:
         """Authorize, sequence and relay -- once each. False means drop.
 
         The single gate between the wire and the typed handlers. Everything
@@ -1695,10 +1781,31 @@ class Session:
                 return False
             if not self._sequence_ok(ctx):
                 return False
+        if (self.terminal_state is None and not self._eliminated()
+                and ctx.mtype in _DEFERRED_HAND_TYPES
+                and ctx.hand is not None and ctx.hand > self._hand_no):
+            if self._queue_future_hostless(ctx) and relay:
+                self._relay_if_host(ctx)
+            return False
+        if relay:
+            identity = (ctx.hand, ctx.seat, ctx.fingerprint)
+            for index, item in enumerate(self._msg_buffer):
+                kept = item.incoming
+                if (kept.hand, kept.seat, kept.fingerprint) == identity:
+                    # A retry may arrive after the hand number advances but
+                    # before replay runs. Apply it once now, without a
+                    # second courier broadcast or a later buffered apply.
+                    self._msg_buffer.pop(index)
+                    return True
+            for frame in self._active_replays:
+                if any((item.incoming.hand, item.incoming.seat, item.incoming.fingerprint) == identity
+                       for item in frame):
+                    return True       # already couriered, still being drained
         # Relayed only after authorization and the replay/equivocation gate,
         # so the host neither amplifies a message its recipients would reject
         # nor re-broadcasts a replay.
-        self._relay_if_host(ctx)
+        if relay:
+            self._relay_if_host(ctx)
         return True
 
     def _sequence_ok(self, ctx: HostlessInbound) -> bool:
@@ -1721,8 +1828,8 @@ class Session:
             return True              # _hand_msg_ok owns malformed hand numbers
         if ctx.hand != self._hand_no:
             # Not a stream we are tracking yet. A future-hand message is
-            # buffered by _hand_msg_ok and fed back through handle_message by
-            # _replay_buffer, so recording it here would mark it seen on the
+            # deferred at ingress and admitted again by _replay_buffer,
+            # so recording it here would mark it seen on the
             # first pass and drop it as a duplicate on the second -- losing
             # precisely the early key_announce the buffer exists to keep.
             return True
@@ -1949,18 +2056,15 @@ class Session:
         except (TypeError, ValueError):
             _log.warning("session: malformed hand number ignored")
             return False
-        continuation = self._casual_continuation
-        if continuation is not None:
-            boundary = (continuation.pending or {}).get("notice")
-            resume = (boundary["resume_hand"] if boundary is not None else
-                      continuation.carry["resume_hand"]
-                      if continuation.carry is not None else None)
-            if resume is not None and h < resume:
-                return False
+        resume = self._resume_hand_boundary()
+        if resume is not None and h < resume:
+            return False
         if h > self._hand_no:
-            buffered = dict(msg)
-            buffered["hand"] = h
-            self._msg_buffer.append((conn_id, buffered))
+            # Direct private-handler compatibility calls have no envelope.
+            # Production traffic is deferred at ingress with its signature
+            # identity intact, before reaching a typed handler.
+            if self.author_mode == AUTHOR_MODE_COMPAT:
+                self._queue_future_hostless(self._normalize_hostless(conn_id, msg))
             return False
         return h == self._hand_no
 
