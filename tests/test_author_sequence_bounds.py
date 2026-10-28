@@ -47,6 +47,8 @@ def test_gap_diagnostics_never_walk_an_attacker_sized_range(monkeypatch):
         return builtins.range(*args)
     monkeypatch.setattr(protocol, "range", bounded_range, raising=False)
     assert len(host.author_seq_holes(1, 1)) <= 4096
+    report = host.author_seq_hole_report(1)
+    assert len(report) == 1 and report[0]["capped"] is True
 
 
 @pytest.mark.parametrize("hand", [1, 2])
@@ -111,3 +113,4 @@ def test_gap_after_large_complete_prefix_is_still_reported():
     host, _ = _host()
     host._author_seq_seen[(1, 1)] = {n: str(n) for n in range(5002) if n != 5000}
     assert host.author_seq_holes(1, 1) == [5000]
+    assert host.author_seq_hole_report(1) == [{"seat": 1, "missing": [5000]}]
