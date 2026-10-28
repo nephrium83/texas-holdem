@@ -5,9 +5,8 @@ The same keypair serves two roles:
     and the signing key for all game messages (Phase 1).
   - Transport identity: the peer ID at the network layer (Phase 3).
 
-A companion X25519 keypair is also stored in the same file. It served
-hole-card encryption in the retired commit-reveal shuffle and is kept
-for future transport-layer encryption; nothing consumes it today.
+A companion X25519 keypair is also stored in the same file. The Internet
+setup adapter uses it to encrypt and authenticate connection descriptions.
 
 Importing this module does not read or write any files. The host explicitly
 loads its Identity with load_or_create(); legacy module helpers load the
@@ -22,7 +21,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import pathlib
 import threading
 
@@ -36,6 +34,7 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from holdem.p2p.signing import verify
+from holdem.p2p.private_storage import atomic_write, canonical_target, locked
 
 
 def _identity_path() -> pathlib.Path:
@@ -47,13 +46,46 @@ def _identity_path() -> pathlib.Path:
 
 
 def _load_keys(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
-    data: dict = {}
-    if path.exists():
-        try:
-            data = json.loads(path.read_text())
-        except Exception:
-            data = {}
+    path = canonical_target(path)
+    data = _read_key_data(path)
+    # Complete identities are immutable. Loading one needs only read access,
+    # including when supplied by an embedding host on a read-only volume.
+    if "x25519_private_key_b64" in data:
+        return (Ed25519PrivateKey.from_private_bytes(base64.b64decode(data["private_key_b64"])),
+                X25519PrivateKey.from_private_bytes(base64.b64decode(data["x25519_private_key_b64"])))
+    with locked(path):
+        return _load_keys_locked(path)
 
+
+def _read_key_data(path: pathlib.Path) -> dict:
+    try:
+        stored = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        data = {}
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read identity at {path}; restore the existing file before retrying") from exc
+    else:
+        try:
+            data = json.loads(stored)
+            if not isinstance(data, dict) or "private_key_b64" not in data:
+                raise ValueError("missing signing identity")
+            for field in ("private_key_b64", "x25519_private_key_b64"):
+                if field in data:
+                    if not isinstance(data[field], str):
+                        raise ValueError("key must be a base64 string")
+                    if len(base64.b64decode(data[field], validate=True)) != 32:
+                        raise ValueError("key must be 32 bytes")
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError(f"invalid identity at {path}; restore it from a trusted backup. "
+                             "It will not be replaced automatically") from exc
+    return data
+
+
+def _load_keys_locked(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
+    data = _read_key_data(path)
+    if data and "x25519_private_key_b64" not in data and path.stat().st_nlink > 1:
+        raise ValueError(f"legacy identity at {path} has multiple hard links; "
+                         "use an independent copy before upgrading it")
     changed = False
 
     # --- Ed25519 key ---
@@ -77,11 +109,7 @@ def _load_keys(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]
         changed = True
 
     if changed:
-        path.write_text(json.dumps(data))
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass   # Windows: best-effort
+        atomic_write(path, json.dumps(data).encode("utf-8"))
 
     return ed_key, x25519_key
 
