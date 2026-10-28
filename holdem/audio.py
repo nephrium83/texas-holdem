@@ -1,10 +1,15 @@
 """Synthesized sound effects — no external audio files needed."""
 import threading, math, struct, wave, io
+import queue
 
 _enabled = True
 _volume = 0.7
 _mixer = None
 _sounds = {}
+_state_lock = threading.RLock()
+_init_lock = threading.Lock()
+_requests = queue.Queue(maxsize=32)
+_worker = None
 
 def _synth(freq_start, freq_end, duration_ms, wave_type="sine", envelope="adsr"):
     """Synthesize a sound as raw PCM bytes."""
@@ -46,13 +51,19 @@ def _make_wav(pcm, sample_rate=22050):
     return buf.read()
 
 def _init():
+    with _init_lock:
+        _init_locked()
+
+
+def _init_locked():
     global _mixer, _sounds
-    if _mixer is not None:
-        return
+    with _state_lock:
+        if _mixer is not None:
+            return
+        volume = _volume
     try:
         import pygame.mixer as mx
         mx.init(frequency=22050, size=-16, channels=1, buffer=256)
-        _mixer = mx
         specs = {
             "deal":   (_synth(800, 400, 100), 22050),
             "check":  (_synth(1000, 1000, 80), 22050),
@@ -63,37 +74,77 @@ def _init():
             "win":    (_synth(400, 1000, 400), 22050),
             "bad_beat": (_synth(800, 150, 350), 22050),
         }
+        sounds = {}
         for name, (pcm, sr) in specs.items():
             wav_bytes = _make_wav(pcm, sr)
             sound = mx.Sound(buffer=wav_bytes)
-            sound.set_volume(_volume)
-            _sounds[name] = sound
+            sound.set_volume(volume)
+            sounds[name] = sound
+        with _state_lock:
+            # A volume change during slow optional-backend initialization
+            # applies to the complete table before it becomes visible.
+            if volume != _volume:
+                for sound in sounds.values():
+                    sound.set_volume(_volume)
+            _sounds = sounds
+            _mixer = mx
     except Exception:
-        _mixer = False  # mark as unavailable
+        with _state_lock:
+            _mixer = False  # mark as unavailable
 
 def play(name: str):
-    if not _enabled:
+    global _worker
+    if not isinstance(name, str):
         return
-    threading.Thread(target=_play_bg, args=(name,), daemon=True).start()
+    with _state_lock:
+        if not _enabled:
+            return
+        if _worker is None:
+            _worker = threading.Thread(target=_play_worker, args=(_requests,),
+                                       daemon=True, name="poker-audio")
+            try:
+                _worker.start()
+            except (RuntimeError, OSError):
+                _worker = None
+                return
+        try:
+            _requests.put_nowait(name)
+        except queue.Full:
+            pass  # Sound effects may be dropped; gameplay must never wait.
+
+
+def _play_worker(requests):
+    while True:
+        name = requests.get()
+        try:
+            if name is None:
+                return
+            _play_bg(name)
+        finally:
+            requests.task_done()
 
 def _play_bg(name):
     _init()
-    if not _mixer or name not in _sounds:
-        return
+    with _state_lock:
+        sound = _sounds.get(name) if _enabled and _mixer else None
+        if sound is None:
+            return
     try:
-        _sounds[name].play()
+        sound.play()
     except Exception:
         pass
 
 def set_volume(vol: float):
     global _volume
-    _volume = max(0.0, min(1.0, float(vol)))
-    for s in _sounds.values():
-        try:
-            s.set_volume(_volume)
-        except Exception:
-            pass
+    with _state_lock:
+        _volume = max(0.0, min(1.0, float(vol)))
+        for s in tuple(_sounds.values()):
+            try:
+                s.set_volume(_volume)
+            except Exception:
+                pass
 
 def set_enabled(val: bool):
     global _enabled
-    _enabled = val
+    with _state_lock:
+        _enabled = val
