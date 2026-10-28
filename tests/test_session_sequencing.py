@@ -100,7 +100,7 @@ def test_future_hand_bet_action_buffered_not_dropped():
         # (hand 1 has no partner here; we only check the buffer survives to h2)
     # after reaching hand 2 the buffered bet is eligible; drop-stale check:
     sessions["peer0"]._hand_no = 2
-    kept = [b for b in sessions["peer0"]._msg_buffer if b[1]["hand"] >= 2]
+    kept = [b for b in sessions["peer0"]._msg_buffer if b.incoming.hand >= 2]
     assert kept, "hand-2 action should still be buffered at hand 2"
 
 

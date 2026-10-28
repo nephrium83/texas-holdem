@@ -336,8 +336,8 @@ class CasualContinuation:
         deal = getattr(s._deal_driver, "deal", None)
         if deal is not None:
             deal._held.clear()
-        s._msg_buffer = [(cid, msg) for cid, msg in s._msg_buffer
-                         if msg.get("hand", 0) >= notice["resume_hand"]]
+        s._msg_buffer = [item for item in s._msg_buffer
+                         if item.incoming.hand >= notice["resume_hand"]]
         s._clear_deadline()
         return result
 

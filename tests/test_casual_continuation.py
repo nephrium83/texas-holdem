@@ -65,19 +65,21 @@ def test_survivors_keep_fixed_seats_balances_and_play_again(lost):
     assert sum(sessions[live[0]].last_settled_stacks) == 1500
 
 
-def test_ahead_copy_cancels_and_every_survivor_reserves_the_same_fresh_hand():
+@pytest.mark.parametrize("first", [0, 1])
+def test_ahead_copy_cancels_and_every_survivor_reserves_the_same_fresh_hand(first):
     bus, sessions, order = casual_table()
     settle_by_checkdown(bus, sessions, order)
     settled = sessions["peer0"].last_settled_stacks
     assert sessions["peer1"].next_p2p_hand() == "started"
     bus.drain()
     disconnect(bus, sessions, 2)
-    for cid in order[:2]:
+    for cid in (order[first], order[1 - first]):
         s = sessions[cid]
         assert s.terminal_state is None
         assert s.last_settled_stacks == settled
         assert s.next_p2p_hand() == "started"
         assert s._hand_no == 3
+        bus.drain()  # The other survivor has not started the fresh hand yet.
     bus.drain()
     finish(bus, sessions, order[:2])
 

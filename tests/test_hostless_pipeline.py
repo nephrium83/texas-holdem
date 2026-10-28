@@ -240,7 +240,7 @@ def test_there_is_one_explicit_hostless_type_registry():
 
 def test_the_dispatch_covers_every_registered_hostless_type():
     """No type may be registered and then never dispatched, or vice versa."""
-    src = _src(Session.handle_message)
+    src = _src(Session.handle_message) + _src(Session._deliver_hand_message)
     for mtype in _HOSTLESS_PAYLOAD_TYPES:
         assert f'"{mtype}"' in src, (
             f"{mtype} is in the registry but never dispatched")
