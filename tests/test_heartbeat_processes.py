@@ -51,8 +51,8 @@ PEER = str(Path(__file__).parent / "heartbeat_peer.py")
 # pause can land at most one 5 s interval after one.
 READY_TIMEOUT    = 20.0
 DROP_WINDOW      = 25.0
-MIN_DROP_DELAY   = 10.0
-SHORT_PAUSE      = 10.0
+MIN_DROP_DELAY   = 19.0  # measured from the last received frame, with1s jitter
+SHORT_PAUSE      = 12.0
 SURVIVE_WINDOW   = 5.0
 MESSAGE_TIMEOUT  = 10.0
 
@@ -60,6 +60,7 @@ MESSAGE_TIMEOUT  = 10.0
 # ----------------------------------------------------------- pause / resume
 
 if sys.platform == "win32":
+    from ctypes import wintypes as w
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _ntdll = ctypes.WinDLL("ntdll")
     _kernel32.OpenProcess.restype = ctypes.c_void_p
@@ -99,6 +100,44 @@ if sys.platform == "win32":
     def _resume_process(pid: int) -> None:
         _nt_process_call("NtResumeProcess", pid)
 
+    class _PeerJob:
+        """Own the fixture's launcher and actual interpreter together."""
+        def __init__(self):
+            class Basic(ctypes.Structure):
+                _fields_ = [("process_time", ctypes.c_int64), ("job_time", ctypes.c_int64),
+                            ("flags", w.DWORD), ("min_working", ctypes.c_size_t),
+                            ("max_working", ctypes.c_size_t), ("process_limit", w.DWORD),
+                            ("affinity", ctypes.c_size_t), ("priority", w.DWORD),
+                            ("scheduling", w.DWORD)]
+            class Limits(ctypes.Structure):
+                _fields_ = [("basic", Basic), ("io", ctypes.c_uint64 * 6),
+                            ("process_memory", ctypes.c_size_t), ("job_memory", ctypes.c_size_t),
+                            ("peak_process", ctypes.c_size_t), ("peak_job", ctypes.c_size_t)]
+            _kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, w.LPCWSTR]
+            _kernel32.CreateJobObjectW.restype = w.HANDLE
+            _kernel32.SetInformationJobObject.argtypes = [w.HANDLE, ctypes.c_int, ctypes.c_void_p, w.DWORD]
+            _kernel32.SetInformationJobObject.restype = w.BOOL
+            _kernel32.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+            _kernel32.AssignProcessToJobObject.restype = w.BOOL
+            self.handle = _kernel32.CreateJobObjectW(None, None)
+            if not self.handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            limits = Limits()
+            limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if not _kernel32.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+                self.close()
+                raise ctypes.WinError(ctypes.get_last_error())
+
+        def attach(self, process):
+            if not _kernel32.AssignProcessToJobObject(self.handle, int(process._handle)):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+        def close(self):
+            if self.handle:
+                handle, self.handle = self.handle, None
+                if not _kernel32.CloseHandle(handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
+
 else:
     def _suspend_process(pid: int) -> None:
         os.kill(pid, signal.SIGSTOP)
@@ -121,15 +160,30 @@ class Peer:
     def __init__(self, label: str, workdir: Path, *args: str) -> None:
         self.label = label
         self._suspended = False
+        self._suspended_pid = None
         self._events: list[dict] = []
         self._lock = threading.Lock()
         self._stderr_path = workdir / f"{label}.stderr.txt"
         self._stderr = open(self._stderr_path, "wb")
+        self._job = _PeerJob() if sys.platform == "win32" else None
         config_dir = workdir / f"{label}-config"
-        self.proc = subprocess.Popen(
-            [sys.executable, PEER, "--config-dir", str(config_dir), *args],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=self._stderr, text=True, bufsize=1)
+        try:
+            self.proc = subprocess.Popen(
+                [sys.executable, PEER, "--config-dir", str(config_dir), *args],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=self._stderr, text=True, bufsize=1,
+                creationflags=0x00000004 if self._job else 0)  # CREATE_SUSPENDED
+            if self._job:
+                self._job.attach(self.proc)
+                _resume_process(self.proc.pid)
+        except BaseException:
+            if self._job:
+                self._job.close()
+            if hasattr(self, "proc"):
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+            self._stderr.close()
+            raise
         self._reader = threading.Thread(target=self._pump, daemon=True,
                                         name=f"heartbeat-reader-{label}")
         self._reader.start()
@@ -175,12 +229,20 @@ class Peer:
 
     # -- the behaviour under test ----------------------------------------
     def suspend(self) -> None:
-        _suspend_process(self.proc.pid)
+        ready = self.seen(lambda e: e.get("type") == "ready")
+        assert ready is not None and type(ready.get("pid")) is int
+        pid = ready["pid"]
+        assert pid > 0 and pid != os.getpid()
+        # Windows venv executables can be redirectors. The peer reports
+        # the actual interpreter that owns its sockets, rather than Popen's
+        # waiting launcher. Both belong to this fixture's own child tree.
+        _suspend_process(pid)
+        self._suspended_pid = pid
         self._suspended = True
 
     def resume(self) -> None:
         if self._suspended:
-            _resume_process(self.proc.pid)
+            _resume_process(self._suspended_pid)
             self._suspended = False
 
     # -- reporting --------------------------------------------------------
@@ -196,17 +258,27 @@ class Peer:
                 + f"\n  stderr tail:\n{errors}\n")
 
     def close(self) -> None:
-        self.resume()                   # a frozen process cannot be asked to quit
-        with contextlib.suppress(Exception):
-            self.command({"op": "quit"})
         try:
-            self.proc.wait(timeout=8)
-        except subprocess.TimeoutExpired:
-            self.proc.terminate()
-            with contextlib.suppress(subprocess.TimeoutExpired):
+            self.resume()               # a frozen process cannot be asked to quit
+            with contextlib.suppress(Exception):
+                self.command({"op": "quit"})
+            try:
+                self.proc.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                self.proc.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    self.proc.wait(timeout=5)
+        finally:
+            if self._job:
+                self._job.close()
+            if self.proc.poll() is None:
+                self.proc.kill()
                 self.proc.wait(timeout=5)
-        with contextlib.suppress(Exception):
+            self.proc.stdin.close()
+            self._reader.join(timeout=5)
             self._stderr.close()
+            assert not self._reader.is_alive(), "heartbeat stdout reader did not stop"
+            self.proc.stdout.close()
 
 
 @contextlib.contextmanager
@@ -234,13 +306,33 @@ def peer_pair(workdir: Path, heartbeat: bool = True):
                 f"{peer.label} never saw the connection" + peer.report()
         yield host, joiner
     finally:
+        errors = []
         for peer in (joiner, host):
             if peer is not None:
-                peer.close()
+                try:
+                    peer.close()
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise RuntimeError("heartbeat peer cleanup failed") from errors[0]
 
 
 def _disconnected(event: dict) -> bool:
     return event.get("type") == "disconnected"
+
+
+def _pause_after_received_frame(observer, paused):
+    paused.command({"op": "send", "msg": {"type": "pause-sync", "payload": {}}})
+    assert observer.wait_for(lambda e: e.get("type") == "recv" and e.get("mtype") == "pause-sync",
+                             MESSAGE_TIMEOUT) is not None
+    paused.suspend()
+
+
+def _assert_silence_interval(observer, drop):
+    frames = [e for e in observer.events() if e.get("type") == "frame" and e["at"] <= drop["at"]]
+    assert frames, "no received frame anchored the silence interval"
+    silence = drop["at"] - frames[-1]["at"]
+    assert MIN_DROP_DELAY <= silence <= DROP_WINDOW, observer.report()
 
 
 # ------------------------------------------------------------ (a) the drop
@@ -254,7 +346,7 @@ def test_paused_joiner_is_dropped_by_the_host(tmp_path):
     """
     with peer_pair(tmp_path) as (host, joiner):
         paused_at = time.monotonic()
-        joiner.suspend()
+        _pause_after_received_frame(host, joiner)
         drop = host.wait_for(_disconnected, DROP_WINDOW)
         elapsed = time.monotonic() - paused_at
         joiner.resume()
@@ -262,10 +354,7 @@ def test_paused_joiner_is_dropped_by_the_host(tmp_path):
         assert drop is not None, (
             f"the host still believed in a peer paused {elapsed:.1f}s ago"
             + host.report() + joiner.report())
-        assert elapsed >= MIN_DROP_DELAY, (
-            f"the host dropped the peer after only {elapsed:.1f}s, too fast "
-            f"for a {MIN_DROP_DELAY}s floor -- something other than the "
-            f"silence timeout closed it" + host.report())
+        _assert_silence_interval(host, drop)
 
         host.command({"op": "peers"})
         peers = host.wait_for(lambda e: e.get("type") == "peers",
@@ -280,7 +369,7 @@ def test_paused_host_is_dropped_by_the_joiner(tmp_path):
     had ever been exercised by a drop."""
     with peer_pair(tmp_path) as (host, joiner):
         paused_at = time.monotonic()
-        host.suspend()
+        _pause_after_received_frame(joiner, host)
         drop = joiner.wait_for(_disconnected, DROP_WINDOW)
         elapsed = time.monotonic() - paused_at
         host.resume()
@@ -288,9 +377,7 @@ def test_paused_host_is_dropped_by_the_joiner(tmp_path):
         assert drop is not None, (
             f"the joiner still believed in a host paused {elapsed:.1f}s ago"
             + joiner.report() + host.report())
-        assert elapsed >= MIN_DROP_DELAY, (
-            f"the joiner dropped the host after only {elapsed:.1f}s"
-            + joiner.report())
+        _assert_silence_interval(joiner, drop)
 
 
 # ------------------------------------------------------------- (b) the blip

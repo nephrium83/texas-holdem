@@ -60,7 +60,8 @@ _LOCK = threading.Lock()
 
 def _emit(obj: dict) -> None:
     """One JSON line on stdout, stamped and flushed."""
-    line = dict(obj, t=round(time.monotonic() - _T0, 3))
+    now = time.monotonic()
+    line = dict(obj, t=round(now - _T0, 3), at=now)
     with _LOCK:
         sys.stdout.write(json.dumps(line, separators=(",", ":"),
                                     default=repr) + "\n")
@@ -94,6 +95,12 @@ def main() -> None:
         transport.SILENCE_TIMEOUT = None
 
     transport.reset_callbacks()
+    read_msg = transport._read_msg
+    async def observed_read(reader):
+        message = await read_msg(reader)
+        _emit({"type": "frame", "mtype": message.get("type")})
+        return message
+    transport._read_msg = observed_read
     transport.on_connect(lambda cid, addr: _emit(
         {"type": "connected", "conn_id": cid, "addr": addr}))
     transport.on_disconnect(lambda cid: _emit(

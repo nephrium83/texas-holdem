@@ -1,6 +1,11 @@
-# Peer Timeout Behavior — Contract Specification
+# Peer Timeout Behavior — Historical Proposal
 
-**Status:** Pre-implementation contract, superseded in part (see the last section). This document is the specification.
+**Status (2026-10-27): entirely non-normative historical proposal.**
+Arrival-order races, heads-up quorum application and refund consequences below
+must not be used as current implementation requirements. Current casual timing,
+drop settlement and accepted trust are defined in
+[CASUAL_P2P_RULES.md](CASUAL_P2P_RULES.md); resource and clock construction is
+defined in [SESSION_DEPENDENCIES.md](SESSION_DEPENDENCIES.md).
 **Phase:** 3 — Deterministic silent-peer timeout  
 **Branch:** agent/sidecar-integration
 
@@ -8,10 +13,8 @@
 
 ## Purpose
 
-This document defines the complete timeout behavior for every phase of a
-hostless peer-to-peer session. It exists to prevent the implementation from
-quietly becoming the specification. All edge cases are resolved here.
-Implementation that contradicts this document is a bug in the implementation.
+This preserves an earlier timeout design for reference. It does not define
+the current runtime, resolve all edge cases, or approve revival of the proposal.
 
 ---
 
@@ -55,11 +58,12 @@ and must be rejected without side effects.
 ```python
 class Clock(Protocol):
     def monotonic(self) -> float: ...
+    def time(self) -> float: ...
 ```
 
-`Session.__init__` accepts an optional `clock: Clock` parameter. The default
-is a thin wrapper around `time.monotonic`. Tests inject a fake clock that
-advances only when told to.
+Current `Session.__init__` requires an explicit non-None `clock: Clock` with
+both methods. The host chooses `RealClock` or a test clock; Session supplies
+no implicit clock. See `SESSION_DEPENDENCIES.md` for the authoritative API.
 
 The clock is used **only** to decide when a peer is allowed to broadcast a
 `timeout_proposal`. It plays no role in whether a received proposal is

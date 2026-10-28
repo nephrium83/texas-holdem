@@ -1,5 +1,29 @@
 # Multiplayer design
 
+**Historical design, not a current protocol specification (2026-10-27).**
+The sections below retain earlier proposals, unimplemented threshold recovery,
+old schemas and transport plans. They do not authorize new implementation work.
+Use [CURRENT_DELIVERY.md](CURRENT_DELIVERY.md) for delivery status,
+[GODOT_PROTOCOL.md](GODOT_PROTOCOL.md) for the desktop contract,
+[CASUAL_P2P_RULES.md](CASUAL_P2P_RULES.md) for approved casual settlement, and
+[SESSION_DEPENDENCIES.md](SESSION_DEPENDENCIES.md) for resource/clock APIs.
+
+Current source differs at these security boundaries:
+
+- `wire.pack` signs `prev` inside the envelope; per-author sequencing is not
+  a globally ordered or collectively attested transcript.
+- Settlement derives cards from verified audit shares, rather than trusting
+  a plaintext `showdown_declare` claim. The full-deck audit intentionally
+  makes every card derivable after a completed hand; permanent muck secrecy
+  and a substring search for plaintext are not security guarantees.
+- Production wire play requires Bayer–Groth proof verification for every
+  shuffle round. A deck-membership audit alone does not prove shuffle provenance.
+- Casual play uses the approved host/timekeeper drop policy, including its
+  heads-up trust tradeoff. The proposed threshold quorum/reconstruction and
+  reconnect state machine below are not that implementation.
+- The action lists below are historical, incomplete design lists. They are
+  not a closed registry accepted by current `Session.handle_message`.
+
 Status (2026-07-24): **protocol core implemented; internet transport pending**.
 The mental-poker deal, signed hostless session, continuous play, and Godot
 sidecar bridge are implemented and tested headlessly. Discovery, relay/NAT
@@ -59,9 +83,11 @@ recipient can finally decrypt. Showdown reveals work the same way.
 Mucking is simply declining to decrypt: you forfeit any claim on the pot
 but keep your information private.
 
-**The guarantee** is strictly stronger than any server, including one we
-run: your hole cards stay private unless *every other player at the
-table colludes*.
+**Threshold proposal's privacy bound:** fewer than *t* colluding share holders
+cannot decrypt; any *t* can pool shares to decrypt. At nine seats with
+*t* = ⌈2n/3⌉, six holders suffice; unanimity of the other eight is not required.
+This historical threshold proposal is distinct from the current n-of-n deal,
+whose completed-hand full-deck audit gives up post-hand secrecy.
 
 **What cryptography cannot fix**, stated plainly:
 - Players sharing their own hole cards off-band (screenshots over
@@ -1239,12 +1265,18 @@ in the cipher suite or proof construction is a bug, not a property to tolerate.
 output not corresponding to any valid permutation + re-encryption of its input must
 generate a proof that fails verification. The test harness injects malformed
 `deal_step`/`"shuffle"` entries covering at least the following eight variants:
-(a) deck permuted but not re-encrypted; (b) deck re-encrypted but not permuted;
+(a) a ciphertext duplicated with another position missing;
+(b) re-encryption inconsistent with the proof's witness;
 (c) deck with one card replaced by a fresh encryption of a different card;
 (d) proof commitment vector mismatched to actual permutation; (e) Fiat-Shamir
 challenge tampered; (f) response scalars zeroed; (g) proof copied verbatim from a
 previous round (replay); (h) proof generated for a different input deck. Every active
 peer must detect each fault within one verification pass and broadcast a `chain_fault`.
+
+An identity permutation is a valid permutation, and zero re-encryption
+scalars are within the algebraic relation. Those transformations with valid
+proofs belong among acceptance controls, not attacks. Shuffle correctness
+does not by itself prove an individual shuffler contributed fresh entropy.
 
 **Property 3 — Correct full decryption.** After a clean n-seat shuffle with known
 seeds, the test oracle knows the composition of all permutations and can compute the
@@ -1252,8 +1284,12 @@ expected card at every deck position. Cooperative decryption of all 52 positions
 recover the expected card point at each. Any mismatch indicates a bug in the shuffle,
 the partial-decrypt arithmetic, or the deck encoding.
 
-**Property 4 — No-leak assertion.** This is the canonical privacy test and the most
-important property in the suite. For each seat j, extract every log entry that is not
+**Property 4 — Historical literal-substring smoke check, not a privacy proof.**
+A transcript can disclose enough shares to derive a card without containing
+its plaintext hex. A privacy test must construct the complete view available
+to the adversary and attempt decryption before the declared reveal boundary.
+The current full-deck post-hand audit intentionally removes post-hand privacy.
+The old check below establishes only literal absence. For each seat j, extract every log entry that is not
 seat j's own final-decrypt output for a hole card assigned to j, and assert that none
 of those entries, when serialised to bytes, contains the hex encoding of either of
 seat j's hole-card plaintext points:
