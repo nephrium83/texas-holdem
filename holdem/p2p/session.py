@@ -87,6 +87,11 @@ _log = logging.getLogger(__name__)
 # left to each send path to invent, so a receiver knows what "no messages
 # yet" means without guessing.
 AUTHOR_SEQ_START = 0
+# Fixed overhead for each author's deal/control traffic; betting adds the
+# configured table's chip total below. Every paid action spends at least one
+# chip, so this budget does not impose a new No-Limit raise cap.
+AUTHOR_SEQ_LIMIT = 4096
+AUTHOR_SEQ_LOOKAHEAD = 1024
 
 # Authorization modes for the peer-authored, host-relayed path.
 #
@@ -1255,6 +1260,12 @@ class Session:
             prevention=prevention,
         )
         self._deal_driver.start()
+        # Completed hands no longer need replay bookkeeping. Retain the
+        # preceding hand for late settlement/report emissions.
+        self._author_seq_seen = {key: value for key, value in self._author_seq_seen.items()
+                                 if hand_no - 1 <= key[0] <= hand_no}
+        self._author_seq_out = {key: value for key, value in self._author_seq_out.items()
+                                if hand_no - 1 <= key[0] <= hand_no}
         self._flush_deal()
         self._replay_buffer()
 
@@ -1336,13 +1347,18 @@ class Session:
         only thing that can catch TOTAL suppression -- where nothing
         arrives and there is no gap to see.
         """
+        if not self._author_sequence_shape_ok(msg):
+            return False
         got = msg.get("author_seq")
         if not isinstance(got, int) or isinstance(got, bool):
-            return True              # unsequenced peer/harness: nothing to check
+            return True              # explicit compatibility mode only
         key = (hand, seat)
-        seen = self._author_seq_seen.setdefault(key, {})
+        seen = self._author_seq_seen.get(key, {})
+        if got > max(seen, default=AUTHOR_SEQ_START - 1) + AUTHOR_SEQ_LOOKAHEAD:
+            return False
         prior = seen.get(got)
         if prior is None:
+            self._author_seq_seen[key] = seen
             seen[got] = fingerprint
             return True
         if prior == fingerprint:
@@ -1405,7 +1421,20 @@ class Session:
         seen = self._author_seq_seen.get((hand, seat))
         if not seen:
             return []
-        return [n for n in range(AUTHOR_SEQ_START, max(seen)) if n not in seen]
+        # Defence in depth for historical/injected state: even a map from
+        # before the ingress limit cannot turn diagnostics into a huge scan.
+        missing = []
+        expected = AUTHOR_SEQ_START
+        for number in sorted(seen):
+            if number < expected:
+                continue
+            if number > expected:
+                room = AUTHOR_SEQ_LIMIT - len(missing)
+                missing.extend(range(expected, min(number, expected + room)))
+                if len(missing) == AUTHOR_SEQ_LIMIT:
+                    break
+            expected = number + 1
+        return missing
 
     def author_seq_hole_report(self, hand: Optional[int] = None) -> list:
         """Every unresolved hole in a hand, as [{seat, missing}] records.
@@ -1650,6 +1679,8 @@ class Session:
         if (self._casual_continuation is not None
                 and ctx.seat in self._casual_continuation.departed):
             return False
+        if not ctx.local and self.author_mode == AUTHOR_MODE_WIRE and ctx.seat is None:
+            return False
         if not ctx.local and ctx.seat is not None:
             if not self._author_owns_seat(ctx.conn_id, ctx.author, ctx.seat):
                 _log.warning(
@@ -1679,6 +1710,8 @@ class Session:
         advances on every hostless send, so a receiver watching only some
         types reads the others as gaps.
         """
+        if not self._author_sequence_shape_ok(ctx.body):
+            return False
         if ctx.hand is None:
             return True              # _hand_msg_ok owns malformed hand numbers
         if ctx.hand != self._hand_no:
@@ -1690,6 +1723,18 @@ class Session:
             return True
         return self._author_seq_ok(
             ctx.seat, ctx.hand, ctx.body, ctx.fingerprint)
+
+    def _author_sequence_shape_ok(self, body: dict) -> bool:
+        got = body.get("author_seq")
+        if not _is_seat(got):
+            return self.author_mode == AUTHOR_MODE_COMPAT
+        cfg = self._table_cfg or {}
+        chips = cfg.get("total_chips", 0)
+        # This is host-configured table state, never a peer message field.
+        # Pure deal-only embeddings have no betting bank and use the fixed
+        # overhead. Continuous tables bind the same bank at start_p2p_hand.
+        extra = chips if _is_seat(chips) and chips > 0 else 0
+        return AUTHOR_SEQ_START <= got < AUTHOR_SEQ_LIMIT + extra
 
     def _relay_if_host(self, ctx: HostlessInbound) -> None:
         """Host only: forward an ALREADY-AUTHORIZED envelope onward.

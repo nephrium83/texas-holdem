@@ -137,7 +137,7 @@ def _table():
 
 
 def _env(author: str, seat: int, mtype="key_announce", **extra):
-    payload = {"seat": seat, "hand": 1}
+    payload = {"seat": seat, "hand": 1, "author_seq": 0}
     payload.update(extra)
     return {"v": 1, "type": mtype, "pubkey": KEY[author] if author in KEY
             else author, "ts": 111, "prev": "0" * 64, "sig": "ff" * 64,
@@ -261,7 +261,7 @@ def test_every_hostless_type_is_relayed(mtype):
     bus, s = _table()
     seat_field = "seat_from" if mtype == "deal_share" else "seat"
     env = _env("B", seat=1, mtype=mtype)
-    env["payload"] = {seat_field: 1, "hand": 1}
+    env["payload"] = {seat_field: 1, "hand": 1, "author_seq": 0}
     s["A"].handle_message("B", dict(env))
     assert _received_by(bus, "C", mtype), f"{mtype} was not relayed to C"
     assert not _received_by(bus, "B", mtype), f"{mtype} was echoed to its author"
@@ -278,7 +278,7 @@ def test_a_host_whose_match_ended_still_relays_settlement_reports():
     s["A"].handle_message("B", _env("B", seat=1, mtype="hand_settled",
                                     digest="ab" * 32, stacks=[1500, 0, 0]))
     s["A"].handle_message("B", _env("B", seat=1, mtype="session_end",
-                                    winner=0, stacks=[1500, 0, 0]))
+                                    winner=0, stacks=[1500, 0, 0], author_seq=1))
     s["A"].handle_message("B", _env("B", seat=1, mtype="bet_action"))
     assert _received_by(bus, "C", "hand_settled")
     assert _received_by(bus, "C", "session_end")
