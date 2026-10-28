@@ -1411,6 +1411,8 @@ class Session:
 
         A late message filling a hole closes it, so this is re-read at the
         moment it is needed rather than latched when a gap first appears.
+        The list contains at most AUTHOR_SEQ_LIMIT missing numbers, even
+        for a larger configured betting bank. Reports mark a reached cap.
 
         Blind spot, stated because it bounds what this can prove: if the
         TAIL of a stream is suppressed there is no higher number to reveal
@@ -1449,7 +1451,10 @@ class Session:
                 continue
             missing = self.author_seq_holes(khand, seat)
             if missing:
-                out.append({"seat": seat, "missing": missing})
+                report = {"seat": seat, "missing": missing}
+                if len(missing) == AUTHOR_SEQ_LIMIT:
+                    report["capped"] = True
+                out.append(report)
         return out
 
     def mark_host_authenticated(self, conn_id: str,
