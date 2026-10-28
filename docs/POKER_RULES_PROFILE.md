@@ -4,7 +4,11 @@
 **Type:** normative contract (see `docs/COLLABORATION.md`, "Research versus
 contract"). Implementation that contradicts this document is a bug in the
 implementation.
-**Milestone:** M1. **Base:** `c69a4bf` (`main`).
+**Milestone:** M1. **Historical inventory base:** `c69a4bf`.
+Normative rulings and historical implementation observations are separate: the
+original §7 inventory is not a conformance certification of current main.
+The 2026-10-27 documentation reconciliation used source `16e6344`; see
+[CURRENT_DELIVERY.md](CURRENT_DELIVERY.md) for reviewed source versus packaged status.
 **Normative source:** `docs/research/sources/poker-tda-2024-v1.0-longform.txt`
 — the official Poker TDA 2024 Rules v1.0 (9 Oct 2024), rules, Recommended
 Procedures and Illustration Addendum, with provenance and hashes in
@@ -331,11 +335,11 @@ the unusual case is a rule this protocol must not pretend to keep.
 |---|---|---|---|---|
 | No maximum bet (NLHE) | 48 [V] `src:282`; 42 [V] `src:248`; 54-D [V] `src:322` | ADOPT | a bet is bounded only by stack. **The derivation:** the ruleset is written *for* a betting structure it does not itself define — it says *"there is no cap on the number of raises in no-limit and pot-limit"* (48), prescribes how a raise is made *"in no-limit or pot-limit"* (42), and rules that *"Declaring 'I bet the pot' is not a valid bet in no-limit"* (54-D), which only makes sense where the pot does not bound the bet. The `nlhe` field of the identifier (§1.1) is where this profile picks the structure those rules assume | `engine.py:664-705`; `replica_table.py:78`, `structure="No-Limit"` |
 | Minimum raise amount | 43-A [V] `src:252`; addendum `src:590-602` | ADOPT | *"A raise must be at least equal to the largest prior full bet or raise of the current betting round"* — and the addendum insists on the reading that matters: the minimum is the largest **increment** added, *"not 3600 (C's total bet), but only 2000, the additional raise action that C added"* `src:594`. The engine stores exactly the increment | `engine.py:756-765`, `min_raise = raise_size` where `raise_size = p.bet - current_bet` |
-| The 50% rounding remedy | 43-A [V] `src:252`; 45 [V] `src:262-264` | DIGITALIZE | *"A player who raises 50% or more of the largest prior bet but less than a minimum raise must make a full minimum raise. If less than 50% it is a call unless 'raise' is first declared or the player is all-in."* The **consequence** — a sub-minimum raise never stands as a raise — is adopted; the **50% threshold itself is discarded**, because it is a remedy for an ambiguous physical gesture (which chips were pushed, in how many motions), and no gesture exists. A sub-minimum raise is **rejected**, never rounded up and never silently reinterpreted as a call | current code coerces upward — gap **C2**, §7 |
-| Correcting an underraise | 52-A [V] `src:304` | DIGITALIZE | *"opening or raising less than the minimum legal amount is corrected anywhere on the current street"* — a repair for chips that are **already in the pot** and cannot be un-pushed. A typed action is validated before it becomes state, so the invalid bet never needs correcting; the same consequence (no under-minimum bet stands) is reached by refusal instead of repair. Note this is where our departure is sharpest: TDA corrects *upward*, which is what the engine does today, and the profile still says reject — because a correction rule is safe only when the actor is a human at a table and not a peer sending arbitrary bytes | gap **C2**, §7 |
+| The 50% rounding remedy | 43-A [V] `src:252`; 45 [V] `src:262-264` | **OVERRIDE (a)** | *"A player who raises 50% or more of the largest prior bet but less than a minimum raise must make a full minimum raise. If less than 50% it is a call unless 'raise' is first declared or the player is all-in."* The **consequence** — a sub-minimum raise never stands as a raise — is adopted; the **50% threshold itself is discarded**, because it is a remedy for an ambiguous physical gesture (which chips were pushed, in how many motions), and no gesture exists. A sub-minimum raise is **rejected**, never rounded up and never silently reinterpreted as a call | current code coerces upward — gap **C2**, §7 |
+| Correcting an underraise | 52-A [V] `src:304` | **OVERRIDE (a)** | *"opening or raising less than the minimum legal amount is corrected anywhere on the current street"* — a repair for chips that are **already in the pot** and cannot be un-pushed. A typed action is validated before it becomes state, so the invalid bet never needs correcting; the same consequence (no under-minimum bet stands) is reached by refusal instead of repair. Note this is where our departure is sharpest: TDA corrects *upward*, which is what the engine does today, and the profile still says reject — because a correction rule is safe only when the actor is a human at a table and not a peer sending arbitrary bytes | gap **C2**, §7 |
 | Re-opening the bet | 47-A [V] `src:276`; addendum Ex. 1 [V] `src:650-658` | ADOPT | *"an all-in wager (or cumulative multiple short all-ins) totaling less than a full bet or raise will not reopen betting for players who have already acted and are not facing at least a full bet or raise when the action returns to them"* — so cumulative short all-ins that *do* total a full raise **must** reopen it; the addendum works the case (25 + 75 = a full 100 raise, betting reopens). The second clause is adopted too: *"the minimum raise is always the last full valid bet or raise of the round"* | reopening: current code judges each all-in alone — gap **B6**, §7. Min-raise clause: conformant, `engine.py:764-765` updates `min_raise` only when the raise is full |
 | Committed chips stay committed | 50-A [V] `src:290` | ADOPT | *"Action in turn is binding and commits chips to the pot that stay in the pot."* This is the professional statement of standing invariant 4. **The session layer deviates in two places.** When a seat drops, the casual P2P profile (ROADMAP decision of 2026-10-04) gives the seats left their own chips back in the split, though the seat that dropped forfeits everything it committed (§3.4, "Absent player"); and a hand still being shuffled is cancelled and its blinds go back. A disputed settlement is not a third: when seats report different settlements the table ends with `ABORTED_PROTOCOL` and nothing is rolled back (`docs/CASUAL_P2P_RULES.md` rule 11). Each game keeps its own result, marked "disputed": a game that settled the hand keeps its payout, and one that voided it the stacks it was dealt from | `engine.py:644-650` `_commit`; ROADMAP standing invariant 4; deviation: `Session._settle_drop`, `Session.last_settled_stacks`; no rollback: `Session._settlement_disagrees` |
-| Action out of turn | 53-A/B [V] `src:310-312` | DIGITALIZE | the **consequence** — an out-of-turn action must not stand as if it were in turn — is adopted; the **machinery** is dropped entirely. TDA backs the action up, keeps it binding if the action to the player did not change, and hands the skipped player's fate to the floor, all because the chips were physically pushed and the information is already public. Here the action is rejected before it becomes game state: no backup, no binding, no penalty, no floor (§3.0) | `replica_table.py:185-186` rejects a non-actor; engine-level guard is gap **C3** |
+| Action out of turn | 53-A/B [V] `src:310-312` | **OVERRIDE (a)** | the **consequence** — an out-of-turn action must not stand as if it were in turn — is adopted; the **machinery** is dropped entirely. TDA backs the action up, keeps it binding if the action to the player did not change, and hands the skipped player's fate to the floor, all because the chips were physically pushed and the information is already public. Here the action is rejected before it becomes game state: no backup, no binding, no penalty, no floor (§3.0) | `replica_table.py:185-186` rejects a non-actor; engine-level guard is gap **C3** |
 | Binding declarations, undercalls | 51 [V] `src:296-300` | **N/A** | the rule governs the gap between what a player *said* and what they *pushed*. One canonical typed action carries both; it is validated once and accepted once, so an undercall cannot be expressed | `client_view.py:253-260` |
 | Accepted action | 49 [V] `src:286` | **N/A** | *"It is the caller's responsibility to determine the correct amount of an opponent's bet before calling, regardless of what is stated by others."* The rule allocates the cost of a miscount; the amount to call is replicated state, computed identically on every replica, and no dealer or player announces it | `engine.py:664-668` `legal()` derives `to_call` from state |
 | Oversized chips, multi-chip bets, prior-bet chips, over-betting for change | 44 [V] `src:258`; 45 [V] `src:262-264`; 46 [V] `src:268-272`; 61 [V] `src:352` | **N/A** | four rules, one physical cause: chips of fixed denomination pushed across a table. No chips are pushed |
@@ -343,6 +347,14 @@ the unusual case is a rule this protocol must not pretend to keep.
 | Count of an opponent's stack | 60 [V] `src:348` | **N/A** | every stack is replicated state, exact and continuously visible; there is nothing to request and nothing to estimate | `replica_table.py:276-297` |
 
 ### 3.4 Clock and absence
+
+**Casual-profile exception C7:** host loss, cancellation before cards are
+dealt, and a protocol abort can leave the last settled stacks visible rather
+than award the current pot. These are the expressly accepted casual rules,
+not authorization for persistent-stakes play. Production wire tables require
+Bayer–Groth before play; the no-proof drop-refund branch is a defensive abort
+or explicit compatibility path, not an offered production deal policy. C7 is
+tracked separately from ordinary forfeit settlement below.
 
 | Area | TDA 2024 | Class | Ruling | Evidence |
 |---|---|---|---|---|
@@ -443,7 +455,7 @@ mode" from "this institution does not exist here".
 | 39 | irregular flops, premature cards, reshuffling | N/A — the board is a fixed set of deal-map positions revealed in order. Like Rule 38, it prescribes a single board without forbidding a second (§3.1) | §3.1, §3.2 |
 | 40–41 | methods of betting and calling | N/A | §3.3 |
 | 42 | methods of raising | ADOPT via the no-limit structure; the one-motion mechanics are N/A | §3.3 |
-| 43-A | raise amounts and the 50% remedy | ADOPT (minimum) + DIGITALIZE (remedy) | §3.3 |
+| 43-A | raise amounts and the 50% remedy | ADOPT (minimum) + OVERRIDE (a) (remedy) | §3.3 |
 | 43-B | "raise" plus an amount is the total | N/A — the typed action carries a total, unambiguously | §3.3 |
 | 44–46 | overchips, multi-chip bets, prior-bet chips | N/A | §3.3 |
 | 47-A | re-opening the bet, cumulative short all-ins | ADOPT | §3.3, gap **B6** |
@@ -452,8 +464,8 @@ mode" from "this institution does not exist here".
 | 49 | accepted action | N/A | §3.3 |
 | 50 | acting in turn; committed chips stay committed | ADOPT | §3.3 |
 | 51 | binding declarations, undercalls | N/A — 51-B's "the posted BB is the pre-flop opener" defines the opening bet for this remedy and is not a blind-structure rule (§3.2) | §3.3, §3.2 |
-| 52 | incorrect bets, underbets, underraises | DIGITALIZE | §3.3 |
-| 53 | action out of turn | DIGITALIZE | §3.3, gap **C3** |
+| 52 | incorrect bets, underbets, underraises | OVERRIDE (a) | §3.3 |
+| 53 | action out of turn | OVERRIDE (a) | §3.3, gap **C3** |
 | 54 | pot size, pot-limit bets | N/A — not a pot-limit game; 54-D supports the no-limit reading | §3.3 |
 | 55–59 | invalid declarations, string bets, non-standard betting and folds, conditional declarations | N/A | §3.3 |
 | 60 | count of an opponent's stack | N/A | §3.3 |
@@ -499,7 +511,7 @@ that would have come — including on a hand that ends by folds
 (`docs/AUDIT-M0-D1-D4.md:88-101`). D3 was closed as *not a defect at the named
 site*, **not** as *no exposure exists*.
 
-### 4.1 What actually happens today
+### 4.1 Protocol exposure and client behavior
 
 **Protocol layer — every dealt seat's hole cards become public at hand end, on
 every completed hand.**
@@ -521,14 +533,15 @@ During play the protocol is *tight*: `_try_complete` refuses to combine another
 seat's hole even when every share happens to be present
 (`mental_deal.py:741-762`). The exposure is strictly post-hand.
 
-**Client boundary — narrower, and inconsistent with itself.**
+**Client boundary — current filtering differs from the original inventory.**
 
 * A fold-win reveals nothing: the settled result carries no scored `runs`, so
   the reveal block never runs (`client_view.py`, showdown-reveal block of
   `snapshot()`).
-* A contested showdown reveals the hole cards of **every dealt seat in the
-  map** — including seats that folded on an earlier street (same loop, which
-  filters only on `is_you`).
+* Historically the client revealed every dealt seat in the map. Current
+  `client_view.snapshot()` filters through `result["shown"]`; folded seats
+  are not rendered. That closes C1 at the client boundary and does not
+  restore protocol-level post-hand secrecy.
 
 ### 4.2 The decision
 
@@ -590,8 +603,9 @@ client's own copy — must not claim that mucked or folded cards stay private
 after the hand, and must not claim the audit proves nobody cheated. The
 accurate statement is:
 
-> *Your hole cards are cryptographically private while the hand is live. When
-> the hand ends the whole deck is opened, so every seat can check the deck
+> *Your hole cards are cryptographically private during betting. Once betting
+> is complete, all-in cards may be tabled before the remaining board is dealt.
+> When the hand ends the whole deck is opened, so every seat can check the deck
 > itself: that what was dealt really was one complete 52-card deck with no card
 > substituted, duplicated or dropped, and that every seat's contribution to
 > unscrambling it is proven against the key that seat published. Opening the
@@ -802,6 +816,7 @@ Validation evidence is recorded in `research/FAMOUS_HAND_REPLAYS.md`.
 | ID | Gap | Profile rule violated | Site |
 |---|---|---|---|
 | **B6** | cumulative short all-ins do not reopen betting; each all-in is judged alone against `min_raise` and never accumulated | §3.3, Rule 47 | `engine.py:756-776` |
+| **C7** | **Accepted casual exception, not persistent-stakes conformance.** Host loss, pre-deal cancellation and defensive protocol aborts can discard an unsettled pot. A no-proof table is refused before production wire play. This document does not authorize a real-money mode or claim cancellation cannot benefit a departing seat | §3.4; approved `CASUAL_P2P_RULES.md` | `Session._assert_deal_preconditions`, `_settle_drop`, `last_settled_stacks`; controls `tests/test_session_prevention.py::test_wire_mode_refuses_detection_only` and `::test_a_wire_joiner_refuses_a_detection_only_table_before_playing` |
 | **C1** | **Closed** (Godot beta, B1). At a contested showdown the client rendered the hole cards of seats that **folded earlier**, not only the seats that reached showdown. `client_view.snapshot` now tables only the seats in `result["shown"]`; control: `tests/test_client_view.py::test_showdown_never_reveals_a_seat_that_folded_earlier` | §4.2 D-M1-1c | `client_view.py`, showdown-reveal block of `snapshot()` |
 | **C2** | a sub-minimum raise is silently coerced up to `min_to` instead of being rejected. Deterministic, so replicas converge — and it is close to TDA's own correction remedy (52-A), which is why the gap is a **decision** rather than a defect. The profile still says reject: a repair rule is safe for a human at a table, not for arbitrary bytes from a hostile peer | §3.3, Rules 43-A and 52-A | `engine.py:747-750` |
 | **C3** | `Engine.act(i, ...)` never checks `i == self.actor`. The replica layer gates it today, so the P2P path is safe; the engine itself is not | §3.3, Rule 53 | `engine.py:709`, gated at `replica_table.py:185-186` |

@@ -1,10 +1,18 @@
 # ADR-001: Serverless cryptographic performance
 
-- **Status:** Accepted
+- **Status:** Superseded; retained as a historical decision record
 - **Date:** 2026-07-29
 - **Scope:** Mental-poker deal, shuffle proofs, and player-facing hand startup
 
 ## Context
+
+The detection-first decision below is no longer admissible for production
+wire play. [GODOT_PROTOCOL.md §4.1](../GODOT_PROTOCOL.md#41-deal-policy) is the
+current deal-policy contract: `bayer-groth-v1` is mandatory and there is no
+implicit default. Detection-only is an explicit test/compatibility mode;
+it uses cards provisionally before its post-hand audit and cannot satisfy
+proof-gated production reveals. Historical timing figures below are not a
+current full-transport performance acceptance result.
 
 The project is intended to become serverless, cryptographically verifiable poker. Every peer must be able to verify the encrypted deal without trusting a dealer or host.
 

@@ -10,6 +10,16 @@ adopts these rules for casual tables is the "casual P2P profile" row of
 
 **The rules, as players see them**
 
+**Implementation clarification (2026-10-27; original approved rules below
+remain unchanged):** a dropped or folded seat's unmatched live contribution
+has no surviving eligible seat at that level. It joins the highest matched
+live pot and uses that pot's surviving eligibility set. If there is no such
+pot, it joins the pot eligible to the remaining contestants. It does not
+create a private pot for the dropper. Split odd chips walk forward from the
+button to eligible survivors. Shared dead antes remain eligible to every
+surviving contender. This is the v2 profile's "Unmatched forfeited live money"
+ruling and `engine._pot_layers`/`settle_forfeit`; it changes no approved rule.
+
 1. **If you drop during a hand, you fold.** Crashing, disconnecting, being disconnected and going silent past a timer all count. Every chip you put in stays in the pot, including a raise nobody has called yet.
 2. **If that leaves one player in the hand, they win the pot.** No cards are shown.
 3. **If two or more players are left, the hand stops and is split.**
