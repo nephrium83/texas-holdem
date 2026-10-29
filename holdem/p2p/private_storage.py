@@ -279,11 +279,24 @@ def _locked(target: Path, parent_fd):
 def atomic_write(target: Path, data: bytes) -> None:
     """Publish within a protected namespace while the caller holds locked()."""
     target = canonical_target(target)
-    with _private_namespace(target.parent, create=True):
-        _atomic_write(target, data)
+    with _private_namespace(target.parent, create=True) as parent_fd:
+        _atomic_write(target, data, parent_fd)
 
 
-def _atomic_write(target: Path, data: bytes) -> None:
+def _require_private_temp(fd: int, path: Path) -> None:
+    if os.name == 'nt':
+        return  # Native owner-only ACL checks are a separate reviewed slice.
+    try:
+        _require_posix_storage(fd, path)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077):
+            raise _refuse(path, 'temporary key file is not owner-only')
+    except OSError as exc:
+        raise _refuse(path, 'temporary file security could not be verified') from exc
+
+
+def _atomic_write(target: Path, data: bytes, parent_fd) -> None:
     """Publish complete synced bytes while the caller holds locked(target).
 
     mkstemp creates POSIX files with mode0600. Windows ACL enforcement is
@@ -293,6 +306,7 @@ def _atomic_write(target: Path, data: bytes) -> None:
     temporary = Path(name)
     try:
         try:
+            _require_private_temp(fd, temporary)
             remaining = memoryview(data)
             while remaining:
                 written = os.write(fd, remaining)
@@ -302,21 +316,23 @@ def _atomic_write(target: Path, data: bytes) -> None:
             if os.fstat(fd).st_size != len(data):
                 raise OSError("incomplete key storage write")
             os.fsync(fd)
+            _require_private_temp(fd, temporary)
         finally:
             os.close(fd)
-        os.replace(temporary, target)
-        if os.name != "nt":
-            directory = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        if os.name == 'nt':
+            os.replace(temporary, target)
+        else:
+            os.replace(temporary.name, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
             try:
-                try:
-                    os.fsync(directory)
-                except OSError as exc:
-                    if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
-                        raise
-            finally:
-                os.close(directory)
+                os.fsync(parent_fd)
+            except OSError as exc:
+                if exc.errno not in (errno.EINVAL, errno.ENOTSUP):
+                    raise
     finally:
         try:
-            temporary.unlink()
+            if os.name == 'nt':
+                temporary.unlink()
+            else:
+                os.unlink(temporary.name, dir_fd=parent_fd)
         except FileNotFoundError:
             pass

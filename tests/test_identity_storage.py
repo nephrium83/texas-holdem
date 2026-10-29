@@ -282,6 +282,61 @@ class TestPrivateNamespace(unittest.TestCase):
         after = target.stat()
         self.assertEqual((before.st_ino, before.st_mode), (after.st_ino, after.st_mode))
 
+    def test_loose_temp_refuses_before_any_write(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'prior')
+        real_create = storage.tempfile.mkstemp
+        def loose(*args, **kwargs):
+            fd, name = real_create(*args, **kwargs)
+            os.fchmod(fd, 0o644)
+            return fd, name
+        with patch.object(storage.tempfile, 'mkstemp', loose), patch.object(os, 'write') as write:
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.atomic_write(target, b'new secret bytes')
+            write.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'prior')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    def test_post_sync_exposure_refuses_publication_and_cleans_temp(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'prior')
+        sync = os.fsync
+        sync_calls = 0
+        def expose(fd):
+            nonlocal sync_calls
+            if sync_calls == 0:
+                os.fchmod(fd, 0o644)
+            sync_calls += 1
+            return sync(fd)
+        with patch.object(os, 'fsync', expose), patch.object(os, 'replace') as replace, patch.object(
+                os, 'write', wraps=os.write) as write, patch.object(storage, '_require_private_temp',
+                wraps=storage._require_private_temp) as check:
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.atomic_write(target, b'new secret bytes')
+            self.assertGreater(write.call_count, 0)
+            self.assertEqual(check.call_count, 2)
+            replace.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'prior')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    def test_publication_and_cleanup_are_relative_to_checked_parent(self):
+        target = self.root / 'identity.json'
+        with patch.object(os, 'replace', wraps=os.replace) as replace:
+            storage.atomic_write(target, b'generated')
+        args, options = replace.call_args
+        self.assertEqual(args[1], target.name)
+        self.assertFalse(Path(args[0]).is_absolute())
+        self.assertEqual(options['src_dir_fd'], options['dst_dir_fd'])
+        with patch.object(os, 'replace', side_effect=OSError('injected replace failure')), patch.object(
+                os, 'unlink', wraps=os.unlink) as unlink:
+            with self.assertRaisesRegex(OSError, 'injected'):
+                storage.atomic_write(target, b'new')
+            cleanup_args, cleanup_options = unlink.call_args
+            self.assertFalse(Path(cleanup_args[0]).is_absolute())
+            self.assertIn('dir_fd', cleanup_options)
+        self.assertEqual(target.read_bytes(), b'generated')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
 
 @pytest.mark.parametrize("stored", [b"{", b"{}", b"[]", b"null", b"\xff",
     b'{"private_key_b64":null}', b'{"private_key_b64":"garbage"}',
@@ -450,7 +505,7 @@ def test_failed_identity_publication_preserves_previous_file(tmp_path, monkeypat
     path = tmp_path / "identity.json"
     _legacy(path)
     previous = path.read_bytes()
-    def failed(*args):
+    def failed(*args, **kwargs):
         raise OSError("injected publication failure")
     monkeypatch.setattr(os, "replace", failed)
     with pytest.raises(OSError, match="injected"):
