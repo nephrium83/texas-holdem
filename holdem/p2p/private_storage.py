@@ -5,7 +5,7 @@ its inode would let concurrent processes acquire different locks.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import errno
 import os
 from pathlib import Path
@@ -14,6 +14,7 @@ import stat
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 
 class InsecureKeyStorage(ValueError):
@@ -122,6 +123,72 @@ def _private_namespace(directory: Path, *, create: bool):
 def ensure_private_dir(directory: Path) -> None:
     with _private_namespace(directory, create=True):
         pass
+
+
+class PrivateRead(NamedTuple):
+    data: bytes
+    links: int
+
+
+def _require_private_existing(fd: int, path: Path, *, can_repair: bool) -> None:
+    """Verify and, when permitted, restrict the exact opened POSIX object."""
+    if os.name == 'nt':
+        # Native Windows file ACL enforcement is a separate reviewed slice.
+        return
+    try:
+        _require_posix_storage(fd, path)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise _refuse(path, 'not a regular file')
+        if info.st_uid != os.geteuid():
+            raise _refuse(path, 'file is not owned by this account')
+        if info.st_mode & 0o077:
+            if not can_repair:
+                raise _refuse(path, 'file permissions cannot be repaired')
+            os.fchmod(fd, stat.S_IMODE(info.st_mode) & 0o700)
+            repaired = os.fstat(fd)
+            if (not stat.S_ISREG(repaired.st_mode) or repaired.st_uid != os.geteuid()
+                    or repaired.st_mode & 0o077):
+                raise _refuse(path, 'file permissions could not be restricted')
+    except OSError as exc:
+        raise _refuse(path, 'file security could not be verified or repaired') from exc
+
+
+def read_private(target: Path) -> PrivateRead | None:
+    """Return bytes and link count from one checked fd, without reopening."""
+    target = canonical_target(target)
+    with ExitStack() as stack:
+        try:
+            parent_fd = stack.enter_context(_private_namespace(target.parent, create=False))
+        except FileNotFoundError:
+            return None
+        flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
+        options = {}
+        name = target
+        if os.name != 'nt':
+            flags |= os.O_NONBLOCK | os.O_NOFOLLOW
+            options['dir_fd'] = parent_fd
+            name = target.name
+        try:
+            fd = os.open(name, flags, **options)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if os.name != 'nt' and exc.errno in (errno.ELOOP, errno.ENXIO):
+                raise _refuse(target, 'redirected or non-regular identity') from exc
+            raise
+        try:
+            _require_private_existing(fd, target, can_repair=True)
+            links = os.fstat(fd).st_nlink
+            chunks = []
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return PrivateRead(b''.join(chunks), links)
+        finally:
+            os.close(fd)
 
 
 def canonical_target(target: Path) -> Path:

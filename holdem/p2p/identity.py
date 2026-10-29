@@ -34,7 +34,9 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from holdem.p2p.signing import verify
-from holdem.p2p.private_storage import atomic_write, canonical_target, locked, ensure_private_dir
+from holdem.p2p.private_storage import (
+    atomic_write, canonical_target, locked, ensure_private_dir, read_private,
+)
 
 
 def _identity_path() -> pathlib.Path:
@@ -47,7 +49,7 @@ def _identity_path() -> pathlib.Path:
 
 def _load_keys(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
     path = canonical_target(path)
-    data = _read_key_data(path)
+    data, _ = _read_key_data(path)
     # Complete identities are immutable. Loading one needs only read access,
     # including when supplied by an embedding host on a read-only volume.
     if "x25519_private_key_b64" in data:
@@ -57,11 +59,12 @@ def _load_keys(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]
         return _load_keys_locked(path)
 
 
-def _read_key_data(path: pathlib.Path) -> dict:
+def _read_key_data(path: pathlib.Path) -> tuple[dict, int]:
     try:
-        stored = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        data = {}
+        private = read_private(path)
+        if private is None:
+            return {}, 0
+        stored = private.data.decode('utf-8')
     except (OSError, UnicodeError) as exc:
         raise ValueError(f"cannot read identity at {path}; restore the existing file before retrying") from exc
     else:
@@ -78,12 +81,12 @@ def _read_key_data(path: pathlib.Path) -> dict:
         except (ValueError, UnicodeError) as exc:
             raise ValueError(f"invalid identity at {path}; restore it from a trusted backup. "
                              "It will not be replaced automatically") from exc
-    return data
+    return data, private.links
 
 
 def _load_keys_locked(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
-    data = _read_key_data(path)
-    if data and "x25519_private_key_b64" not in data and path.stat().st_nlink > 1:
+    data, links = _read_key_data(path)
+    if data and "x25519_private_key_b64" not in data and links > 1:
         raise ValueError(f"legacy identity at {path} has multiple hard links; "
                          "use an independent copy before upgrading it")
     changed = False

@@ -179,6 +179,109 @@ class TestPrivateNamespace(unittest.TestCase):
                     lock.unlink()
                 (self.root / 'second-link').unlink(missing_ok=True)
 
+    def test_existing_read_repairs_owned_mode_without_changing_bytes(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'generated private fixture')
+        target.chmod(0o644)
+        real_read = os.read
+        def read(fd, size):
+            self.assertEqual(os.fstat(fd).st_mode & 0o077, 0)
+            return real_read(fd, size)
+        with patch.object(os, 'read', read):
+            result = storage.read_private(target)
+        self.assertEqual(result.data, b'generated private fixture')
+        self.assertEqual(result.links, target.stat().st_nlink)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_leaf_foreign_owner_reaches_file_checker_without_read_or_repair(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'preserve')
+        leaf = target.stat()
+        real_stat = os.fstat
+        def foreign(fd):
+            result = real_stat(fd)
+            if (result.st_dev, result.st_ino) == (leaf.st_dev, leaf.st_ino):
+                values = list(result)
+                values[4] = os.geteuid() + 1
+                return os.stat_result(values)
+            return result
+        with patch.object(os, 'fstat', foreign), patch.object(os, 'read') as read, patch.object(
+                os, 'fchmod') as chmod, patch.object(storage, '_require_private_existing',
+                wraps=storage._require_private_existing) as check:
+            with self.assertRaisesRegex(storage.InsecureKeyStorage, 'owned by') as caught:
+                storage.read_private(target)
+            self.assertIn(str(target), str(caught.exception))
+            check.assert_called_once()
+            read.assert_not_called()
+            chmod.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'preserve')
+
+    def test_failed_repair_and_unsafe_namespace_are_never_read(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'preserve')
+        target.chmod(0o644)
+        with patch.object(os, 'fchmod'), patch.object(os, 'read') as read:
+            with self.assertRaisesRegex(storage.InsecureKeyStorage, 'could not be restricted'):
+                storage.read_private(target)
+            read.assert_not_called()
+        target.chmod(0o600)
+        self.root.chmod(0o777)
+        with patch.object(os, 'read') as read:
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.read_private(target)
+            read.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'preserve')
+
+    def test_read_stays_on_checked_fd_after_path_replacement(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'original checked bytes')
+        target.chmod(0o600)
+        original = storage._require_private_existing
+        def replace_after_check(fd, path, **options):
+            original(fd, path, **options)
+            target.rename(self.root / 'old-object')
+            target.write_bytes(b'unchecked replacement')
+        with patch.object(storage, '_require_private_existing', replace_after_check):
+            result = storage.read_private(target)
+        self.assertEqual(result.data, b'original checked bytes')
+        self.assertEqual(target.read_bytes(), b'unchecked replacement')
+
+    def test_fifo_read_refuses_promptly_in_bounded_child(self):
+        import select
+        import signal
+        target = self.root / 'identity.json'
+        os.mkfifo(target, 0o600)
+        before = target.stat()
+        reader, writer = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(reader)
+            try:
+                with patch.object(os, 'read', side_effect=AssertionError('secret read attempted')):
+                    try:
+                        storage.read_private(target)
+                    except storage.InsecureKeyStorage:
+                        os.write(writer, b'refused')
+                    else:
+                        os.write(writer, b'accepted')
+            except BaseException:
+                os.write(writer, b'error')
+            finally:
+                os.close(writer)
+                os._exit(0)
+        os.close(writer)
+        try:
+            ready, _, _ = select.select([reader], [], [], 3)
+            if not ready:
+                os.kill(child, signal.SIGKILL)
+                self.fail('identity FIFO read blocked before type validation')
+            self.assertEqual(os.read(reader, 64), b'refused')
+        finally:
+            os.close(reader)
+            os.waitpid(child, 0)
+        after = target.stat()
+        self.assertEqual((before.st_ino, before.st_mode), (after.st_ino, after.st_mode))
+
 
 @pytest.mark.parametrize("stored", [b"{", b"{}", b"[]", b"null", b"\xff",
     b'{"private_key_b64":null}', b'{"private_key_b64":"garbage"}',
@@ -196,12 +299,9 @@ def test_unreadable_identity_is_not_treated_as_absent(tmp_path, monkeypatch):
     path = tmp_path / "identity.json"
     identity.load_or_create(path)
     stored = path.read_bytes()
-    original = Path.read_text
-    def denied(self, *args, **kwargs):
-        if self == path:
-            raise PermissionError("injected unreadable identity")
-        return original(self, *args, **kwargs)
-    monkeypatch.setattr(Path, "read_text", denied)
+    def denied(*args, **kwargs):
+        raise PermissionError("injected unreadable identity")
+    monkeypatch.setattr(os, "read", denied)
     with pytest.raises(ValueError, match="identity"):
         identity.load_or_create(path)
     assert path.read_bytes() == stored
