@@ -205,7 +205,8 @@ class TestPrivateNamespace(unittest.TestCase):
                 values[4] = os.geteuid() + 1
                 return os.stat_result(values)
             return result
-        with patch.object(os, 'fstat', foreign), patch.object(os, 'read') as read, patch.object(
+        with patch.object(os, 'fstat', foreign), patch.object(os, 'read',
+                side_effect=AssertionError('unexpected identity read')) as read, patch.object(
                 os, 'fchmod') as chmod, patch.object(storage, '_require_private_existing',
                 wraps=storage._require_private_existing) as check:
             with self.assertRaisesRegex(storage.InsecureKeyStorage, 'owned by') as caught:
@@ -220,13 +221,14 @@ class TestPrivateNamespace(unittest.TestCase):
         target = self.root / 'identity.json'
         target.write_bytes(b'preserve')
         target.chmod(0o644)
-        with patch.object(os, 'fchmod'), patch.object(os, 'read') as read:
+        with patch.object(os, 'fchmod'), patch.object(os, 'read',
+                side_effect=AssertionError('unexpected identity read')) as read:
             with self.assertRaisesRegex(storage.InsecureKeyStorage, 'could not be restricted'):
                 storage.read_private(target)
             read.assert_not_called()
         target.chmod(0o600)
         self.root.chmod(0o777)
-        with patch.object(os, 'read') as read:
+        with patch.object(os, 'read', side_effect=AssertionError('unexpected identity read')) as read:
             with self.assertRaises(storage.InsecureKeyStorage):
                 storage.read_private(target)
             read.assert_not_called()
@@ -290,7 +292,8 @@ class TestPrivateNamespace(unittest.TestCase):
             fd, name = real_create(*args, **kwargs)
             os.fchmod(fd, 0o644)
             return fd, name
-        with patch.object(storage.tempfile, 'mkstemp', loose), patch.object(os, 'write') as write:
+        with patch.object(storage.tempfile, 'mkstemp', loose), patch.object(
+                os, 'write', wraps=os.write) as write:
             with self.assertRaises(storage.InsecureKeyStorage):
                 storage.atomic_write(target, b'new secret bytes')
             write.assert_not_called()
