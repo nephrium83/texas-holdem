@@ -47,7 +47,11 @@ def resolve_paths(args) -> RuntimePaths:
 
 
 def _parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Poker preview")
+    parser = argparse.ArgumentParser(
+        description="Poker Preview — Godot player client",
+        epilog="Players: open Poker.exe from the complete Windows preview ZIP. "
+               "Source launches require the Godot runtime, exported pack and libsodium paths; "
+               "see docs/BUILD_WINDOWS.md.")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--self-test-visible", action="store_true",
                         help="Run the play test in a rendered game window")

@@ -7,6 +7,7 @@ of those conveniences removed, without contacting a package index.
 from __future__ import annotations
 
 from email.parser import Parser
+import configparser
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,17 @@ def test_wheel_exposes_optional_desktop_p2p_and_internet_dependencies(core_wheel
         assert any(requirement.lower().startswith(package.lower())
                    and f'extra == "{extra}"' in requirement
                    for requirement in requirements), requirements
+
+
+def test_installed_wheel_labels_the_godot_player_and_explicit_legacy_harness(core_wheel):
+    _, wheel = core_wheel
+    with zipfile.ZipFile(wheel) as archive:
+        entry_path, = (name for name in archive.namelist()
+                       if name.endswith('.dist-info/entry_points.txt'))
+        entries = configparser.ConfigParser()
+        entries.read_string(archive.read(entry_path).decode('utf-8'))
+    assert entries['gui_scripts']['holdem'] == 'holdem.desktop_launcher:main'
+    assert entries['gui_scripts']['holdem-legacy-tk'] == 'holdem.gui:main'
 
 
 @pytest.mark.timeout(120)

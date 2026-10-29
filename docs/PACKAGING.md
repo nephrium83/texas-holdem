@@ -21,7 +21,7 @@ their dependencies. Select an extra when using those adapters:
 |---|---|---|
 | `python -m pip install .` | Embed the local poker rules and player views | None |
 | `python -m pip install ".[p2p]"` | Use the authenticated peer-to-peer protocol | cryptography |
-| `python -m pip install ".[desktop]"` | Run the existing desktop application | Pillow and cryptography |
+| `python -m pip install ".[desktop]"` | Run the explicit legacy Tkinter development harness | Pillow and cryptography |
 | `python -m pip install -e ".[dev]"` | Develop and test the entire application | Desktop dependencies, pytest, and wheel build tools |
 
 The peer-to-peer mental-poker protocol additionally requires a compatible
@@ -30,6 +30,12 @@ Ristretto-enabled libsodium runtime, configured as described in
 native runtime. The standalone Godot desktop distribution also needs its
 Godot runtime and assets; the Python wheel is not the portable Windows game.
 See [`BUILD_WINDOWS.md`](BUILD_WINDOWS.md) for that build.
+
+The player command `holdem` and `python -m holdem` use the Godot launcher.
+They do not fall back to Tkinter. Source launches need `--godot`, `--pck`
+and `--libsodium`; `--help` lists the options. Players should use `Poker.exe`
+from the complete preview ZIP. The development-only legacy commands are
+`holdem-legacy-tk` and `python -m holdem.gui`.
 
 ## Build and verify a wheel
 
