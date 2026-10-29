@@ -163,14 +163,33 @@ See [the performance budget](docs/PERFORMANCE_BUDGET.md), the
 [shuffle benchmark](docs/BG_SHUFFLE_BENCHMARK.md), and the
 [L5 performance baseline](docs/L5_SCOPE.md).
 
-## Run the current playable harness
+## Play the Godot client
+
+For the Windows game, extract the complete preview ZIP and open `Poker.exe`.
+This is the player client; Python package installation alone does not include
+the Godot executable or game assets. See [Windows builds](docs/BUILD_WINDOWS.md).
+
+The `holdem` command, `python -m holdem`, and `python main.py` all select the
+same Godot launcher. For source development, supply its runtime files explicitly:
+
+```powershell
+python -m pip install -e ".[internet]"
+python -m holdem --godot "C:/path/to/PokerRuntime.exe" --pck "C:/path/to/poker.pck" --libsodium "C:/path/to/libsodium.dll"
+```
+
+`python -m holdem --help` lists the launch and diagnostic options. Use the
+reviewed runtime files described in [the build instructions](docs/BUILD_WINDOWS.md).
+
+## Legacy Tkinter development harness
+
+The old interface remains available only as an explicit development tool:
 
 ```bash
 git clone https://github.com/nephrium83/texas-holdem.git
 cd texas-holdem
 python -m venv .venv
 python -m pip install -e ".[desktop]"
-python -m holdem
+python -m holdem.gui
 ```
 
 Python 3.10 or newer is required. Tk is required for the legacy harness and is
@@ -183,10 +202,14 @@ included with standard python.org Windows installers.
     <img src="docs/screenshot.png" alt="Legacy Tkinter poker table" width="900">
   </p>
   <p>
-    This interface remains useful as a playable engine harness, but it is not
-    the target visual experience. The shipping client is being rebuilt in Godot.
+    This is the legacy development harness. The player client uses Godot.
   </p>
 </details>
+
+The installed alias `holdem-legacy-tk` opens the same harness. Its optional old
+freezer target is `packaging/legacy_tk.spec`, producing
+`Texas_Holdem_Legacy_Tk.exe`; it is not the Windows preview build. The former
+ambiguous `poker.spec` target now stops with directions to the Godot build.
 
 ## Test the project
 

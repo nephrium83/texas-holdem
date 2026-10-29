@@ -8,6 +8,12 @@ Internet Host/Join through a trusted configured introduction service. See
 [`LAN_PLAY.md`](LAN_PLAY.md) for the one-invite join and Ready flow.
 The packaged preview targets 64-bit Windows 10 or newer.
 
+This is the Godot player build, using `packaging/windows.spec` and
+`holdem.desktop_launcher`. The root `poker.spec` target is retired and stops
+with instructions rather than building the old Tkinter client. Developers
+who explicitly need that harness can use `packaging/legacy_tk.spec`; its
+output is named `Texas_Holdem_Legacy_Tk.exe`.
+
 Build with 64-bit Windows Python 3.13 and PyInstaller 6.20.0. First install
 the reviewed minimal PyAV runtime produced by `tools/build_ice_native.py`;
 that explicit source build requires MSVC and Git tools. Stock PyPI PyAV

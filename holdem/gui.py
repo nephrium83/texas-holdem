@@ -1,3 +1,5 @@
+"""Legacy Tkinter development harness; Poker Preview uses the Godot client."""
+
 import base64
 import io
 import math
@@ -101,7 +103,7 @@ def rrect(cv, x1, y1, x2, y2, r, **kw):
 class Holdem:
     def __init__(self, root, mp_session=None, is_host=True, local_seat=0):
         self.root = root
-        root.title("Texas Hold'em")
+        root.title("Texas Hold'em — Legacy Tkinter Harness")
         root.minsize(1180, 760)
 
         # Multiplayer state
@@ -3573,6 +3575,7 @@ class Holdem:
 
 def main():
     root = tk.Tk()
+    root.title("Texas Hold'em — Legacy Tkinter Harness")
 
     # Apply persisted fullscreen preference; default is maximised (zoomed).
     # True fullscreen (no taskbar) is intentionally avoided — zoomed is
