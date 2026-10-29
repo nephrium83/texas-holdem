@@ -34,14 +34,14 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from holdem.p2p.signing import verify
-from holdem.p2p.private_storage import atomic_write, canonical_target, locked
+from holdem.p2p.private_storage import atomic_write, canonical_target, locked, ensure_private_dir
 
 
 def _identity_path() -> pathlib.Path:
     """L-4: Store identity alongside other app config via settings.config_dir()."""
     from holdem.settings import config_dir
     d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(d)
     return d / "identity.json"
 
 
