@@ -3575,7 +3575,6 @@ class Holdem:
 
 def main():
     root = tk.Tk()
-    root.title("Texas Hold'em — Legacy Tkinter Harness")
 
     # Apply persisted fullscreen preference; default is maximised (zoomed).
     # True fullscreen (no taskbar) is intentionally avoided — zoomed is
@@ -3627,6 +3626,7 @@ def main():
 
     root.protocol("WM_DELETE_WINDOW", on_close_during_onboarding)
     OnboardingFlow(root, on_solo=_start_solo)
+    root.title("Texas Hold'em — Legacy Tkinter Harness")
     root.mainloop()
 
 
