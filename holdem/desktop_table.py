@@ -141,7 +141,9 @@ class DesktopTable:
             clock=self._local_clock, schedule=self._local_schedule,
         )
         _wire_hand_start(sessions, order)
-        self._start_local = _make_start_table(sessions, order, bus, dict(self._settings))
+        local_settings = dict(self._settings,
+                              continuation_policy=Session.CONTINUATION_END_TABLE)
+        self._start_local = _make_start_table(sessions, order, bus, local_settings)
         human.on_state_changed = self._on_change
         self._local = (bus, sessions, order)
         self._mode = "local"
