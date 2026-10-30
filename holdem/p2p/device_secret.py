@@ -75,12 +75,16 @@ def load_or_create(path: Optional[Path] = None) -> bytes:
     developer machine essentially never has, which is why every observed
     occurrence was on Linux CI and none locally.
     """
-    target = canonical_target(Path(path) if path is not None else secret_path())
+    supplied = Path(path) if path is not None else secret_path()
+    # Existing device-secret reads retain their resolver and byte policy.
+    # Creation must validate the original supplied chain before secret work.
+    target = canonical_target(supplied, allow_aliases=True)
 
     existing = _read(target)
     if existing is not None:
         return existing
 
+    target = canonical_target(supplied)
     with locked(target):
         existing = _read(target)
         if existing is not None:

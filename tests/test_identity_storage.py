@@ -6,11 +6,339 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import unittest
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from holdem.p2p import device_secret, identity
+from holdem.p2p import private_storage as storage
+
+
+@unittest.skipUnless(sys.platform == 'linux', 'native Linux namespace policy')
+class TestPrivateNamespace(unittest.TestCase):
+    """Generated fixtures only; no real identity or host configuration."""
+
+    def setUp(self):
+        import tempfile
+        self.directory = tempfile.TemporaryDirectory(prefix='storage-namespace-')
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def test_supported_binary_write_and_stable_lock(self):
+        target = self.root / 'private' / 'identity.json'
+        data = bytes(range(256))
+        with storage.locked(target):
+            storage.atomic_write(target, data)
+        lock = target.with_name(target.name + '.lock')
+        inode = lock.stat().st_ino
+        with storage.locked(target):
+            self.assertEqual(lock.stat().st_ino, inode)
+        self.assertEqual(target.read_bytes(), data)
+        self.assertEqual(list(target.parent.glob('*.tmp')), [])
+
+    def test_unverifiable_storage_refuses_before_mutation(self):
+        target = self.root / 'missing' / 'identity.json'
+        for kind in (None, True, 'tmpfs', -1, 2**64, 0x65735546,
+                     0x6969, 0xff534d42, 0x794c7630):
+            with self.subTest(kind=kind), patch.object(
+                    storage, '_posix_storage_kind', return_value=kind), patch.object(
+                    os, 'mkdir', wraps=os.mkdir) as mkdir, patch.object(
+                    storage.tempfile, 'mkstemp', wraps=storage.tempfile.mkstemp) as temp:
+                with self.assertRaises(storage.InsecureKeyStorage):
+                    with storage.locked(target):
+                        self.fail('unsafe lock was acquired')
+                with self.assertRaises(storage.InsecureKeyStorage):
+                    storage.atomic_write(target, b'generated')
+                mkdir.assert_not_called()
+                temp.assert_not_called()
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_capability_query_failure_preserves_prior_bytes(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'prior')
+        with patch.object(storage, '_posix_storage_kind', side_effect=OSError('query failed')):
+            with self.assertRaises(storage.InsecureKeyStorage) as caught:
+                storage.atomic_write(target, b'new')
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual(target.read_bytes(), b'prior')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    def test_every_component_is_checked_and_descriptors_close(self):
+        directory = self.root / 'private'
+        directory.mkdir()
+        seen, opened, closed = [], [], []
+        real_query, real_open, real_close = storage._posix_storage_kind, os.open, os.close
+        def query(fd):
+            seen.append(os.fstat(fd).st_ino)
+            if len(seen) == 3:
+                return None
+            return real_query(fd)
+        def open_fd(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        def close_fd(fd):
+            closed.append(fd)
+            return real_close(fd)
+        with patch.object(storage, '_posix_storage_kind', query), patch.object(
+                os, 'open', open_fd), patch.object(os, 'close', close_fd):
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.ensure_private_dir(directory)
+        self.assertEqual(len(seen), 3)
+        self.assertCountEqual(opened, closed)
+
+    def test_unsafe_ancestor_refuses_before_lock_or_temp(self):
+        ancestor = self.root / 'writable'
+        parent = ancestor / 'private'
+        parent.mkdir(parents=True, mode=0o700)
+        ancestor.chmod(0o777)
+        target = parent / 'identity.json'
+        target.write_bytes(b'prior')
+        for operation in ('lock', 'write'):
+            with self.subTest(operation=operation), self.assertRaises(storage.InsecureKeyStorage):
+                if operation == 'lock':
+                    with storage.locked(target):
+                        self.fail('unsafe lock was acquired')
+                else:
+                    storage.atomic_write(target, b'new')
+        self.assertEqual(target.read_bytes(), b'prior')
+        self.assertEqual([p.name for p in parent.iterdir()], ['identity.json'])
+
+    def test_sticky_ancestor_works_but_sticky_final_parent_refuses(self):
+        shared = self.root / 'shared'
+        shared.mkdir(mode=0o1777)
+        shared.chmod(0o1777)
+        target = shared / 'owned' / 'identity.json'
+        with storage.locked(target):
+            storage.atomic_write(target, b'generated')
+        self.assertEqual(target.read_bytes(), b'generated')
+        with self.assertRaises(storage.InsecureKeyStorage):
+            with storage.locked(shared / 'unsafe.json'):
+                self.fail('shared final storage was accepted')
+        self.assertFalse((shared / 'unsafe.json.lock').exists())
+
+    def test_missing_components_are_private_existing_ones_unchanged(self):
+        self.root.chmod(0o755)
+        before = self.root.stat()
+        old = os.umask(0)
+        try:
+            storage.ensure_private_dir(self.root / 'one' / 'two')
+        finally:
+            os.umask(old)
+        for component in (self.root / 'one', self.root / 'one' / 'two'):
+            self.assertEqual(component.stat().st_mode & 0o777, 0o700)
+        after = self.root.stat()
+        self.assertEqual((before.st_mode, before.st_uid), (after.st_mode, after.st_uid))
+
+    def test_original_aliases_and_parent_traversal_refuse(self):
+        real = self.root / 'real'
+        real.mkdir()
+        target = real / 'identity.json'
+        target.write_bytes(b'prior')
+        alias = self.root / 'alias'
+        alias.symlink_to(real, target_is_directory=True)
+        dangling = self.root / 'dangling'
+        dangling.symlink_to(self.root / 'absent')
+        leaf = self.root / 'leaf'
+        leaf.symlink_to(target)
+        for path in (alias / 'identity.json', alias / '..' / 'identity.json',
+                     dangling, leaf):
+            with self.subTest(path=path), self.assertRaises(storage.InsecureKeyStorage):
+                storage.canonical_target(path)
+        with self.assertRaises(storage.InsecureKeyStorage):
+            storage.atomic_write(alias / 'identity.json', b'new')
+        self.assertEqual(target.read_bytes(), b'prior')
+
+    def test_unsafe_lock_objects_refuse_without_mutation(self):
+        target = self.root / 'identity.json'
+        lock = self.root / 'identity.json.lock'
+        for kind in ('fifo', 'directory', 'symlink', 'loose', 'hardlink'):
+            with self.subTest(kind=kind):
+                if kind == 'fifo':
+                    os.mkfifo(lock)
+                elif kind == 'directory':
+                    lock.mkdir()
+                elif kind == 'symlink':
+                    lock.symlink_to(self.root / 'absent')
+                else:
+                    lock.write_bytes(b'preserve')
+                    lock.chmod(0o666 if kind == 'loose' else 0o600)
+                    if kind == 'hardlink':
+                        os.link(lock, self.root / 'second-link')
+                before = lock.lstat()
+                with self.assertRaises(storage.InsecureKeyStorage):
+                    with storage.locked(target):
+                        self.fail('unsafe lock was acquired')
+                after = lock.lstat()
+                self.assertEqual((before.st_ino, before.st_mode), (after.st_ino, after.st_mode))
+                if kind == 'directory':
+                    lock.rmdir()
+                else:
+                    lock.unlink()
+                (self.root / 'second-link').unlink(missing_ok=True)
+
+    def test_existing_read_repairs_owned_mode_without_changing_bytes(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'generated private fixture')
+        target.chmod(0o644)
+        real_read = os.read
+        def read(fd, size):
+            self.assertEqual(os.fstat(fd).st_mode & 0o077, 0)
+            return real_read(fd, size)
+        with patch.object(os, 'read', read):
+            result = storage.read_private(target)
+        self.assertEqual(result.data, b'generated private fixture')
+        self.assertEqual(result.links, target.stat().st_nlink)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_leaf_foreign_owner_reaches_file_checker_without_read_or_repair(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'preserve')
+        leaf = target.stat()
+        real_stat = os.fstat
+        def foreign(fd):
+            result = real_stat(fd)
+            if (result.st_dev, result.st_ino) == (leaf.st_dev, leaf.st_ino):
+                values = list(result)
+                values[4] = os.geteuid() + 1
+                return os.stat_result(values)
+            return result
+        with patch.object(os, 'fstat', foreign), patch.object(os, 'read',
+                side_effect=AssertionError('unexpected identity read')) as read, patch.object(
+                os, 'fchmod') as chmod, patch.object(storage, '_require_private_existing',
+                wraps=storage._require_private_existing) as check:
+            with self.assertRaisesRegex(storage.InsecureKeyStorage, 'owned by') as caught:
+                storage.read_private(target)
+            self.assertIn(str(target), str(caught.exception))
+            check.assert_called_once()
+            read.assert_not_called()
+            chmod.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'preserve')
+
+    def test_failed_repair_and_unsafe_namespace_are_never_read(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'preserve')
+        target.chmod(0o644)
+        with patch.object(os, 'fchmod'), patch.object(os, 'read',
+                side_effect=AssertionError('unexpected identity read')) as read:
+            with self.assertRaisesRegex(storage.InsecureKeyStorage, 'could not be restricted'):
+                storage.read_private(target)
+            read.assert_not_called()
+        target.chmod(0o600)
+        self.root.chmod(0o777)
+        with patch.object(os, 'read', side_effect=AssertionError('unexpected identity read')) as read:
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.read_private(target)
+            read.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'preserve')
+
+    def test_read_stays_on_checked_fd_after_path_replacement(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'original checked bytes')
+        target.chmod(0o600)
+        original = storage._require_private_existing
+        def replace_after_check(fd, path, **options):
+            original(fd, path, **options)
+            target.rename(self.root / 'old-object')
+            target.write_bytes(b'unchecked replacement')
+        with patch.object(storage, '_require_private_existing', replace_after_check):
+            result = storage.read_private(target)
+        self.assertEqual(result.data, b'original checked bytes')
+        self.assertEqual(target.read_bytes(), b'unchecked replacement')
+
+    def test_fifo_read_refuses_promptly_in_bounded_child(self):
+        import select
+        import signal
+        target = self.root / 'identity.json'
+        os.mkfifo(target, 0o600)
+        before = target.stat()
+        reader, writer = os.pipe()
+        child = os.fork()
+        if child == 0:
+            os.close(reader)
+            try:
+                with patch.object(os, 'read', side_effect=AssertionError('secret read attempted')):
+                    try:
+                        storage.read_private(target)
+                    except storage.InsecureKeyStorage:
+                        os.write(writer, b'refused')
+                    else:
+                        os.write(writer, b'accepted')
+            except BaseException:
+                os.write(writer, b'error')
+            finally:
+                os.close(writer)
+                os._exit(0)
+        os.close(writer)
+        try:
+            ready, _, _ = select.select([reader], [], [], 3)
+            if not ready:
+                os.kill(child, signal.SIGKILL)
+                self.fail('identity FIFO read blocked before type validation')
+            self.assertEqual(os.read(reader, 64), b'refused')
+        finally:
+            os.close(reader)
+            os.waitpid(child, 0)
+        after = target.stat()
+        self.assertEqual((before.st_ino, before.st_mode), (after.st_ino, after.st_mode))
+
+    def test_loose_temp_refuses_before_any_write(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'prior')
+        real_create = storage.tempfile.mkstemp
+        def loose(*args, **kwargs):
+            fd, name = real_create(*args, **kwargs)
+            os.fchmod(fd, 0o644)
+            return fd, name
+        with patch.object(storage.tempfile, 'mkstemp', loose), patch.object(
+                os, 'write', wraps=os.write) as write:
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.atomic_write(target, b'new secret bytes')
+            write.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'prior')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    def test_post_sync_exposure_refuses_publication_and_cleans_temp(self):
+        target = self.root / 'identity.json'
+        target.write_bytes(b'prior')
+        sync = os.fsync
+        sync_calls = 0
+        def expose(fd):
+            nonlocal sync_calls
+            if sync_calls == 0:
+                os.fchmod(fd, 0o644)
+            sync_calls += 1
+            return sync(fd)
+        with patch.object(os, 'fsync', expose), patch.object(os, 'replace') as replace, patch.object(
+                os, 'write', wraps=os.write) as write, patch.object(storage, '_require_private_temp',
+                wraps=storage._require_private_temp) as check:
+            with self.assertRaises(storage.InsecureKeyStorage):
+                storage.atomic_write(target, b'new secret bytes')
+            self.assertGreater(write.call_count, 0)
+            self.assertEqual(check.call_count, 2)
+            replace.assert_not_called()
+        self.assertEqual(target.read_bytes(), b'prior')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
+
+    def test_publication_and_cleanup_are_relative_to_checked_parent(self):
+        target = self.root / 'identity.json'
+        with patch.object(os, 'replace', wraps=os.replace) as replace:
+            storage.atomic_write(target, b'generated')
+        args, options = replace.call_args
+        self.assertEqual(args[1], target.name)
+        self.assertFalse(Path(args[0]).is_absolute())
+        self.assertEqual(options['src_dir_fd'], options['dst_dir_fd'])
+        with patch.object(os, 'replace', side_effect=OSError('injected replace failure')), patch.object(
+                os, 'unlink', wraps=os.unlink) as unlink:
+            with self.assertRaisesRegex(OSError, 'injected'):
+                storage.atomic_write(target, b'new')
+            cleanup_args, cleanup_options = unlink.call_args
+            self.assertFalse(Path(cleanup_args[0]).is_absolute())
+            self.assertIn('dir_fd', cleanup_options)
+        self.assertEqual(target.read_bytes(), b'generated')
+        self.assertEqual(list(self.root.glob('*.tmp')), [])
 
 
 @pytest.mark.parametrize("stored", [b"{", b"{}", b"[]", b"null", b"\xff",
@@ -29,12 +357,9 @@ def test_unreadable_identity_is_not_treated_as_absent(tmp_path, monkeypatch):
     path = tmp_path / "identity.json"
     identity.load_or_create(path)
     stored = path.read_bytes()
-    original = Path.read_text
-    def denied(self, *args, **kwargs):
-        if self == path:
-            raise PermissionError("injected unreadable identity")
-        return original(self, *args, **kwargs)
-    monkeypatch.setattr(Path, "read_text", denied)
+    def denied(*args, **kwargs):
+        raise PermissionError("injected unreadable identity")
+    monkeypatch.setattr(os, "read", denied)
     with pytest.raises(ValueError, match="identity"):
         identity.load_or_create(path)
     assert path.read_bytes() == stored
@@ -85,6 +410,13 @@ def test_symlink_legacy_upgrade_preserves_shared_identity(tmp_path):
         if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
             pytest.skip("Windows account lacks symlink creation privilege")
         raise
+    if os.name != "nt":
+        from holdem.p2p.private_storage import InsecureKeyStorage
+        before = path.read_bytes()
+        with pytest.raises(InsecureKeyStorage, match="symlink"):
+            identity.load_or_create(alias)
+        assert path.read_bytes() == before and alias.is_symlink()
+        return
     first, second = identity.load_or_create(alias), identity.load_or_create(path)
     assert alias.is_symlink() and alias.samefile(path)
     assert first.public_key_bytes() == second.public_key_bytes()
@@ -176,7 +508,7 @@ def test_failed_identity_publication_preserves_previous_file(tmp_path, monkeypat
     path = tmp_path / "identity.json"
     _legacy(path)
     previous = path.read_bytes()
-    def failed(*args):
+    def failed(*args, **kwargs):
         raise OSError("injected publication failure")
     monkeypatch.setattr(os, "replace", failed)
     with pytest.raises(OSError, match="injected"):
