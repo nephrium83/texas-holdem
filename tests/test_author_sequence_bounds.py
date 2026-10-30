@@ -83,6 +83,7 @@ def test_new_hands_retain_only_current_and_preceding_author_streams():
     initialize_for_tests()
     host, _ = _host()
     host._adopt_deal_policy(host.DEAL_POLICY_BG)
+    host._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     for hand in range(1, 6):
         host._author_seq_seen[(hand, 1)] = {0: "record"}
         host.begin_hand(hand)

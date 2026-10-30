@@ -17,6 +17,7 @@ def session():
     s.local_conn_id = 'peer0'
     s.configure_seats(['peer0', 'peer1'])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s.state = 'PLAYING'
     s._hand_no = 7
     s._deal_hole = ['old hole']

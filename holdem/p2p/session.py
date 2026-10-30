@@ -406,6 +406,20 @@ class Session:
     DEAL_POLICY_DETECTION = "detection-only-v1"
     DEAL_POLICIES = frozenset({DEAL_POLICY_BG, DEAL_POLICY_DETECTION})
 
+    CONTINUATION_POLICY_SETTING = "continuation_policy"
+    CONTINUATION_SURVIVORS = "survivors-v1"
+    CONTINUATION_END_TABLE = "end-table-v1"
+    CONTINUATION_POLICIES = frozenset({CONTINUATION_SURVIVORS,
+                                       CONTINUATION_END_TABLE})
+
+    @classmethod
+    def parse_continuation_policy(cls, table_settings) -> Optional[str]:
+        """Missing, malformed or unsupported table policy means refusal."""
+        if not isinstance(table_settings, dict):
+            return None
+        value = table_settings.get(cls.CONTINUATION_POLICY_SETTING)
+        return value if isinstance(value, str) and value in cls.CONTINUATION_POLICIES else None
+
     #: Terminal outcome for a table this peer will not play on.
     POLICY_REFUSED = "POLICY_REFUSED"
 
@@ -594,6 +608,7 @@ class Session:
         # overwritten when non-empty, which would let a stale policy survive
         # into a table running under a different one.
         self._deal_policy: Optional[str] = None
+        self._continuation_policy: Optional[str] = None
         # Last successfully-built deal context id. Terminal recording
         # reads this instead of recomputing, so a session can always
         # produce a record even when the context no longer encodes.
@@ -702,9 +717,7 @@ class Session:
         self._drop_compared: set[int] = set()
         # The stacks a drop's forfeit left, once one has; see _settle_drop.
         self._drop_stacks: list | None = None
-        # Explicitly enabled by the casual LAN adapter. Other embedders
-        # retain the existing terminate-on-peer-loss contract.
-        self._casual_reliability = False
+        # Created only when the accepted table policy selects survivors.
         self._casual_continuation = None
         # A busted seat's view of the hands played on without it: the last
         # hand every seat still playing reported settling alike, with its
@@ -919,9 +932,8 @@ class Session:
             from holdem.p2p.casual_runtime import clock_fault
             clock_fault(self, body)
         elif t in ("casual_clock_request", "casual_clock_sample"):
-            if getattr(self, "_casual_reliability", False):
-                from holdem.p2p.casual_clock import lobby_clocks
-                lobby_clocks(self).receive(conn_id, msg)
+            from holdem.p2p.casual_clock import lobby_clocks
+            lobby_clocks(self).receive(conn_id, msg)
 
     def _deliver_hand_message(self, conn_id: str, body: dict) -> None:
         """Apply hand traffic after ingress, including deferred arrivals."""
@@ -991,7 +1003,8 @@ class Session:
     #: not with the product: it exists so two different encodings can never
     #: produce the same digest.
     _DEAL_CTX_LABEL   = b"poker.deal.context"
-    _DEAL_CTX_VERSION = 2
+    # v3 is reserved by RECOVERY_SPEC's different proposed recovery layout.
+    _DEAL_CTX_VERSION = 4
 
     def _deal_context_bytes(self) -> bytes:
         """Injective encoding of (layout version, deal policy, seat order).
@@ -1025,12 +1038,16 @@ class Session:
             raise RuntimeError(
                 "cannot build a deal context before a policy is adopted; "
                 "forensic callers want _recorded_session_id()")
+        if self._continuation_policy is None:
+            raise RuntimeError("cannot build a deal context before a continuation policy is adopted")
         out = bytearray()
         out += len(self._DEAL_CTX_LABEL).to_bytes(4, "big")
         out += self._DEAL_CTX_LABEL
         out += self._DEAL_CTX_VERSION.to_bytes(4, "big")
         policy = self._deal_policy.encode("utf-8")
         out += len(policy).to_bytes(4, "big") + policy
+        continuation = self._continuation_policy.encode("utf-8")
+        out += len(continuation).to_bytes(4, "big") + continuation
         out += len(self._seat_order).to_bytes(4, "big")
         for cid in self._seat_order:
             if not isinstance(cid, str):
@@ -1126,6 +1143,31 @@ class Session:
         return self._deal_policy
 
     @property
+    def continuation_policy(self) -> Optional[str]:
+        return self._continuation_policy
+
+    @property
+    def _casual_reliability(self) -> bool:
+        """Runtime behavior is derived exclusively from the adopted policy."""
+        return self._continuation_policy == self.CONTINUATION_SURVIVORS
+
+    @owned
+    def _adopt_continuation_policy(self, policy: str) -> bool:
+        """One writer: adopt once, repeat identically, refuse a change."""
+        if not isinstance(policy, str) or policy not in self.CONTINUATION_POLICIES:
+            raise ValueError(f"not a continuation policy: {policy!r}")
+        if self._continuation_policy is not None:
+            return self._continuation_policy == policy
+        if policy == self.CONTINUATION_SURVIVORS:
+            from holdem.p2p.casual_continuation import CasualContinuation
+            continuation = CasualContinuation(self)
+        else:
+            continuation = None
+        self._casual_continuation = continuation
+        self._continuation_policy = policy
+        return True
+
+    @property
     def proofs_verified(self) -> int:
         """Shuffle proofs this seat has verified in the current hand.
 
@@ -1216,6 +1258,8 @@ class Session:
             raise RuntimeError(
                 "cannot begin hand: no deal policy has been adopted; a hand "
                 "must follow an accepted table")
+        if self._continuation_policy is None:
+            raise RuntimeError("cannot begin hand: no continuation policy has been adopted")
         # Keyed to the ADOPTED POLICY first, and to author_mode second.
         # A table that settled on Bayer-Groth must enforce it on every
         # peer path; verification is not optional merely because the
@@ -2895,14 +2939,6 @@ class Session:
     def local_seat(self) -> int:
         return self._seat_order.index(self.local_conn_id)
 
-    @owned
-    def enable_casual_reliability(self) -> None:
-        """Enable the casual survivor protocol for this table, once."""
-        if self._casual_continuation is None:
-            from holdem.p2p.casual_continuation import CasualContinuation
-            self._casual_continuation = CasualContinuation(self)
-            self._casual_reliability = True
-
     @property
     def departed_seats(self) -> frozenset:
         continuation = self._casual_continuation
@@ -3772,7 +3808,8 @@ class Session:
             # onto the transport's dispatch thread.
             proposed = self.parse_deal_policy(settings, self.author_mode)
             same = (list(payload.get("seat_order", [])) == list(self._seat_order)
-                    and proposed == self._deal_policy)
+                    and proposed == self._deal_policy
+                    and self.parse_continuation_policy(settings) == self._continuation_policy)
             if not same:
                 _log.warning(
                     "session: game_start from %s would change settled table "
@@ -3809,11 +3846,16 @@ class Session:
                 f"will not play under in {self.author_mode}",
                 conn_id=conn_id)
             return
-        if not self._adopt_deal_policy(policy):
+        continuation = self.parse_continuation_policy(settings)
+        if continuation is None:
+            self.terminate(self.POLICY_REFUSED,
+                           "table omitted or declared an unsupported continuation policy",
+                           conn_id=conn_id)
+            return
+        if not self._adopt_deal_policy(policy) or not self._adopt_continuation_policy(continuation):
             self.terminate(
                 self.POLICY_REFUSED,
-                f"table changed deal policy from {self._deal_policy!r} to "
-                f"{policy!r}",
+                "table attempted to change an adopted deal or continuation policy",
                 conn_id=conn_id)
             return
         self.state = "PLAYING"
@@ -4319,10 +4361,12 @@ class Session:
                 + ("" if self.author_mode == AUTHOR_MODE_WIRE else
                    f" or {self.DEAL_POLICY_DETECTION!r}")
                 + ". A table must declare how it deals; there is no default.")
-        if not self._adopt_deal_policy(policy):
+        continuation = self.parse_continuation_policy(table_settings)
+        if continuation is None:
+            raise ValueError("cannot start a game: an explicit supported continuation_policy is required")
+        if not self._adopt_deal_policy(policy) or not self._adopt_continuation_policy(continuation):
             raise RuntimeError(
-                f"cannot start a game: deal policy is already "
-                f"{self._deal_policy!r} and cannot change to {policy!r}")
+                "cannot start a game: an adopted deal or continuation policy cannot change")
         with self._lock:
             seat_order = [p.conn_id for p in self.players.values()]
         self._seat_order = seat_order
@@ -4814,13 +4858,12 @@ class Session:
 
     @owned
     def reliability_tick(self) -> None:
-        """Drive opted-in casual play from the host adapter's scheduler."""
-        if not getattr(self, "_casual_reliability", False):
-            return
+        """Drive existing lobby capability checks and adopted casual play."""
         if self.state == "LOBBY":
-            from holdem.p2p.casual_clock import lobby_clocks
-            lobby_clocks(self).tick()
-        else:
+            if self.author_mode == AUTHOR_MODE_WIRE or self._casual_reliability:
+                from holdem.p2p.casual_clock import lobby_clocks
+                lobby_clocks(self).tick()
+        elif self._casual_reliability:
             from holdem.p2p.casual_runtime import runtime
             runtime(self).tick(self)
 
@@ -4841,7 +4884,7 @@ class Session:
 
     @owned
     def reliability_lobby_status(self) -> dict:
-        if not getattr(self, "_casual_reliability", False):
+        if self.author_mode != AUTHOR_MODE_WIRE and not self._casual_reliability:
             return {"ready": True, "error": None}
         from holdem.p2p.casual_clock import lobby_clocks
         return lobby_clocks(self).status()

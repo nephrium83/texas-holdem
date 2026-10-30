@@ -8,10 +8,7 @@ from tests.showdown_rig import rig_showdowns
 
 
 def casual_table(n=3, **kwargs):
-    bus, sessions, order = table(n, **kwargs)
-    for session in sessions.values():
-        session.enable_casual_reliability()
-    return bus, sessions, order
+    return table(n, continuation_policy=Session.CONTINUATION_SURVIVORS, **kwargs)
 
 
 def finish(bus, sessions, live):

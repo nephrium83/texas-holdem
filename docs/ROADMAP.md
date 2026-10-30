@@ -42,6 +42,12 @@ the rules-profile field is still unbound. Implementation acceptance is
 recorded in `docs/research/FAMOUS_HAND_REPLAYS.md`, separately from the
 earlier audit's six passes and known ante mismatch.
 
+**Continuation policy update, 2026-10-29.** LAN and Internet casual adapters
+declare `survivors-v1`; other Session embedders must explicitly declare their
+table's `continuation_policy`. It is adopted once from `game_start` and bound
+into deal-context v4. See `docs/GODOT_PROTOCOL.md`. This does not add a new
+acceptance exchange or activate the future journal/recovery protocol.
+
 ---
 
 ## Historical repository snapshot — October 20, 2026
