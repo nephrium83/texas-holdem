@@ -60,6 +60,40 @@ def test_parent_directory_is_created(tmp_path):
         device_secret.SECRET_BYTES
 
 
+@pytest.mark.parametrize('alias_kind', ['file', 'directory'])
+def test_existing_secret_alias_remains_readable_without_creation(tmp_path, monkeypatch, alias_kind):
+    directory = tmp_path / 'real'
+    directory.mkdir()
+    target = directory / 'device_secret'
+    target.write_bytes(bytes(range(32)))
+    alias = tmp_path / 'alias'
+    try:
+        alias.symlink_to(target if alias_kind == 'file' else directory,
+                         target_is_directory=alias_kind == 'directory')
+    except OSError as exc:
+        if os.name == 'nt' and getattr(exc, 'winerror', None) == 1314:
+            pytest.skip('Windows account lacks symlink creation privilege')
+        raise
+    def no_creation(*args, **kwargs):
+        raise AssertionError('existing secret must not enter its creation path')
+    monkeypatch.setattr(device_secret, 'locked', no_creation)
+    monkeypatch.setattr(device_secret, 'atomic_write', no_creation)
+    requested = alias if alias_kind == 'file' else alias / 'device_secret'
+    assert device_secret.load_or_create(requested) == bytes(range(32))
+    assert target.read_bytes() == bytes(range(32)) and alias.is_symlink()
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Windows strict creation path lands in its native namespace slice')
+def test_missing_secret_alias_is_refused_before_creation(tmp_path):
+    from holdem.p2p.private_storage import InsecureKeyStorage
+    target, alias = tmp_path / 'missing-secret', tmp_path / 'alias'
+    alias.symlink_to(target)
+    with pytest.raises(InsecureKeyStorage, match='symlink'):
+        device_secret.load_or_create(alias)
+    assert alias.is_symlink() and not target.exists()
+    assert not list(tmp_path.glob('*.tmp')) and not list(tmp_path.glob('*.lock'))
+
+
 def test_honours_the_config_dir_override(tmp_path, monkeypatch):
     monkeypatch.setenv("HOLDEM_CONFIG_DIR", str(tmp_path / "cfg"))
     assert device_secret.secret_path() == \

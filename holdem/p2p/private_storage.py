@@ -191,12 +191,14 @@ def read_private(target: Path) -> PrivateRead | None:
             os.close(fd)
 
 
-def canonical_target(target: Path) -> Path:
+def canonical_target(target: Path, *, allow_aliases: bool = False) -> Path:
     """Preserve the supplied POSIX chain; refuse aliases instead of resolving."""
     if os.name == "nt":
         for part in target.parts[1:] if target.anchor else target.parts:
             if part not in (".", "..") and (part.endswith((".", " ")) or ":" in part):
                 raise ValueError(f"ambiguous Windows key storage path: {target}")
+        return target.resolve()
+    if allow_aliases:
         return target.resolve()
     target = _lexical_target(target)
     current = Path(target.anchor)
