@@ -6,6 +6,7 @@ from .p2p.session import Session
 def table_settings(settings: dict) -> dict:
     values = {"sb": 25, "bb": 50, "stack": 1000,
               "structure": "No-Limit", "deal_policy": Session.DEAL_POLICY_BG,
+              "continuation_policy": Session.CONTINUATION_SURVIVORS,
               "casual_profile": PROFILE}
     values.update(settings)
     for field in ("sb", "bb", "stack"):
@@ -19,6 +20,8 @@ def table_settings(settings: dict) -> dict:
         raise ValueError("Unsupported betting structure")
     if values["deal_policy"] != Session.DEAL_POLICY_BG:
         raise ValueError("Peer games require Bayer-Groth dealing")
+    if values["continuation_policy"] != Session.CONTINUATION_SURVIVORS:
+        raise ValueError("Casual peer games require survivor continuation")
     if values["casual_profile"] != PROFILE:
         raise ValueError("All players need the same Poker Preview version")
     return values

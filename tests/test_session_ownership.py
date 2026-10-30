@@ -53,6 +53,7 @@ def table(n=3):
                                   avatar_b64="")
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         s.state = "PLAYING"
         bus.register(cid, s)
         sessions[cid] = s
@@ -173,7 +174,7 @@ def test_every_public_mutator_is_owned():
         "configure_seats", "reveal_board_street", "open_deal_audit",
         "add_local_player", "set_ready", "check_deadlines",
         "broadcast_game_state", "handle_game_action", "set_host_engine",
-        "enable_casual_reliability", "casual_drop", "reliability_tick",
+        "casual_drop", "reliability_tick",
         "reliability_started", "reliability_view", "reliability_lobby_status",
     ]
     for name in expected:

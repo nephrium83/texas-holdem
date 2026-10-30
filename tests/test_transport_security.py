@@ -151,6 +151,7 @@ def test_action_rejects_wrong_seat_owner():
     s.set_host_engine(_Eng())
     s.configure_seats(["A", "B"])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s._VALID_ACTIONS = {"fold", "call", "raise", "check", "bet"}
 
     fired = []

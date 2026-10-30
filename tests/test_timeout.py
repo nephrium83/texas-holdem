@@ -68,6 +68,7 @@ def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0,
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         bus.register(cid, s)
         sessions[cid] = s
     names  = [f"P{i}" for i in range(n)]
@@ -100,6 +101,7 @@ def make_betting_table(n, clocks):
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         r = ReplicaTable(
             session_id="poker|" + "|".join(order), hand_no=1,
             names=[f"P{j}" for j in range(n)], stacks=[1000] * n,
@@ -139,6 +141,7 @@ def session_with_deadline():
     s.local_conn_id = "A"
     s.configure_seats(["A", "B"])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     from holdem.p2p.replica_table import ReplicaTable
     r = ReplicaTable(
         session_id="poker|A|B", hand_no=1,
@@ -246,6 +249,7 @@ class TestDeadlineLifecycle:
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(
@@ -328,6 +332,7 @@ class TestBettingTimeout:
         s.local_conn_id = "peer0"
         s.configure_seats(["peer0", "peer1"])
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
         from holdem.p2p.replica_table import ReplicaTable
         r = ReplicaTable(
@@ -471,6 +476,7 @@ class TestDealTimeout:
             s.local_conn_id = cid
             s.configure_seats(list(order))
             s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+            s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
             bus.register(cid, s)
             sessions[cid] = s
 

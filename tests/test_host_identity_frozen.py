@@ -149,6 +149,7 @@ def test_begin_hand_is_refused_after_termination():
     s = peer("PLAYING")
     s.configure_seats(["peer0", "peer1", "peer2"])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s.terminate(Session.HOST_LOST, "host dropped")
     with pytest.raises(RuntimeError, match="terminated"):
         s.begin_hand(hand_no=5, button=0)
@@ -160,6 +161,7 @@ def test_next_hand_is_refused_after_termination():
     s = peer("PLAYING")
     s.configure_seats(["peer0", "peer1", "peer2"])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s.terminate(Session.HOST_LOST, "host dropped")
     assert s.next_p2p_hand() == "session_over"
 
@@ -192,6 +194,7 @@ def test_capability_freeze_does_not_lapse_after_termination():
     # direct write would set up state the chokepoint could never produce,
     # leaving this test proving only that the freeze branch returns early.
     assert s._adopt_deal_policy(Session.DEAL_POLICY_BG)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s.terminate(Session.HOST_LOST, "host dropped")
     s._on_game_start("peer0", {"payload": {
         "seat_order": ["attacker", "peer1"],
