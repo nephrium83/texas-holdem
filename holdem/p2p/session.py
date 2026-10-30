@@ -1256,6 +1256,12 @@ class Session:
         # driver exists: everything above this line is policy, everything
         # below deals cards. begin_hand is also called directly by tests and
         # harnesses that never go through _begin_p2p_hand.
+        driver, outbox = self._prepare_deal(hand_no, button, seats_in)
+        self._publish_deal(hand_no, driver, outbox)
+
+    def _prepare_deal(self, hand_no: int, button: int, seats_in):
+        """Do fallible local work without replacing the current hand."""
+        self._assert_owner()
         self._assert_deal_preconditions()
         from holdem.p2p.mental_deal_driver import MentalDealDriver
         order = list(self._seat_order)
@@ -1268,29 +1274,43 @@ class Session:
             raise RuntimeError("cannot begin hand: local seat is not dealt in "
                                "(busted seats spectate via next_p2p_hand)")
         prevention = self.prevention
-        self._deal_hole = [None, None]
-        self._deal_board = [None] * 5
-        self._deal_outbox = []
-        self._hand_no = hand_no
-        self._deal_driver = MentalDealDriver(
+        outbox = []
+        driver = MentalDealDriver(
             session_id=self._deal_session_id(),
             hand_no=hand_no,
             local_seat=local,
             seats_in=list(seats_in),
             button=button,
             master_secret=self._deal_master_secret,
-            send=self._deal_outbox.append,      # buffer; _flush_deal routes them
+            send=outbox.append,                # local buffer; no transport yet
             prevention=prevention,
         )
-        self._deal_driver.start()
+        driver.start()
+        return driver, outbox
+
+    def _publish_deal(self, hand_no: int, driver, outbox) -> None:
+        """Publish a prepared hand; an uncertain send/replay is terminal."""
+        self._assert_owner()
+        self._deal_hole = [None, None]
+        self._deal_board = [None] * 5
+        self._deal_outbox = outbox
+        self._hand_no = hand_no
+        self._deal_driver = driver
         # Completed hands no longer need replay bookkeeping. Retain the
         # preceding hand for late settlement/report emissions.
         self._author_seq_seen = {key: value for key, value in self._author_seq_seen.items()
                                  if hand_no - 1 <= key[0] <= hand_no}
         self._author_seq_out = {key: value for key, value in self._author_seq_out.items()
                                 if hand_no - 1 <= key[0] <= hand_no}
-        self._flush_deal()
-        self._replay_buffer()
+        try:
+            self._flush_deal()
+            self._replay_buffer()
+        except Exception:
+            # Messages may already have left this process. Restoring an old
+            # driver would let two different hands share live protocol state.
+            self.terminate(self.ABORTED_PROTOCOL,
+                           "Hand startup failed after publication")
+            raise
 
     def _replay_buffer(self) -> None:
         """Feed buffered messages now that a hand has begun: those for the
@@ -2926,27 +2946,22 @@ class Session:
                 f"cannot start a hand: session terminated "
                 f"({self.terminal_state}: {self.terminal_reason})")
         self._assert_deal_preconditions()
-        self._table_cfg = {"names": list(names), "sb": int(sb),
+        config = {"names": list(names), "sb": int(sb),
                            "bb": int(bb), "structure": structure,
                            "button": int(button),
                            "total_chips": sum(int(stack) for stack in stacks)}
-        self._session_over = False
-        self._session_winner = None
-        self._final_stacks = None
-        self._session_end_announced = False
-        self._p2p_spectator = False
         self._bind_seat_keys()
         self._begin_p2p_hand(hand_no=hand_no, stacks=list(stacks),
-                             positions=None)
+                             positions=None, config=config)
 
     def _begin_p2p_hand(self, *, hand_no: int, stacks: list,
-                        positions) -> bool:
+                        positions, config=None) -> bool:
         """Construct and start one hand of the continuous session from
         explicit inputs. `positions` is the previous hand's played
         (bb_seat, sb_seat, button) triple -- the dead-button chain state --
         or None for the first hand (and a first-hand redeal)."""
         from holdem.p2p.replica_table import ReplicaTable
-        cfg = self._table_cfg
+        cfg = self._table_cfg if config is None else config
         # Everything that can refuse this hand runs BEFORE any gameplay
         # state exists. Validating after the replica is live produces the
         # worst outcome available: a table that has posted blinds, accepts
@@ -2962,6 +2977,35 @@ class Session:
         self._assert_deal_preconditions()
         session_id = self._deal_session_id()
 
+        replica = ReplicaTable(
+            session_id=session_id, hand_no=hand_no,
+            names=list(cfg["names"]), stacks=list(stacks),
+            sb=cfg["sb"], bb=cfg["bb"], structure=cfg["structure"])
+        for seat in self.departed_seats:
+            replica.engine.sit_out(seat)
+        if positions is None:
+            ok = replica.start_hand(cfg["button"])
+        else:
+            bb_seat, sb_seat, btn = positions
+            ok = replica.start_hand(btn, bb_seat=bb_seat,
+                                          sb_seat=sb_seat)
+        if not ok:                              # fewer than 2 seats dealt
+            self._table_cfg = cfg
+            self._replica = None
+            self._finish_session(stacks, announce=False)
+            return False
+        # Both the replica and its first cryptographic emissions are staged
+        # locally. A provider, constructor or start failure retains the entire
+        # preceding hand, including its driver and balances (audit finding 73).
+        driver, outbox = self._prepare_deal(hand_no, replica.button,
+                                           replica.seats_dealt)
+        self._table_cfg = cfg
+        if config is not None:
+            self._session_over = False
+            self._session_winner = None
+            self._final_stacks = None
+            self._session_end_announced = False
+            self._p2p_spectator = False
         self._hand_record = None
         self.void_reason = None
         self.hand_result = None
@@ -2969,33 +3013,8 @@ class Session:
         self._own_hole_set = False
         self._hand_stacks = list(stacks)
         self._hand_positions = positions
-        self._replica = ReplicaTable(
-            session_id=session_id, hand_no=hand_no,
-            names=list(cfg["names"]), stacks=list(stacks),
-            sb=cfg["sb"], bb=cfg["bb"], structure=cfg["structure"])
-        for seat in self.departed_seats:
-            self._replica.engine.sit_out(seat)
-        if positions is None:
-            ok = self._replica.start_hand(cfg["button"])
-        else:
-            bb_seat, sb_seat, btn = positions
-            ok = self._replica.start_hand(btn, bb_seat=bb_seat,
-                                          sb_seat=sb_seat)
-        if not ok:                              # fewer than 2 seats dealt
-            self._replica = None
-            self._finish_session(stacks, announce=False)
-            return False
-        try:
-            self.begin_hand(hand_no, button=self._replica.button,
-                            seats_in=self._replica.seats_dealt)
-        except Exception:
-            # begin_hand still has refusal paths that need the replica to
-            # evaluate (is the local seat dealt in?). If one fires, roll the
-            # replica back rather than leaving a bettable table with no deal.
-            self._replica = None
-            self._hand_stacks = []
-            self._hand_positions = None
-            raise
+        self._replica = replica
+        self._publish_deal(hand_no, driver, outbox)
         self._last_digest = self._replica.state_digest()
         self._safe_emit(
             "hand_started",
