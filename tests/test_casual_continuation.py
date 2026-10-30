@@ -28,6 +28,47 @@ def disconnect(bus, sessions, seat):
     bus.drain()
 
 
+@pytest.mark.parametrize('failure', ['provider', 'start'])
+def test_failed_survivor_start_preserves_signed_carry_for_retry(monkeypatch, failure):
+    bus, sessions, order = casual_table()
+    disconnect(bus, sessions, 2)
+    host = sessions[order[0]]
+    continuation = host._casual_continuation
+    carry = continuation.carry
+    assert carry is not None and continuation.pending is None
+    balances = list(carry['stacks'])
+    old_driver, old_replica = host._deal_driver, host.replica
+    old_hand, old_drop = host._hand_no, host._drop_stacks
+    from holdem.p2p.mental_deal_driver import MentalDealDriver
+
+    def fail(*args, **kwargs):
+        raise RuntimeError('preparation failed')
+
+    with monkeypatch.context() as blocked:
+        if failure == 'provider':
+            blocked.setattr(host, '_master_secret_override', None)
+            blocked.setattr(host, '_master_secret_cache', None)
+            blocked.setattr(host, '_secret_provider', fail)
+        else:
+            blocked.setattr(MentalDealDriver, 'start', fail)
+        with pytest.raises(RuntimeError, match='preparation failed'):
+            host.next_p2p_hand()
+    assert continuation.carry is carry
+    assert host._drop_stacks is old_drop
+    assert host._deal_driver is old_driver and host.replica is old_replica
+    assert host._hand_no == old_hand
+    assert host.last_settled_stacks == balances
+    for cid in order[:2]:
+        s = sessions[cid]
+        assert s.next_p2p_hand() == 'started'
+        assert s._hand_no == carry['resume_hand']
+        assert s._hand_positions == carry['positions']
+        assert s._hand_stacks == balances
+        assert s._casual_continuation.carry is None
+    bus.drain()
+    assert all(sessions[cid]._own_hole_set for cid in order[:2])
+
+
 @pytest.mark.parametrize("lost", [1, 2])
 def test_survivors_keep_fixed_seats_balances_and_play_again(lost):
     bus, sessions, order = casual_table()

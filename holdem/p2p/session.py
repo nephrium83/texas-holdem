@@ -2991,7 +2991,7 @@ class Session:
                              positions=None, config=config)
 
     def _begin_p2p_hand(self, *, hand_no: int, stacks: list,
-                        positions, config=None) -> bool:
+                        positions, config=None, continuation=None) -> bool:
         """Construct and start one hand of the continuous session from
         explicit inputs. `positions` is the previous hand's played
         (bb_seat, sb_seat, button) triple -- the dead-button chain state --
@@ -3035,6 +3035,8 @@ class Session:
         # preceding hand, including its driver and balances (audit finding 73).
         driver, outbox = self._prepare_deal(hand_no, replica.button,
                                            replica.seats_dealt)
+        if continuation is not None:
+            continuation.began()
         self._table_cfg = cfg
         if config is not None:
             self._session_over = False
@@ -3106,9 +3108,9 @@ class Session:
                 self._p2p_spectator = True
                 self._notify_state_changed()
                 return "eliminated"
-            continuation.began()
             started = self._begin_p2p_hand(hand_no=hand_no, stacks=stacks,
-                                           positions=positions)
+                                           positions=positions,
+                                           continuation=continuation)
             return "started" if started else "session_over"
         voided = self.hand_voided
         if not voided and self.hand_result is None:
