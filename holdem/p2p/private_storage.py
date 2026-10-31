@@ -130,10 +130,184 @@ class PrivateRead(NamedTuple):
     links: int
 
 
+# ---------------------------------------------------------------------------
+# Windows leaf-file security (windows-strict-leaf-read slice)
+# ---------------------------------------------------------------------------
+
+def _nt_open_with_write_dac(path: Path):
+    """Open path with WRITE_DAC access using CreateFileW; return raw handle.
+
+    Returns (handle, valid) where valid=False means ACCESS_DENIED and the
+    caller must CloseHandle even on failure (handle is INVALID_HANDLE_VALUE).
+    Raises OSError for errors other than ACCESS_DENIED.
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    CreateFileW = k32.CreateFileW
+    CreateFileW.restype = wt.HANDLE
+    CreateFileW.argtypes = [
+        wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_void_p,
+        wt.DWORD, wt.DWORD, wt.HANDLE,
+    ]
+    WRITE_DAC = 0x00040000
+    READ_CONTROL = 0x00020000  # SetSecurityInfo reads existing SD internally
+    WRITE_OWNER = 0x00080000   # PROTECTED_DACL_SECURITY_INFORMATION requires this
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    OPEN_EXISTING = 3
+    FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    INVALID_HANDLE_VALUE = ctypes.cast(ctypes.c_void_p(-1), wt.HANDLE).value
+
+    handle = CreateFileW(
+        str(path), WRITE_DAC | READ_CONTROL | WRITE_OWNER,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        None, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, None,
+    )
+    if handle == INVALID_HANDLE_VALUE:
+        err = ctypes.get_last_error()
+        if err == 5:  # ERROR_ACCESS_DENIED
+            return handle, False
+        raise OSError(None, f"CreateFileW failed (error {err})", str(path), err)
+    return handle, True
+
+
+def _nt_close(handle) -> None:
+    import ctypes
+    import ctypes.wintypes as wt
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CloseHandle.argtypes = [wt.HANDLE]
+    k32.CloseHandle.restype = wt.BOOL
+    k32.CloseHandle(handle)
+
+
+def _require_private_existing_windows(fd: int, path: Path, *, can_repair: bool) -> None:
+    """Verify Windows identity file owner and DACL; normalize TRUSTED-ONLY DACLs.
+
+    CONFORMING  : SE_DACL_PROTECTED, every effective allow ACE names the token
+                  user → accepted, no repair needed.
+    TRUSTED-ONLY: every effective allow ACE names the user or a trusted OS
+                  principal (SYSTEM / Administrators / TrustedInstaller /
+                  OWNER RIGHTS), e.g. the stock inherited %APPDATA% DACL →
+                  normalized to D:P(A;;FA;;;user) via WRITE_DAC reopen.
+    REFUSED     : NULL DACL, unsupported ACE type, or any effective allow ACE
+                  for an untrusted SID → InsecureKeyStorage.
+    """
+    import msvcrt
+    from holdem.p2p.windows_security import (
+        get_token_user_sid_string, get_handle_security,
+        classify_leaf_dacl, normalize_leaf_dacl, free_sd,
+    )
+
+    handle = msvcrt.get_osfhandle(fd)
+    user_sid = get_token_user_sid_string()
+
+    owner_str, acl_ptr, sd_control, sd_ptr = get_handle_security(handle)
+    try:
+        if owner_str != user_sid:
+            raise _refuse(
+                path,
+                f"file is not owned by the current user "
+                f"(owner {owner_str}); change ownership or copy to a "
+                f"user-owned location"
+            )
+        classification = classify_leaf_dacl(acl_ptr, user_sid, sd_control)
+    finally:
+        free_sd(sd_ptr)
+
+    if classification == "conforming":
+        return
+
+    if classification == "refused":
+        raise _refuse(
+            path,
+            "file DACL grants access to untrusted principals or has an "
+            "unsupported structure; remedy: "
+            f'icacls "{path}" /inheritance:r /grant:r *{user_sid}:F'
+        )
+
+    # TRUSTED-ONLY: attempt normalization via a WRITE_DAC reopen.
+    if not can_repair:
+        raise _refuse(path, "inherited DACL cannot be normalized on this handle")
+
+    repair_handle, have_write_dac = _nt_open_with_write_dac(path.resolve())
+    if not have_write_dac:
+        raise _refuse(
+            path,
+            "file has an inherited DACL and WRITE_DAC access was denied; "
+            f'remedy: icacls "{path}" /inheritance:r /grant:r *{user_sid}:F'
+        )
+    try:
+        normalize_leaf_dacl(repair_handle, user_sid, path)
+    finally:
+        _nt_close(repair_handle)
+
+    # Re-read from the original handle to confirm normalization succeeded.
+    owner2, acl2, ctrl2, sd2 = get_handle_security(handle)
+    try:
+        if classify_leaf_dacl(acl2, user_sid, ctrl2) != "conforming":
+            raise _refuse(path, "DACL normalization did not achieve conforming state")
+    finally:
+        free_sd(sd2)
+
+
+def _require_private_temp_windows(fd: int, path: Path) -> None:
+    """Verify owner and normalize DACL of a just-created Windows temp key file.
+
+    mkstemp inherits the parent directory's DACL (typically TRUSTED-ONLY on a
+    standard %APPDATA% path). Normalize to D:P(A;;FA;;;user) before writing
+    any key bytes so that the completed publication is owner-only from the
+    moment of the atomic rename.
+    """
+    import msvcrt
+    from holdem.p2p.windows_security import (
+        get_token_user_sid_string, get_handle_security,
+        classify_leaf_dacl, normalize_leaf_dacl, free_sd,
+    )
+
+    handle = msvcrt.get_osfhandle(fd)
+    user_sid = get_token_user_sid_string()
+
+    owner_str, acl_ptr, sd_control, sd_ptr = get_handle_security(handle)
+    try:
+        if owner_str != user_sid:
+            raise _refuse(path, "temporary key file is not owned by the current user")
+        classification = classify_leaf_dacl(acl_ptr, user_sid, sd_control)
+        if classification == "refused":
+            raise _refuse(
+                path, "temporary key file DACL grants access to untrusted principals"
+            )
+    finally:
+        free_sd(sd_ptr)
+
+    if classification == "conforming":
+        return
+
+    # TRUSTED-ONLY: normalize via a WRITE_DAC reopen (temp file was just created).
+    repair_handle, have_write_dac = _nt_open_with_write_dac(path)
+    if not have_write_dac:
+        raise _refuse(path, "temporary key file: WRITE_DAC access denied during normalization")
+    try:
+        normalize_leaf_dacl(repair_handle, user_sid, path)
+    finally:
+        _nt_close(repair_handle)
+
+    owner2, acl2, ctrl2, sd2 = get_handle_security(handle)
+    try:
+        if classify_leaf_dacl(acl2, user_sid, ctrl2) != "conforming":
+            raise _refuse(path, "temporary key file DACL normalization failed")
+    finally:
+        free_sd(sd2)
+
+
+# ---------------------------------------------------------------------------
+# Cross-platform file verification
+# ---------------------------------------------------------------------------
+
 def _require_private_existing(fd: int, path: Path, *, can_repair: bool) -> None:
-    """Verify and, when permitted, restrict the exact opened POSIX object."""
-    if os.name == 'nt':
-        # Native Windows file ACL enforcement is a separate reviewed slice.
+    """Verify and, when permitted, restrict the exact opened object."""
+    if os.name == "nt":
+        _require_private_existing_windows(fd, path, can_repair=can_repair)
         return
     try:
         _require_posix_storage(fd, path)
@@ -286,8 +460,9 @@ def atomic_write(target: Path, data: bytes) -> None:
 
 
 def _require_private_temp(fd: int, path: Path) -> None:
-    if os.name == 'nt':
-        return  # Native owner-only ACL checks are a separate reviewed slice.
+    if os.name == "nt":
+        _require_private_temp_windows(fd, path)
+        return
     try:
         _require_posix_storage(fd, path)
         info = os.fstat(fd)
@@ -301,8 +476,8 @@ def _require_private_temp(fd: int, path: Path) -> None:
 def _atomic_write(target: Path, data: bytes, parent_fd) -> None:
     """Publish complete synced bytes while the caller holds locked(target).
 
-    mkstemp creates POSIX files with mode0600. Windows ACL enforcement is
-    separate; chmod is not an owner-only ACL on that platform.
+    mkstemp creates POSIX files with mode 0600. Windows temp-file DACL
+    normalization runs inside _require_private_temp before the first key byte.
     """
     fd, name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
     temporary = Path(name)
