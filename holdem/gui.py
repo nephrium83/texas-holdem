@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk, colorchooser
 
-from .engine import (Engine, Player, Brain, equity,
+from .engine import (Engine, Player, Brain, equity, IllegalAction,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR, Card as _Card,
                     FULL_DECK as _FULL_DECK)
 
@@ -1190,9 +1190,15 @@ class Holdem:
             _audio.play("check" if lg["can_check"] else "call")
         elif action == "raise":
             _audio.play("raise_sound")
-        e.act(seat, action, amount)
+        try:
+            e.act(seat, action, amount)
+        except IllegalAction:
+            # A peer's illegal/out-of-turn action changes nothing; re-publish
+            # the authoritative state so that peer resynchronises.
+            self._mp_host_sync()
+            return
         self.flush_log()
-        self._mp_session.broadcast_game_state()
+        self._mp_host_sync()
         self.redraw()
         self.root.after(max(80, self.delay // 3), self.loop)
 
@@ -1318,6 +1324,27 @@ class Holdem:
         """Re-broadcast current game state to all peers (called after becoming host)."""
         if self._mp_session and self._mp_is_host:
             self._mp_session.broadcast_game_state()
+
+    def _mp_host_sync(self) -> None:
+        """Host: publish the authoritative state after ANY state change.
+
+        Audit finding 4: hero() and ai_turn() applied actions, and loop()
+        advanced streets, without telling the peers, so their tables lagged
+        or froze. Every state-changing path on the host calls this.
+        """
+        if self._mp_mode and self._mp_is_host and self._mp_session is not None:
+            self._mp_session.broadcast_game_state()
+
+    def _mp_is_remote_seat(self, seat: int) -> bool:
+        """True if ``seat`` belongs to another connected human in multiplayer.
+
+        Audit finding 3: the host's loop() fed every non-local seat to the
+        AI, so it played remote humans' hands and discarded their actions.
+        A remote seat must only ever be advanced by its own peer's action.
+        """
+        if not self._mp_mode or seat == self.hero_seat:
+            return False
+        return bool(self._mp_seat_to_peer.get(seat, ""))
 
     def _show_banner(self, text: str, duration_ms: int = 3000) -> None:
         """Draw a transient text banner in the canvas centre."""
@@ -1542,6 +1569,7 @@ class Holdem:
             e.next_street()
             self.flush_log()
             self.redraw()
+            self._mp_host_sync()                # peers must see the new street
             self.start_equity()
             self.root.after(self.delay, self.loop)
             return
@@ -1564,6 +1592,12 @@ class Holdem:
                 return    # pre-action fired; loop() will be called again
             self.unlock()
             self.start_clock()
+        elif self._mp_is_remote_seat(i):
+            # A remote human's turn: never let the local AI play it. Make
+            # sure that peer sees it is to act, then wait -- its action
+            # arrives via _mp_peer_acted, which re-enters loop().
+            self.lock()
+            self._mp_host_sync()
         else:
             self.lock()
             self.root.after(self.delay,
@@ -1580,6 +1614,7 @@ class Holdem:
         e.act(local, action, 0)
         self.flush_log()
         self.redraw()
+        self._mp_host_sync()
         self.root.after(max(60, self.delay // 3), self.loop)
 
     def locked_runout(self):
@@ -1619,6 +1654,8 @@ class Holdem:
         e = self.engine
         if e is None or e.actor != i:
             return
+        if self._mp_is_remote_seat(i):
+            return      # a remote human's seat is never played by the AI
         act, amt = self.brain.decide(e, i)
         if e.street == "preflop":
             self._record_vpip_pfr(i, act, e.legal(i))
@@ -1628,6 +1665,7 @@ class Holdem:
             _audio.play("allin")
         self.flush_log()
         self.redraw()
+        self._mp_host_sync()
         # ~20% chance of a contextual emote from this AI seat
         # M-12: use the seeded rng to keep replay deterministic
         if self.rng.random() < 0.20:
@@ -1869,6 +1907,7 @@ class Holdem:
                 _audio.play("raise_sound")
         self.flush_log()
         self.redraw()
+        self._mp_host_sync()
         self.root.after(max(80, self.delay // 3), self.loop)
 
     def _hotkey(self, ev):
