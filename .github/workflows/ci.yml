@@ -123,11 +123,118 @@ jobs:
           python-version: "3.13"
       - name: Install
         run: python -m pip install -e .[dev]
+      - name: Windows DACL and process-suspend diagnostic
+        shell: pwsh
+        run: |
+          $code = @'
+          import sys, os, ctypes, ctypes.wintypes as wt, tempfile, msvcrt, subprocess
+          from pathlib import Path
+
+          print("=== Python / platform ===")
+          print("Python:", sys.version)
+          print("Platform:", sys.platform)
+
+          print()
+          print("=== DACL diagnostic on a fresh temp file ===")
+          from holdem.p2p.windows_security import (
+              get_token_user_sid_string, get_handle_security,
+              classify_leaf_dacl, free_sd, normalize_leaf_dacl,
+          )
+          from holdem.p2p.private_storage import _nt_open_with_write_dac, _nt_close
+
+          fd, tmp = tempfile.mkstemp(prefix="dacl-ci-test-")
+          try:
+              user_sid = get_token_user_sid_string()
+              print("User SID:", user_sid)
+              handle = msvcrt.get_osfhandle(fd)
+              owner, acl_ptr, sd_ctrl, sd_ptr = get_handle_security(handle)
+              try:
+                  print("File owner:", owner)
+                  print("Owner == user:", owner == user_sid)
+                  cls = classify_leaf_dacl(acl_ptr, user_sid, sd_ctrl)
+                  print("Initial classification:", cls)
+              finally:
+                  free_sd(sd_ptr)
+              rh, have_dac = _nt_open_with_write_dac(Path(tmp))
+              print("WRITE_DAC open succeeded:", have_dac)
+              if have_dac:
+                  try:
+                      normalize_leaf_dacl(rh, user_sid, Path(tmp))
+                      print("normalize_leaf_dacl: OK")
+                  except Exception as e:
+                      print("normalize_leaf_dacl FAILED:", repr(e))
+                  finally:
+                      _nt_close(rh)
+                  owner2, acl2, ctrl2, sd2 = get_handle_security(handle)
+                  try:
+                      cls2 = classify_leaf_dacl(acl2, user_sid, ctrl2)
+                      print("Post-normalization classification:", cls2)
+                  finally:
+                      free_sd(sd2)
+          finally:
+              os.close(fd)
+              try: os.unlink(tmp)
+              except OSError: pass
+
+          print()
+          print("=== NtSuspendProcess / NtResumeProcess availability ===")
+          ntdll = ctypes.WinDLL("ntdll")
+          k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+          for nm in ("NtSuspendProcess", "NtResumeProcess"):
+              fn = getattr(ntdll, nm, None)
+              print(f"  {nm}: {'found' if fn is not None else 'NOT FOUND'}")
+
+          print()
+          print("=== Job object test: CREATE_SUSPENDED + AssignProcessToJobObject ===")
+          CREATE_SUSPENDED = 0x00000004
+          proc = subprocess.Popen(
+              [sys.executable, "-c", "import sys; sys.exit(0)"],
+              creationflags=CREATE_SUSPENDED,
+          )
+          print(f"  Spawned PID {proc.pid} with CREATE_SUSPENDED")
+          try:
+              k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wt.LPCWSTR]
+              k32.CreateJobObjectW.restype = wt.HANDLE
+              job = k32.CreateJobObjectW(None, None)
+              print(f"  Job handle: {job!r}")
+              if job:
+                  k32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
+                  k32.AssignProcessToJobObject.restype = wt.BOOL
+                  ok = k32.AssignProcessToJobObject(job, int(proc._handle))
+                  last_err = ctypes.get_last_error()
+                  print(f"  AssignProcessToJobObject: ok={bool(ok)}, last_err={last_err}")
+                  k32.CloseHandle.argtypes = [wt.HANDLE]
+                  k32.CloseHandle.restype = wt.BOOL
+                  k32.CloseHandle(job)
+          finally:
+              fn = getattr(ntdll, "NtResumeProcess", None)
+              if fn is not None:
+                  fn.argtypes = [ctypes.c_void_p]
+                  fn.restype = ctypes.c_long
+                  PROCESS_SUSPEND_RESUME = 0x0800
+                  h = k32.OpenProcess(PROCESS_SUSPEND_RESUME, False, proc.pid)
+                  if h:
+                      status = fn(h)
+                      k32.CloseHandle(h)
+                      print(f"  NtResumeProcess status: {status:#010x}")
+                  else:
+                      print(f"  OpenProcess for NtResumeProcess failed: {ctypes.get_last_error()}")
+              try:
+                  proc.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  proc.kill()
+                  proc.wait()
+              print(f"  Process exit code: {proc.returncode}")
+
+          print()
+          print("=== Diagnostic complete ===")
+'@
+          $code | python -
       - name: Verify desktop, key storage and process-test ownership
         run: >-
           python -m pytest tests/test_desktop_launcher.py
           tests/test_identity_storage.py tests/test_heartbeat_harness.py
-          tests/test_heartbeat_processes.py -q
+          tests/test_heartbeat_processes.py -v --tb=long
 
   journal-windows:
     # The journal's access-control and durable-creation guarantees are
