@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk, colorchooser
 
-from .engine import (Engine, Player, Brain, equity, IllegalAction,
+from .engine import (Engine, Player, Brain, equity, IllegalAction, cashout_split,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR, Card as _Card,
                     FULL_DECK as _FULL_DECK)
 
@@ -2319,12 +2319,19 @@ class Holdem:
         if hero_eq < 0.55:
             return False
 
+        # Audit finding 6: price the equity only against the pots the hero
+        # is eligible for, and pay opponents only from pots they are in.
+        split = cashout_split(e.players, local,
+                              [p.idx for p in e.contested()], hero_eq)
+        if split is None or split["eligible_pot"] <= 0:
+            return False    # a live side pot among others needs a run-out
         self._cashout_offered = True
-        gross = int(hero_eq * pot)
-        net = int(gross * 0.99)
+        eligible_pot = split["eligible_pot"]
+        gross, net = split["gross"], split["net"]
 
         msg = (f"Cash out for {net:,} chips?\n\n"
-               f"Your equity: {hero_eq:.0%} × {pot:,} pot = {gross:,} chips\n"
+               f"Your equity: {hero_eq:.0%} × {eligible_pot:,} "
+               f"(the pot you can win) = {gross:,} chips\n"
                f"After 1% fee: {net:,} chips\n\n"
                f"Yes = take the money now\n"
                f"No  = run it out")
@@ -2332,14 +2339,14 @@ class Holdem:
             return False
 
         # --- Award chips ---
-        hero.stack += net
-        hero.won = net
-        remaining = pot - net
-        per_opp, leftover = divmod(remaining, n_opp) if n_opp else (0, 0)
-        for k, opp_p in enumerate(opp):
-            share = per_opp + (1 if k < leftover else 0)
-            opp_p.stack += share
-            opp_p.won = share
+        if split["refund"] is not None:          # uncalled bet goes back
+            seat, back = split["refund"]
+            e.players[seat].stack += back
+        for seat, amount in split["payouts"].items():
+            if amount:
+                e.players[seat].stack += amount
+                e.players[seat].won = amount
+        pot = eligible_pot
 
         # Clear all betting state (bypassing engine.settle)
         for p in e.players:
