@@ -1304,21 +1304,54 @@ class Holdem:
         if am_new_host:
             self._mp_is_host = True
             self._show_banner("Host left — you are now hosting", duration_ms=4000)
-            # H-11: wire the session engine and action callback so broadcast works
+            # Audit finding 5: a peer's engine is a lossy REPLICA rebuilt by
+            # _mp_apply_state -- public fields, stub hole cards, no deck and
+            # no betting internals (need_to_act, no_raise, raises_this_street,
+            # contributions). It must never become the authoritative engine
+            # in the middle of a hand: the new host would deal stub cards and
+            # mis-run the betting. The departed host cannot hand over its full
+            # state (it is gone), and that state includes the deck and every
+            # hole card, which no peer may receive. So a mid-hand promotion
+            # voids the hand; the replica is reused only BETWEEN hands, when
+            # its public state (stacks) is all a fresh deal needs.
             if self._mp_session is not None and self.engine is not None:
-                self._mp_session._engine = self.engine
-                # Re-apply the last known game state so the engine is up to date
-                if self._mp_remote_state:
-                    self._mp_apply_state(self._mp_remote_state)
-                self._mp_session.on_action = lambda seat, act, amt: self.root.after(
-                    0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
-            self._mp_broadcast_state()
+                if self._mp_replica_mid_hand():
+                    self._mp_void_promoted_hand()
+                else:
+                    self._mp_session._engine = self.engine
+                    self._mp_session.on_action = lambda seat, act, amt: self.root.after(
+                        0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
+                    self._mp_broadcast_state()
             # Show the host controls bar if not already visible
             if not getattr(self, "_host_bar_built", False):
                 self._build_host_controls(self.table)
                 self._host_bar_built = True
         else:
             self._show_banner("Host reconnecting…", duration_ms=2000)
+
+    def _mp_replica_mid_hand(self) -> bool:
+        """True if this peer's (replica) engine is in the middle of a hand."""
+        e = self.engine
+        return (e is not None and not self.hand_over
+                and e.street not in ("idle", "showdown"))
+
+    def _mp_void_promoted_hand(self) -> None:
+        """Void the hand in progress when promoted to host mid-hand.
+
+        The replica cannot finish it (see _mp_on_host_changed), and it does
+        not know each seat's total contribution this hand, so it cannot
+        refund or settle it either. Nothing is broadcast from it and no
+        peer action is accepted against it; the table must start a fresh
+        hand. (The session layer itself refuses host loss during PLAYING;
+        this is the GUI's own guard should that path ever be reached.)
+        """
+        e = self.engine
+        e.actor = None
+        self.hand_over = True
+        self.lock()
+        self.l_status.config(
+            text="Host left mid-hand — that hand is void. Its state cannot "
+                 "be recovered safely; start a new hand.")
 
     def _mp_broadcast_state(self) -> None:
         """Re-broadcast current game state to all peers (called after becoming host)."""
