@@ -15,6 +15,14 @@ RANK_STR = {2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9",
             10: "10", 11: "J", 12: "Q", 13: "K", 14: "A"}
 
 
+class IllegalAction(ValueError):
+    """Engine.act refused an action: unknown, out of turn, or illegal.
+
+    Subclasses ValueError so callers already catching ValueError keep
+    working; the engine state is unchanged when this is raised.
+    """
+
+
 class Card:
     __slots__ = ("v", "s")
 
@@ -742,8 +750,27 @@ class Engine:
     # -- actions -----------------------------------------------------------
 
     def act(self, i, action, amount=0):
+        """Apply one betting action for seat ``i``.
+
+        Raises IllegalAction -- leaving the engine untouched -- when the
+        action is unknown, when ``i`` is not the seat to act, when that
+        seat cannot act, or when it raises without a raise being legal.
+        The engine is the last line of defence for every caller (GUI,
+        replica, contract), so it never trusts them to have checked.
+        """
+        if action not in ("fold", "call", "raise"):
+            raise IllegalAction(f"unknown action {action!r}")
+        if not isinstance(i, int) or not 0 <= i < len(self.players):
+            raise IllegalAction(f"no such seat {i!r}")
+        if self.actor is None or i != self.actor:
+            raise IllegalAction(
+                f"seat {i} acted out of turn (seat to act: {self.actor})")
         p = self.players[i]
+        if not self.can_act(p):
+            raise IllegalAction(f"seat {i} cannot act")
         lg = self.legal(i)
+        if action == "raise" and not lg["can_raise"]:
+            raise IllegalAction(f"seat {i} may not raise here")
 
         if action == "fold":
             p.folded = True
