@@ -222,6 +222,67 @@ def test_bad_commands_answer_with_error():
     asyncio.run(inner())
 
 
+def test_malformed_wire_values_refuse_without_acting_and_connection_recovers():
+    async def inner():
+        bus, sessions, order = make_table(2)
+        actor = sessions[order[0]].replica.actor
+        srv = await serve(sessions[order[actor]])
+        try:
+            w, before = await open_client(srv)
+            cases = [("raise_to", {"amount": value})
+                     for value in ("40", 40.0, 40.9, True, None)]
+            cases += [("raise_to", {}), ("fold", False), ("fold", []),
+                      ("check_call", {"unexpected": 1}), ([], {})]
+            for command, payload in cases:
+                w.writer.write(json.dumps({"type": "command", "command": command,
+                                           "payload": payload}).encode() + b"\n")
+                await w.writer.drain()
+                result = await w.recv()
+                assert result["ok"] is False and "error" in result
+                assert await w.recv() == before
+            await w.command("check_call")
+            assert (await w.recv())["ok"] is True
+            after = await w.recv()
+            assert after["action_on"] != before["action_on"]
+            w.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())
+
+
+def test_controller_socket_preserves_payload_types_and_rejects_invalid_shapes():
+    async def inner():
+        calls = []
+
+        def handle(command, payload):
+            calls.append((command, payload))
+            return {"type": "command_result", "command": command, "ok": True}
+
+        srv = ClientServer(None, snapshot_provider=lambda: {"type": "snapshot"},
+                           command_handler=handle)
+        await srv.start()
+        try:
+            w, _ = await open_client(srv)
+            for command, payload in [("fold", False), ("fold", []), ([], {})]:
+                w.writer.write(json.dumps({"type": "command", "command": command,
+                                           "payload": payload}).encode() + b"\n")
+                await w.writer.drain()
+                assert (await w.recv())["ok"] is False
+                await w.recv()
+            assert calls == []
+            await w.command("host_lan", nickname="Player")
+            assert (await w.recv())["ok"] is True
+            await w.recv()
+            await w.command("leave_table")
+            assert (await w.recv())["ok"] is True
+            await w.recv()
+            assert calls == [("host_lan", {"nickname": "Player"}), ("leave_table", {})]
+            w.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())
+
+
 def test_unprompted_push_when_a_remote_player_acts():
     async def inner():
         bus, sessions, order = make_table(2)

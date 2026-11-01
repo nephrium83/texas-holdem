@@ -102,6 +102,37 @@ def test_from_hex_rejects_bad_point():
         EG.Ciphertext.from_hex(["ff" * 32, "ff" * 32])
 
 
+@pytest.mark.parametrize('pair', [[], [R.G.hex()], [R.G.hex()] * 3,
+                                 {0: R.G.hex(), 1: R.G.hex()}, None, 42,
+                                 R.G.hex(), [R.G.hex(), 0], [None, R.G.hex()]])
+def test_from_hex_rejects_malformed_wire_shapes_with_value_error(pair):
+    with pytest.raises(ValueError):
+        EG.Ciphertext.from_hex(pair)
+
+
+@pytest.mark.parametrize('container', [list, tuple])
+def test_from_hex_preserves_list_tuple_identity_and_hex_text_forms(container):
+    pair = container([R.IDENTITY.hex().upper(), ' ' + R.G.hex().upper() + ' '])
+    assert EG.Ciphertext.from_hex(pair) == EG.Ciphertext(R.IDENTITY, R.G)
+
+
+@pytest.mark.parametrize('pair', [[], [R.G.hex()], [R.G.hex()] * 3])
+def test_malformed_ciphertext_pair_aborts_deal_and_identifies_sender(pair):
+    from holdem.p2p.mental_deal import MentalDeal, Phase
+
+    observer = MentalDeal('malformed-pair', 1, 1, [0, 1], 0, b'observer-secret')
+    sender = MentalDeal('malformed-pair', 1, 0, [0, 1], 0, b'sender-secret')
+    observer.start()
+    for message in sender.start():
+        observer.handle(message)
+    assert observer.phase == Phase.SHUFFLE
+    deck = [list(ct.to_hex()) for ct in EG.make_trivial_deck()]
+    deck[17] = pair
+    observer.handle({'type': 'deck_round', 'round': 1, 'seat': 0, 'deck': deck})
+    assert observer.phase == Phase.ABORTED
+    assert observer.bad_seat == 0
+
+
 # --------------------------------------------------------------- MULTI-PARTY (the real scheme)
 
 def _joint_key(shares):

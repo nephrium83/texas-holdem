@@ -142,6 +142,56 @@ def test_apply_command_unknown_raises():
         contract.apply_command(e, 0, "teleport")
 
 
+@pytest.mark.parametrize('seat', [-1, -4, 4, 100, True, False, None, '0', 0.0])
+def test_invalid_snapshot_seat_refuses_before_selecting_private_cards(seat):
+    e = _table()
+    with pytest.raises(ValueError, match='seat'):
+        contract.build_snapshot(e, seat)
+
+
+@pytest.mark.parametrize('command,payload', [
+    ('raise_to', {'amount': '40'}), ('raise_to', {'amount': True}),
+    ('raise_to', {'amount': 40.9}), ('raise_to', {'amount': 40.0}),
+    ('raise_to', {'amount': None}), ('raise_to', {}),
+    ('add_chips', {'amount': '100'}), ('add_chips', {'amount': False}),
+    ('sit_in', {'post_now': 'false'}), ('sit_in', {'post_now': 0}),
+    ('fold', []), ('fold', False), ('check_call', {'amount': 1}),
+])
+def test_malformed_command_values_cannot_mutate_the_table(command, payload):
+    e = _table()
+    actor = e.actor
+    before = [contract.build_snapshot(e, seat) for seat in range(len(e.players))]
+    with pytest.raises(ValueError):
+        contract.apply_command(e, actor, command, payload)
+    assert before == [contract.build_snapshot(e, seat) for seat in range(len(e.players))]
+
+
+@pytest.mark.parametrize('seat', [-1, True, False, 4, None, '0', 0.0])
+def test_invalid_command_seat_cannot_select_another_player(seat):
+    e = _table()
+    before = contract.build_snapshot(e, 0)
+    with pytest.raises(ValueError, match='seat'):
+        contract.apply_command(e, seat, 'sit_out')
+    assert contract.build_snapshot(e, 0) == before
+
+
+@pytest.mark.parametrize('post_now', [False, True])
+def test_sit_in_preserves_real_boolean_values(monkeypatch, post_now):
+    e = _table()
+    calls = []
+    monkeypatch.setattr(e, 'sit_in', lambda seat, **payload: calls.append((seat, payload)))
+    contract.apply_command(e, 0, 'sit_in', {'post_now': post_now})
+    assert calls == [(0, {'post_now': post_now})]
+
+
+def test_sit_in_omitted_post_now_stays_false(monkeypatch):
+    e = _table()
+    calls = []
+    monkeypatch.setattr(e, 'sit_in', lambda seat, **payload: calls.append((seat, payload)))
+    contract.apply_command(e, 0, 'sit_in')
+    assert calls == [(0, {'post_now': False})]
+
+
 if __name__ == "__main__":
     fns = [(k, v) for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

@@ -57,7 +57,8 @@ dev = [
 Repository = "https://github.com/nephrium83/texas-holdem"
 
 [project.gui-scripts]
-holdem = "holdem.gui:main"
+holdem = "holdem.desktop_launcher:main"
+holdem-legacy-tk = "holdem.gui:main"
 
 [tool.setuptools]
 packages = ["holdem", "holdem.p2p"]
