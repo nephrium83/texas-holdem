@@ -179,10 +179,12 @@ def test_existing_ed25519_only_identity_keeps_its_signing_key(tmp_path):
     path = tmp_path / "identity.json"
     # The legacy file can predate the companion encryption key. Loading it
     # adds that key without replacing the signing identity or extra fields.
-    path.write_text(json.dumps({
+    from holdem.p2p import identity_storage
+    with identity_storage.creating(path) as publisher:
+        publisher.publish(json.dumps({
         "private_key_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
         "nickname": "existing host",
-    }))
+        }).encode())
     loaded = identity.load_or_create(path)
     assert loaded.public_key_bytes() == _identity(bytes(range(32))).public_key_bytes()
     stored = json.loads(path.read_text())
