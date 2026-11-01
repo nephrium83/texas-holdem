@@ -310,8 +310,13 @@ def test_windows_remedy_restores_the_original_secret(tmp_path):
         device_secret.load_or_create(target)
     command = device_secret.windows_remedy(target)
     assert command in str(info.value)                  # the message carries it
+    # Windows PowerShell 5.1 launched from a PowerShell 7 environment (as on
+    # the CI runner) inherits pwsh's PSModulePath and cannot load its own
+    # Microsoft.PowerShell.Security module (no Get-Acl). Clearing it lets 5.1
+    # rebuild its default -- the state a user's own PowerShell window has.
+    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
     run = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                          command], capture_output=True, text=True)
+                          command], capture_output=True, text=True, env=env)
     assert run.returncode == 0, f"remedy failed: {run.stderr.strip()}"
     assert device_secret.load_or_create(target) == ORIGINAL
     assert target.read_bytes() == ORIGINAL
