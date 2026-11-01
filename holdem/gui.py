@@ -1923,8 +1923,14 @@ class Holdem:
         if e is None or e.actor != local or self.v_observe.get():
             return
         self.stop_clock()
-        amt = self.v_bet.get() if action == "raise" else 0
         lg = e.legal(local)
+        amt = 0
+        if action == "raise":
+            # The local slider is bounded to [min_to, max_to], but clamp here
+            # too: the engine now rejects an out-of-range raise (rules profile
+            # gap C2) rather than rounding it, and a stale slider value from
+            # an earlier street must not turn a click into an error.
+            amt = max(lg["min_to"], min(int(self.v_bet.get()), lg["max_to"]))
         self.lock()
         if self._mp_mode and not self._mp_is_host:
             # Peer: send action to host; wait for game_state echo

@@ -49,7 +49,7 @@ from __future__ import annotations
 import hashlib
 from typing import Dict, List, Optional
 
-from holdem.engine import Card, Deck, Engine, Player
+from holdem.engine import Card, Deck, Engine, IllegalAction, Player
 
 
 PHASE_BETTING = "betting"          # a betting round is open
@@ -188,7 +188,14 @@ class ReplicaTable:
             return "rejected"
         if action == "raise" and not e.legal(seat)["can_raise"]:
             return "rejected"
-        e.act(seat, action, int(amount))
+        try:
+            # The engine is the authority on legality -- including the raise
+            # range, which it now REJECTS rather than clamps (rules profile
+            # gap C2). Its refusal leaves state untouched; every replica
+            # reaches the same verdict for the same message.
+            e.act(seat, action, int(amount))
+        except IllegalAction:
+            return "rejected"
         self._recompute_phase()
         return "applied"
 
