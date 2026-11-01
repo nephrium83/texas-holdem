@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   PYTEST_TIMEOUT: "60"
 
@@ -20,8 +23,10 @@ jobs:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install
@@ -32,8 +37,10 @@ jobs:
   sidecar-integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install
@@ -44,12 +51,14 @@ jobs:
   godot-sidecar:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - name: Install Godot 4.7.1
-        uses: chickensoft-games/setup-godot@v2
+        uses: chickensoft-games/setup-godot@ac93246ea68518a384c1c280a496e5989341f2f6 # v2
         with:
           version: 4.7.1
           use-dotnet: false
@@ -72,7 +81,9 @@ jobs:
   gui-smoke:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install Tk and Xvfb
         run: |
           sudo apt-get update
@@ -83,9 +94,11 @@ jobs:
   godot-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: Install Godot 4.7.1
-        uses: chickensoft-games/setup-godot@v2
+        uses: chickensoft-games/setup-godot@ac93246ea68518a384c1c280a496e5989341f2f6 # v2
         with:
           version: 4.7.1
           use-dotnet: false
@@ -95,30 +108,25 @@ jobs:
         run: godot --headless --path . --import
       - name: Run GUT tests headless
         working-directory: godot
-        run: >-
-          godot --headless --path .
-          -s addons/gut/gut_cmdln.gd
-          -gdir=res://test/unit
-          -gexit
-          | tee gut_output.txt
-      - name: Fail if GUT produced no run summary
-        working-directory: godot
+        shell: bash
         run: |
-          if ! grep -q "Run Summary" gut_output.txt; then
-            echo "::error::GUT did not emit a run summary - tests did not execute (likely an import/class_name failure)."
-            exit 1
-          fi
-          if grep -qE "[1-9][0-9]* failing tests" gut_output.txt; then
-            echo "::error::GUT reported failing tests."
-            exit 1
-          fi
-          echo "GUT run summary present and no failures."
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/gut_results.xml"
+          godot --headless --path . \
+            -s addons/gut/gut_cmdln.gd \
+            -gdir=res://test/unit -gexit \
+            -gjunit_xml_file="$RUNNER_TEMP/gut_results.xml" \
+            | tee gut_output.txt
+      - name: Validate nonempty GUT results
+        run: python tests/gut_report_check.py "$RUNNER_TEMP/gut_results.xml"
 
   desktop-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - name: Install
@@ -136,8 +144,10 @@ jobs:
     # not committed, and an unrelated red job teaches everyone to ignore it.
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
       - name: Install
