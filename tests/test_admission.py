@@ -39,6 +39,7 @@ cannot do is become the pinned host or alter a signed message.
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -502,6 +503,71 @@ def test_after_authentication_player_ack_assigns_our_id():
     s.handle_message("host", {"type": "player_ack", "pubkey": HOST_KEY.hex(),
                               "payload": {"your_conn_id": "seat-me"}})
     assert s.local_conn_id == "seat-me"
+
+
+def test_authentication_publication_already_has_the_pin_and_rejects_a_forged_roster(monkeypatch):
+    s = _joiner_session()
+    published = []
+    original_setattr = Session.__setattr__
+
+    def at_publication(self, name, value):
+        original_setattr(self, name, value)
+        if self is s and name == '_host_authenticated' and value is True:
+            published.append((s._owner.held(), s._pinned_host_pubkey, s._host_conn_id))
+            # Re-enter exactly when admission opens: the pinned host identity
+            # must already constrain any roster processed from this point.
+            s.handle_message('host', {
+                'type': 'player_list', 'pubkey': HOST_KEY.hex(),
+                'payload': {'players': [
+                    {'conn_id': 'host', 'nickname': 'forged', 'is_host': True,
+                     'ed25519_pubkey_hex': K2.hex()}]}})
+
+    monkeypatch.setattr(Session, '__setattr__', at_publication)
+    assert s.mark_host_authenticated('host', HOST_KEY) is True
+    assert 'host' not in s.players
+    assert published == [(True, HOST_KEY.hex(), 'host')]
+
+
+def test_host_authentication_waits_for_the_current_session_owner():
+    s = _joiner_session()
+    entered, finished = threading.Event(), threading.Event()
+    results = []
+
+    def authenticate():
+        entered.set()
+        results.append(s.mark_host_authenticated('host', HOST_KEY))
+        finished.set()
+
+    with s._owner:
+        worker = threading.Thread(target=authenticate)
+        worker.start()
+        assert entered.wait(5)
+        assert not finished.wait(0.2)
+        assert s._host_authenticated is False
+        assert s._host_conn_id == '' and s._pinned_host_pubkey is None
+    worker.join(5)
+    assert not worker.is_alive()
+    assert results == [True]
+    assert (s._host_authenticated, s._host_conn_id, s._pinned_host_pubkey) == (
+        True, 'host', HOST_KEY.hex())
+
+
+def test_host_key_mismatch_does_not_publish_any_authentication_state():
+    s = _joiner_session()
+    assert s.mark_host_authenticated('impostor', K2) is False
+    assert (s._host_authenticated, s._host_conn_id, s._pinned_host_pubkey) == (
+        False, '', None)
+
+
+def test_failed_pin_conversion_does_not_publish_authentication():
+    from types import SimpleNamespace
+
+    s = _joiner_session()
+    s._joiner_admission = SimpleNamespace(host_pubkey=object())
+    with pytest.raises(TypeError):
+        s.mark_host_authenticated('host')
+    assert (s._host_authenticated, s._host_conn_id, s._pinned_host_pubkey) == (
+        False, '', None)
 
 
 def test_later_admission_traffic_cannot_repoint_the_host_hop():

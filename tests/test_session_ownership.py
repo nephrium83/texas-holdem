@@ -172,7 +172,7 @@ def test_every_public_mutator_is_owned():
         "handle_message", "handle_disconnect", "terminate", "begin_hand",
         "start_p2p_hand", "next_p2p_hand", "send_bet_action", "start_game",
         "configure_seats", "reveal_board_street", "open_deal_audit",
-        "add_local_player", "set_ready", "check_deadlines",
+        "add_local_player", "set_ready", "check_deadlines", "mark_host_authenticated",
         "broadcast_game_state", "handle_game_action", "set_host_engine",
         "casual_drop", "reliability_tick",
         "reliability_started", "reliability_view", "reliability_lobby_status",

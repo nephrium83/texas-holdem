@@ -1607,6 +1607,7 @@ class Session:
                 out.append(report)
         return out
 
+    @owned
     def mark_host_authenticated(self, conn_id: str,
                                 host_pubkey=None) -> bool:
         """The joiner's host hop, established the only way it may be.
@@ -1630,21 +1631,23 @@ class Session:
         """
         if self._joiner_admission is None:
             return False
-        pinned = self._joiner_admission.host_pubkey
+        pinned = bytes(self._joiner_admission.host_pubkey)
         if host_pubkey is not None:
-            if bytes(host_pubkey) != bytes(pinned):
+            offered = bytes(host_pubkey)
+            if offered != pinned:
                 _log.warning(
                     "session: refusing to authenticate %s -- caller offered "
                     "%s but the invite pinned %s", conn_id,
-                    bytes(host_pubkey).hex()[:16], bytes(pinned).hex()[:16])
+                    offered.hex()[:16], pinned.hex()[:16])
                 return False
-        self._host_conn_id = conn_id
-        self._host_authenticated = True
+        pinned_hex = pinned.hex()
         # Retained so the chain can be closed later: the roster the host
         # sends must name THIS key for the host's own seat. Without it the
         # joiner's seat keys are simply whatever the host asserted, and
         # "invite key == frozen seat key" is a claim nothing checks.
-        self._pinned_host_pubkey = bytes(pinned).hex()
+        self._pinned_host_pubkey = pinned_hex
+        self._host_conn_id = conn_id
+        self._host_authenticated = True
         return True
 
     @staticmethod
