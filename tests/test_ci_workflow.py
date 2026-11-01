@@ -100,13 +100,16 @@ def test_gut_workflow_rejects_failed_process_even_with_a_passing_summary(tmp_pat
     run = next(step for step in steps if step.get('name') == 'Run GUT tests headless')
     assert run.get('shell') == 'bash'
     assert '-gjunit_xml_file=' in run['run']
-    bash = shutil.which('bash') or r'C:\Program Files\Git\bin\bash.exe'
-    if not Path(bash).is_file():
+    # WindowsApps bash may be an unconfigured WSL launcher. A launch error
+    # would not prove that the pipeline propagated the mocked exit status.
+    bash = r'C:\Program Files\Git\bin\bash.exe' if os.name == 'nt' else shutil.which('bash')
+    if not bash or not Path(bash).is_file():
         pytest.skip('Bash is needed to exercise GitHub shell pipeline semantics')
     source = 'godot() { printf "Run Summary\\nAll tests passed!\\n"; return 7; }\n' + run['run']
     env = dict(os.environ, RUNNER_TEMP=tmp_path.as_posix())
     result = subprocess.run([bash, '--noprofile', '--norc', '-eo', 'pipefail', '-c', source],
                             cwd=tmp_path, env=env, capture_output=True, timeout=10)
-    assert result.returncode != 0, result.stdout
+    assert result.returncode == 7, (result.stdout, result.stderr)
+    assert b'Run Summary' in result.stdout
     validation = next(step for step in steps if step.get('name') == 'Validate nonempty GUT results')
     assert 'gut_report_check.py' in validation['run']
