@@ -104,8 +104,12 @@ def verify_all(shares, proofs, ctx_for) -> list:
     ``shares[i]`` is seat i's public share X_i, ``proofs[i]`` its PoP, and
     ``ctx_for(i)`` yields the context bytes bound for seat i (e.g. session
     id plus the seat index). Empty result means every share is legitimate
-    and it is safe to form PK = sum_i X_i.
+    and it is safe to form PK = sum_i X_i. Unequal share/proof counts raise
+    ValueError rather than silently accepting an unchecked suffix.
     """
+    shares, proofs = list(shares), list(proofs)
+    if len(shares) != len(proofs):
+        raise ValueError('shares and proofs must have the same number of entries')
     bad = []
     for i, (X, pf) in enumerate(zip(shares, proofs)):
         if not verify(X, pf, ctx_for(i)):
