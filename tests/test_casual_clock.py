@@ -81,7 +81,6 @@ class SignedTable:
                     conn_id=name, peer_id=name, nickname=name, avatar_b64="",
                     ed25519_pubkey_hex=self.signers[other].public_key_bytes().hex(),
                     is_host=other == 0, ready=True)
-            s._casual_reliability = True
             self.sessions[cid] = s
         for seat in [1, 2]:
             admit(policy, self.order[seat], self.signers[seat].public_key_bytes(),

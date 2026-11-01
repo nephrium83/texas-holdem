@@ -205,7 +205,8 @@ def test_d1_game_start_with_a_repeated_seat_is_refused_before_playing():
     s = compat_joiner()
     s._on_game_start("host", {"payload": {
         "seat_order": ["host", "joiner", "host"],
-        "table_settings": {Session.DEAL_POLICY_SETTING:
+        "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE,
+                           Session.DEAL_POLICY_SETTING:
                            Session.DEAL_POLICY_DETECTION}}})
 
     assert s.state == "LOBBY", "a duplicated seat order started the table"
@@ -216,7 +217,8 @@ def test_d1_game_start_with_a_repeated_seat_is_refused_before_playing():
     # ... and the lobby is still usable: a correct order is accepted.
     s._on_game_start("host", {"payload": {
         "seat_order": ["host", "joiner"],
-        "table_settings": {Session.DEAL_POLICY_SETTING:
+        "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE,
+                           Session.DEAL_POLICY_SETTING:
                            Session.DEAL_POLICY_DETECTION}}})
     assert s.state == "PLAYING"
     assert s._seat_order == ["host", "joiner"]
@@ -347,6 +349,7 @@ def test_d4_bg_policy_forces_prevention_regardless_of_author_mode():
                 clock=_DependencyClock())
     assert s.author_mode == AUTHOR_MODE_COMPAT
     s._adopt_deal_policy(Session.DEAL_POLICY_BG)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
     assert s.prevention is True
     # This checks table policy; native readiness has its own cold tests.
@@ -374,6 +377,7 @@ def test_d4_detection_only_compat_table_remains_legal():
                 master_secret=b"\x02" * 32,
                 clock=_DependencyClock())
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     assert s.prevention is False
     with mock.patch("holdem.p2p.ristretto.require_initialized"):
         s._assert_deal_preconditions()      # legal in compat, must not raise

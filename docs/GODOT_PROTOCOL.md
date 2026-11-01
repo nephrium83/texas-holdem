@@ -446,9 +446,29 @@ was dealt from, and the replicas that settled keep their payouts. Only a
 failure every replica shares, such as a deterministic engine bug, voids the
 hand everywhere and redeals it.
 
-**Legacy departure behavior.** The `PEER_LOST` path below describes Session
-embedders without the casual LAN reliability profile. Desktop LAN rooms
-continue after an agreed non-host departure instead. Host loss closes the
+**Continuation policy.** Every table explicitly declares `continuation_policy`
+in the existing `game_start.table_settings`: `survivors-v1` continues after an
+agreed non-host departure; `end-table-v1` uses the legacy terminal behavior
+below. Missing or unsupported values are refused before accepting the table.
+The policy is adopted once; duplicate starts cannot change it. Runtime
+membership behavior derives from that adopted value, rather than an embedder
+remembering a separate enable call.
+
+Godot LAN play routes through `DesktopTable -> LanTable`; Internet play uses
+`DesktopTable -> InternetTable -> DirectPokerRoom`. Both adapters declare
+`survivors-v1`. Local in-process bot tables explicitly declare `end-table-v1`.
+Another game embedding Session must choose its table policy explicitly.
+
+The continuation string is a length-prefixed field beside the deal policy in
+deal-context version 4. Version 3 remains reserved for RECOVERY_SPEC's different
+proposed layout. A context cannot be built until both policies are adopted;
+different policies produce different cryptographic domains. Older clients
+cannot share a deal with this version. This adds no acceptance exchange:
+policy disagreement across peers is detected by the deal, potentially after
+local blinds post, and the failed hand follows existing void accounting.
+
+**Legacy departure behavior.** The `PEER_LOST` path below describes tables
+that explicitly select `end-table-v1`. Host loss closes the
 table in both profiles, and `ABORTED_PROTOCOL` remains terminal in both.
 
 In the legacy profile, two failures end the table rather than the hand. The

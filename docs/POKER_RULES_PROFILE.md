@@ -101,7 +101,9 @@ field encoding or position in an already bound deal-context layout also
 requires a domain version bump. The profile is not bound today, so the
 2026-10-19 semantic revision changes no runtime layout or domain version.
 The future binding still belongs to the single deliberate version break in
-§1.4 (`_DEAL_CTX_VERSION`, currently `2`; proposed future context `3`).
+§1.4 (proposed future recovery context `3`). The current runtime uses
+deal-context `4` to bind continuation policy; it still does not bind this
+rules profile. Version `3` was reserved for the different recovery layout.
 
 | Change | Consequence |
 |---|---|

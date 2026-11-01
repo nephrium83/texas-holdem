@@ -43,6 +43,7 @@ def make_table(n, stacks=None):
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         s._deal_master_secret = bytes([100 + i]) * 32   # stable key shares; shuffle stays random
         bus.register(cid, s)
         sessions[cid] = s
@@ -321,6 +322,7 @@ def test_lobby_snapshot_before_hand():
     s.local_conn_id = "peer0"
     s.configure_seats(list(order))
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     snap = client_view.snapshot(s)
     assert snap["phase"] == "lobby"
     assert snap["you"]["seat"] == 0
