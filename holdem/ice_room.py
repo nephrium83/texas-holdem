@@ -68,7 +68,6 @@ class DirectPokerRoom:
         self.session = Session(is_host=is_host, nickname=nickname, avatar_b64="",
                                transport=self.transport, clock=clock, master_secret=master_secret,
                                admission=policy, joiner_admission=pin)
-        self.session.enable_casual_reliability()
         self.session.on_state_changed = self._notify
         self.session.on_player_list_changed = self._roster_changed
         self.session.on_game_start = self._game_started

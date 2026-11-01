@@ -261,7 +261,8 @@ def three_sessions(three_peers):
     # the one existing suite that exercises the mandate end to end over TCP:
     # every hand below now generates and verifies real shuffle proofs.
     a.send({"op": "start_game",
-            "settings": {"deal_policy": "bayer-groth-v1"}})
+            "settings": {"deal_policy": "bayer-groth-v1",
+                         "continuation_policy": "end-table-v1"}})
     assert a.wait_for(lambda e: e.get("type") == "ack"
                       and e.get("op") == "start_game") is not None, \
         f"host could not start the game; stderr={a.stderr[-8:]}"

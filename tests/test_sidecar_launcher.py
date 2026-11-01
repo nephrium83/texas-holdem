@@ -183,6 +183,7 @@ def test_a_busted_human_sees_the_match_end_without_pressing_next(
     bus, sessions, order, human = _build_table(seats=3)
     for cid in order:
         sessions[cid]._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        sessions[cid]._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         sessions[cid].start_p2p_hand(hand_no=1, names=list(order),
                                      stacks=[100, 300, 300], sb=25, bb=50)
     bus.drain()
@@ -212,7 +213,8 @@ def test_bot_driver_is_a_no_op_for_a_session_with_nothing_to_do():
 # ------------------------------------------------------- start_table verdicts
 
 _SETTINGS = {"sb": 5, "bb": 10, "stack": 500, "structure": "No-Limit",
-             "deal_policy": "bayer-groth-v1"}
+             "deal_policy": "bayer-groth-v1",
+             "continuation_policy": Session.CONTINUATION_END_TABLE}
 
 
 def test_start_table_starts_the_table_and_drains():

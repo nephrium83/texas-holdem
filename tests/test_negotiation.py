@@ -100,7 +100,7 @@ def make_table(n=2, settings=None):
     for i, cid in enumerate(order):
         host.players[cid] = Player(conn_id=cid, peer_id=cid,
                                    nickname=f"P{i}", avatar_b64="")
-    host.start_game(dict(settings if settings is not None else {KEY: BG}))
+    host.start_game(dict(settings if settings is not None else {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG}))
     bus.drain()
     return bus, sessions, order
 
@@ -109,7 +109,7 @@ def test_prevention_cannot_be_downgraded_mid_session():
     """The attack: the table agreed on prevention, then a peer broadcasts a
     second game_start with it turned off. Nothing else would notice --
     prevention is read from exactly this message."""
-    bus, sessions, order = make_table(2, settings={KEY: BG})
+    bus, sessions, order = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     victim = sessions["peer1"]
     assert victim.prevention is True
 
@@ -119,7 +119,7 @@ def test_prevention_cannot_be_downgraded_mid_session():
     # duplicating test_game_start_from_a_non_host_is_refused.
     victim.handle_message("peer0", {
         "type": "game_start",
-        "payload": {"seat_order": order, "table_settings": {KEY: DETECTION}},
+        "payload": {"seat_order": order, "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}},
     })
     assert victim.prevention is True, "prevention was silently downgraded"
     assert victim.deal_policy == BG
@@ -128,7 +128,7 @@ def test_prevention_cannot_be_downgraded_mid_session():
 def test_seat_order_cannot_be_rewritten_mid_session():
     """Resetting seat order mid-session repoints every seat index, which
     would reassign hole cards and blame."""
-    bus, sessions, order = make_table(3, settings={KEY: BG})
+    bus, sessions, order = make_table(3, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     victim = sessions["peer1"]
     before = list(victim._seat_order)
 
@@ -141,12 +141,12 @@ def test_seat_order_cannot_be_rewritten_mid_session():
 
 
 def test_game_start_from_a_non_host_is_refused():
-    bus, sessions, order = make_table(2, settings={KEY: BG})
+    bus, sessions, order = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     victim = sessions["peer1"]
     victim.state = "LOBBY"          # even before play, only the host starts
     victim.handle_message("peer1", {
         "type": "game_start",
-        "payload": {"seat_order": order, "table_settings": {KEY: DETECTION}},
+        "payload": {"seat_order": order, "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}},
     })
     assert victim.prevention is True
     assert victim.state == "LOBBY"
@@ -165,7 +165,7 @@ def test_host_game_start_still_works_from_the_lobby():
     peer.handle_message("peer0", {
         "type": "game_start",
         "payload": {"seat_order": ["peer0", "peer1"],
-                    "table_settings": {KEY: BG}},
+                    "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG}},
     })
     assert peer.state == "PLAYING"
     assert peer.prevention is True
@@ -175,11 +175,11 @@ def test_host_game_start_still_works_from_the_lobby():
 def test_repeated_identical_game_start_is_harmless():
     """Duplicate delivery of the legitimate message must be idempotent,
     not a refusal that leaves the peer in a different state."""
-    bus, sessions, order = make_table(2, settings={KEY: BG})
+    bus, sessions, order = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     peer.handle_message("peer0", {
         "type": "game_start",
-        "payload": {"seat_order": order, "table_settings": {KEY: BG}},
+        "payload": {"seat_order": order, "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG}},
     })
     assert peer.prevention is True
     assert peer._seat_order == order

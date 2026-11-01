@@ -34,32 +34,37 @@ from cryptography.hazmat.primitives.serialization import (
 )
 
 from holdem.p2p.signing import verify
-from holdem.p2p.private_storage import atomic_write, canonical_target, locked
+from holdem.p2p import identity_storage
 
 
 def _identity_path() -> pathlib.Path:
     """L-4: Store identity alongside other app config via settings.config_dir()."""
     from holdem.settings import config_dir
     d = config_dir()
-    d.mkdir(parents=True, exist_ok=True)
     return d / "identity.json"
 
 
 def _load_keys(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
-    path = canonical_target(path)
     data = _read_key_data(path)
     # Complete identities are immutable. Loading one needs only read access,
     # including when supplied by an embedding host on a read-only volume.
     if "x25519_private_key_b64" in data:
         return (Ed25519PrivateKey.from_private_bytes(base64.b64decode(data["private_key_b64"])),
                 X25519PrivateKey.from_private_bytes(base64.b64decode(data["x25519_private_key_b64"])))
-    with locked(path):
-        return _load_keys_locked(path)
-
-
-def _read_key_data(path: pathlib.Path) -> dict:
     try:
-        stored = path.read_text(encoding="utf-8")
+        with identity_storage.creating(path) as publisher:
+            return _load_keys_locked(path, publisher)
+    except identity_storage.StorageCleanupError as exc:
+        raise ValueError(f"cannot read identity at {path}; release retained storage resources before retrying") from exc
+
+
+def _read_key_data(path: pathlib.Path, publisher=None) -> dict:
+    try:
+        stored = (identity_storage.load_identity_bytes(path) if publisher is None
+                  else publisher.read_existing())
+        if stored is None:
+            return {}
+        stored = stored.decode('utf-8')
     except FileNotFoundError:
         data = {}
     except (OSError, UnicodeError) as exc:
@@ -81,9 +86,9 @@ def _read_key_data(path: pathlib.Path) -> dict:
     return data
 
 
-def _load_keys_locked(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
-    data = _read_key_data(path)
-    if data and "x25519_private_key_b64" not in data and path.stat().st_nlink > 1:
+def _load_keys_locked(path: pathlib.Path, publisher) -> tuple[Ed25519PrivateKey, X25519PrivateKey]:
+    data = _read_key_data(path, publisher)
+    if data and "x25519_private_key_b64" not in data and publisher.leaf_nlink > 1:
         raise ValueError(f"legacy identity at {path} has multiple hard links; "
                          "use an independent copy before upgrading it")
     changed = False
@@ -109,7 +114,7 @@ def _load_keys_locked(path: pathlib.Path) -> tuple[Ed25519PrivateKey, X25519Priv
         changed = True
 
     if changed:
-        atomic_write(path, json.dumps(data).encode("utf-8"))
+        publisher.publish(json.dumps(data).encode("utf-8"))
 
     return ed_key, x25519_key
 

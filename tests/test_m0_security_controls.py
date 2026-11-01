@@ -211,7 +211,8 @@ def test_control_game_start_adopts_a_repeated_seat_order_again(monkeypatch):
 
     s._on_game_start("host", {"payload": {
         "seat_order": ["host", "joiner", "host"],
-        "table_settings": {Session.DEAL_POLICY_SETTING:
+        "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE,
+                           Session.DEAL_POLICY_SETTING:
                            Session.DEAL_POLICY_DETECTION}}})
 
     assert s.state == "PLAYING"
@@ -228,7 +229,8 @@ def test_control_the_duplicate_guard_leaves_a_legitimate_order_alone():
     s = compat_joiner()
     s._on_game_start("host", {"payload": {
         "seat_order": ["host", "joiner"],
-        "table_settings": {Session.DEAL_POLICY_SETTING:
+        "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE,
+                           Session.DEAL_POLICY_SETTING:
                            Session.DEAL_POLICY_DETECTION}}})
     assert s.state == "PLAYING"
 
@@ -363,6 +365,7 @@ def test_control_the_author_mode_mandate_lets_a_bg_compat_table_through(
                         _prefix_assert_deal_preconditions)
     s = _compat_session()
     s._adopt_deal_policy(Session.DEAL_POLICY_BG)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
     with mock.patch.object(type(s), "prevention",
                            property(lambda self: False)):
@@ -378,6 +381,7 @@ def test_control_a_detection_only_compat_table_is_still_legal():
     """
     s = _compat_session()
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
     assert s.prevention is False
     with mock.patch("holdem.p2p.ristretto.require_initialized"):
@@ -394,6 +398,7 @@ def test_control_the_real_guard_still_refuses_the_same_table():
     """
     s = _compat_session()
     s._adopt_deal_policy(Session.DEAL_POLICY_BG)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
     with mock.patch.object(type(s), "prevention",
                            property(lambda self: False)):

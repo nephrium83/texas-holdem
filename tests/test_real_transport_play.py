@@ -127,7 +127,8 @@ def table(tmp_path):
         for p in made:
             _ask(p, "arm_hand", args=args)        # dealt on game_start
         _ask(host, "start_game",
-             settings={"deal_policy": "bayer-groth-v1"})
+             settings={"deal_policy": "bayer-groth-v1",
+                       "continuation_policy": "end-table-v1"})
         by_seat = {}
         for p in made:
             st = _until(p, lambda s: s["state"] == "PLAYING"

@@ -12,9 +12,9 @@ def _table(*, start=True, offsets=(0, 0, 0), stacks=None):
     require_crypto()
     table = SignedTable(offsets)
     for s in table.sessions.values():
-        s.enable_casual_reliability()
         s.configure_seats(table.order)
         s._adopt_deal_policy(s.DEAL_POLICY_BG)
+        s._adopt_continuation_policy(s.CONTINUATION_SURVIVORS)
         s.state = "PLAYING"
         s.reliability_started()
     if start:
