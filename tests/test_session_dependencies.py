@@ -92,6 +92,7 @@ def test_first_hand_announces_the_provided_secret_and_later_hands_reuse_it(
     session.local_conn_id = "peer"
     session.configure_seats(["remote", "peer"])
     session._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+    session._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     assert calls == [], "lobby setup loaded the secret eagerly"
 
     announced_keys = []

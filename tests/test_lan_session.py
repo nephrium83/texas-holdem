@@ -231,7 +231,8 @@ def test_invalid_legacy_or_addressless_join_opens_no_socket(controller, code):
 def test_join_pins_before_socket_and_does_not_ready_before_roster(controller):
     table, fake, local, _changes = controller
     fake.eager = _packet("game_start", _identity(), {
-        "table_settings": {"deal_policy": Session.DEAL_POLICY_BG},
+        "table_settings": {"deal_policy": Session.DEAL_POLICY_BG,
+                           "continuation_policy": Session.CONTINUATION_SURVIVORS},
         "seat_order": ["host", "you"],
     })
     host, _code = _join_authenticated(table, fake, local)

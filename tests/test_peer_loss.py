@@ -52,7 +52,8 @@ except NativeCryptoUnavailable as exc:
                 allow_module_level=True)
 
 
-def table(n=3, stacks=None, start=True, policy=Session.DEAL_POLICY_BG):
+def table(n=3, stacks=None, start=True, policy=Session.DEAL_POLICY_BG,
+          continuation_policy=Session.CONTINUATION_END_TABLE):
     """n seated sessions on one bus, peer0 the host, game started."""
     bus = InMemoryBus()
     order = [f"peer{i}" for i in range(n)]
@@ -70,6 +71,7 @@ def table(n=3, stacks=None, start=True, policy=Session.DEAL_POLICY_BG):
                                   avatar_b64="")
         s.configure_seats(list(order))
         s._adopt_deal_policy(policy)
+        s._adopt_continuation_policy(continuation_policy)
         s.state = "PLAYING"
         bus.register(cid, s)
         sessions[cid] = s

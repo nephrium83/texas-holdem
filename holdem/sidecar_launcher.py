@@ -336,6 +336,8 @@ def _deal_first_hand(sessions: dict, order: list, bus: InMemoryBus, *,
             raise RuntimeError(
                 f"{cid} already holds a different deal policy "
                 f"({sessions[cid].deal_policy!r})")
+        if not sessions[cid]._adopt_continuation_policy(Session.CONTINUATION_END_TABLE):
+            raise RuntimeError(f"{cid} already holds a different continuation policy")
     names  = [sessions[cid].local_nickname for cid in order]
     stacks = [stack] * len(order)
     for cid in order:
@@ -424,6 +426,7 @@ async def run(*, seats: int, sb: int, bb: int, stack: int, structure: str,
         # is the product's active client path; it should exercise the same
         # deal the wire mandate requires, not the weaker one compat permits.
         "deal_policy": Session.DEAL_POLICY_BG,
+        "continuation_policy": Session.CONTINUATION_END_TABLE,
     }
     _wire_hand_start(sessions, order)
     start_table = _make_start_table(sessions, order, bus, table_settings)

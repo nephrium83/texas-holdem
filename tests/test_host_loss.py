@@ -89,6 +89,7 @@ def _start_playing(sessions, order):
         sessions[cid].state = "PLAYING"
         sessions[cid].configure_seats(list(order))
         sessions[cid]._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        sessions[cid]._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
 
 
 def test_playing_host_loss_terminates_and_does_not_elect():

@@ -205,7 +205,6 @@ class LanTable:
             secret_provider=device_secret.load_or_create,
             admission=host_admission, joiner_admission=joiner_admission,
         )
-        session.enable_casual_reliability()
         with self._lock:
             generation = self._generation
             self._session = session

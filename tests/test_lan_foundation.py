@@ -13,7 +13,8 @@ from holdem.p2p.session import Session
 from holdem.p2p.timeout import FakeClock
 
 SETTINGS = dict(sb=25, bb=50, stack=1000, structure="No-Limit",
-                deal_policy=Session.DEAL_POLICY_BG)
+                deal_policy=Session.DEAL_POLICY_BG,
+                continuation_policy=Session.CONTINUATION_END_TABLE)
 
 
 def _session(*, is_host=True):

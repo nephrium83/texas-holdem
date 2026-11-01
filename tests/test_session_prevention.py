@@ -58,7 +58,7 @@ def make_table(n=2, settings=None):
         host.players[f"peer{i}"] = Player(conn_id=f"peer{i}",
                                           peer_id=f"peer{i}",
                                           nickname=f"P{i}", avatar_b64="")
-    host.start_game(dict(settings if settings is not None else {KEY: BG}))
+    host.start_game(dict(settings if settings is not None else {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG}))
     bus.drain()
     return sessions, list(sessions)
 
@@ -120,7 +120,7 @@ def test_a_non_string_policy_is_refused_never_coerced(value):
     switch.
     """
     with pytest.raises(ValueError, match="deal_policy"):
-        make_table(2, settings={KEY: value})
+        make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: value})
 
 
 @pytest.mark.parametrize("value", [
@@ -133,7 +133,7 @@ def test_a_non_string_policy_is_refused_never_coerced(value):
 def test_an_unrecognised_policy_string_is_refused(value):
     """Strict equality against a known set, not a prefix or fuzzy match."""
     with pytest.raises(ValueError, match="deal_policy"):
-        make_table(2, settings={KEY: value})
+        make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: value})
 
 
 def test_a_value_that_merely_stringifies_to_a_policy_is_refused():
@@ -153,9 +153,9 @@ def test_a_value_that_merely_stringifies_to_a_policy_is_refused():
             return Session.DEAL_POLICY_BG
 
     assert Session.parse_deal_policy(
-        {KEY: Sneaky()}, AUTHOR_MODE_COMPAT) is None
+        {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: Sneaky()}, AUTHOR_MODE_COMPAT) is None
     with pytest.raises(ValueError, match="deal_policy"):
-        make_table(2, settings={KEY: Sneaky()})
+        make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: Sneaky()})
 
 
 # --------------------------------------------------- wire mode mandates BG
@@ -165,16 +165,16 @@ def test_wire_mode_refuses_detection_only():
     harnesses and benchmarks; on a transport carrying real envelopes it is
     refused, because "we will notice afterwards that someone cheated" is
     not a property this protocol will advertise as trustless."""
-    assert Session.parse_deal_policy({KEY: DETECTION}, AUTHOR_MODE_WIRE) is None
+    assert Session.parse_deal_policy({Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}, AUTHOR_MODE_WIRE) is None
 
 
 def test_wire_mode_accepts_bayer_groth():
-    assert Session.parse_deal_policy({KEY: BG}, AUTHOR_MODE_WIRE) == BG
+    assert Session.parse_deal_policy({Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG}, AUTHOR_MODE_WIRE) == BG
 
 
 def test_compat_mode_accepts_detection_only_explicitly():
     assert Session.parse_deal_policy(
-        {KEY: DETECTION}, AUTHOR_MODE_COMPAT) == DETECTION
+        {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}, AUTHOR_MODE_COMPAT) == DETECTION
     # ...but still not by omission.
     assert Session.parse_deal_policy({}, AUTHOR_MODE_COMPAT) is None
 
@@ -192,7 +192,7 @@ def test_a_wire_joiner_refuses_a_detection_only_table_before_playing():
     """
     s = _wire_joiner()
     s.handle_message("host", {"type": "game_start", "payload": {
-        "seat_order": ["host", "me"], "table_settings": {KEY: DETECTION}}})
+        "seat_order": ["host", "me"], "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}}})
     assert s.terminal_state == Session.POLICY_REFUSED
     assert s.deal_policy is None
     assert s.terminal_record is not None
@@ -210,7 +210,7 @@ def test_a_refused_table_never_reaches_the_game_start_callback():
     fired = []
     s.on_game_start = fired.append
     s.handle_message("host", {"type": "game_start", "payload": {
-        "seat_order": ["host", "me"], "table_settings": {KEY: DETECTION}}})
+        "seat_order": ["host", "me"], "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}}})
     assert fired == [], "a refused table still announced a game start"
 
 
@@ -219,14 +219,14 @@ def test_a_refused_table_records_what_it_refused():
     the record carries the policy explicitly or the cause is unrecoverable."""
     s = _wire_joiner()
     s.handle_message("host", {"type": "game_start", "payload": {
-        "seat_order": ["host", "me"], "table_settings": {KEY: DETECTION}}})
+        "seat_order": ["host", "me"], "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}}})
     assert DETECTION in s.terminal_reason
 
 
 # --------------------------------------------------------- propagation
 
 def test_policy_propagates_to_every_peer():
-    sessions, _ = make_table(3, settings={KEY: BG})
+    sessions, _ = make_table(3, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     for conn_id, s in sessions.items():
         assert s.deal_policy == BG, f"{conn_id} missed the table policy"
         assert s.prevention is True
@@ -234,8 +234,8 @@ def test_policy_propagates_to_every_peer():
 
 def test_host_and_peers_agree_without_negotiating():
     """No peer announces a policy; they all read the same broadcast."""
-    on = make_table(4, settings={KEY: BG})[0]
-    off = make_table(4, settings={KEY: DETECTION})[0]
+    on = make_table(4, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})[0]
+    off = make_table(4, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION})[0]
     assert len({s.deal_policy for s in on.values()}) == 1
     assert len({s.deal_policy for s in off.values()}) == 1
     assert next(iter(on.values())).prevention is True
@@ -246,16 +246,17 @@ def test_host_and_peers_agree_without_negotiating():
 
 def test_adopting_the_same_policy_twice_is_idempotent():
     """Retries and relay echoes must stay harmless."""
-    sessions, _ = make_table(2, settings={KEY: BG})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     assert peer._adopt_deal_policy(BG) is True
+    peer._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     assert peer.deal_policy == BG
 
 
 def test_changing_the_policy_is_refused_by_the_chokepoint():
     """None -> A adopts, A -> A is idempotent, A -> B is refused. Asserted
     on the writer itself, not on a handler that happens to call it."""
-    sessions, _ = make_table(2, settings={KEY: BG})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     assert peer._adopt_deal_policy(DETECTION) is False
     assert peer.deal_policy == BG, "a refused adoption still wrote the field"
@@ -263,11 +264,11 @@ def test_changing_the_policy_is_refused_by_the_chokepoint():
 
 def test_a_second_game_start_cannot_change_the_policy():
     """Capabilities freeze once play begins."""
-    sessions, _ = make_table(2, settings={KEY: BG})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     peer._on_game_start("peer0", {"payload": {
         "seat_order": ["peer0", "peer1"],
-        "table_settings": {KEY: DETECTION}}})
+        "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION}}})
     assert peer.deal_policy == BG
     assert peer.prevention is True
 
@@ -276,16 +277,16 @@ def test_a_malformed_second_game_start_does_not_raise():
     """The freeze branch is a reject path reached from a message handler.
     Raising there would carry a hostile or stale game_start out of
     handle_message and onto the transport's dispatch thread."""
-    sessions, _ = make_table(2, settings={KEY: BG})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     peer._on_game_start("peer0", {"payload": {
-        "seat_order": ["peer0", "peer1"], "table_settings": {KEY: 12345}}})
+        "seat_order": ["peer0", "peer1"], "table_settings": {Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: 12345}}})
     assert peer.deal_policy == BG
 
 
 def test_a_fresh_session_does_not_inherit_a_previous_policy():
-    a, _ = make_table(2, settings={KEY: DETECTION})
-    b, _ = make_table(2, settings={KEY: BG})
+    a, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION})
+    b, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     assert all(s.deal_policy == DETECTION for s in a.values())
     assert all(s.deal_policy == BG for s in b.values())
 
@@ -296,14 +297,14 @@ def test_driver_receives_the_table_policy():
     """The single mapping point from policy string to the deal layer's
     bool. This is the bridge that a downgrade would cut."""
     for policy, expected in ((DETECTION, False), (BG, True)):
-        sessions, _ = make_table(2, settings={KEY: policy})
+        sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: policy})
         for s in sessions.values():
             s.begin_hand(hand_no=1, button=0)
             assert s._deal_driver.deal.prevention is expected
 
 
 def test_detection_only_hand_emits_no_proof():
-    sessions, _ = make_table(2, settings={KEY: DETECTION})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION})
     for s in sessions.values():
         s.begin_hand(hand_no=1, button=0)
     for s in sessions.values():
@@ -331,8 +332,8 @@ def test_the_deal_context_binds_the_policy():
     """"bayer-groth-v1" is a context commitment, not decorative metadata:
     two tables identical but for their policy must not share a deal
     domain."""
-    bg, _ = make_table(2, settings={KEY: BG})
-    det, _ = make_table(2, settings={KEY: DETECTION})
+    bg, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
+    det, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: DETECTION})
     assert (bg["peer0"]._deal_session_id()
             != det["peer0"]._deal_session_id())
 
@@ -350,6 +351,7 @@ def test_the_deal_context_encoding_is_injective():
                     clock=_DependencyClock(),
                     master_secret=bytes(range(32)))
         s._deal_policy = BG
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         s._seat_order = order
         return s._deal_context_bytes()
 
@@ -365,6 +367,7 @@ def test_the_deal_context_refuses_non_string_seat_ids():
                 clock=_DependencyClock(),
                 master_secret=bytes(range(32)))
     s._deal_policy = BG
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s._seat_order = ["ok", 7]
     with pytest.raises(TypeError, match="seat id must be str"):
         s._deal_context_bytes()
@@ -391,6 +394,7 @@ def make_deal_table(n, policy):
         s.local_conn_id = cid
         s.configure_seats(list(order))
         assert s._adopt_deal_policy(policy)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order
@@ -469,7 +473,7 @@ def test_the_terminal_record_carries_the_deal_policy():
     green: the only test that looked at it asserted on terminal_reason,
     which interpolates the value incidentally.
     """
-    sessions, _ = make_table(2, settings={KEY: BG})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     peer.terminate(Session.HOST_LOST, "host dropped")
     assert peer.terminal_record is not None
@@ -487,7 +491,7 @@ def test_a_malformed_seat_order_cannot_split_the_terminal_transition():
     was terminal but had never produced a record, never invalidated its
     pending work, and never notified its callbacks.
     """
-    sessions, _ = make_table(2, settings={KEY: BG})
+    sessions, _ = make_table(2, settings={Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE, KEY: BG})
     peer = sessions["peer1"]
     notified = []
     peer.on_session_terminated = notified.append
@@ -607,6 +611,7 @@ def test_a_hand_that_fails_after_the_replica_exists_rolls_it_back():
     s.local_conn_id = "peer0"
     s.configure_seats(order)
     assert s._adopt_deal_policy(DETECTION)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     s.local_conn_id = "ghost"          # seated nowhere
 
     with pytest.raises(RuntimeError, match="local seat not in seat order"):
@@ -635,6 +640,7 @@ def test_reseating_clears_the_cached_deal_context():
     s.local_conn_id = "peer0"
     s.configure_seats(["peer0", "peer1"])
     assert s._adopt_deal_policy(BG)
+    s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
     first = s._deal_session_id()
     assert s._recorded_session_id() == first
 

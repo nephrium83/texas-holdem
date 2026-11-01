@@ -37,6 +37,7 @@ def make_table(n):
         s.local_conn_id = cid
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         bus.register(cid, s)
         sessions[cid] = s
     return bus, sessions, order

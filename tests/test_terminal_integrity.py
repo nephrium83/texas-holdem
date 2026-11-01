@@ -54,6 +54,7 @@ def table(n=3, stacks=None, hand_no=1):
                                   avatar_b64="")
         s.configure_seats(list(order))
         s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
+        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         s.state = "PLAYING"          # a table dealing a hand is PLAYING
         bus.register(cid, s)
         sessions[cid] = s

@@ -100,6 +100,7 @@ def test_forgotten_startup_cannot_load_secrets_or_partially_start_a_hand(
         session.local_conn_id = 'peer'
         session.configure_seats(['peer', 'remote'])
         session._adopt_deal_policy(Session.DEAL_POLICY_BG)
+        session._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
         assert session.seat_order == ['peer', 'remote']
         assert session.replica is None and not R.is_initialized()
         assert calls == [], 'lobby configuration accessed crypto or the secret'

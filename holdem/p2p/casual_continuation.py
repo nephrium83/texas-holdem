@@ -1,4 +1,4 @@
-"""Opt-in, signed membership boundaries for one casual table.
+"""Signed membership boundaries selected by the adopted table policy.
 
 Seats and their keys never move. Departures stop the current deal, every
 survivor computes its own carry-forward balance, and the next deal waits
