@@ -266,6 +266,32 @@ def test_termination_notifies_the_client_once_after_the_record():
     assert s._current_deadline_token is None    # no deadline re-armed
 
 
+@pytest.mark.parametrize('broken', ['terminated', 'state', 'both'])
+def test_failing_terminal_observers_cannot_suppress_notification_or_completion(broken, caplog):
+    bus, sessions, order = table()
+    s = sessions['peer1']
+    calls = []
+
+    def terminated(record):
+        calls.append(('terminated', record.terminal_state))
+        if broken in ('terminated', 'both'):
+            raise RuntimeError('termination observer failed')
+
+    def changed():
+        calls.append(('state', s.terminal_state))
+        if broken in ('state', 'both'):
+            raise RuntimeError('state observer failed')
+
+    s.on_session_terminated = terminated
+    s.on_state_changed = changed
+    assert s.terminate(Session.HOST_LOST, 'host dropped') is True
+    assert calls == [('terminated', Session.HOST_LOST), ('state', Session.HOST_LOST)]
+    assert s._current_deadline_token is None
+    assert 'observer failed' in caplog.text
+    assert s.terminate(Session.ABORTED_PROTOCOL, 'second cause') is False
+    assert len(calls) == 2
+
+
 def test_concurrent_terminal_requests_yield_one_winner():
     """Under the current single-writer model these arrive serialized; the
     mechanism should not depend on that to stay correct."""
