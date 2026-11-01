@@ -297,20 +297,26 @@ def test_chmod_remedy_restores_the_original_secret(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows DACLs")
-def test_icacls_remedy_restores_the_original_secret(tmp_path):
-    """A secret left by the old code inherits its folder's DACL and is
-    refused. Running the exact icacls command from the refusal message
-    restricts it to the token user, after which the ORIGINAL bytes load."""
+def test_windows_remedy_restores_the_original_secret(tmp_path):
+    """A secret left by the old code inherits its folder's DACL (and, if an
+    elevated process wrote it, explicit Administrators/SYSTEM entries) and is
+    refused. Running EXACTLY the PowerShell command the refusal message
+    prints gives it identity_storage's own descriptor, after which the
+    ORIGINAL bytes load."""
     import subprocess
     target = tmp_path / "device_secret"
-    target.write_bytes(ORIGINAL)                       # inherited DACL, like the old code
-    with pytest.raises(identity_storage.InsecureKeyStorage):
+    target.write_bytes(ORIGINAL)                       # like the old code
+    with pytest.raises(identity_storage.InsecureKeyStorage) as info:
         device_secret.load_or_create(target)
-    user = os.environ["USERNAME"]
-    # exactly the two commands the refusal message gives
-    subprocess.run(["icacls", str(target), "/inheritance:r", "/grant:r", f"{user}:F"],
-                   check=True, capture_output=True)
-    subprocess.run(["icacls", str(target), "/setowner", user],
-                   check=True, capture_output=True)
+    command = device_secret.windows_remedy(target)
+    assert command in str(info.value)                  # the message carries it
+    subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    command], check=True, capture_output=True)
     assert device_secret.load_or_create(target) == ORIGINAL
     assert target.read_bytes() == ORIGINAL
+
+
+def test_windows_remedy_quotes_the_path_safely():
+    cmd = device_secret.windows_remedy(Path(r"C:\Users\o'brien\cfg\device_secret"))
+    assert "-LiteralPath 'C:\\Users\\o''brien\\cfg\\device_secret'" in cmd
+    assert 'D:P(A;;FA;;;' in cmd and 'O:$($s)' in cmd

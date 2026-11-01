@@ -137,10 +137,26 @@ def _refusal(target: Path, cause: Exception) -> str:
         f"or regenerated. Do not delete it: that would change this device's "
         f"key shares. Instead restrict the file and its folders to your "
         f"account and retry -- on Linux: chmod 600 on the file and 700 on its "
-        f"folder; on Windows: icacls \"{target}\" /inheritance:r /grant:r "
-        f"\"%USERNAME%:F\" then icacls \"{target}\" /setowner \"%USERNAME%\" "
+        f"folder; on Windows, in PowerShell as this account: "
+        f"{windows_remedy(target)} "
         f"(and make sure no ancestor folder grants other accounts write, "
         f"delete or permission-change rights).")
+
+
+def windows_remedy(target: Path) -> str:
+    """One PowerShell command that gives ``target`` exactly the security
+    descriptor identity_storage creates -- owned by the current user, a
+    protected DACL, the current user its only entry -- keeping the bytes.
+
+    It REPLACES the descriptor rather than editing it: a file created by an
+    elevated process can carry explicit (not inherited) Administrators and
+    SYSTEM entries, which removing inheritance alone leaves in place.
+    """
+    path = str(target).replace("'", "''")
+    return ("$s=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+            f"$a=Get-Acl -LiteralPath '{path}'; "
+            "$a.SetSecurityDescriptorSddlForm(\"O:$($s)D:P(A;;FA;;;$($s))\"); "
+            f"Set-Acl -LiteralPath '{path}' -AclObject $a")
 
 
 def _absent_is_none(read):
