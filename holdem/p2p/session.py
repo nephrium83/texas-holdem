@@ -3975,12 +3975,18 @@ class Session:
                         **(event if event is not None
                            else {"reason": f"{state}: {reason}"}))
         if self.on_session_terminated:
-            self.on_session_terminated(self.terminal_record)
+            try:
+                self.on_session_terminated(self.terminal_record)
+            except Exception:
+                _log.exception("session: termination observer failed")
         # Called directly, not through _notify_state_changed: that would
         # re-arm a deadline on a session whose pending work was just
         # invalidated.
         if self.on_state_changed is not None:
-            self.on_state_changed()
+            try:
+                self.on_state_changed()
+            except Exception:
+                _log.exception("session: terminal state observer failed")
         return True
 
     def _invalidate_pending_work(self) -> None:
