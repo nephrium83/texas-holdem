@@ -215,8 +215,8 @@ class _Conn:
         """Section 4: apply, answer with command_result, then a fresh
         snapshot. The session validates exactly as it would a remote
         peer's action -- nothing from the client is trusted."""
-        command = str(msg.get("command", ""))
-        payload = msg.get("payload") or {}
+        command = msg.get("command", "")
+        payload = msg.get("payload")
         try:
             result = client_view.apply_command(self._session, command,
                                                payload,
@@ -245,9 +245,15 @@ class _Conn:
         self._send(client_view.snapshot(self._session))
 
     async def _handle_controller_command(self, msg: dict) -> None:
-        command = str(msg.get("command", ""))
-        payload = msg.get("payload") or {}
+        command = msg.get("command", "")
+        payload = msg.get("payload")
         try:
+            if not isinstance(command, str):
+                raise ValueError("Command must be a string")
+            if payload is None:
+                payload = {}
+            if not isinstance(payload, dict):
+                raise ValueError("Command payload must be an object")
             result = await asyncio.to_thread(self._command_handler, command, payload)
         except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
             _log.error("client command %r failed", command)

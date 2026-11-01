@@ -43,12 +43,39 @@ def _seat_view(engine, p) -> dict:
     }
 
 
+def _validate_seat(engine, seat):
+    if type(seat) is not int or not 0 <= seat < len(engine.players):
+        raise ValueError('seat must be an integer identifying a player at this table')
+
+
+def validate_command_payload(command, payload=None) -> dict:
+    """Check wire value types without coercing them or deciding poker legality."""
+    if not isinstance(command, str) or command not in (
+            'fold', 'check_call', 'raise_to', 'sit_out', 'sit_in', 'add_chips',
+            'start_game', 'next_hand'):
+        raise ValueError(f'unknown command: {command!r}')
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        raise ValueError('command payload must be an object')
+    required = {'amount'} if command in ('raise_to', 'add_chips') else set()
+    allowed = {'post_now'} if command == 'sit_in' else required
+    if required - set(payload) or set(payload) - allowed:
+        raise ValueError(f'unexpected or missing payload fields for {command}')
+    if 'amount' in payload and type(payload['amount']) is not int:
+        raise ValueError('amount must be an integer')
+    if 'post_now' in payload and type(payload['post_now']) is not bool:
+        raise ValueError('post_now must be true or false')
+    return dict(payload)
+
+
 def build_snapshot(engine, seat: int) -> dict:
     """Full renderable state for exactly one ``seat`` (section 5 snapshot).
 
     Hole cards for any seat other than ``seat`` are omitted entirely.
     ``you.legal`` is populated only when it is ``seat``'s turn to act.
     """
+    _validate_seat(engine, seat)
     sb_seat = getattr(engine, "sb_seat", getattr(engine, "sb_i", -1))
     bb_seat = getattr(engine, "bb_seat", getattr(engine, "bb_i", -1))
 
@@ -99,7 +126,8 @@ def apply_command(engine, seat: int, command: str, payload: dict | None = None):
     Returns whatever the underlying engine call returns. Raises ValueError
     on an unknown command. Legality is the engine's job, not ours.
     """
-    payload = payload or {}
+    _validate_seat(engine, seat)
+    payload = validate_command_payload(command, payload)
     if command == "fold":
         return engine.act(seat, "fold")
     if command == "check_call":
@@ -107,11 +135,11 @@ def apply_command(engine, seat: int, command: str, payload: dict | None = None):
         # separate "check" action; sending that silently skips narration.
         return engine.act(seat, "call")
     if command == "raise_to":
-        return engine.act(seat, "raise", int(payload["amount"]))
+        return engine.act(seat, "raise", payload["amount"])
     if command == "sit_out":
         return engine.sit_out(seat)
     if command == "sit_in":
-        return engine.sit_in(seat, post_now=bool(payload.get("post_now", False)))
+        return engine.sit_in(seat, post_now=payload.get("post_now", False))
     if command == "add_chips":
-        return engine.add_chips(seat, int(payload["amount"]))
+        return engine.add_chips(seat, payload["amount"])
     raise ValueError(f"unknown command: {command!r}")

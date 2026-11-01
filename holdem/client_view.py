@@ -342,7 +342,7 @@ def apply_command(session, command: str,
     those is how prevention silently defaulted off. A sidecar that cannot
     start a table simply passes None.
     """
-    payload = payload or {}
+    payload = contract.validate_command_payload(command, payload)
     if command == "start_game":
         # Starts the local table that is ALREADY configured (seats, blinds,
         # deal policy). This is not table creation, and not a lobby: see
@@ -358,7 +358,7 @@ def apply_command(session, command: str,
         # The engine treats a zero-to-call "call" as a check.
         verdict = session.send_bet_action("call")
     elif command == "raise_to":
-        verdict = session.send_bet_action("raise", int(payload["amount"]))
+        verdict = session.send_bet_action("raise", payload["amount"])
     elif command == "next_hand":
         # Advance the continuous session past a settled/voided hand. This
         # is a table-wide step: every peer's sidecar makes the same call
