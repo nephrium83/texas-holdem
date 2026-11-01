@@ -34,8 +34,15 @@ is published by atomic replacement through the pinned directory under an
 exclusive lock. Storage that cannot establish that boundary -- reparse
 points, substituted roots, short-name aliases, unverifiable volumes, or
 ancestors other accounts can mutate -- is refused with InsecureKeyStorage
-rather than used. Unsafe EXISTING files are refused, never repaired: a
-secret another account could have written cannot be trusted to be ours.
+rather than used. Unsafe EXISTING files are refused, never repaired or
+rewritten: a secret another account could have written cannot be trusted
+to be ours, and code cannot tell a tampered file from a legitimate one.
+The refusal leaves the bytes untouched and tells the operator to restrict
+the permissions in place -- which preserves the secret -- not to delete it.
+
+Secrets written by the previous code keep their bytes: on Linux it already
+chmod-ed them 0600, so they read back unchanged; on Windows they carry an
+inherited DACL and are refused until their permissions are restricted.
 
 This replaced private_storage, which checked nothing about the existing
 file and only best-effort chmod-ed a new one (a no-op for ACLs on Windows).
@@ -112,6 +119,28 @@ def load_or_create(path: Optional[Path] = None) -> bytes:
         raise ValueError(
             f"cannot store device secret at {target}; release retained storage "
             f"resources before retrying") from exc
+    except identity_storage.InsecureKeyStorage as exc:
+        raise identity_storage.InsecureKeyStorage(_refusal(target, exc)) from exc
+
+
+def _refusal(target: Path, cause: Exception) -> str:
+    """Refusal text whose remedy PRESERVES the existing secret's bytes.
+
+    An existing secret is never repaired or rewritten automatically: code
+    cannot tell a tampered file from a legitimate one, and silently changing
+    this device's secret is the failure this module exists to prevent. The
+    operator restricts the permissions in place instead, which keeps the
+    exact bytes.
+    """
+    return (
+        f"{cause}. The device secret at {target} was not modified, replaced "
+        f"or regenerated. Do not delete it: that would change this device's "
+        f"key shares. Instead restrict the file and its folders to your "
+        f"account and retry -- on Linux: chmod 600 on the file and 700 on its "
+        f"folder; on Windows: icacls \"{target}\" /inheritance:r /grant:r "
+        f"\"%USERNAME%:F\" then icacls \"{target}\" /setowner \"%USERNAME%\" "
+        f"(and make sure no ancestor folder grants other accounts write, "
+        f"delete or permission-change rights).")
 
 
 def _absent_is_none(read):
