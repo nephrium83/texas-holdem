@@ -329,33 +329,38 @@ def prove(ck: CommitmentKey, c_A: Sequence[Point],
 
 def verify(ck: CommitmentKey, c_A: Sequence[Point], c_b: Point, n: int,
            context: bytes, proof: HadamardProof) -> bool:
-    """Verify a Hadamard product proof. Returns False; never raises."""
-    m = len(c_A)
-    if m < 2 or n < 1 or n > ck.n:
-        return False
-    if len(proof.c_B_interior) != m - 2:
-        return False
+    """Verify a Hadamard product proof. Returns False; never raises.
 
-    # Rebuilt from the statement, not taken from the prover.
-    c_B: List[Point] = [c_A[0], *proof.c_B_interior, c_b]
-
+    The whole body is guarded (audit #50): the shape checks and the proof
+    field accesses used to run OUTSIDE the try, so a malformed or wrongly
+    deserialised proof object raised instead of being rejected. Same guard
+    as bg_product.verify.
+    """
     try:
+        m = len(c_A)
+        if m < 2 or n < 1 or n > ck.n:
+            return False
+        if len(proof.c_B_interior) != m - 2:
+            return False
+
+        # Rebuilt from the statement, not taken from the prover.
+        c_B: List[Point] = [c_A[0], *proof.c_B_interior, c_b]
+
         x, y = _challenges(_transcript(ck, n, m, context, c_A, c_b, c_B))
         bmap = BilinearMap.from_challenge(y, n)
-    except ValueError:
+        xs = _powers(x, m)
+        c_D_list, c_D, c_neg1 = _derived_commitments(ck, c_B, m, n, xs)
+
+        return bg_zero.verify(
+            ck,
+            [*c_A[1:], c_neg1],
+            [*c_D_list, c_D],
+            bmap,
+            _zero_context(context, c_A, c_b, c_B, x, y),
+            proof.zero,
+        )
+    except (AttributeError, IndexError, TypeError, ValueError):
         return False
-
-    xs = _powers(x, m)
-    c_D_list, c_D, c_neg1 = _derived_commitments(ck, c_B, m, n, xs)
-
-    return bg_zero.verify(
-        ck,
-        [*c_A[1:], c_neg1],
-        [*c_D_list, c_D],
-        bmap,
-        _zero_context(context, c_A, c_b, c_B, x, y),
-        proof.zero,
-    )
 
 
 __all__ = ["HadamardProof", "prove", "verify"]
