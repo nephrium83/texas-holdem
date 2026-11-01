@@ -152,6 +152,24 @@ def test_verify_all_flags_swapped_context():
     assert pop.verify_all(Xs, proofs, ctx_for) == [1]
 
 
+@pytest.mark.parametrize('share_count,proof_count', [(2, 1), (1, 2), (0, 1), (1, 0)])
+def test_verify_all_refuses_unmatched_shares_or_proofs(share_count, proof_count):
+    xs = [R.random_scalar() for _ in range(2)]
+    shares = [R.mul_base(x) for x in xs]
+    ctx_for = lambda i: f"cardinality|{i}".encode()
+    proofs = [pop.prove(x, ctx=ctx_for(i)) for i, x in enumerate(xs)]
+    with pytest.raises(ValueError, match='same number'):
+        pop.verify_all(iter(shares[:share_count]), iter(proofs[:proof_count]), ctx_for)
+
+
+def test_verify_all_preserves_aligned_iterables_and_empty_ceremony():
+    x = R.random_scalar()
+    ctx_for = lambda i: f"iterable|{i}".encode()
+    assert pop.verify_all(iter([R.mul_base(x)]), iter([pop.prove(x, ctx=ctx_for(0))]),
+                          ctx_for) == []
+    assert pop.verify_all(iter([]), iter([]), ctx_for) == []
+
+
 if __name__ == "__main__":
     fns = [(k, v) for k, v in sorted(globals().items())
            if k.startswith("test_") and callable(v)]

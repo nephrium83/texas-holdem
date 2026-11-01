@@ -153,6 +153,9 @@ class Ciphertext:
     @staticmethod
     def from_hex(pair: Sequence[str]) -> "Ciphertext":
         """Parse a wire pair [C0_hex, C1_hex], validating both points."""
+        if (not isinstance(pair, (list, tuple)) or len(pair) != 2
+                or not all(isinstance(value, str) for value in pair)):
+            raise ValueError('ciphertext must be a pair of hexadecimal strings')
         c0 = R.point_from_bytes(bytes.fromhex(pair[0]))
         c1 = R.point_from_bytes(bytes.fromhex(pair[1]))
         return Ciphertext(c0, c1)
