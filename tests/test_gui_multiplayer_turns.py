@@ -63,7 +63,7 @@ def _ui(mp=True, is_host=True, seat_to_peer=None):
         v_observe=_Var(False), v_bet=_Var(0),
         rng=random.Random(0), brain=SimpleNamespace(
             decide=lambda eng, i: ("call", 0)),
-        _allin_announced=set(), calls=calls,
+        _allin_announced=set(), calls=calls, hand_over=False,
     )
     noop = lambda *a, **k: None
     for name in ("flush_log", "redraw", "start_equity", "start_clock",

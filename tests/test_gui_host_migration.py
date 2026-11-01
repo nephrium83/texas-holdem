@@ -47,9 +47,14 @@ def _peer(street):
     )
     ui._show_banner = lambda *a, **k: None
     ui.lock = lambda: ui.locked.append(True)
+    noop = lambda *a, **k: None
+    for name in ("flush_log", "redraw", "start_equity", "locked_runout",
+                 "showdown"):
+        setattr(ui, name, noop)
+    ui._defer = lambda *a: False
     for name in ("_mp_on_host_changed", "_mp_replica_mid_hand",
                  "_mp_void_promoted_hand", "_mp_broadcast_state",
-                 "_mp_peer_acted", "_mp_host_sync"):
+                 "_mp_peer_acted", "_mp_host_sync", "loop"):
         setattr(ui, name, types.MethodType(getattr(Holdem, name), ui))
     return ui
 
@@ -84,3 +89,17 @@ def test_not_promoted_changes_nothing():
     assert ui._mp_session._engine is None
     assert not ui._mp_is_host
     assert ui.engine.actor is not None
+
+
+def test_loop_after_a_voided_promotion_never_advances_the_hand():
+    """Found in review: after the void the new host has _mp_is_host=True and
+    actor None, which loop() would read as "betting round closed" and use to
+    deal the next street of the voided hand onto the replica's stub cards.
+    loop() must refuse to drive a hand that is over."""
+    ui = _peer("preflop")
+    ui._mp_on_host_changed(True)
+    e = ui.engine
+    street, board = e.street, list(e.board)
+    ui.loop()
+    assert e.street == street and e.board == board
+    assert ui._mp_session.broadcasts == 0

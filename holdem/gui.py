@@ -1585,6 +1585,12 @@ class Holdem:
     def loop(self):
         if self._mp_mode and not self._mp_is_host:
             return   # peers are driven by game_state messages, not the local loop
+        if self.hand_over:
+            # Nothing to drive. In particular a hand voided on host promotion
+            # (_mp_void_promoted_hand) has actor None, which below would read
+            # as "betting round closed" and advance the voided hand onto the
+            # replica's stub cards.
+            return
         if self._defer(self.loop):
             return
         e = self.engine
@@ -2360,7 +2366,7 @@ class Holdem:
         self.result = {
             "winners": {local}, "pots": [{"amount": pot, "eligible": [local], "runs": []}],
             "runs": [], "shown": {local}, "mucked": set(),
-            "order": [local], "refund": None, "tabled": False,
+            "order": [local], "refund": split["refund"], "tabled": False,
             "cashout": {
                 "seat": local,
                 "equity": hero_eq,
