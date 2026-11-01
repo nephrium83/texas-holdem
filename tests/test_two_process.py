@@ -59,7 +59,16 @@ HAND_ARGS = {
 
 # ── subprocess helpers ────────────────────────────────────────────────────────
 
-def _start_worker(*extra_args: str) -> subprocess.Popen:
+def _start_worker(*extra_args: str, config_dir) -> subprocess.Popen:
+    """Start a peer worker with its OWN config directory (audit #121).
+
+    A worker loads an identity and a device secret from HOLDEM_CONFIG_DIR.
+    Started from a class-scoped fixture it would otherwise inherit whatever
+    the environment held -- historically the developer's real config. Each
+    worker also needs a DIFFERENT directory: two peers sharing one identity
+    and one secret is not two peers. config_dir is keyword-only and has no
+    default, so a caller cannot forget it.
+    """
     return subprocess.Popen(
         [sys.executable, WORKER, *extra_args],
         stdin=subprocess.PIPE,
@@ -67,6 +76,7 @@ def _start_worker(*extra_args: str) -> subprocess.Popen:
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        env=dict(os.environ, HOLDEM_CONFIG_DIR=str(config_dir)),
     )
 
 
@@ -462,7 +472,7 @@ class EventCollector:
 # ── class-scoped fixture ──────────────────────────────────────────────────────
 
 @pytest.fixture(scope="class")
-def shared_two_process(request):
+def shared_two_process(request, tmp_path_factory):
     """One pair of subprocesses shared across the entire test class.
 
     Using class scope means the mental-poker deal runs once (~20-30s)
@@ -487,7 +497,10 @@ def shared_two_process(request):
     request.cls.t0 = time.monotonic()
     request.cls.t_start_hand = None
     try:
-        host_proc = _start_worker("--role", "host", "--port", "0")
+        request.cls.config_dirs = (tmp_path_factory.mktemp("host-config"),
+                                   tmp_path_factory.mktemp("guest-config"))
+        host_proc = _start_worker("--role", "host", "--port", "0",
+                                  config_dir=request.cls.config_dirs[0])
         host_col  = EventCollector(host_proc, "host")
         _drain(host_proc.stderr, host_stderr)
 
@@ -496,7 +509,8 @@ def shared_two_process(request):
         assert ready is not None, "host never emitted ready"
         port = ready["port"]
 
-        guest_proc = _start_worker("--role", "guest", "--peer-port", str(port))
+        guest_proc = _start_worker("--role", "guest", "--peer-port", str(port),
+                                   config_dir=request.cls.config_dirs[1])
         guest_col  = EventCollector(guest_proc, "guest")
         _drain(guest_proc.stderr, guest_stderr)
 
@@ -687,13 +701,14 @@ class TestTwoSidecarProcess:
 
 # ── command-path classification ──────────────────────────────────────────────
 
-def test_command_path_reports_a_healthy_host():
+def test_command_path_reports_a_healthy_host(tmp_path):
     """Control for the classifier: a working run reaches every stage.
 
     Without this, a classifier that silently reported nothing would look
     identical to a clean run.
     """
-    proc = _start_worker("--role", "host", "--port", "0")
+    proc = _start_worker("--role", "host", "--port", "0",
+                         config_dir=tmp_path / "host-config")
     col = EventCollector(proc, "host")
     sink = StderrSink("host")
     _drain(proc.stderr, sink)
@@ -701,7 +716,8 @@ def test_command_path_reports_a_healthy_host():
         assert col.wait_for(lambda e: e.get("type") == "ready",
                             timeout=STARTUP_TIMEOUT), "host never emitted ready"
         guest = _start_worker("--role", "guest", "--peer-port",
-                              str(col.all_of_type("ready")[0]["port"]))
+                              str(col.all_of_type("ready")[0]["port"]),
+                              config_dir=tmp_path / "guest-config")
         EventCollector(guest, "guest")   # drain stdout so it cannot block
         try:
             assert col.wait_for(lambda e: e.get("type") == "connected",
@@ -725,7 +741,7 @@ def test_command_path_reports_a_healthy_host():
         proc.terminate()
 
 
-def test_starved_consumer_is_classified_not_guessed():
+def test_starved_consumer_is_classified_not_guessed(tmp_path):
     """Reproduces the captured CI shape deterministically.
 
     The observed failure was: host alive, stderr_bytes=0, no start_hand
@@ -744,7 +760,8 @@ def test_starved_consumer_is_classified_not_guessed():
     ahead of the host's own command. This test does not prove that is
     what happened in CI. It proves the instrumentation would say so.
     """
-    env = dict(os.environ, PEER_WORKER_STALL_MS="8000")
+    env = dict(os.environ, PEER_WORKER_STALL_MS="8000",
+               HOLDEM_CONFIG_DIR=str(tmp_path / "host-config"))
     host = subprocess.Popen(
         [sys.executable, WORKER, "--role", "host", "--port", "0"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -758,7 +775,8 @@ def test_starved_consumer_is_classified_not_guessed():
                               timeout=STARTUP_TIMEOUT)
         assert ready is not None
         guest = _start_worker("--role", "guest", "--peer-port",
-                              str(ready["port"]))
+                              str(ready["port"]),
+                              config_dir=tmp_path / "guest-config")
         gcol = EventCollector(guest, "guest")
         assert hcol.wait_for(lambda e: e.get("type") == "connected",
                              timeout=STARTUP_TIMEOUT)
