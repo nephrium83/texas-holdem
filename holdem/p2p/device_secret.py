@@ -24,6 +24,22 @@ passphrase prompt on every launch and protect nothing that is not already
 lost. Do not reuse this module for anything of value without revisiting
 that decision.
 
+Storage
+-------
+The secret is stored through ``identity_storage`` -- the same strict,
+object-bound storage as the identity it sits next to (finding 210). It is
+read only from a verified, pinned local object; it is created owner-only
+(0600 / a protected token-user DACL) before the secret is written; and it
+is published by atomic replacement through the pinned directory under an
+exclusive lock. Storage that cannot establish that boundary -- reparse
+points, substituted roots, short-name aliases, unverifiable volumes, or
+ancestors other accounts can mutate -- is refused with InsecureKeyStorage
+rather than used. Unsafe EXISTING files are refused, never repaired: a
+secret another account could have written cannot be trusted to be ours.
+
+This replaced private_storage, which checked nothing about the existing
+file and only best-effort chmod-ed a new one (a no-op for ACLs on Windows).
+
 Corruption fails loudly
 -----------------------
 A file that exists but is not exactly 32 bytes raises rather than being
@@ -39,7 +55,7 @@ from pathlib import Path
 from typing import Optional
 
 from holdem.settings import config_dir
-from holdem.p2p.private_storage import atomic_write, canonical_target, locked
+from holdem.p2p import identity_storage
 
 SECRET_BYTES = 32
 FILENAME = "device_secret"
@@ -75,30 +91,58 @@ def load_or_create(path: Optional[Path] = None) -> bytes:
     developer machine essentially never has, which is why every observed
     occurrence was on Linux CI and none locally.
     """
-    target = canonical_target(Path(path) if path is not None else secret_path())
-
-    existing = _read(target)
-    if existing is not None:
-        return existing
-
-    with locked(target):
+    target = Path(path) if path is not None else secret_path()
+    try:
+        # Fast path: an existing secret needs only a verified read -- no
+        # lock and no write access (the common case on every launch).
         existing = _read(target)
         if existing is not None:
             return existing
-        secret = os.urandom(SECRET_BYTES)
-        atomic_write(target, secret)
-        _restrict(target)
-        return secret
+        # Create under the storage lock. Re-read inside it: a concurrent
+        # first launch may have published while we waited, and BOTH callers
+        # must end up with that one secret or their key shares diverge.
+        with identity_storage.creating(target) as publisher:
+            existing = _check(target, _absent_is_none(publisher.read_existing))
+            if existing is not None:
+                return existing
+            secret = os.urandom(SECRET_BYTES)
+            publisher.publish(secret)
+            return secret
+    except identity_storage.StorageCleanupError as exc:
+        raise ValueError(
+            f"cannot store device secret at {target}; release retained storage "
+            f"resources before retrying") from exc
+
+
+def _absent_is_none(read):
+    """Run a storage read; a missing file (or directory) means 'no secret'.
+
+    InsecureKeyStorage is a ValueError and propagates unchanged: unsafe
+    storage is refused, not treated as absent. Any other OSError is a read
+    failure on a secret that may well exist, and is reported as such.
+    """
+    try:
+        return read()
+    except FileNotFoundError:
+        return None
 
 
 def _read(target: Path) -> Optional[bytes]:
-    """The stored secret, or None if absent. Raises if present but wrong."""
+    """The stored secret, or None if absent. Raises if present but wrong,
+    or if the storage itself cannot be trusted."""
     try:
-        data = target.read_bytes()
-    except FileNotFoundError:
-        return None
+        data = _absent_is_none(lambda: identity_storage.load_identity_bytes(target))
+    except identity_storage.InsecureKeyStorage:
+        raise
     except OSError as exc:
         raise ValueError(f"cannot read device secret at {target}: {exc}") from exc
+    return _check(target, data)
+
+
+def _check(target: Path, data: Optional[bytes]) -> Optional[bytes]:
+    """Validate a stored secret's length; None passes through as absent."""
+    if data is None:
+        return None
     if len(data) != SECRET_BYTES:
         raise ValueError(
             f"device secret at {target} is {len(data)} bytes, expected "
@@ -107,21 +151,6 @@ def _read(target: Path) -> Optional[bytes]:
             f"file exists to prevent. Delete it to generate a new one (this "
             f"invalidates key shares from earlier hands).")
     return data
-
-
-def _restrict(target: Path) -> None:
-    """Best-effort owner-only permissions.
-
-    Meaningful on POSIX. On Windows chmod only toggles the read-only
-    attribute and does not touch ACLs, so the file inherits the config
-    directory's inherited permissions -- acceptable given the threat model
-    above, where the secret is no more sensitive than the process memory
-    it lives in.
-    """
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
 
 
 __all__ = ["SECRET_BYTES", "FILENAME", "secret_path", "load_or_create"]

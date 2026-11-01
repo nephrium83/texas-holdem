@@ -22,7 +22,7 @@ from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
 
 try:
     initialize_for_tests()
-    from holdem.p2p import device_secret
+    from holdem.p2p import device_secret, identity_storage
     from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
     from holdem.p2p.mental_deal import derive_share
     from holdem.p2p.session import Session
@@ -68,12 +68,20 @@ def test_honours_the_config_dir_override(tmp_path, monkeypatch):
 
 # ------------------------------------------------------- corrupt file
 
+def _plant(target, content):
+    """Store ``content`` through the SAME strict storage the module uses, so
+    a test about a wrong-length secret is not instead tripped up by (and
+    silently passing on) the storage-permission checks."""
+    with identity_storage.creating(target) as publisher:
+        publisher.publish(content)
+
+
 @pytest.mark.parametrize("content", [b"", b"short", b"x" * 31, b"x" * 33])
 def test_wrong_length_raises_rather_than_regenerating(tmp_path, content):
     """Silent regeneration is the exact bug this module fixes -- an identity
     changing without anyone noticing -- so it must not be the recovery."""
     target = tmp_path / "device_secret"
-    target.write_bytes(content)
+    _plant(target, content)
     with pytest.raises(ValueError, match="expected 32"):
         device_secret.load_or_create(target)
     assert target.read_bytes() == content, "corrupt file must be left alone"
@@ -81,9 +89,60 @@ def test_wrong_length_raises_rather_than_regenerating(tmp_path, content):
 
 def test_error_message_tells_the_operator_what_to_do(tmp_path):
     target = tmp_path / "device_secret"
-    target.write_bytes(b"nope")
+    _plant(target, b"nope")
     with pytest.raises(ValueError, match="[Dd]elete it"):
         device_secret.load_or_create(target)
+
+
+# -------------------------------------------- strict storage (finding 210)
+
+def test_device_secret_no_longer_uses_private_storage():
+    """private_storage verified nothing about an existing secret; the module
+    must go through identity_storage instead."""
+    import inspect
+    source = inspect.getsource(device_secret)
+    assert "private_storage import" not in source
+    assert "identity_storage" in source
+
+
+def test_unsafe_existing_secret_is_refused_and_left_alone(tmp_path):
+    """A secret written with ordinary permissions (0644 under the usual
+    umask on Linux; an inherited, non-private DACL on Windows) is exactly
+    what the old code produced and accepted. It is refused -- not repaired,
+    not replaced -- because another account could have written it."""
+    target = tmp_path / "device_secret"
+    planted = b"k" * device_secret.SECRET_BYTES
+    target.write_bytes(planted)
+    if os.name != "nt":
+        os.chmod(target, 0o644)
+    with pytest.raises(identity_storage.InsecureKeyStorage):
+        device_secret.load_or_create(target)
+    assert target.read_bytes() == planted, "unsafe secret must not be modified"
+
+
+def test_insecure_storage_is_still_a_value_error(tmp_path):
+    """Callers that already handle ValueError keep working."""
+    assert issubclass(identity_storage.InsecureKeyStorage, ValueError)
+
+
+def test_created_secret_is_private_and_strictly_readable(tmp_path):
+    target = tmp_path / "device_secret"
+    secret = device_secret.load_or_create(target)
+    # readable back through the strict verifier = conforming permissions
+    assert identity_storage.load_identity_bytes(target) == secret
+    if os.name != "nt":
+        assert (target.stat().st_mode & 0o777) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink policy")
+def test_symlinked_secret_is_refused(tmp_path):
+    real = tmp_path / "elsewhere" / "device_secret"
+    secret = device_secret.load_or_create(real)
+    link = tmp_path / "device_secret"
+    link.symlink_to(real)
+    with pytest.raises(ValueError):
+        device_secret.load_or_create(link)
+    assert real.read_bytes() == secret
 
 
 # ------------------------------------------------------ session wiring
@@ -175,26 +234,29 @@ def test_share_is_stable_per_seat_and_hand(tmp_path, monkeypatch):
 def test_racing_first_launch_does_not_see_a_partial_file(tmp_path, monkeypatch):
     """A reader in the creation window must not observe a 0-byte secret.
 
-    The window is forced rather than raced: os.write is delayed for the
-    creating thread, and a second thread calls load_or_create inside that
-    delay. Without the fix the second thread raises ValueError on a
-    0-byte file. With it, no reader can observe a partial file at all.
+    The window is forced rather than raced: the creator's publish is
+    delayed, and a second thread calls load_or_create inside that delay.
+    It must wait for the creator's lock, then read the ONE secret the
+    creator published -- never a partial file, never a second secret.
     """
     import threading
 
     target = tmp_path / "device_secret"
-    real_write = os.write
     in_window = threading.Event()
     release = threading.Event()
 
-    def slow_write(fd, data):
-        # Only stall the real secret-sized write, not incidental ones.
+    # Hold the window open at the storage layer's publish step, which every
+    # platform goes through (Windows publishes via the Win32 API, so an
+    # os.write hook would never fire there and the test would prove nothing).
+    real_publish = identity_storage.Publisher.publish
+
+    def slow_publish(self, data):
         if len(data) == device_secret.SECRET_BYTES:
             in_window.set()
             release.wait(timeout=5.0)
-        return real_write(fd, data)
+        return real_publish(self, data)
 
-    monkeypatch.setattr(os, "write", slow_write)
+    monkeypatch.setattr(identity_storage.Publisher, "publish", slow_publish)
 
     results = {}
 
@@ -206,6 +268,9 @@ def test_racing_first_launch_does_not_see_a_partial_file(tmp_path, monkeypatch):
 
     def racer():
         assert in_window.wait(timeout=5.0), "creation window never opened"
+        # The racer will block on the creator's lock; let the creator finish
+        # shortly after the racer is in flight.
+        threading.Timer(0.3, release.set).start()
         try:
             results["racer"] = device_secret.load_or_create(target)
         except BaseException as exc:                    # noqa: BLE001
@@ -234,6 +299,8 @@ def test_racing_first_launch_does_not_see_a_partial_file(tmp_path, monkeypatch):
     assert target.read_bytes() == results["creator"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows publishes via the Win32 "
+                    "API, not os.write; the race test above covers it there")
 def test_no_reader_can_observe_a_zero_byte_secret(tmp_path, monkeypatch):
     """Directly pins the invariant: the published path is never partial.
 
