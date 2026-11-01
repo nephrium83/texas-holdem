@@ -374,7 +374,11 @@ def test_run_it_twice():
     e.button = 2
     e.start_hand()
     e.act(0, "raise", 500)
-    e.act(1, "raise", 500)
+    # B has 490 behind facing 490: that is an all-in CALL, not a raise.
+    # (This used to send "raise", which act() silently downgraded; it now
+    # refuses an illegal raise -- audit finding 1.)
+    assert not e.legal(1)["can_raise"]
+    e.act(1, "call")
     e.act(2, "fold")
     assert e.betting_locked()
     res = e.settle(runs=2)

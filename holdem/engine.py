@@ -15,6 +15,14 @@ RANK_STR = {2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8", 9: "9",
             10: "10", 11: "J", 12: "Q", 13: "K", 14: "A"}
 
 
+class IllegalAction(ValueError):
+    """Engine.act refused an action: unknown, out of turn, or illegal.
+
+    Subclasses ValueError so callers already catching ValueError keep
+    working; the engine state is unchanged when this is raised.
+    """
+
+
 class Card:
     __slots__ = ("v", "s")
 
@@ -357,6 +365,81 @@ def _pot_layers(live, dead, contenders):
         else:
             pots.append({"amount": remaining, "eligible": list(contenders)})
     return pots
+
+
+def cashout_split(players, hero_idx, contenders, hero_eq, fee=0.01):
+    """Split the pot for an EV cashout, respecting side-pot eligibility.
+
+    Audit finding 6: the cashout priced the hero's equity against the WHOLE
+    pot and split the rest evenly over every opponent, so a short all-in
+    hero could cash out chips it could never win, and an opponent could be
+    paid from a side pot it was not in. This applies settle()'s own rules:
+
+    1. an uncalled live bet is returned to its owner (as settle step 1);
+    2. the pot is layered by _pot_layers (as settle step 4);
+    3. the hero's equity is applied only to pots the hero is eligible for
+       AND contests; a pot whose only eligible player is the hero is simply
+       the hero's, and one whose only eligible player is another seat is
+       that seat's;
+    4. the opponents' remainder of each hero pot goes only to that pot's
+       other eligible players.
+
+    Returns None when a side pot is contested by two or more OTHER players:
+    the hero has no claim on it, and only a run-out can decide it, so no
+    cashout should be offered. Otherwise a dict with ``payouts`` (seat ->
+    chips), ``refund`` ((seat, chips) or None), ``eligible_pot`` (the
+    contested chips the equity applied to), ``gross``, ``net`` and ``fee``.
+    The payouts plus the refund always equal the whole pot.
+    """
+    live = [p.total_live for p in players]
+    dead = [p.total_dead for p in players]
+    refund = None
+    lives = sorted((v for v in live if v > 0), reverse=True)
+    if len(lives) >= 2 and lives[0] > lives[1]:
+        top = [i for i, v in enumerate(live) if v == lives[0]]
+        if len(top) == 1:
+            back = lives[0] - lives[1]
+            live[top[0]] -= back
+            refund = (top[0], back)
+    contenders = list(contenders)
+    pots = _pot_layers(live, dead, contenders)
+
+    payouts = {i: 0 for i in range(len(players))}
+    contested = []                      # hero pots with at least one rival
+    for pot in pots:
+        elig = pot["eligible"]
+        if hero_idx in elig:
+            if len(elig) == 1:
+                payouts[hero_idx] += pot["amount"]
+            else:
+                contested.append(pot)
+        elif len(elig) == 1:
+            payouts[elig[0]] += pot["amount"]
+        else:
+            return None                 # a live side pot the hero is not in
+
+    eligible_pot = sum(p["amount"] for p in contested)
+    gross = int(hero_eq * eligible_pot)
+    net = int(gross * (1 - fee))
+    # Spread the hero's net over the contested pots in proportion to size,
+    # then give each pot's remainder to that pot's other eligible seats.
+    parts = [net * pot["amount"] // eligible_pot if eligible_pot else 0
+             for pot in contested]
+    if contested:                       # rounding chips to the largest pot
+        biggest = max(range(len(contested)),
+                      key=lambda k: contested[k]["amount"])
+        parts[biggest] += net - sum(parts)
+    for pot, hero_part in zip(contested, parts):
+        payouts[hero_idx] += hero_part
+        rivals = [i for i in pot["eligible"] if i != hero_idx]
+        rest = pot["amount"] - hero_part
+        each, odd = divmod(rest, len(rivals))
+        for j, i in enumerate(rivals):
+            payouts[i] += each + (1 if j < odd else 0)
+
+    return {"payouts": payouts, "refund": refund,
+            "eligible_pot": eligible_pot, "gross": gross, "net": net,
+            "fee": gross - net}
 
 
 class Engine:
@@ -742,8 +825,27 @@ class Engine:
     # -- actions -----------------------------------------------------------
 
     def act(self, i, action, amount=0):
+        """Apply one betting action for seat ``i``.
+
+        Raises IllegalAction -- leaving the engine untouched -- when the
+        action is unknown, when ``i`` is not the seat to act, when that
+        seat cannot act, or when it raises without a raise being legal.
+        The engine is the last line of defence for every caller (GUI,
+        replica, contract), so it never trusts them to have checked.
+        """
+        if action not in ("fold", "call", "raise"):
+            raise IllegalAction(f"unknown action {action!r}")
+        if not isinstance(i, int) or not 0 <= i < len(self.players):
+            raise IllegalAction(f"no such seat {i!r}")
+        if self.actor is None or i != self.actor:
+            raise IllegalAction(
+                f"seat {i} acted out of turn (seat to act: {self.actor})")
         p = self.players[i]
+        if not self.can_act(p):
+            raise IllegalAction(f"seat {i} cannot act")
         lg = self.legal(i)
+        if action == "raise" and not lg["can_raise"]:
+            raise IllegalAction(f"seat {i} may not raise here")
 
         if action == "fold":
             p.folded = True

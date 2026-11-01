@@ -231,6 +231,11 @@ class MentalDeal:
     # Phase D (audit) state
     _round_decks: List[List[Ciphertext]] = field(default_factory=list)  # per-round history
     _audit_shares: Dict[int, list] = field(default_factory=dict)   # seat -> PositionShares
+    # seat -> opened ShuffleWitness (None = opened without one / unparseable)
+    _audit_witnesses: Dict[int, Optional["shuffle_mp.ShuffleWitness"]] = field(
+        default_factory=dict)
+    # this seat's own shuffles: (round, deck, witness), opened at audit time
+    _my_shuffles: List[tuple] = field(default_factory=list)
     _audit_report: Optional["deck_audit.AuditReport"] = None
     _audit_opened: bool = False
     abort_reason: Optional[str] = None
@@ -556,19 +561,26 @@ class MentalDeal:
 
     def _maybe_emit_shuffle(self) -> List[dict]:
         """If it is this seat's turn to shuffle the next round, produce and
-        broadcast the shuffled deck. Changes NO local state -- the deck is
+        broadcast the shuffled deck. The deck is NOT applied here -- it is
         applied uniformly by _on_deck_round when the echo arrives, so every
         seat (including this one) advances identically.
 
-        In prevention mode the shuffle witness (which is never transmitted)
-        is consumed here to build the Bayer-Groth proof and then discarded
-        with the local frame, so the no-local-state property holds either
-        way.
+        The shuffle witness is never transmitted during the hand. It is
+        retained (and, in prevention mode, also used for the Bayer-Groth
+        proof) so it can be opened in the post-hand audit.
         """
         next_round = self._shuffle_round + 1
         if self._expected_shuffler(next_round) != self.seat:
             return []
         deck, wit = shuffle_mp.shuffle_deck(self._joint_pk, self._deck)
+        # The witness never goes on the wire during the hand. It is kept so
+        # this seat can OPEN it in the post-hand audit, which is what binds
+        # the audited deck to the shuffles actually played (deck_audit
+        # .verify_chain). This is the one piece of local state the shuffle
+        # step keeps; the deck itself is still applied only on echo. Kept
+        # per candidate deck: if this ever ran twice for a round, open_audit
+        # must open the witness of the deck peers actually accepted.
+        self._my_shuffles.append((next_round, deck, wit))
         msg = {
             "type": "deck_round",
             "round": next_round,
@@ -820,13 +832,46 @@ class MentalDeal:
         self._audit_opened = True
         shares = deck_audit.make_shares(self._deck, self._x_share)
         self._audit_shares[self.seat] = shares
+        wit = self._accepted_witness()
+        self._audit_witnesses[self.seat] = wit
         msg = {
             "type": "audit_open",
             "seat": self.seat,
             "shares": [[bytes(ps.share).hex(), ps.proof.hex()] for ps in shares],
+            # The witness of the shuffle round this seat performed: it binds
+            # the audited deck to the shuffles actually played.
+            "witness": None if wit is None else {
+                "perm": list(wit.perm),
+                "scalars": [bytes(s).hex() for s in wit.scalars],
+            },
         }
         self._maybe_run_audit()
         return [msg]
+
+    def _accepted_witness(self) -> Optional["shuffle_mp.ShuffleWitness"]:
+        """The witness of the deck peers actually accepted for this seat's
+        shuffle round (None if this seat did not shuffle an accepted round)."""
+        for round_no, deck, wit in self._my_shuffles:
+            if not 1 <= round_no <= len(self._round_decks):
+                continue
+            accepted = self._round_decks[round_no - 1]
+            if [ct.to_hex() for ct in accepted] == [ct.to_hex() for ct in deck]:
+                return wit
+        return None
+
+    @staticmethod
+    def _parse_witness(raw) -> Optional["shuffle_mp.ShuffleWitness"]:
+        """Wire form -> ShuffleWitness. None for an absent witness; raises
+        ValueError for a malformed one."""
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("witness must be an object")
+        if len(raw["perm"]) != 52 or len(raw["scalars"]) != 52:
+            raise ValueError("witness must cover exactly 52 positions")
+        perm = [int(v) for v in raw["perm"]]
+        scalars = [R.scalar_from_bytes(bytes.fromhex(h)) for h in raw["scalars"]]
+        return shuffle_mp.ShuffleWitness(perm=perm, scalars=scalars)
 
     def _on_audit_open(self, msg: dict) -> List[dict]:
         if self.phase not in (Phase.DEAL, Phase.AUDIT):
@@ -847,7 +892,14 @@ class MentalDeal:
         if seat not in self.seats_in:
             return self._abort(f"audit_open from unknown seat {seat}", seat)
 
+        try:
+            witness = self._parse_witness(msg.get("witness"))
+        except (KeyError, ValueError, TypeError):
+            return self._abort(f"seat {seat} opened a malformed shuffle witness",
+                               seat)
+
         self._audit_shares[seat] = shares
+        self._audit_witnesses[seat] = witness
         self._maybe_run_audit()
         return []
 
@@ -859,19 +911,33 @@ class MentalDeal:
             return                              # already settled
         pubkeys = [self._pubkeys[s] for s in self.seats_in]
         shares_by_seat = [self._audit_shares[s] for s in self.seats_in]
-        report = deck_audit.audit_deck(self._deck, pubkeys, shares_by_seat)
+        # Bind the audited deck to the shuffles actually played: round r's
+        # broadcast output, opened by its shuffler's witness. Seats are given
+        # as INDICES into seats_in so every entry of report.bad_seats (chain
+        # or DLEQ) uses one convention; they are mapped back to seats below.
+        chain = deck_audit.ShuffleChain(
+            pk=self._joint_pk,
+            rounds=[
+                deck_audit.ShuffleRound(
+                    seat=self.seats_in.index(self._expected_shuffler(r)),
+                    output=deck,
+                    witness=self._audit_witnesses.get(self._expected_shuffler(r)),
+                )
+                for r, deck in enumerate(self._round_decks, start=1)
+            ],
+        )
+        report = deck_audit.audit_deck(self._deck, pubkeys, shares_by_seat,
+                                       chain=chain)
         self._audit_report = report
         if report.ok:
             self.phase = Phase.DONE
         else:
-            # Void, naming a seat when the evidence identifies one. A lying
-            # decryptor is pinned by its own failed DLEQ and appears in
-            # bad_seats. A corrupt deck with no bad decryptor is a shuffler
-            # cheat, but the multiset check only sees the final deck, so
-            # blame is None -- see the module docstring for why attributing
-            # it needs a new message exchange and why that is a pending
-            # design decision rather than a correctness gap.
-            blame = report.bad_seats[0] if report.bad_seats else None
+            # Void, naming a seat when the evidence identifies one: a lying
+            # decryptor by its own failed DLEQ, a cheating shuffler by the
+            # first chain round its opened witness does not reproduce (or
+            # that it declined to open).
+            blame = (self.seats_in[report.bad_seats[0]]
+                     if report.bad_seats else None)
             self._abort("; ".join(report.problems) or "audit failed", blame)
 
 

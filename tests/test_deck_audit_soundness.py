@@ -45,15 +45,19 @@ def table():
     xs = [_s(10 + i) for i in range(N_SEATS)]
     pubs = [R.mul_base(x) for x in xs]
     pk = eg.joint_public_key(pubs)
-    deck, _ = shuffle_deck(pk, eg.make_trivial_deck())
+    deck, wit = shuffle_deck(pk, eg.make_trivial_deck())
     shares = [da.make_shares(deck, x) for x in xs]
-    return {"xs": xs, "pubs": pubs, "pk": pk, "deck": deck, "shares": shares}
+    chain = da.ShuffleChain(
+        pk=pk, rounds=[da.ShuffleRound(seat=0, output=deck, witness=wit)])
+    return {"xs": xs, "pubs": pubs, "pk": pk, "deck": deck, "shares": shares,
+            "chain": chain}
 
 
 def audit(table, deck=None, shares=None):
     return da.audit_deck(deck if deck is not None else table["deck"],
                          table["pubs"],
-                         shares if shares is not None else table["shares"])
+                         shares if shares is not None else table["shares"],
+                         chain=table["chain"])
 
 
 # ----------------------------------------------------------- control
@@ -148,7 +152,8 @@ def test_substituted_card_is_detected(table):
 
     deck = list(table["deck"])
     deck[4] = eg.encrypt(table["pk"], point, R.random_scalar())
-    report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]))
+    report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]),
+                            chain=table["chain"])
     assert report.ok is False
     assert any("duplicated" in p or "missing" in p for p in report.problems), \
         report.problems
@@ -157,7 +162,8 @@ def test_substituted_card_is_detected(table):
 def test_duplicated_card_is_detected(table):
     deck = list(table["deck"])
     deck[11] = eg.reencrypt(table["pk"], deck[12], R.random_scalar())
-    report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]))
+    report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]),
+                            chain=table["chain"])
     assert report.ok is False
     assert any("duplicated" in p for p in report.problems)
 
@@ -168,7 +174,8 @@ def test_non_card_plaintext_is_detected(table):
     stranger = R.hash_to_group(hashlib.sha512(b"not-a-card").digest())
     deck = list(table["deck"])
     deck[20] = eg.encrypt(table["pk"], stranger, R.random_scalar())
-    report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]))
+    report = da.audit_deck(deck, table["pubs"], _reshare(deck, table["xs"]),
+                            chain=table["chain"])
     assert report.ok is False
     assert any("non-card point" in p for p in report.problems)
     assert any("missing" in p for p in report.problems)
@@ -179,7 +186,8 @@ def test_trivial_ciphertext_in_a_shuffled_deck_is_detected(table):
     identity base is degenerate, so it must be refused up front."""
     deck = list(table["deck"])
     deck[0] = eg.Ciphertext(R.IDENTITY, deck[0].c1)
-    report = da.audit_deck(deck, table["pubs"], table["shares"])
+    report = da.audit_deck(deck, table["pubs"], table["shares"],
+                            chain=table["chain"])
     assert report.ok is False
     assert any("trivial ciphertext" in p for p in report.problems)
 
@@ -192,15 +200,41 @@ def test_make_shares_refuses_a_trivial_ciphertext(table):
 
 
 def test_a_whole_foreign_deck_is_detected(table):
-    """52 valid cards, but not the deck that was played. The multiset check
-    passes -- and that is correct: detection-only proves the FINAL deck is
-    a legal deck, not that it descends from the input. That is exactly the
-    gap Bayer-Groth prevention closes."""
+    """52 valid cards, but not the deck that was played (audit finding 7).
+
+    This test used to assert ``ok is True`` -- it pinned the vulnerability
+    instead of guarding against it. A legal-but-foreign deck is exactly what
+    a cheating shuffler would substitute (it knows that deck's order), so
+    the audit must reject it: the deck is checked against the played
+    shuffle chain, not just for being 52 distinct cards."""
     other, _ = shuffle_deck(table["pk"], eg.make_trivial_deck())
-    report = da.audit_deck(other, table["pubs"], _reshare(other, table["xs"]))
-    assert report.ok is True, (
-        "a legal-but-foreign deck passes the audit by design; prevention "
-        "mode is what binds output to input")
+    report = da.audit_deck(other, table["pubs"], _reshare(other, table["xs"]),
+                           chain=table["chain"])
+    assert report.ok is False, (
+        "a deck not derived from the played deck must fail the audit")
+    assert any("not the output of the shuffle chain" in p
+               for p in report.problems)
+    # the multiset view alone would have accepted it -- that was the bug
+    assert sorted(c for c in report.cards if c) == sorted(eg.CARDS)
+
+
+def test_a_foreign_deck_with_its_own_valid_chain_is_still_rejected(table):
+    """The attacker cannot escape by also supplying a chain for its foreign
+    deck: the chain must start at the canonical trivial deck AND each round
+    must be the opened shuffle of the previous round's broadcast output.
+    A one-round chain for a fresh deck is valid only for that fresh deck,
+    so the seat must claim it as ITS round -- where it is then attributed."""
+    pk = table["pk"]
+    honest_out, honest_w = shuffle_deck(pk, eg.make_trivial_deck())
+    forged, forged_w = shuffle_deck(pk, eg.make_trivial_deck())   # ignores input
+    chain = da.ShuffleChain(pk=pk, rounds=[
+        da.ShuffleRound(seat=0, output=honest_out, witness=honest_w),
+        da.ShuffleRound(seat=1, output=forged, witness=forged_w),
+    ])
+    report = da.audit_deck(forged, table["pubs"], _reshare(forged, table["xs"]),
+                           chain=chain)
+    assert report.ok is False
+    assert report.bad_seats == [1]
 
 
 # ------------------------------------------------------ dleq forgery
@@ -321,20 +355,18 @@ def test_prevention_names_the_cheating_shuffler():
         assert "shuffle proof" in deal.abort_reason
 
 
-def test_detection_only_voids_the_hand_but_names_nobody():
-    """The documented gap. The cheat IS caught -- the hand voids fail-closed
-    and no card or chip is at risk -- but the multiset check only sees the
-    final deck, so no seat is named. Attributing it needs every seat to open
-    every intermediate round, which is a wire change and a pending design
-    decision (see mental_deal's module docstring). If that exchange is ever
-    added, this test should flip to asserting bad_seat == 0."""
+def test_detection_only_voids_the_hand_and_names_the_shuffler():
+    """Detection-only now names the cheater too. Every shuffler opens its
+    shuffle witness in the audit; seat 0's opened witness cannot reproduce
+    the corrupted round-1 deck the table accepted, so the chain attributes
+    the corruption to seat 0 (this test used to pin bad_seat is None)."""
     deals, Phase = _cheating_table(prevention=False)
     for deal in deals.values():
         assert deal.phase == Phase.ABORTED, "the cheat must still be caught"
         assert deal.audit_report is not None
         assert deal.audit_report.ok is False
         assert any("duplicated" in p for p in deal.audit_report.problems)
-        assert deal.bad_seat is None, "documented: no attribution here yet"
+        assert deal.bad_seat == 0
 
 
 def test_first_corrupt_round_is_implemented_but_unwired():
@@ -349,5 +381,5 @@ def test_first_corrupt_round_is_implemented_but_unwired():
     source = (Path(__file__).resolve().parents[1]
               / "holdem" / "p2p" / "mental_deal.py").read_text()
     assert "first_corrupt_round(" not in source, (
-        "mental_deal now calls first_corrupt_round -- wire the chain audit "
-        "and update test_detection_only_voids_the_hand_but_names_nobody")
+        "mental_deal now calls first_corrupt_round -- it attributes via "
+        "deck_audit.verify_chain instead; update this test")
