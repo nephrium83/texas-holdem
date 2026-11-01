@@ -101,6 +101,16 @@ def test_symlink_legacy_upgrade_preserves_shared_identity(tmp_path):
     identity.load_or_create(path)
 
 
+# The device secret now publishes through identity_storage (finding 210).
+# These hooks target os.write/os.fsync/os.link, which only the POSIX
+# publish path uses; Windows publishes via the Win32 API, where they would
+# never fire. Windows publication is covered by the identity tests and
+# the multi-process convergence test below, which run on both.
+_POSIX_PUBLISH = pytest.mark.skipif(
+    os.name == "nt", reason="hooks the POSIX publish path (os.write/fsync/link)")
+
+
+@_POSIX_PUBLISH
 def test_short_device_secret_writes_are_completed(tmp_path, monkeypatch):
     path = tmp_path / "device_secret"
     write = os.write
@@ -109,6 +119,7 @@ def test_short_device_secret_writes_are_completed(tmp_path, monkeypatch):
     assert len(secret) == 32 and path.read_bytes() == secret
 
 
+@_POSIX_PUBLISH
 def test_zero_progress_secret_write_fails_without_publication(tmp_path, monkeypatch):
     path = tmp_path / "device_secret"
     monkeypatch.setattr(os, "write", lambda fd, data: 0)
@@ -118,6 +129,7 @@ def test_zero_progress_secret_write_fails_without_publication(tmp_path, monkeypa
     assert list(tmp_path.glob("*.tmp")) == []
 
 
+@_POSIX_PUBLISH
 def test_failed_secret_sync_removes_temporary_key(tmp_path, monkeypatch):
     path = tmp_path / "device_secret"
     def failed(*args):
@@ -128,6 +140,7 @@ def test_failed_secret_sync_removes_temporary_key(tmp_path, monkeypatch):
     assert not path.exists() and list(tmp_path.glob("*.tmp")) == []
 
 
+@_POSIX_PUBLISH
 def test_no_hard_links_never_exposes_partial_secret(tmp_path, monkeypatch):
     path = tmp_path / "device_secret"
     seen = []

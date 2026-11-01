@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk, colorchooser
 
-from .engine import (Engine, Player, Brain, equity,
+from .engine import (Engine, Player, Brain, equity, IllegalAction, cashout_split,
                     AI_STYLES, SUIT_GLYPHS, RANK_STR, Card as _Card,
                     FULL_DECK as _FULL_DECK)
 
@@ -1190,9 +1190,15 @@ class Holdem:
             _audio.play("check" if lg["can_check"] else "call")
         elif action == "raise":
             _audio.play("raise_sound")
-        e.act(seat, action, amount)
+        try:
+            e.act(seat, action, amount)
+        except IllegalAction:
+            # A peer's illegal/out-of-turn action changes nothing; re-publish
+            # the authoritative state so that peer resynchronises.
+            self._mp_host_sync()
+            return
         self.flush_log()
-        self._mp_session.broadcast_game_state()
+        self._mp_host_sync()
         self.redraw()
         self.root.after(max(80, self.delay // 3), self.loop)
 
@@ -1298,15 +1304,24 @@ class Holdem:
         if am_new_host:
             self._mp_is_host = True
             self._show_banner("Host left — you are now hosting", duration_ms=4000)
-            # H-11: wire the session engine and action callback so broadcast works
+            # Audit finding 5: a peer's engine is a lossy REPLICA rebuilt by
+            # _mp_apply_state -- public fields, stub hole cards, no deck and
+            # no betting internals (need_to_act, no_raise, raises_this_street,
+            # contributions). It must never become the authoritative engine
+            # in the middle of a hand: the new host would deal stub cards and
+            # mis-run the betting. The departed host cannot hand over its full
+            # state (it is gone), and that state includes the deck and every
+            # hole card, which no peer may receive. So a mid-hand promotion
+            # voids the hand; the replica is reused only BETWEEN hands, when
+            # its public state (stacks) is all a fresh deal needs.
             if self._mp_session is not None and self.engine is not None:
-                self._mp_session._engine = self.engine
-                # Re-apply the last known game state so the engine is up to date
-                if self._mp_remote_state:
-                    self._mp_apply_state(self._mp_remote_state)
-                self._mp_session.on_action = lambda seat, act, amt: self.root.after(
-                    0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
-            self._mp_broadcast_state()
+                if self._mp_replica_mid_hand():
+                    self._mp_void_promoted_hand()
+                else:
+                    self._mp_session._engine = self.engine
+                    self._mp_session.on_action = lambda seat, act, amt: self.root.after(
+                        0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
+                    self._mp_broadcast_state()
             # Show the host controls bar if not already visible
             if not getattr(self, "_host_bar_built", False):
                 self._build_host_controls(self.table)
@@ -1314,10 +1329,55 @@ class Holdem:
         else:
             self._show_banner("Host reconnecting…", duration_ms=2000)
 
+    def _mp_replica_mid_hand(self) -> bool:
+        """True if this peer's (replica) engine is in the middle of a hand."""
+        e = self.engine
+        return (e is not None and not self.hand_over
+                and e.street not in ("idle", "showdown"))
+
+    def _mp_void_promoted_hand(self) -> None:
+        """Void the hand in progress when promoted to host mid-hand.
+
+        The replica cannot finish it (see _mp_on_host_changed), and it does
+        not know each seat's total contribution this hand, so it cannot
+        refund or settle it either. Nothing is broadcast from it and no
+        peer action is accepted against it; the table must start a fresh
+        hand. (The session layer itself refuses host loss during PLAYING;
+        this is the GUI's own guard should that path ever be reached.)
+        """
+        e = self.engine
+        e.actor = None
+        self.hand_over = True
+        self.lock()
+        self.l_status.config(
+            text="Host left mid-hand — that hand is void. Its state cannot "
+                 "be recovered safely; start a new hand.")
+
     def _mp_broadcast_state(self) -> None:
         """Re-broadcast current game state to all peers (called after becoming host)."""
         if self._mp_session and self._mp_is_host:
             self._mp_session.broadcast_game_state()
+
+    def _mp_host_sync(self) -> None:
+        """Host: publish the authoritative state after ANY state change.
+
+        Audit finding 4: hero() and ai_turn() applied actions, and loop()
+        advanced streets, without telling the peers, so their tables lagged
+        or froze. Every state-changing path on the host calls this.
+        """
+        if self._mp_mode and self._mp_is_host and self._mp_session is not None:
+            self._mp_session.broadcast_game_state()
+
+    def _mp_is_remote_seat(self, seat: int) -> bool:
+        """True if ``seat`` belongs to another connected human in multiplayer.
+
+        Audit finding 3: the host's loop() fed every non-local seat to the
+        AI, so it played remote humans' hands and discarded their actions.
+        A remote seat must only ever be advanced by its own peer's action.
+        """
+        if not self._mp_mode or seat == self.hero_seat:
+            return False
+        return bool(self._mp_seat_to_peer.get(seat, ""))
 
     def _show_banner(self, text: str, duration_ms: int = 3000) -> None:
         """Draw a transient text banner in the canvas centre."""
@@ -1525,6 +1585,12 @@ class Holdem:
     def loop(self):
         if self._mp_mode and not self._mp_is_host:
             return   # peers are driven by game_state messages, not the local loop
+        if self.hand_over:
+            # Nothing to drive. In particular a hand voided on host promotion
+            # (_mp_void_promoted_hand) has actor None, which below would read
+            # as "betting round closed" and advance the voided hand onto the
+            # replica's stub cards.
+            return
         if self._defer(self.loop):
             return
         e = self.engine
@@ -1542,6 +1608,7 @@ class Holdem:
             e.next_street()
             self.flush_log()
             self.redraw()
+            self._mp_host_sync()                # peers must see the new street
             self.start_equity()
             self.root.after(self.delay, self.loop)
             return
@@ -1564,6 +1631,12 @@ class Holdem:
                 return    # pre-action fired; loop() will be called again
             self.unlock()
             self.start_clock()
+        elif self._mp_is_remote_seat(i):
+            # A remote human's turn: never let the local AI play it. Make
+            # sure that peer sees it is to act, then wait -- its action
+            # arrives via _mp_peer_acted, which re-enters loop().
+            self.lock()
+            self._mp_host_sync()
         else:
             self.lock()
             self.root.after(self.delay,
@@ -1580,6 +1653,7 @@ class Holdem:
         e.act(local, action, 0)
         self.flush_log()
         self.redraw()
+        self._mp_host_sync()
         self.root.after(max(60, self.delay // 3), self.loop)
 
     def locked_runout(self):
@@ -1619,6 +1693,8 @@ class Holdem:
         e = self.engine
         if e is None or e.actor != i:
             return
+        if self._mp_is_remote_seat(i):
+            return      # a remote human's seat is never played by the AI
         act, amt = self.brain.decide(e, i)
         if e.street == "preflop":
             self._record_vpip_pfr(i, act, e.legal(i))
@@ -1628,6 +1704,7 @@ class Holdem:
             _audio.play("allin")
         self.flush_log()
         self.redraw()
+        self._mp_host_sync()
         # ~20% chance of a contextual emote from this AI seat
         # M-12: use the seeded rng to keep replay deterministic
         if self.rng.random() < 0.20:
@@ -1869,6 +1946,7 @@ class Holdem:
                 _audio.play("raise_sound")
         self.flush_log()
         self.redraw()
+        self._mp_host_sync()
         self.root.after(max(80, self.delay // 3), self.loop)
 
     def _hotkey(self, ev):
@@ -2247,12 +2325,19 @@ class Holdem:
         if hero_eq < 0.55:
             return False
 
+        # Audit finding 6: price the equity only against the pots the hero
+        # is eligible for, and pay opponents only from pots they are in.
+        split = cashout_split(e.players, local,
+                              [p.idx for p in e.contested()], hero_eq)
+        if split is None or split["eligible_pot"] <= 0:
+            return False    # a live side pot among others needs a run-out
         self._cashout_offered = True
-        gross = int(hero_eq * pot)
-        net = int(gross * 0.99)
+        eligible_pot = split["eligible_pot"]
+        gross, net = split["gross"], split["net"]
 
         msg = (f"Cash out for {net:,} chips?\n\n"
-               f"Your equity: {hero_eq:.0%} × {pot:,} pot = {gross:,} chips\n"
+               f"Your equity: {hero_eq:.0%} × {eligible_pot:,} "
+               f"(the pot you can win) = {gross:,} chips\n"
                f"After 1% fee: {net:,} chips\n\n"
                f"Yes = take the money now\n"
                f"No  = run it out")
@@ -2260,14 +2345,14 @@ class Holdem:
             return False
 
         # --- Award chips ---
-        hero.stack += net
-        hero.won = net
-        remaining = pot - net
-        per_opp, leftover = divmod(remaining, n_opp) if n_opp else (0, 0)
-        for k, opp_p in enumerate(opp):
-            share = per_opp + (1 if k < leftover else 0)
-            opp_p.stack += share
-            opp_p.won = share
+        if split["refund"] is not None:          # uncalled bet goes back
+            seat, back = split["refund"]
+            e.players[seat].stack += back
+        for seat, amount in split["payouts"].items():
+            if amount:
+                e.players[seat].stack += amount
+                e.players[seat].won = amount
+        pot = eligible_pot
 
         # Clear all betting state (bypassing engine.settle)
         for p in e.players:
@@ -2281,7 +2366,7 @@ class Holdem:
         self.result = {
             "winners": {local}, "pots": [{"amount": pot, "eligible": [local], "runs": []}],
             "runs": [], "shown": {local}, "mucked": set(),
-            "order": [local], "refund": None, "tabled": False,
+            "order": [local], "refund": split["refund"], "tabled": False,
             "cashout": {
                 "seat": local,
                 "equity": hero_eq,

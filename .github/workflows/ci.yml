@@ -126,7 +126,7 @@ jobs:
       - name: Verify desktop, key storage and process-test ownership
         run: >-
           python -m pytest tests/test_desktop_launcher.py
-          tests/test_identity_storage.py tests/test_heartbeat_harness.py
+          tests/test_identity_storage.py tests/test_device_secret_storage.py tests/test_heartbeat_harness.py
           tests/test_heartbeat_processes.py -q
 
   journal-windows:
