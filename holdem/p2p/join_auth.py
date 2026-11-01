@@ -64,6 +64,13 @@ class JoinAuthenticator:
         #: The ONE connection being authenticated. None until routing settles.
         self.conn_id: Optional[str] = None
         self.player_info_sent = False
+        #: True once this attempt has reached ITS terminal callback
+        #: (authenticated or failed). Audit #59: failure used to leave the
+        #: connection bound, so a valid accept already queued behind the
+        #: bad message could still authenticate a connection the UI had
+        #: been told failed. Exactly one terminal callback per attempt;
+        #: begin() starts a fresh attempt.
+        self._settled = False
 
     # ------------------------------------------------------------------
     def route(self, conn_id: str, msg: dict) -> None:
@@ -89,15 +96,20 @@ class JoinAuthenticator:
         """
         self.conn_id = conn_id
         self.player_info_sent = False
+        self._settled = False
         self._transport.send(conn_id, {
             "type": "admission_hello", **self._adm.hello_payload()})
 
     # ------------------------------------------------------------------
     def _fail(self, reason: str) -> None:
+        if self._settled:
+            return                       # this attempt already ended
+        self._settled = True
+        failed_conn, self.conn_id = self.conn_id, None   # detach first
         _log.warning("join: admission failed: %s", reason)
         try:
-            if self.conn_id:
-                self._transport.disconnect(self.conn_id)
+            if failed_conn:
+                self._transport.disconnect(failed_conn)
         except Exception:                                # noqa: BLE001
             pass
         if self._on_failed is not None:
@@ -105,6 +117,8 @@ class JoinAuthenticator:
 
     def _step(self, conn_id: str, mtype: str, body: dict,
               author_hex: str) -> None:
+        if self._settled:
+            return                       # terminal: nothing more is processed
         if self.conn_id is None or conn_id != self.conn_id:
             # Belongs to a socket this dialog is not using -- a failed
             # direct attempt cannot complete admission for the relay
@@ -144,6 +158,7 @@ class JoinAuthenticator:
                     conn_id, self._adm.host_pubkey):
                 self._fail("the acceptance did not match the pinned host key")
                 return
+            self._settled = True
             self._send_player_info(conn_id)
             if self._on_authenticated is not None:
                 self._on_authenticated(conn_id)

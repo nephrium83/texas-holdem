@@ -3239,13 +3239,16 @@ class Session:
         # rather than coerced, for the same reason as session_end.
         if not _is_seat(msg.get("seat")):
             return
-        try:
-            seq = int(msg["seq"])
-            seat = int(msg["seat"])
-            action = str(msg["action"])
-            amount = int(msg.get("amount", 0))
-        except (KeyError, ValueError, TypeError):
+        # Exact types, never coercion (audit #78): int() quietly turned True
+        # into 1, "25" into 25 and 25.7 into 25, so a malformed frame was
+        # re-interpreted as a different, legal-looking action instead of
+        # being refused. _is_seat is the exact-int (non-bool) check; the
+        # sequence number and amount must also be non-negative.
+        seq, action, amount = msg.get("seq"), msg.get("action"), msg.get("amount", 0)
+        if (not _is_seat(seq) or seq < 0 or not _is_seat(amount) or amount < 0
+                or not isinstance(action, str)):
             return
+        seat = msg["seat"]
         self._safe_emit(
             "action_received",
             hand=self._hand_no, seq=seq, seat=seat,
@@ -3898,13 +3901,44 @@ class Session:
         if self.on_deal_private:
             self.on_deal_private(payload)
 
+    def _chat_display_name(self, conn_id: str, msg: dict,
+                           payload: dict) -> Optional[str]:
+        """Who a chat message is FROM, decided by identity, not by payload.
+
+        Audit #82: the payload's "nickname" was displayed as the sender, so
+        any admitted player could post under anyone's name even though the
+        envelope's signature identified the real author.
+
+        Signed (wire) messages: the name of the player whose VERIFIED signing
+        key authored the envelope -- relayed envelopes keep the original
+        author's key -- or None (dropped) when no seated player has that key.
+        Unsigned (compat) messages carry no author: the host can still name
+        the sending connection; a non-host only ever sees the host's relay,
+        so the payload name is all it has (the compat mode's known limit).
+        """
+        author = msg.get("pubkey")
+        if isinstance(author, str) and author:
+            author = author.lower()
+            for player in self.players.values():
+                if getattr(player, "ed25519_pubkey_hex", "").lower() == author:
+                    return player.nickname
+            return None
+        sender = self.players.get(conn_id)
+        if self.is_host and sender is not None:
+            return sender.nickname
+        return payload.get("nickname", "Player")
+
     def _on_chat(self, conn_id: str, msg: dict) -> None:
         payload = self._control_payload(msg)
         if payload is None or any(
                 key in payload and not isinstance(payload[key], str)
                 for key in ("nickname", "text")):
             return
-        nickname = payload.get("nickname", "Player")
+        nickname = self._chat_display_name(conn_id, msg, payload)
+        if nickname is None:
+            _log.warning("session: chat from an unknown author via %s -- dropping",
+                         conn_id)
+            return
         text = payload.get("text", "")
         if self.on_chat:
             self.on_chat(nickname, text)
