@@ -99,3 +99,59 @@ causing two end-to-end parse failures. After `godot --headless --path godot
 --import`, both failed cases passed unchanged. The refactored full run used
 the same import preparation and passed both end-to-end cases. Generated
 tracked import metadata is excluded from this change.
+
+## Strict identity storage
+
+`identity.load_or_create()` uses a separate host storage adapter. Importing it
+does not open files, load native libraries or create keys. Device-secret storage
+retains its existing behavior.
+
+Identity paths must name physical local storage. Parent traversal (`..`),
+symlinks, Windows junctions/reparse points, UNC/device paths and ambiguous
+Windows names are refused. Substituted drive roots and NTFS 8.3 short-name
+aliases are refused too. The supplied chain is walked forward without
+canonicalization. Every operation uses the pinned directory and the same opened
+file that was checked; parsing never reopens a checked pathname.
+
+On Linux, each directory must belong to the account or root and must prevent
+other accounts from replacing entries. A sticky intermediate directory such as
+`/tmp` is allowed; the final parent has no sticky exception. Files must belong
+to the account, be regular files on the parent device, and have no group/other
+permissions or special mode bits. Existing insecure files are refused without
+changing them. Supported filesystem semantics are limited to ext2/3/4, XFS,
+Btrfs, F2FS and tmpfs on supported 64-bit Linux ABIs. Other POSIX systems, ZFS,
+network filesystems, FUSE and unverifiable storage are refused.
+
+On Windows, each directory is opened relative to its pinned parent, without
+following reparses or sharing deletion. Only fixed local NTFS/ReFS storage with
+persistent ACLs is supported. Untrusted directory owners or grants that permit
+replacing the pinned chain are refused. Existing identity files must be owned
+by the token user and have a protected DACL granting access exclusively to that
+user. Inherited or trusted-system-only extra grants are also refused. The game
+does not normalize existing DACLs, take ownership, or claim to revoke historical
+handles or undo previous disclosure. Newly created directories and files have
+explicit token-user ownership and protected private DACLs before key bytes exist,
+including when an elevated token defaults ownership to Administrators.
+
+Creation and upgrades use a stable verified lock. Legacy hard-linked identities
+require an independent copy before upgrading; complete conforming identities
+still load without a writable lock. Unknown JSON fields and the signing key are
+preserved during a legacy upgrade.
+
+The commit is a single object-bound rename. Before commit, failures preserve the
+previous identity and attempt deletion of only the owned temporary. A failed
+deletion or release is diagnosed with the affected path and is never described
+as successful cleanup. After commit, cleanup or directory-durability failures
+produce non-secret diagnostics and return the committed identity. A retry loads
+the same keys once any outstanding resource is released. A complete read without
+publication returns no keys if cleanup fails; it raises instead and never
+generates a replacement. A failed release is attempted once, since repeating a
+Linux close can close a descriptor already reused by another thread.
+
+For loose Linux files, restore appropriate ownership and `chmod 600 <path>`;
+remove untrusted directory write access with `chmod go-w <directory>`. Do not
+change shared-directory policy blindly. On Windows, restore the existing keys
+from a trusted backup into a physically private supported location, or have the
+owner inspect and correct the descriptor. The game never changes ancestor ACLs
+or repairs historically exposed keys automatically. `HOLDEM_CONFIG_DIR` selects
+the configuration directory, whose complete ancestor chain must also be safe.
