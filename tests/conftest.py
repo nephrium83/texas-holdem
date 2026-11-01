@@ -23,7 +23,10 @@ Autouse fixtures:
    material. Tests that set the variable themselves still win -- monkeypatch
    applies after this fixture.
 """
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -38,6 +41,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import crypto_gate
+
+
+# What HOLDEM_CONFIG_DIR said before the guard below replaced it -- kept only
+# so a test can prove the suite never resolves to it.
+ORIGINAL_CONFIG_DIR = os.environ.get("HOLDEM_CONFIG_DIR")
+SESSION_CONFIG_DIR = None
+
+
+def pytest_configure(config):
+    """Session-wide config guard (audit finding #121).
+
+    The per-test fixture below only covers function-scoped code. A class-,
+    module- or session-scoped fixture runs BEFORE it, and anything such a
+    fixture spawns inherits the developer's environment -- so it resolved
+    the REAL config directory and its identity and device secret (one run
+    on a developer machine wrote settings.json into %APPDATA%\\holdem). Worse,
+    a machine that sets HOLDEM_CONFIG_DIR at user level would hand the test
+    workers the user's actual keys.
+
+    So: before any fixture of any scope, point HOLDEM_CONFIG_DIR at a fresh
+    throwaway directory, UNCONDITIONALLY -- never the caller's value.
+    """
+    global SESSION_CONFIG_DIR
+    SESSION_CONFIG_DIR = tempfile.mkdtemp(prefix="holdem-test-config-")
+    os.environ["HOLDEM_CONFIG_DIR"] = SESSION_CONFIG_DIR
+
+
+def pytest_unconfigure(config):
+    if SESSION_CONFIG_DIR:
+        shutil.rmtree(SESSION_CONFIG_DIR, ignore_errors=True)
 
 
 def pytest_report_header(config):
