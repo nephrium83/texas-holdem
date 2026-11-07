@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+from process_output import read_port, stop_process
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -70,23 +72,7 @@ def _start_sidecar(*extra_args: str) -> subprocess.Popen:
 
 
 def _read_port(proc: subprocess.Popen) -> int:
-    """Read the SIDECAR_PORT:<n> line from stdout; fail fast on timeout."""
-    deadline = time.monotonic() + STARTUP_TIMEOUT
-    buf = ""
-    while time.monotonic() < deadline:
-        ch = proc.stdout.read(1)
-        if not ch:
-            break
-        buf += ch
-        if "\n" in buf:
-            line = buf.split("\n", 1)[0].strip()
-            if line.startswith("SIDECAR_PORT:"):
-                return int(line.split(":", 1)[1])
-            buf = buf.split("\n", 1)[1]
-    raise TimeoutError(
-        f"sidecar did not print SIDECAR_PORT within {STARTUP_TIMEOUT}s. "
-        f"stdout so far: {buf!r}"
-    )
+    return read_port(proc, STARTUP_TIMEOUT)
 
 
 @contextlib.contextmanager
@@ -143,8 +129,7 @@ class TestSidecarHandshake:
             assert isinstance(port, int)
             assert 1 <= port <= 65535
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
     def test_hello_then_snapshot(self):
         proc = _start_sidecar("--seats", "2")
@@ -159,8 +144,7 @@ class TestSidecarHandshake:
                 assert snap["type"] == "snapshot"
                 assert "phase" in snap
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
     def test_snapshot_is_lobby_phase(self):
         proc = _start_sidecar("--seats", "2")
@@ -171,8 +155,7 @@ class TestSidecarHandshake:
                 snap = _readline(reader)       # snapshot
                 assert snap["phase"] == "lobby"
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
 
 class TestSidecarCommands:
@@ -194,8 +177,7 @@ class TestSidecarCommands:
                 assert result["ok"] is False
                 assert result["command"] == "bogus"
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
     def test_command_followed_by_fresh_snapshot(self):
         """A command_result is always followed by a fresh snapshot."""
@@ -213,8 +195,7 @@ class TestSidecarCommands:
                 snap = _readline(reader)
                 assert snap["type"] == "snapshot"
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
 
 def _command(sock, reader, command: str, payload: dict | None = None):
@@ -280,8 +261,7 @@ class TestClientCanReachTheMentalDeal:
                 assert hole and len(hole) == 2, \
                     f"no hole cards dealt -- deal did not run: {hole!r}"
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
     def test_the_local_replica_reaches_live_play(self):
         """The deal does not merely run -- it hands off to real betting.
@@ -314,8 +294,7 @@ class TestClientCanReachTheMentalDeal:
                 assert turn_state != "lobby", \
                     f"turn state stayed in lobby: {turn_state!r}"
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
     def test_the_shipped_table_declares_and_runs_bayer_groth(self):
         """The mandate, asserted on the shipped socket.
@@ -358,8 +337,7 @@ class TestClientCanReachTheMentalDeal:
                     f"{snap['proofs_verified']} shuffle proofs -- the policy "
                     f"string arrived without the proofs behind it")
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
     def test_second_start_game_does_not_restart_the_table(self):
         """start_game is not idempotent-by-accident: a duplicate must report
@@ -371,15 +349,22 @@ class TestClientCanReachTheMentalDeal:
                 _readline(reader)
                 _readline(reader)
                 sock.settimeout(60.0)
-                first, _ = _command(sock, reader, "start_game")
+                first, before = _command(sock, reader, "start_game")
                 assert first["verdict"] == "started"
 
-                second, _ = _command(sock, reader, "start_game")
+                second, after = _command(sock, reader, "start_game")
                 assert second["verdict"] == "already_started", second
                 assert second["ok"] is False
+                # A refusal alone cannot prove the command did not redeal.
+                # Compare authoritative cards, stacks, events and lifecycle;
+                # periodic countdown display is deliberately excluded.
+                for field in ("hand_num", "phase", "board", "seats", "you",
+                              "events", "pot", "action_on", "deal_policy",
+                              "proofs_verified", "result", "session_over",
+                              "session_winner", "voided"):
+                    assert after.get(field) == before.get(field), field
         finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            stop_process(proc)
 
 
 class TestSidecarArgValidation:

@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from crypto_gate import require_crypto
+from process_output import capture, collect_stdout, read_port, stop_process
 
 # ---------------------------------------------------------------------------
 # Paths and binary discovery
@@ -96,45 +97,11 @@ def _tail(path: Path, lines: int = 30) -> str:
 
 
 def _read_port(proc: subprocess.Popen) -> int:
-    """Parse SIDECAR_PORT:<n> from the sidecar's stdout."""
-    deadline = time.monotonic() + _SIDECAR_STARTUP
-    buf = ""
-    while time.monotonic() < deadline:
-        ch = proc.stdout.read(1)
-        if not ch:
-            break
-        buf += ch
-        if "\n" in buf:
-            line, buf = buf.split("\n", 1)
-            line = line.strip()
-            if line.startswith("SIDECAR_PORT:"):
-                return int(line.split(":", 1)[1])
-    raise TimeoutError(
-        f"sidecar did not print SIDECAR_PORT within {_SIDECAR_STARTUP}s. "
-        f"stdout so far: {buf!r}"
-    )
+    return read_port(proc, _SIDECAR_STARTUP)
 
 
-def _collect_stdout(proc: subprocess.Popen,
-                    sentinel: str,
-                    timeout: float) -> list[str]:
-    """Read lines from proc stdout until sentinel line or timeout."""
-    lines: list[str] = []
-    deadline = time.monotonic() + timeout
-    buf = ""
-    while time.monotonic() < deadline:
-        ch = proc.stdout.read(1)
-        if not ch:          # process closed its stdout
-            break
-        buf += ch
-        if "\n" in buf:
-            line, buf = buf.split("\n", 1)
-            line = line.strip()
-            if line:
-                lines.append(line)
-            if line == sentinel:
-                return lines
-    return lines
+def _collect_stdout(proc: subprocess.Popen, sentinel: str, timeout: float) -> list[str]:
+    return collect_stdout(proc, sentinel, timeout)
 
 
 # ---------------------------------------------------------------------------
@@ -171,14 +138,14 @@ class TestGodotSidecarHandshake:
             try:
                 godot_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                godot_proc.kill()
+                stop_process(godot_proc, force=True)
 
             errors = [l for l in output if l.startswith("GODOT_ERROR")]
             assert not errors, f"Godot reported errors: {errors}"
             assert godot_proc.returncode == 0, (
                 f"Godot exited {godot_proc.returncode}. "
                 f"stdout: {output!r}  "
-                f"stderr: {godot_proc.stderr.read()!r}"
+                f"stderr: {capture(godot_proc).stderr_tail()!r}"
             )
             assert "GODOT_CONNECTED" in output, \
                 f"GODOT_CONNECTED missing from: {output}"
@@ -190,14 +157,8 @@ class TestGodotSidecarHandshake:
                 f"GODOT_DONE missing from: {output}"
 
         finally:
-            if godot_proc and godot_proc.poll() is None:
-                godot_proc.terminate()
-                try:
-                    godot_proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    godot_proc.kill()
-            sidecar.terminate()
-            sidecar.wait(timeout=5)
+            stop_process(godot_proc)
+            stop_process(sidecar)
 
 
 @pytest.mark.skipif(_GODOT_BIN is None, reason="godot binary not found in PATH")
@@ -239,8 +200,8 @@ class TestGodotClientPlays:
             try:
                 output, _ = godot_proc.communicate(timeout=_E2E_TIMEOUT)
             except subprocess.TimeoutExpired:
-                godot_proc.kill()
-                output, _ = godot_proc.communicate()
+                stop_process(godot_proc, force=True)
+                output, _ = godot_proc.communicate(timeout=5)
                 pytest.fail(f"the client did not finish within {_E2E_TIMEOUT}s."
                             f"\nstdout:\n{output}\nsidecar log:\n"
                             f"{_tail(sidecar_log)}")
@@ -272,11 +233,8 @@ class TestGodotClientPlays:
             assert summary["face_up_failures"] == [], context
             assert summary["lobby_names"] == ["Player (You)", "Bot 1"], context
         finally:
-            if godot_proc and godot_proc.poll() is None:
-                godot_proc.kill()
-                godot_proc.wait(timeout=5)
-            sidecar.terminate()
-            sidecar.wait(timeout=5)
+            stop_process(godot_proc)
+            stop_process(sidecar)
 
     def test_a_sidecar_lost_mid_run_ends_the_run_with_that_error(self, tmp_path):
         """However a run ends, the driver reports and quits. A lost sidecar
@@ -312,8 +270,7 @@ class TestGodotClientPlays:
                     pytest.fail(f"no hand settled before the kill.\nstdout:\n"
                                 f"{output()}\nsidecar log:\n{_tail(sidecar_log)}")
                 time.sleep(0.05)
-            sidecar.kill()
-            sidecar.wait(timeout=5)
+            stop_process(sidecar, force=True)
 
             try:
                 godot_proc.wait(timeout=_LOST_SIDECAR_EXIT)
@@ -331,9 +288,5 @@ class TestGodotClientPlays:
             assert summary["hands_settled"] >= 1, context
             assert godot_proc.returncode == 1, context
         finally:
-            if godot_proc and godot_proc.poll() is None:
-                godot_proc.kill()
-                godot_proc.wait(timeout=5)
-            if sidecar.poll() is None:
-                sidecar.kill()
-                sidecar.wait(timeout=5)
+            stop_process(godot_proc)
+            stop_process(sidecar)
