@@ -5,6 +5,8 @@ import io
 import math
 import logging
 import queue
+from copy import deepcopy
+from functools import wraps
 from types import MappingProxyType
 import random
 import threading
@@ -94,6 +96,70 @@ SPEEDS = {"Slow": 950, "Normal": 550, "Fast": 260, "Instant": 60}
 HERO = 0   # default seat for solo play; see Holdem.hero_seat property for MP
 
 
+def _bankroll_transfer(delta=0, stack_changes=(), bonus_date=None):
+    """One locked practice-wallet transfer; table memory rolls back on failed publication."""
+    published = False
+    applied = []
+    actual_delta = delta
+    try:
+        if type(delta) is not int:
+            raise ValueError("wallet transfer must be integer chips")
+        path = cfg.config_path()
+        with cfg._json_lock(path):
+            raw = cfg._read_json_mapping(path)
+            if not isinstance(raw.get("client", {}), dict) or not isinstance(raw.get("last_table", {}), dict):
+                raise ValueError("invalid wallet settings buckets")
+            current = deepcopy(raw)
+            client = current.setdefault("client", {})
+            balance = client.get("bankroll", cfg.SPEC["bankroll"]["default"])
+            maximum = cfg.SPEC["bankroll"]["hi"]
+            if type(balance) is not int or not 0 <= balance <= maximum:
+                raise ValueError("stored wallet balance is invalid")
+            if bonus_date is not None:
+                if client.get("last_daily_bonus_date") == bonus_date:
+                    return True, 0
+                level = client.get("player_level", 1)
+                if type(level) is not int or not 1 <= level <= 50:
+                    raise ValueError("stored bonus level is invalid")
+                actual_delta += 500 * level
+                client["last_daily_bonus_date"] = bonus_date
+            target = balance + actual_delta
+            if not 0 <= target <= maximum:
+                return False, 0
+            for player, before, after in stack_changes:
+                if type(after) is not int or after < 0 or player.stack != before:
+                    raise ValueError("stale or invalid table transfer")
+            client["bankroll"] = target
+            try:
+                for player, before, after in stack_changes:
+                    applied.append((player, before))
+                    player.stack = after
+                cfg._write_json(path, current)
+                published = True
+            finally:
+                if not published:
+                    for player, before in applied:
+                        player.stack = before
+        cfg._cache = None
+        return True, actual_delta
+    except (OSError, ValueError, TypeError):
+        logging.getLogger(__name__).exception("Practice wallet transfer failed")
+        # An unlock/close failure after publication cannot undo published money.
+        if published:
+            cfg._cache = None
+            return True, actual_delta
+        return False, 0
+
+
+def _game_after(ui, delay, callback):
+    epoch = getattr(ui, "_game_epoch", 0)
+    @wraps(callback)
+    def guarded():
+        if epoch == getattr(ui, "_game_epoch", 0):
+            callback()
+    return ui.root.after(delay, guarded)
+
+
 def _game_rule(ui, key, local_variable):
     rules = getattr(ui, "_mp_rules", None)
     if getattr(ui, "_mp_mode", False) and rules is not None:
@@ -155,6 +221,9 @@ class Holdem:
         self.rng = random.Random()
         self.brain = Brain(self.rng)
         self.engine = None
+        self._cash_engine = None
+        self._game_epoch = 0
+        root.bind("<Destroy>", self._cash_destroyed, add="+")
         self.theme = THEMES["Cyberpunk"]   # replaced after config load below
 
         # settings
@@ -225,16 +294,10 @@ class Holdem:
         self._last_hero_eq = 0.0    # most recent win equity fraction for hero
         self._allin_announced: set = set()  # seats already given allin sound
 
-        # daily bonus
+        # Daily rewards share the same locked wallet transaction as purchases.
         today = datetime.date.today().isoformat()
-        if cfg.get('last_daily_bonus_date') != today:
-            level = cfg.get('player_level')
-            bonus = 500 * level
-            cfg.set('bankroll', cfg.get('bankroll') + bonus)
-            cfg.set('last_daily_bonus_date', today)
-            self._pending_daily_bonus_msg = f'Daily bonus! +{bonus:,} chips'
-        else:
-            self._pending_daily_bonus_msg = ''
+        credited, bonus = _bankroll_transfer(bonus_date=today)
+        self._pending_daily_bonus_msg = f'Daily bonus! +{bonus:,} chips' if credited and bonus else ''
 
         # avatar – loaded from settings (written by onboarding); may be
         # overridden by main() after OnboardingFlow sets it.
@@ -924,6 +987,61 @@ class Holdem:
         else:
             self.l_hint.config(text="")
 
+    def _stop_gameplay(self):
+        self._game_epoch = getattr(self, "_game_epoch", 0) + 1
+        self._tourn_tick_gen = getattr(self, "_tourn_tick_gen", 0) + 1
+        self.level_gen = getattr(self, "level_gen", 0) + 1
+        self.game_over = True
+        self.stop_clock()
+        self._invalidate_equity()
+
+    def _fund_table(self, staged, cash):
+        previous = getattr(self, "_cash_engine", None)
+        previous_seat = getattr(self, "_cash_seat", 0)
+        returning = previous.players[previous_seat].stack if previous is not None else 0
+        funded = cash and not self._mp_mode
+        buying = staged.players[self.hero_seat].stack if funded else 0
+        changes = [(previous.players[previous_seat], returning, 0)] if previous is not None else []
+        if previous is not None or buying:
+            ok, _ = _bankroll_transfer(returning - buying, changes)
+            if not ok:
+                messagebox.showerror("Practice bankroll", "Not enough practice chips, or the wallet could not be saved.")
+                return False
+        self._stop_gameplay()
+        self._cash_engine = staged if funded else None
+        self._cash_seat = self.hero_seat
+        return True
+
+    def _buy_practice_chips(self, amount):
+        e = self.engine
+        if (self._mp_mode or getattr(self, "_cash_engine", None) is not e
+                or e is None or not self.hand_over or e.street != "idle"
+                or type(amount) is not int or amount <= 0):
+            return False
+        player = e.players[self.hero_seat]
+        maximum = self.table_rules.get("buyin_max_bb", 100) * e.bb
+        if player.stack + amount > maximum:
+            return False
+        ok, _ = _bankroll_transfer(-amount, [(player, player.stack, player.stack + amount)])
+        return ok
+
+    def _release_practice_chips(self, stop=True):
+        e = getattr(self, "_cash_engine", None)
+        if e is None:
+            return True
+        player = e.players[self._cash_seat]
+        ok, _ = _bankroll_transfer(player.stack, [(player, player.stack, 0)])
+        if not ok:
+            return False
+        self._cash_engine = None
+        if stop:
+            self._stop_gameplay()
+        return True
+
+    def _cash_destroyed(self, event):
+        if event.widget is self.root and not self._release_practice_chips(stop=False):
+            logging.getLogger(__name__).error("Window destroyed before practice chips could be returned")
+
     # ---------------------------------------------------------- game set-up
 
     def new_game(self):
@@ -949,15 +1067,14 @@ class Holdem:
             players.append(Player(i, f"P{i+1}", stack,
                                   style=self.rng.choice(AI_STYLES), level=lvl))
 
-        self.engine = Engine(players, sb=sb, bb=bb,
+        staged = Engine(players, sb=sb, bb=bb,
                              structure=_game_rule(self, 'structure', self.v_struct), rng=self.rng,
                              bb_ante=(not cash) and _game_rule(self, 'bb_ante', self.v_ante),
                              deal_sitting_out=not cash)
+        if not self._fund_table(staged, cash=cash):
+            return
+        self.engine = staged
         self.buyin = stack
-        # deduct buy-in from persistent bankroll (cash only)
-        if cash:
-            br = cfg.get('bankroll')
-            cfg.set('bankroll', max(0, br - stack))
         self.bank = float(_game_constant(self, 'bank_start', BANK_START))
         self.level_started = time.time()
         self.level_idx = 0
@@ -997,11 +1114,11 @@ class Holdem:
         self.say("hand", "=== New game ===")
         self.level_gen = getattr(self, "level_gen", 0) + 1
         if _game_rule(self, 'mode', self.v_mode) == "Tournament":
-            self.root.after(1000, lambda g=self.level_gen: self._level_tick(g))
+            _game_after(self, 1000, lambda g=self.level_gen: self._level_tick(g))
             self._tourn_tick_gen += 1
             _ttg = self._tourn_tick_gen
-            self.root.after(1000, lambda g=_ttg: self._tick_tournament_overlay(g))
-        self.root.after(120, self.deal)
+            _game_after(self, 1000, lambda g=_ttg: self._tick_tournament_overlay(g))
+        _game_after(self, 120, self.deal)
 
     def _retheme(self):
         t = self.theme
@@ -1063,10 +1180,13 @@ class Holdem:
             players.append(p)
 
         # H-10: pass betting structure to Engine (was always defaulting to No-Limit)
-        self.engine = Engine(players, sb=sb, bb=bb, structure=structure,
+        staged = Engine(players, sb=sb, bb=bb, structure=structure,
                              bb_ante=self._mp_rules["mode"] == "Tournament" and self._mp_rules["bb_ante"],
                              deal_sitting_out=self._mp_rules["mode"] == "Tournament")
 
+        if not self._fund_table(staged, cash=self._mp_rules["mode"] == "Cash"):
+            return
+        self.engine = staged
         # Common state reset
         self.buyin  = stack
         self.bank   = float(_game_constant(self, 'bank_start', BANK_START))
@@ -1095,11 +1215,11 @@ class Holdem:
         if self._mp_is_host:
             sess.set_host_engine(self.engine)
             sess.configure_seats(seat_order)
-            sess.on_action = lambda seat, act, amt: self.root.after(
+            sess.on_action = lambda seat, act, amt: _game_after(self, 
                 0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
             self.say("hand", "=== Multiplayer Game (Host) ===")
             self.b_next.config(state="disabled")
-            self.root.after(120, self.deal)
+            _game_after(self, 120, self.deal)
         else:
             self.say("hand", "=== Multiplayer Game ===")
             self.l_status.config(text="Waiting for host to deal…")
@@ -1243,7 +1363,7 @@ class Holdem:
         self.flush_log()
         self._mp_host_sync()
         self.redraw()
-        self.root.after(max(80, self.delay // 3), self.loop)
+        _game_after(self, max(80, self.delay // 3), self.loop)
 
     def _mp_send_action(self, action: str, amount: int = 0) -> None:
         """Peer: pack and broadcast an action message to the host."""
@@ -1525,10 +1645,12 @@ class Holdem:
 
         local = self.hero_seat
         hero = e.players[local]
-        if cash and hero.stack == 0 and not hero.sitting_out:
+        if cash and not self._mp_mode and hero.stack == 0 and not hero.sitting_out:
             if messagebox.askyesno(
                     "Rebuy", f"You're felted. Rebuy for {self.buyin:,}?"):
-                e.add_chips(local, self.buyin)
+                if not self._buy_practice_chips(self.buyin):
+                    messagebox.showerror("Rebuy", "Not enough practice chips, or the wallet could not be saved.")
+                    return
             else:
                 e.sit_out(local)
                 self.b_sit.config(text="I'm back")
@@ -1657,7 +1779,7 @@ class Holdem:
             self.redraw()
             self._mp_host_sync()                # peers must see the new street
             self.start_equity()
-            self.root.after(self.delay, self.loop)
+            _game_after(self, self.delay, self.loop)
             return
 
         i = e.actor
@@ -1668,7 +1790,7 @@ class Holdem:
         if i == local and hero.sitting_out:     # sitting out: check or fold
             self.lock()
             act = "call" if e.legal(local)["can_check"] else "fold"
-            self.root.after(max(60, self.delay // 3),
+            _game_after(self, max(60, self.delay // 3),
                             lambda a=act: self._forced(a))
             return
 
@@ -1686,7 +1808,7 @@ class Holdem:
             self._mp_host_sync()
         else:
             self.lock()
-            self.root.after(self.delay,
+            _game_after(self, self.delay,
                             lambda seat=i: self.ai_turn(seat))
 
     def _forced(self, action):
@@ -1701,7 +1823,7 @@ class Holdem:
         self.flush_log()
         self.redraw()
         self._mp_host_sync()
-        self.root.after(max(60, self.delay // 3), self.loop)
+        _game_after(self, max(60, self.delay // 3), self.loop)
 
     def locked_runout(self):
         """No more betting possible, board incomplete: table the hands and
@@ -1731,7 +1853,7 @@ class Holdem:
                         "All in. Run the board twice?") else 1
                 else:
                     runs = 2                     # the AIs always consent
-        self.root.after(self.delay, lambda: self.showdown(runs=runs,
+        _game_after(self, self.delay, lambda: self.showdown(runs=runs,
                                                           tabled=True))
 
     def ai_turn(self, i):
@@ -1769,10 +1891,10 @@ class Holdem:
                 if act == "raise":
                     _emote = "\U0001f44d"
             if _emote:
-                self.root.after(
+                _game_after(self, 
                     max(60, self.delay // 2),
                     lambda si=i, em=_emote: self._show_emote(si, em))
-        self.root.after(max(60, self.delay // 3), self.loop)
+        _game_after(self, max(60, self.delay // 3), self.loop)
 
     # --------------------------------------------------------- hero actions
 
@@ -1837,7 +1959,7 @@ class Holdem:
             _audio.play("check" if lg["can_check"] else "call")
         self.flush_log()
         self.redraw()
-        self.root.after(max(80, self.delay // 3), self.loop)
+        _game_after(self, max(80, self.delay // 3), self.loop)
 
     def _record_vpip_pfr(self, seat_idx: int, action: str, lg: dict) -> None:
         """Update session VPIP/PFR counters for one preflop action.
@@ -2000,7 +2122,7 @@ class Holdem:
         self.flush_log()
         self.redraw()
         self._mp_host_sync()
-        self.root.after(max(80, self.delay // 3), self.loop)
+        _game_after(self, max(80, self.delay // 3), self.loop)
 
     def _hotkey(self, ev):
         if isinstance(self.root.focus_get(), (tk.Entry, tk.Spinbox, ttk.Combobox)):
@@ -2101,10 +2223,6 @@ class Holdem:
         if local in res["winners"]:
             self.l_status.config(text=f"You win {e.players[local].won}.")
             _audio.play("win")
-            # update persistent bankroll with winnings
-            won = e.players[local].won
-            if won > 0:
-                cfg.set('bankroll', cfg.get('bankroll') + won)
             self.update_xp(pots_won=1)
         elif not e.players[local].in_seat:
             if e.players[local].sitting_out or e.players[local].wait_for_bb:
@@ -2133,7 +2251,7 @@ class Holdem:
 
         alive_next = [p for p in e.players if p.stack > 0]
         if len(alive_next) < 2:
-            self.root.after(self.delay * 2,
+            _game_after(self, self.delay * 2,
                             lambda: self.finish_game(alive_next))
             return
 
@@ -2145,7 +2263,7 @@ class Holdem:
             self.b_next.config(state="disabled")   # peer cannot initiate next deal
         elif self.v_auto.get() or self.v_observe.get() or hero_idle \
                 or (hero.stack <= 0 and _game_rule(self, 'mode', self.v_mode) == "Cash"):
-            self.root.after(max(900, self.delay * 3), self.deal)
+            _game_after(self, max(900, self.delay * 3), self.deal)
 
 
     # --------------------------------------------------------------- clock
@@ -2245,7 +2363,7 @@ class Holdem:
         self.l_blinds.config(
             text=f"Blinds {e.sb}/{e.bb}"
                  + (f" \u00b7 ante {e.bb}" if e.bb_ante else "") + suffix)
-        self.root.after(1000, lambda: self._level_tick(gen))
+        _game_after(self, 1000, lambda: self._level_tick(gen))
 
     def _draw_tournament_overlay(self):
         """Draw tournament info (blinds, countdown, rank) in the canvas
@@ -2309,7 +2427,7 @@ class Holdem:
                 pass
         self._tourn_overlay_ids = []
         self._draw_tournament_overlay()
-        self.root.after(1000, lambda: self._tick_tournament_overlay(gen))
+        _game_after(self, 1000, lambda: self._tick_tournament_overlay(gen))
 
     # ------------------------------------------------------- table actions
 
@@ -2336,7 +2454,7 @@ class Holdem:
 
     def add_chips_dialog(self):
         e = self.engine
-        if e is None or not self.hand_over or _game_rule(self, 'mode', self.v_mode) != "Cash":
+        if self._mp_mode or e is None or not self.hand_over or _game_rule(self, 'mode', self.v_mode) != "Cash":
             return
         local = self.hero_seat
         hero = e.players[local]
@@ -2348,7 +2466,7 @@ class Holdem:
             "Add chips", f"Add how much? (max {cap:,})",
             minvalue=1, maxvalue=cap,
             initialvalue=min(cap, self.buyin))
-        if amt and e.add_chips(local, amt):
+        if amt and self._buy_practice_chips(amt):
             self.say("pot", f"You add {amt:,}.")
             self.redraw()
 
@@ -2470,17 +2588,14 @@ class Holdem:
             f"Fee: {gross - net:,}\n"
             f"Your net: {hero.stack - start:+,} | stack {hero.stack:,}"
         )
-        # update persistent bankroll
-        if net > 0:
-            cfg.set('bankroll', cfg.get('bankroll') + net)
         self.redraw()
 
         alive_next = [p for p in e.players if p.stack > 0]
         if len(alive_next) < 2:
-            self.root.after(self.delay * 2,
+            _game_after(self, self.delay * 2,
                             lambda: self.finish_game(alive_next))
         elif self.v_auto.get() or self.v_observe.get():
-            self.root.after(max(900, self.delay * 3), self.deal)
+            _game_after(self, max(900, self.delay * 3), self.deal)
         return True
 
     # ------------------------------------------------------- persistence
@@ -2518,7 +2633,7 @@ class Holdem:
     def _defer(self, fn):
         """While the settings pause is up, requeue game callbacks."""
         if self.paused:
-            self.root.after(200, fn)
+            _game_after(self, 200, fn)
             return True
         return False
 
@@ -2836,6 +2951,11 @@ class Holdem:
                     "New game", "Abandon the current game?",
                     parent=self.settings_win):
                 return
+        if not self._release_practice_chips():
+            messagebox.showerror("Practice bankroll", "Could not return your chips. The table remains open.")
+            return
+        self._stop_gameplay()
+        self.engine = None
         self.close_settings()
         self._sync_resume()
         self._show(self.setup)
@@ -2843,6 +2963,9 @@ class Holdem:
     def quit_to_desktop(self):
         if messagebox.askyesno("Quit", "Quit to desktop?",
                                parent=self.settings_win):
+            if not self._release_practice_chips():
+                messagebox.showerror("Practice bankroll", "Could not return your chips. The table remains open.")
+                return
             self.save_config()
             self.root.destroy()
 
@@ -3818,6 +3941,9 @@ def main():
         app.avatar_path = avatar_path
 
         def on_close():
+            if not app._release_practice_chips():
+                messagebox.showerror("Practice bankroll", "Could not return your chips. The table remains open.")
+                return
             app.save_config()
             root.destroy()
 
