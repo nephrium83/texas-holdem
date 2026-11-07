@@ -130,3 +130,59 @@ def test_host_invite_omits_an_unconfigured_private_fleet_relay(monkeypatch):
         flow._create_game_dialog()
     assert len(calls) == 1
     assert calls[0]["relay_address"] is None
+
+
+
+def test_cancel_can_join_a_worker_already_posting_ui_without_tk_servicing_it():
+    import ast
+    import inspect
+    import queue
+    import threading
+
+    attempt, _, transport, _ = _attempt()
+    reached, resume_tk = threading.Event(), threading.Event()
+    owner = threading.get_ident()
+    callbacks, errors = [], []
+
+    class UIQueue(queue.SimpleQueue):
+        def put(self, fn):
+            super().put(fn)
+            reached.set()
+
+    class Window:
+        def after(self, delay, fn):
+            if threading.get_ident() != owner:
+                # Model cross-thread Tk.after's wait for the mainloop. The
+                # mainloop cannot resume while cancel joins this worker.
+                reached.set()
+                resume_tk.wait(2)
+            callbacks.append(fn)
+
+    # Exercise the actual production nested seam without opening real
+    # sockets or a display. Its closed-over names become this test namespace.
+    tree = ast.parse(inspect.getsource(onboarding))
+    seam = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == '_ui_post')
+    namespace = dict(attempt=attempt, win=Window(), threading=threading,
+                     tk_thread=owner, ui_queue=UIQueue(), tk=onboarding.tk, log=onboarding.log)
+    exec(compile(ast.Module(body=[seam], type_ignores=[]), '<actual join UI seam>', 'exec'), namespace)
+    def post():
+        try:
+            namespace['_ui_post'](lambda: pytest.fail('stale UI update'))
+        except BaseException as exc:
+            errors.append(exc)
+    worker = threading.Thread(target=post)
+    def stop():
+        worker.join(0.3)
+        assert not worker.is_alive(), 'cancellation waited on Tk-dependent dispatch'
+    transport.stop = stop
+    worker.start()
+    try:
+        assert reached.wait(2)
+        attempt.cancel()
+        assert not errors
+        assert not callbacks, 'worker invoked Tk directly'
+        while not namespace['ui_queue'].empty():
+            namespace['ui_queue'].get_nowait()()  # cancelled guard drops it
+    finally:
+        resume_tk.set()
+        worker.join(2)

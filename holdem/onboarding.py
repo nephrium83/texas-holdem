@@ -15,6 +15,7 @@ import base64
 import io
 import logging
 import os
+import queue
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -835,7 +836,7 @@ class OnboardingFlow:
         )
         conn_info_lbl = tk.Label(
             win,
-            text=f"{_stun_text}  |  Relay: ready",
+            text=f"{_stun_text}  |  Relay: unavailable",
             bg=_PANEL, fg=_DIM,
             font=("Segoe UI", 8),
         )
@@ -862,13 +863,13 @@ class OnboardingFlow:
                 )
                 code_lbl.config(text=_code_ref[0])
                 conn_info_lbl.config(
-                    text=f"STUN: {addr[0]}:{addr[1]}  |  Relay: ready"
+                    text=f"STUN: {addr[0]}:{addr[1]}  |  Relay: unavailable"
                 )
             elif _stun_polls[0] < 10:
                 win.after(500, _poll_stun)
             else:
                 conn_info_lbl.config(
-                    text="STUN unavailable, direct only  |  Relay: ready"
+                    text="STUN unavailable, direct only  |  Relay: unavailable"
                 )
 
         if pub_addr is None:
@@ -1021,6 +1022,23 @@ class OnboardingFlow:
 
         attempt_ref = [None]
         dialog_closed = [False]
+        ui_queue = queue.SimpleQueue()
+        tk_thread = threading.get_ident()
+
+        def _drain_ui():
+            if dialog_closed[0]:
+                return
+            for _ in range(128):
+                try:
+                    callback = ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                callback()
+                if dialog_closed[0]:
+                    return
+            win.after(20, _drain_ui)
+
+        win.after(20, _drain_ui)
 
         def _cancel_attempt():
             dialog_closed[0] = True
@@ -1114,6 +1132,12 @@ class OnboardingFlow:
                 if not attempt.active:
                     return
                 fn = attempt.guard(fn)
+                if threading.get_ident() != tk_thread:
+                    # Cross-thread Tk.after waits for Tk to service the call.
+                    # Cancellation must be able to join transport dispatch
+                    # without dispatch waiting on the cancelling Tk thread.
+                    ui_queue.put(fn)
+                    return
                 try:
                     win.after(0, fn)
                 except tk.TclError:
