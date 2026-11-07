@@ -5,6 +5,7 @@ import io
 import math
 import logging
 import queue
+from types import MappingProxyType
 import random
 import threading
 import datetime
@@ -91,6 +92,13 @@ BLIND_LEVELS = [(10, 20), (15, 30), (25, 50), (50, 100), (75, 150),
 SPEEDS = {"Slow": 950, "Normal": 550, "Fast": 260, "Instant": 60}
 
 HERO = 0   # default seat for solo play; see Holdem.hero_seat property for MP
+
+
+def _game_rule(ui, key, local_variable):
+    rules = getattr(ui, "_mp_rules", None)
+    if getattr(ui, "_mp_mode", False) and rules is not None:
+        return rules[key]
+    return local_variable.get()
 
 
 def _bet_shortcut_model(raw):
@@ -937,8 +945,8 @@ class Holdem:
                                   style=self.rng.choice(AI_STYLES), level=lvl))
 
         self.engine = Engine(players, sb=sb, bb=bb,
-                             structure=self.v_struct.get(), rng=self.rng,
-                             bb_ante=(not cash) and self.v_ante.get(),
+                             structure=_game_rule(self, 'structure', self.v_struct), rng=self.rng,
+                             bb_ante=(not cash) and _game_rule(self, 'bb_ante', self.v_ante),
                              deal_sitting_out=not cash)
         self.buyin = stack
         # deduct buy-in from persistent bankroll (cash only)
@@ -964,8 +972,8 @@ class Holdem:
 
         self.b_sit.config(text="Sit out")
         self.b_straddle.config(text="Straddle: off")
-        can_straddle = (cash and self.v_straddles.get()
-                        and self.v_struct.get() != "Fixed-Limit" and n >= 3)
+        can_straddle = (cash and _game_rule(self, 'straddles', self.v_straddles)
+                        and _game_rule(self, 'structure', self.v_struct) != "Fixed-Limit" and n >= 3)
         self.b_straddle.config(
             state="normal" if can_straddle else "disabled")
         self.b_add.config(state="disabled")
@@ -977,13 +985,13 @@ class Holdem:
 
         self._retheme()
         self.l_summary.config(
-            text=f"{n}-handed  ·  {self.v_struct.get()}  ·  {self.v_mode.get()}"
+            text=f"{n}-handed  ·  {_game_rule(self, 'structure', self.v_struct)}  ·  {_game_rule(self, 'mode', self.v_mode)}"
                  f"  ·  AI {'mixed' if self.v_chaos.get() else base}"
                  f"  ·  table #{cfg.rules_hash(self.table_rules)}")
         self._show(self.table)
         self.say("hand", "=== New game ===")
         self.level_gen = getattr(self, "level_gen", 0) + 1
-        if self.v_mode.get() == "Tournament":
+        if _game_rule(self, 'mode', self.v_mode) == "Tournament":
             self.root.after(1000, lambda g=self.level_gen: self._level_tick(g))
             self._tourn_tick_gen += 1
             _ttg = self._tourn_tick_gen
@@ -1022,14 +1030,11 @@ class Holdem:
         sess = self._mp_session
         ts   = getattr(sess, '_last_table_settings',
                        {"sb": 10, "bb": 20, "stack": 1000})
-        sb        = ts.get("sb",        10)
-        bb        = ts.get("bb",        20)
-        stack     = ts.get("stack",   1000)
-        structure = ts.get("structure", "No-Limit")
-
-        # H-10/M-13: store run-it-twice and straddle rules so loop/deal use them
-        self._mp_rit       = ts.get("rit",       "Ask")
-        self._mp_straddles = ts.get("straddles",  False)
+        self._mp_rules = MappingProxyType(cfg.table_rules(**ts))
+        self.table_rules = self._mp_rules
+        self.joined_table = True
+        sb, bb, stack = (self._mp_rules[key] for key in ("sb", "bb", "stack"))
+        structure = self._mp_rules["structure"]
 
         seat_order = sess.seat_order or list(sess.players.keys())
         n = max(2, len(seat_order))
@@ -1053,7 +1058,9 @@ class Holdem:
             players.append(p)
 
         # H-10: pass betting structure to Engine (was always defaulting to No-Limit)
-        self.engine = Engine(players, sb=sb, bb=bb, structure=structure)
+        self.engine = Engine(players, sb=sb, bb=bb, structure=structure,
+                             bb_ante=self._mp_rules["mode"] == "Tournament" and self._mp_rules["bb_ante"],
+                             deal_sitting_out=self._mp_rules["mode"] == "Tournament")
 
         # Common state reset
         self.buyin  = stack
@@ -1504,9 +1511,9 @@ class Holdem:
         e = self.engine
         if e is None or self.game_over or not self.hand_over:
             return
-        cash = self.v_mode.get() == "Cash"
+        cash = _game_rule(self, 'mode', self.v_mode) == "Cash"
 
-        if cash and self.v_topup.get():           # AI auto top-up
+        if cash and not self._mp_mode and self.v_topup.get():  # solo AI top-up
             for p in e.players:
                 if not p.human and 0 <= p.stack < self.buyin:
                     e.add_chips(p.idx, self.buyin - p.stack)
@@ -1530,7 +1537,7 @@ class Holdem:
         self._hand_start_stacks = [p.stack for p in e.players]
 
         if not cash:                              # timed blind levels
-            mins = max(1, self.v_lvlmin.get())
+            mins = max(1, _game_rule(self, 'level_minutes', self.v_lvlmin))
             want = min(len(BLIND_LEVELS) - 1,
                        int((time.time() - self.level_started) // (mins * 60)))
             if want != self.level_idx:
@@ -1552,7 +1559,7 @@ class Holdem:
         self.hand_over = False
         self._cashout_offered = False
 
-        allow_straddle = (cash and self.v_straddles.get()
+        allow_straddle = (cash and _game_rule(self, 'straddles', self.v_straddles)
                           and str(self.b_straddle["state"]) == "normal")
 
         def straddle_fn(utg):
@@ -1709,7 +1716,7 @@ class Holdem:
                        and not e.players[self.hero_seat].sitting_out)
             if hero_in and self._maybe_offer_cashout(e):
                 return   # hand settled via EV cashout
-            mode = self.v_rit.get()
+            mode = _game_rule(self, 'rit', self.v_rit)
             if mode == "Always":
                 runs = 2
             elif mode == "Ask":
@@ -2107,10 +2114,10 @@ class Holdem:
                 _audio.play("bad_beat")
         self.l_hint.config(text="")
 
-        if (self.v_rabbit.get() and len(e.board) < 5
-                and self.v_mode.get() == "Cash"):
+        if (_game_rule(self, 'rabbit', self.v_rabbit) and len(e.board) < 5
+                and _game_rule(self, 'mode', self.v_mode) == "Cash"):
             self.b_rabbit.config(state="normal")
-        if self.v_mode.get() == "Cash":
+        if _game_rule(self, 'mode', self.v_mode) == "Cash":
             hero = e.players[local]
             cap_bb = self.table_rules.get("buyin_max_bb", 100)
             if hero.stack + hero.total < cap_bb * e.bb:
@@ -2126,13 +2133,13 @@ class Holdem:
             return
 
         hero = e.players[local]
-        hero_idle = (hero.stack <= 0 and self.v_mode.get() != "Cash") \
+        hero_idle = (hero.stack <= 0 and _game_rule(self, 'mode', self.v_mode) != "Cash") \
             or hero.sitting_out or hero.wait_for_bb
         self.b_next.config(state="normal")
         if self._mp_mode and not self._mp_is_host:
             self.b_next.config(state="disabled")   # peer cannot initiate next deal
         elif self.v_auto.get() or self.v_observe.get() or hero_idle \
-                or (hero.stack <= 0 and self.v_mode.get() == "Cash"):
+                or (hero.stack <= 0 and _game_rule(self, 'mode', self.v_mode) == "Cash"):
             self.root.after(max(900, self.delay * 3), self.deal)
 
 
@@ -2220,9 +2227,9 @@ class Holdem:
     def _level_tick(self, gen):
         e = self.engine
         if (gen != self.level_gen or e is None or self.game_over
-                or self.v_mode.get() == "Cash"):
+                or _game_rule(self, 'mode', self.v_mode) == "Cash"):
             return
-        mins = max(1, self.v_lvlmin.get())
+        mins = max(1, _game_rule(self, 'level_minutes', self.v_lvlmin))
         if self.level_idx >= len(BLIND_LEVELS) - 1:
             suffix = ""
         else:
@@ -2238,7 +2245,7 @@ class Holdem:
     def _draw_tournament_overlay(self):
         """Draw tournament info (blinds, countdown, rank) in the canvas
         top-right corner.  No-ops when not in tournament mode."""
-        if self.v_mode.get() != "Tournament" or self.engine is None:
+        if _game_rule(self, 'mode', self.v_mode) != "Tournament" or self.engine is None:
             self._tourn_overlay_ids = []
             return
         e = self.engine
@@ -2247,7 +2254,7 @@ class Holdem:
         W = max(cv.winfo_width(), 600)
 
         # Countdown to next level
-        mins = max(1, self.v_lvlmin.get())
+        mins = max(1, _game_rule(self, 'level_minutes', self.v_lvlmin))
         if self.level_idx < len(BLIND_LEVELS) - 1:
             nxt_secs = max(0.0, ((self.level_idx + 1) * mins * 60
                                  - (time.time() - self.level_started)))
@@ -2288,7 +2295,7 @@ class Holdem:
         """Refresh just the tournament overlay canvas items every second."""
         if (gen != self._tourn_tick_gen or self.engine is None
                 or self.game_over
-                or self.v_mode.get() != "Tournament"):
+                or _game_rule(self, 'mode', self.v_mode) != "Tournament"):
             return
         for iid in getattr(self, '_tourn_overlay_ids', []):
             try:
@@ -2312,7 +2319,7 @@ class Holdem:
             self.b_sit.config(text="I'm back")
             self.say("fold", "You sit out.")
         else:
-            if self.v_mode.get() == "Cash" and (hero.owes_bb or hero.owes_sb):
+            if _game_rule(self, 'mode', self.v_mode) == "Cash" and (hero.owes_bb or hero.owes_sb):
                 post = messagebox.askyesno(
                     "Return", "Post the missed blinds now?\n"
                               "(No = wait for the big blind)")
@@ -2324,7 +2331,7 @@ class Holdem:
 
     def add_chips_dialog(self):
         e = self.engine
-        if e is None or not self.hand_over or self.v_mode.get() != "Cash":
+        if e is None or not self.hand_over or _game_rule(self, 'mode', self.v_mode) != "Cash":
             return
         local = self.hero_seat
         hero = e.players[local]
@@ -2347,7 +2354,7 @@ class Holdem:
 
     def rabbit(self):
         e = self.engine
-        if (e is None or not self.hand_over or not self.v_rabbit.get()
+        if (e is None or not self.hand_over or not _game_rule(self, 'rabbit', self.v_rabbit)
                 or len(e.board) >= 5):
             return
         self.rabbit_cards = e.peek_runout()
@@ -2716,7 +2723,7 @@ class Holdem:
                  justify="left", font=("Segoe UI", 8)).pack(anchor="w")
 
         def sync_aids():
-            state = "normal" if self.v_training.get() else "disabled"
+            state = "normal" if _game_rule(self, 'training_aids', self.v_training) else "disabled"
             b_hints.config(state=state)
             b_odds.config(state=state)
 
@@ -2796,9 +2803,9 @@ class Holdem:
             self._eq_signature = None
             self.draw_equity()
         e = self.engine
-        cash = self.v_mode.get() == "Cash"
-        can_straddle = (cash and self.v_straddles.get()
-                        and self.v_struct.get() != "Fixed-Limit"
+        cash = _game_rule(self, 'mode', self.v_mode) == "Cash"
+        can_straddle = (cash and _game_rule(self, 'straddles', self.v_straddles)
+                        and _game_rule(self, 'structure', self.v_struct) != "Fixed-Limit"
                         and e is not None and len(e.players) >= 3)
         self.b_straddle.config(
             state="normal" if can_straddle else "disabled")
