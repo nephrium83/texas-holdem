@@ -550,18 +550,13 @@ class Session:
         # AUTHOR_MODE_COMPAT is only selected by a transport that declares
         # it delivers no verified envelopes, and the production transport
         # declares the opposite.
-        # KNOWN GAP, deliberately not closed here. A wire-mode JOINER built
-        # without a pin has _pinned_host_pubkey = None, so the roster check
-        # in _on_player_list silently no-ops and the session accepts
-        # whatever host key it is told. Independent review classed this as
-        # structural rather than live: onboarding always supplies a pin and
-        # sidecar_launcher runs in compat, so no shipped path reaches it.
-        #
-        # Requiring it here is the obvious fix and was tried; it fails 34
-        # existing tests whose doubles build wire-mode joiners for reasons
-        # unrelated to admission. That is a real change to the test estate,
-        # not a bug fix, and it does not belong in a correction pass. Left
-        # as a named gap rather than a silent one.
+        # Formerly a KNOWN GAP (audit #72), now closed just below: a wire-mode
+        # JOINER built without a pin had _pinned_host_pubkey = None, so the
+        # roster check in _on_player_list silently no-oped and the session
+        # accepted whatever host key it was told. No shipped path reached it
+        # (onboarding always supplies a pin; sidecar_launcher runs in compat),
+        # but the constructor allowed it. Closing it meant moving the test
+        # doubles that built unpinned wire-mode joiners onto a real pin.
         if admission is None and is_host and author_mode == AUTHOR_MODE_WIRE:
             raise ValueError(
                 "a host on a verified-envelope transport must be given an "
@@ -569,6 +564,19 @@ class Session:
                 "without one, any connection that can sign an envelope "
                 "would be able to join the lobby")
         self._admission = admission
+        # Audit #72: the mirror of the host check above. Without it a wire-mode
+        # JOINER built with no admission started out _host_authenticated with
+        # nothing pinned, so any endpoint that could sign an envelope could
+        # play host -- supply the roster and the table config -- to it. (The
+        # KNOWN GAP note above recorded why this was deferred: test doubles
+        # built unpinned joiners. They now pin a real host key instead; see
+        # tests/joiner_helpers.py.)
+        if joiner_admission is None and not is_host and author_mode == AUTHOR_MODE_WIRE:
+            raise ValueError(
+                "a joiner on a verified-envelope transport must be given its "
+                "invite's admission (holdem.p2p.admission.JoinerAdmission) so "
+                "it can authenticate the host key the invite pinned; without "
+                "one, any signing endpoint could act as the host")
         # Joiner side. When set, this session refuses everything but the
         # admission handshake until a peer has authenticated as the exact
         # host key the invite pinned. _host_authenticated is the switch;
