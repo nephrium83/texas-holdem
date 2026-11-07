@@ -187,18 +187,31 @@ def test_illegal_actions_are_refused_not_applied(seed):
     rng = random.Random(9000 + seed)
     n = rng.randint(2, 6)
     stacks = [rng.randrange(50, 600) for _ in range(n)]
-    table = _table(n, stacks, "No-Limit")
-    table.start_hand(button=rng.randrange(n))
+    button = rng.randrange(n)
 
-    seat = table.actor
-    legal = table.engine.legal(seat)
-    before = _total(table)
+    def fresh():
+        t = _table(n, stacks, "No-Limit")
+        t.start_hand(button=button)
+        return t
+
+    probe = fresh()
+    legal = probe.engine.legal(probe.actor)
+    # Audit #136: conservation alone would pass a raise that was clamped and
+    # APPLIED (moving chips stack->pot), which is exactly what used to
+    # happen. Each bad amount gets a fresh table and the CURRENT sequence
+    # number, and must be refused with nothing at all changed.
     for bad in (legal["max_to"] + 1, legal["max_to"] + 10 ** 9, -1,
                 legal["min_to"] - 1 if legal["min_to"] > 0 else -5):
-        table.apply_action(0, seat, "raise", bad)
-        assert _total(table) == before, \
-            f"seed={seed}: illegal raise {bad} moved chips"
-    assert table.phase == PHASE_BETTING
+        table = fresh()
+        if not table.engine.legal(table.actor)["can_raise"]:
+            continue                       # no raise exists to get wrong
+        seq, digest = table.next_seq, table.state_digest()
+        verdict = table.apply_action(seq, table.actor, "raise", bad)
+        assert verdict == "rejected", f"seed={seed}: raise to {bad} was {verdict}"
+        assert table.next_seq == seq, f"seed={seed}: rejected raise advanced seq"
+        assert table.state_digest() == digest, \
+            f"seed={seed}: rejected raise to {bad} changed state"
+        assert table.phase == PHASE_BETTING
 
 
 @pytest.mark.parametrize("seed", range(20))

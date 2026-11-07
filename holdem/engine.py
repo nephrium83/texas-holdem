@@ -65,6 +65,16 @@ class Deck:
         Used by the verifiable-shuffle protocol to inject the deterministic
         deck order agreed upon by all players.
         """
+        indices = list(indices)
+        # Exactly one of each card. Anything else -- a duplicate, a missing
+        # card, a negative index (which Python would silently wrap to the
+        # end of FULL_DECK) or an extra entry -- is malformed shuffle output
+        # and must fail here, not surface later as an impossible hand.
+        if (len(indices) != len(FULL_DECK)
+                or any(type(i) is not int for i in indices)
+                or sorted(indices) != list(range(len(FULL_DECK)))):
+            raise ValueError("deck indices must be a permutation of "
+                             f"range({len(FULL_DECK)})")
         obj = cls.__new__(cls)
         obj.rng = None
         # deal() pops from the end, so reverse to serve index 0 first
@@ -72,8 +82,10 @@ class Deck:
         return obj
 
     def deal(self, n: int = 1):
-        out = self.cards[-n:]
-        del self.cards[-n:]
+        if n < 0 or n > len(self.cards):
+            raise ValueError(f"cannot deal {n} card(s): {len(self.cards)} left")
+        out = self.cards[-n:] if n else []
+        del self.cards[len(self.cards) - n:]
         return out
 
 
@@ -471,6 +483,10 @@ class Engine:
         self.hand_no = 0
         self.raises_this_street = 0
         self.no_raise = set()     # seats facing an under-raise: call/fold only
+        # seat -> its bet total when it last acted this round. TDA 47-A: a
+        # seat that has acted may raise again only when the bet has since
+        # grown by at least a full raise, counting short all-ins TOGETHER.
+        self.acted_at = {}
         self.river_aggr = None    # last bettor/raiser on the river
         self.straddler = None
         self.events = []          # (kind, text) for the log
@@ -698,7 +714,14 @@ class Engine:
             p.owes_bb = p.owes_sb = False
             p.wait_for_bb = False
 
-        self.current_bet = max(p.bet for p in self.players)
+        # The bring-in is the FULL big blind even when the big blind is
+        # all-in for less: callers owe a full blind, and the short blind's
+        # side-pot layering handles what it could not cover (TDA 54-B: "All
+        # pre-flop ... bets will assume full blinds were posted"; Ex. 2 puts
+        # the first player's pot-limit bet at 700 with a short 100 BB at
+        # 100/200, i.e. a full 200 call). Taking only the largest POSTED bet
+        # let everyone limp for whatever the short stack had.
+        self.current_bet = max(self.bb, max(p.bet for p in self.players))
 
         # optional UTG straddle (3+ handed, big-bet games only)
         first = None
@@ -769,6 +792,7 @@ class Engine:
 
     def _open_round(self, first):
         self.no_raise = set()
+        self.acted_at = {}
         actors = [p for p in self.players if self.can_act(p)]
         if len(actors) < 2 and all(p.bet == self.current_bet for p in actors):
             self.need_to_act = set()
@@ -846,6 +870,20 @@ class Engine:
         lg = self.legal(i)
         if action == "raise" and not lg["can_raise"]:
             raise IllegalAction(f"seat {i} may not raise here")
+        if action == "raise" and self.structure != "Fixed-Limit":
+            # Rules profile gap C2 (TDA 43-A / 52-A, OVERRIDE): a raise
+            # outside [min_to, max_to] is REJECTED, never rounded up or down.
+            # Rounding is a repair for chips physically pushed at a table;
+            # here the amount is typed, possibly by a hostile peer.
+            # (Fixed-Limit has one legal size, so its amount is ignored.)
+            if (isinstance(amount, bool) or not isinstance(amount, (int, float))
+                    or (isinstance(amount, float) and not math.isfinite(amount))
+                    or amount != int(amount)):
+                raise IllegalAction(f"raise amount {amount!r} is not a whole number")
+            if not lg["min_to"] <= int(amount) <= lg["max_to"]:
+                raise IllegalAction(
+                    f"raise to {amount} is outside "
+                    f"[{lg['min_to']}, {lg['max_to']}]")
 
         if action == "fold":
             p.folded = True
@@ -904,12 +942,24 @@ class Engine:
                     self.need_to_act = {q.idx for q in self.players
                                         if self.can_act(q)}
                 else:
-                    # all-in for less than a full raise: players who already
-                    # acted must still call the difference, but can't re-raise
+                    # All-in for less than a full raise. Everyone behind must
+                    # still at least call the difference. Whether a seat that
+                    # has ALREADY acted may re-raise depends on how far the
+                    # bet has grown since it acted, counting every short
+                    # all-in together (TDA 47-A; addendum Ex. 1: increments
+                    # of 25 and 75 make a full 100 and reopen the betting).
+                    # min_raise is unchanged: the minimum raise stays the
+                    # last FULL bet or raise (47-A second clause, 43 Ex. 2).
                     behind = {q.idx for q in self.players
                               if self.can_act(q) and q.idx != i
                               and q.bet < self.current_bet}
-                    self.no_raise |= behind - self.need_to_act
+                    for q in behind:
+                        if q not in self.acted_at:
+                            continue            # yet to act: unrestricted
+                        if self.current_bet - self.acted_at[q] >= self.min_raise:
+                            self.no_raise.discard(q)
+                        else:
+                            self.no_raise.add(q)
                     self.need_to_act |= behind
             verb = "bets" if opening else "raises to"
             shown = add if opening else p.bet
@@ -934,6 +984,7 @@ class Engine:
                     full_raise=full, pot_after=self.pot,
                 )
 
+        self.acted_at[i] = p.bet            # the level this seat acted at
         self.need_to_act.discard(i)
         self.actor = self._seek((i + 1) % len(self.players))
 

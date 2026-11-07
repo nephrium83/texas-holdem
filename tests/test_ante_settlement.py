@@ -126,7 +126,12 @@ def test_ante_main_pot_splits_over_two_runs_with_odd_chip_to_first_run():
     engine = _showdown([10, 10], [0, 3], board="2c 4d 7h")
     # First board leaves AA ahead; second makes KK three of a kind.
     tail = _cards("9s Jc Kd Qh")
-    engine.deck = Deck.from_indices([(card.v - 2) * 4 + card.s for card in tail])
+    # A deliberately PARTIAL stacked deck, dealt in this order. Built
+    # directly: Deck.from_indices is the production entry point and accepts
+    # only a complete 52-card permutation (audit finding #38).
+    engine.deck = Deck.__new__(Deck)
+    engine.deck.rng = None
+    engine.deck.cards = list(reversed(tail))      # deal() pops from the end
     result = engine.settle(runs=2)
     assert _pots(result) == [(23, [0, 1], [0, 1])]
     assert [(run["amount"], run["winners"], run["payouts"])

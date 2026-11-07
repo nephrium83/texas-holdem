@@ -192,16 +192,15 @@ def _sign(value: dict, keys: ProbeKeys) -> dict:
 
 
 def _verify(value: dict, signer: str) -> None:
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    # One Ed25519 check for the whole codebase: signing.verify refuses
+    # small-order / non-canonical keys and nonces that the library alone
+    # accepts (finding N1). A direct library call here kept that hole open.
+    from holdem.p2p.signing import verify
 
     signature = bytes.fromhex(_hex(value["signature"], 128))
     unsigned = {key: item for key, item in value.items() if key != "signature"}
-    try:
-        Ed25519PublicKey.from_public_bytes(bytes.fromhex(_hex(signer, 64))).verify(
-            signature, canonical(unsigned))
-    except (InvalidSignature, ValueError) as exc:
-        raise SetupError("invalid setup signature") from exc
+    if not verify(bytes.fromhex(_hex(signer, 64)), canonical(unsigned), signature):
+        raise SetupError("invalid setup signature")
 
 
 def make_ready(context: dict, keys: ProbeKeys) -> dict:

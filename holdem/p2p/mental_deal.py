@@ -805,14 +805,33 @@ class MentalDeal:
         if pos in self._board_pos:
             slot = self._board_pos.index(pos)
             if self._board[slot] is None:
-                self._board[slot] = eg.point_to_card(
-                    eg.combine(self._deck[pos], shares))
+                card = self._decrypt_card(pos, shares)
+                if card is not None:
+                    self._board[slot] = card
         elif pos in self._hole_pos.get(self.seat, []):
             ordinal = self._hole_pos[self.seat].index(pos)
             if self._hole[ordinal] is None:
-                self._hole[ordinal] = eg.point_to_card(
-                    eg.combine(self._deck[pos], shares))
+                card = self._decrypt_card(pos, shares)
+                if card is not None:
+                    self._hole[ordinal] = card
         # else: another seat's hole -> never combined (privacy)
+
+    def _decrypt_card(self, pos: int, shares) -> Optional[str]:
+        """The card at ``pos`` -- or abort if the plaintext is not a card.
+
+        Audit #62: a fully, VALIDLY decrypted position whose point maps to
+        no card used to leave the slot None, so hole_complete() /
+        board_complete() stayed False forever and the hand stalled before
+        the audit could run. Every share here passed its DLEQ proof, so the
+        decryptors are honest: the corrupt ciphertext came out of the shuffle
+        chain, and which shuffler produced it is unknown until the witnesses
+        are opened -- hence no seat is blamed (detection-only attribution).
+        """
+        card = eg.point_to_card(eg.combine(self._deck[pos], shares))
+        if card is None:
+            self._abort(f"deck position {pos} decrypts to a point that is not "
+                        f"a card: the shuffled deck is corrupt", None)
+        return card
 
     # ---------------------------------------------------------------- Phase D
 
