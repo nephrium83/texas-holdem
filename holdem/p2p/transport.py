@@ -110,6 +110,17 @@ def get_clock() -> Clock:
 _loop: Optional[asyncio.AbstractEventLoop] = None
 _thread: Optional[threading.Thread] = None
 _loop_lock = threading.Lock()          # H-2: guards _loop initialisation
+# Lifecycle (audit #89), both guarded by _loop_lock. stop() tears down the
+# module-global registries (_server, _writers, _tasks) OUTSIDE the lock, so
+# a start that slipped into that window used to share them with the dying
+# generation -- the old shutdown could close the new listener and writers,
+# and its final _reset_state() wiped the new generation's bookkeeping.
+# While _stopping, starts are REFUSED (not queued: waiting could deadlock
+# against callbacks that run during shutdown) and a concurrent second
+# stop() waits for the first instead of resetting state mid-teardown.
+_stopping = False
+_stop_done = threading.Event()
+_stop_done.set()
 
 # conn_id -> asyncio StreamWriter
 _writers: dict[str, asyncio.StreamWriter] = {}
@@ -226,9 +237,22 @@ _JOIN_TIMEOUT = 2.0
 # Public registration API (call before starting)
 # ---------------------------------------------------------------------------
 
-def on_task_error(callback: Callable) -> None:
-    """Register a handler for exceptions raised by background tasks."""
+def on_task_error(callback: Callable) -> Callable[[], None]:
+    """Register a handler for exceptions raised by background tasks.
+
+    Returns an unsubscribe function (audit #87). reset_callbacks() also
+    clears these now: they were the one registry it skipped, so every
+    replaced session (ice_room registers one per room) kept a stale handler
+    alive and pinned its dead session state in memory.
+    """
     _task_error_callbacks.append(callback)
+
+    def unsubscribe() -> None:
+        try:
+            _task_error_callbacks.remove(callback)
+        except ValueError:
+            pass                            # already removed or reset
+    return unsubscribe
 
 
 def event_loop() -> Optional[asyncio.AbstractEventLoop]:
@@ -424,6 +448,7 @@ def reset_callbacks() -> None:
     _conn_callbacks.clear()
     _disc_callbacks.clear()
     _reason_disc_callbacks.clear()
+    _task_error_callbacks.clear()           # audit #87: was never cleared
 
 
 # ---------------------------------------------------------------------------
@@ -482,27 +507,39 @@ def _sign_frame(msg: dict) -> bytes:
 
 
 async def _read_msg(reader: asyncio.StreamReader) -> dict:
-    header = await reader.readexactly(4)
-    length = struct.unpack(">I", header)[0]
-    # C-3: reject oversized frames before allocating memory
-    if length > MAX_MSG:
-        raise ValueError(f"oversized frame: {length} bytes (max {MAX_MSG})")
-    body = await reader.readexactly(length)
-    # M-1: propagate JSON errors as ValueError so _handle_connection can close
-    # cleanly. safe_loads bounds size and nesting first: a frame small enough
-    # to pass the length check above can still be nested deeply enough that
-    # json.loads raises RecursionError, which is NOT a ValueError and used to
-    # escape _handle_connection entirely as an uncaught task exception.
-    from holdem.p2p import wire as _wire_mod
-    msg = _wire_mod.safe_loads(body)
-    if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
-        raise ValueError("message must be an object with a string type")
-    # C-1: every peer message MUST be a valid signed envelope. Relay-control
-    # frames are the sole exception (addressed to the relay, not a session).
-    if msg.get("type") in _RELAY_CONTROL_TYPES:
-        return msg
+    """Read the next VERIFIED envelope from a peer stream.
+
+    Relay-control frames are the only unsigned frames on the wire, and they
+    travel client -> relay only: a client never awaits a relay reply, and
+    no session handles one. Audit #84: an inbound ``relay_join`` used to be
+    returned UNSIGNED, so any TCP client could put an attacker-shaped object
+    into session callbacks on a transport that advertises
+    delivers_verified_envelopes=True. Such frames are now skipped -- never
+    delivered -- without dropping the connection (whether an external relay
+    ever forwards a join frame is outside this codebase).
+    """
     from holdem.p2p import wire as _wire
-    return _wire.unpack(body, clock=_clock)  # missing/bad/expired sig raises
+    while True:
+        header = await reader.readexactly(4)
+        length = struct.unpack(">I", header)[0]
+        # C-3: reject oversized frames before allocating memory
+        if length > MAX_MSG:
+            raise ValueError(f"oversized frame: {length} bytes (max {MAX_MSG})")
+        body = await reader.readexactly(length)
+        # M-1: propagate JSON errors as ValueError so _handle_connection can
+        # close cleanly. safe_loads bounds size and nesting first: a frame
+        # small enough to pass the length check above can still be nested
+        # deeply enough that json.loads raises RecursionError, which is NOT
+        # a ValueError and used to escape _handle_connection entirely.
+        msg = _wire.safe_loads(body)
+        if not isinstance(msg, dict) or not isinstance(msg.get("type"), str):
+            raise ValueError("message must be an object with a string type")
+        if msg.get("type") in _RELAY_CONTROL_TYPES:
+            log.debug("transport: ignoring inbound relay-control frame %r",
+                      msg.get("type"))
+            continue
+        # C-1: every peer message MUST be a valid signed envelope.
+        return _wire.unpack(body, clock=_clock)  # missing/bad/expired sig raises
 
 
 # ---------------------------------------------------------------------------
@@ -653,10 +690,15 @@ async def _handle_connection(reader: asyncio.StreamReader,
         if heartbeat is not None:
             heartbeat.cancel()      # nothing left to prove liveness to
         writer.close()
+        # Whoever REMOVES the writer owns the one disconnect event (audit
+        # #86). A failed write already went through _drop_writer, which
+        # popped it and notified; this finally then fired a second
+        # PEER_LOST for the same socket.
         with _writers_lock:
-            _writers.pop(conn_id, None)
+            owned = _writers.pop(conn_id, None) is not None
         log.debug("transport: disconnected %s", conn_id)
-        _deliver_event(_run_disc_callbacks, conn_id, reason)
+        if owned:
+            _deliver_event(_run_disc_callbacks, conn_id, reason)
 
 
 # ---------------------------------------------------------------------------
@@ -970,14 +1012,25 @@ def _report_send_failure(fut) -> None:
 
 
 def disconnect(conn_id: str, *, reason: str = "disconnect") -> None:
-    """Close one peer, preserving the local cause for opt-in callbacks."""
-    _ensure_loop()
+    """Close one peer, preserving the local cause for opt-in callbacks.
+
+    A no-op when the transport is not running or is shutting down (audit
+    #88): it used to call _ensure_loop(), so a redundant cleanup call after
+    stop() started a brand-new transport thread -- an orphan loop after stop
+    had reported completion. send() was already fixed the same way.
+    """
+    loop = _loop
+    if loop is None or loop.is_closed() or _closing:
+        return
     with _writers_lock:
         writer = _writers.get(conn_id)
         if writer is not None:
             _disconnect_reasons[conn_id] = reason
     if writer is not None:
-        _loop.call_soon_threadsafe(writer.close)
+        try:
+            loop.call_soon_threadsafe(writer.close)
+        except RuntimeError:
+            pass                            # loop closed between check and call
 
 
 def stop(timeout: float = 5.0) -> None:
@@ -995,120 +1048,137 @@ def stop(timeout: float = 5.0) -> None:
     start_host()/connect() may be used again.
     """
     global _loop, _thread, _announce_task, _server, _listen_address, _closing
+    global _stopping
 
     with _loop_lock:
-        loop, thread = _loop, _thread
-        _loop, _thread = None, None
+        already_stopping = _stopping
+        if not already_stopping:
+            _stopping = True            # starts are refused until we finish
+            _stop_done.clear()
+            loop, thread = _loop, _thread
+            _loop, _thread = None, None
 
-    if loop is None or loop.is_closed():
-        _reset_state()
+    if already_stopping:
+        # A concurrent stop() owns the teardown. Resetting state here, as
+        # this used to, would wipe registries mid-shutdown; wait for it.
+        if not _stop_done.wait(timeout + 2 * _JOIN_TIMEOUT + 5):
+            log.error("transport: concurrent stop() did not finish in time")
         return
 
-    _closing = True                 # spawn() refuses new work from here
+    try:
+        if loop is None or loop.is_closed():
+            _reset_state()
+            return
 
-    async def _shutdown() -> None:
-        """Tear down in dependency order.
+        _closing = True                 # spawn() refuses new work from here
 
-        Order matters and is easy to get wrong: Server.wait_closed() waits
-        for serve_forever AND every handler task, so awaiting it before
-        cancelling those tasks deadlocks until the outer timeout, after
-        which the loop is force-closed mid-teardown -- peers never see EOF
-        and tasks are destroyed while pending.
+        async def _shutdown() -> None:
+            """Tear down in dependency order.
 
-        So: stop accepting, cancel and JOIN every task (their finally
-        blocks close their own writers), then confirm the sockets are down,
-        then reap the server.
-        """
-        global _server, _announce_task
-        server, _server = _server, None
-        _announce_task = None
-        if server is not None:
-            server.close()                  # stop accepting; do not await yet
+            Order matters and is easy to get wrong: Server.wait_closed() waits
+            for serve_forever AND every handler task, so awaiting it before
+            cancelling those tasks deadlocks until the outer timeout, after
+            which the loop is force-closed mid-teardown -- peers never see EOF
+            and tasks are destroyed while pending.
 
-        # Keep our own references: a handler's finally pops its writer from
-        # _writers, so after the join there is nothing left to await on.
-        with _writers_lock:
-            writers = list(_writers.values())
+            So: stop accepting, cancel and JOIN every task (their finally
+            blocks close their own writers), then confirm the sockets are down,
+            then reap the server.
+            """
+            global _server, _announce_task
+            server, _server = _server, None
+            _announce_task = None
+            if server is not None:
+                server.close()                  # stop accepting; do not await yet
 
-        # Drain repeatedly: a connection accepted just before _closing took
-        # effect can register after the first snapshot, and a task missed
-        # here is a task destroyed while pending. Bounded so a task that
-        # will not stop cannot hang shutdown.
-        #
-        # The join itself is bounded because cancellation is not always
-        # prompt: a task blocked in loop.getaddrinfo (the STUN query) waits
-        # on a default-executor thread that cancelling does not interrupt,
-        # and waiting on it would tie shutdown latency to a DNS server.
-        stragglers: list = []
-        for _ in range(5):
-            with _tasks_lock:
-                tasks = [t for t in _tasks if not t.done()]
-            if not tasks:
-                break
-            for task in tasks:
-                task.cancel()
-            _done, pending = await asyncio.wait(tasks, timeout=_JOIN_TIMEOUT)
-            stragglers = list(pending)
-            if pending:
-                break                       # not going to stop; report below
-        if stragglers:
-            log.warning(
-                "transport: %d task(s) did not stop within %.1fs: %s",
-                len(stragglers), _JOIN_TIMEOUT,
-                ", ".join(sorted(t.get_name() for t in stragglers)))
+            # Keep our own references: a handler's finally pops its writer from
+            # _writers, so after the join there is nothing left to await on.
+            with _writers_lock:
+                writers = list(_writers.values())
 
-        async def _close(writer) -> None:
-            try:
-                writer.close()
-                await asyncio.wait_for(writer.wait_closed(), 2.0)
-            except (OSError, ConnectionError, asyncio.TimeoutError):
-                pass                        # peer already gone, or not draining
-            except Exception:
-                log.debug("transport: writer close raced", exc_info=True)
-            finally:
-                # Force the socket down while the loop is still alive. A
-                # writer that survives to garbage collection finalises by
-                # calling close() -> loop.call_soon on a CLOSED loop, which
-                # raises RuntimeError from a __del__ where nothing can
-                # handle it. abort() is immediate and idempotent.
+            # Drain repeatedly: a connection accepted just before _closing took
+            # effect can register after the first snapshot, and a task missed
+            # here is a task destroyed while pending. Bounded so a task that
+            # will not stop cannot hang shutdown.
+            #
+            # The join itself is bounded because cancellation is not always
+            # prompt: a task blocked in loop.getaddrinfo (the STUN query) waits
+            # on a default-executor thread that cancelling does not interrupt,
+            # and waiting on it would tie shutdown latency to a DNS server.
+            stragglers: list = []
+            for _ in range(5):
+                with _tasks_lock:
+                    tasks = [t for t in _tasks if not t.done()]
+                if not tasks:
+                    break
+                for task in tasks:
+                    task.cancel()
+                _done, pending = await asyncio.wait(tasks, timeout=_JOIN_TIMEOUT)
+                stragglers = list(pending)
+                if pending:
+                    break                       # not going to stop; report below
+            if stragglers:
+                log.warning(
+                    "transport: %d task(s) did not stop within %.1fs: %s",
+                    len(stragglers), _JOIN_TIMEOUT,
+                    ", ".join(sorted(t.get_name() for t in stragglers)))
+
+            async def _close(writer) -> None:
                 try:
-                    transport_obj = writer.transport
-                    if transport_obj is not None and \
-                            not transport_obj.is_closing():
-                        transport_obj.abort()
+                    writer.close()
+                    await asyncio.wait_for(writer.wait_closed(), 2.0)
+                except (OSError, ConnectionError, asyncio.TimeoutError):
+                    pass                        # peer already gone, or not draining
                 except Exception:
-                    log.debug("transport: abort raced", exc_info=True)
+                    log.debug("transport: writer close raced", exc_info=True)
+                finally:
+                    # Force the socket down while the loop is still alive. A
+                    # writer that survives to garbage collection finalises by
+                    # calling close() -> loop.call_soon on a CLOSED loop, which
+                    # raises RuntimeError from a __del__ where nothing can
+                    # handle it. abort() is immediate and idempotent.
+                    try:
+                        transport_obj = writer.transport
+                        if transport_obj is not None and \
+                                not transport_obj.is_closing():
+                            transport_obj.abort()
+                    except Exception:
+                        log.debug("transport: abort raced", exc_info=True)
 
-        if writers:
-            await asyncio.gather(*(_close(w) for w in writers),
-                                 return_exceptions=True)
-        with _writers_lock:
-            _writers.clear()
+            if writers:
+                await asyncio.gather(*(_close(w) for w in writers),
+                                     return_exceptions=True)
+            with _writers_lock:
+                _writers.clear()
 
-        if server is not None:
-            try:
-                await asyncio.wait_for(server.wait_closed(), 2.0)
-            except asyncio.TimeoutError:
-                log.warning("transport: server did not close within 2s")
-            except Exception:
-                log.debug("transport: server close raced", exc_info=True)
+            if server is not None:
+                try:
+                    await asyncio.wait_for(server.wait_closed(), 2.0)
+                except asyncio.TimeoutError:
+                    log.warning("transport: server did not close within 2s")
+                except Exception:
+                    log.debug("transport: server close raced", exc_info=True)
 
-    try:
-        asyncio.run_coroutine_threadsafe(_shutdown(), loop).result(timeout)
-    except Exception:
-        log.exception("transport: shutdown sequence failed")
+        try:
+            asyncio.run_coroutine_threadsafe(_shutdown(), loop).result(timeout)
+        except Exception:
+            log.exception("transport: shutdown sequence failed")
 
-    loop.call_soon_threadsafe(loop.stop)
-    if thread is not None and thread.is_alive():
-        thread.join(timeout)
-        if thread.is_alive():
-            log.error("transport: loop thread did not exit within %.1fs",
-                      timeout)
-    try:
-        loop.close()
-    except Exception:
-        log.debug("transport: loop close raced", exc_info=True)
-    _reset_state()
+        loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout)
+            if thread.is_alive():
+                log.error("transport: loop thread did not exit within %.1fs",
+                          timeout)
+        try:
+            loop.close()
+        except Exception:
+            log.debug("transport: loop close raced", exc_info=True)
+        _reset_state()
+    finally:
+        with _loop_lock:
+            _stopping = False
+        _stop_done.set()
 
 
 def _stop_worker(timeout: float = 5.0) -> None:
@@ -1232,13 +1302,18 @@ def _ensure_loop() -> None:
     """
     global _loop, _thread
     with _loop_lock:
+        if _stopping:
+            raise RuntimeError(
+                "transport is stopping; start it again after stop() returns")
         if _loop is not None and not _loop.is_closed():
             return
-        _loop = asyncio.new_event_loop()
+        loop = _loop = asyncio.new_event_loop()
 
         def _run():
-            asyncio.set_event_loop(_loop)
-            _loop.run_forever()
+            # The thread's OWN loop object, not the global: stop() nulls the
+            # global under the lock before this thread is necessarily running.
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
 
         _thread = threading.Thread(target=_run, daemon=True, name="p2p-transport")
         _thread.start()

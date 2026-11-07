@@ -105,18 +105,31 @@ class MessageWorker:
                         self._queue.maxsize, label)
             return False
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Stop the worker and join it. Idempotent."""
-        if not self._started:
-            self._stopping.set()
-            return
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Stop the worker and join it. Idempotent.
+
+        CANCEL semantics (audit #55): once stop() is called no further queued
+        work runs. The worker checks between items and the backlog is
+        discarded here -- previously the sentinel went to the END of the
+        queue, so every pending handler still ran, and a backlog longer than
+        ``timeout`` let stop() return while the worker kept mutating Session
+        / MentalDeal state underneath a teardown or a replacement session.
+
+        Returns True once the worker has exited. False means a handler
+        already in progress did not finish within ``timeout``: the thread is
+        still alive, and the caller must not assume protocol state is quiet.
+        """
         self._stopping.set()
-        # The sentinel must get in even when the queue is full, which is
-        # exactly the state a backpressured worker is in when shutdown
-        # arrives. put_nowait alone raises queue.Full there, leaving the
-        # thread running and stop() raising into its caller. Drop pending
-        # work to make room: the worker is shutting down, so those messages
-        # were never going to be handled.
+        if not self._started:
+            return True
+        # Discard the backlog, then make room for the sentinel even when a
+        # backpressured queue is full (put_nowait alone raised queue.Full
+        # there, leaving the thread running and stop() raising).
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
         while True:
             try:
                 self._queue.put_nowait(_SENTINEL)
@@ -128,7 +141,10 @@ class MessageWorker:
                     pass                    # consumer drained it; retry
         self._thread.join(timeout)
         if self._thread.is_alive():
-            log.error("dispatch: worker did not stop within %.1fs", timeout)
+            log.error("dispatch: worker did not stop within %.1fs -- a "
+                      "handler is still running", timeout)
+            return False
+        return True
 
     # ------------------------------------------------------------ internals
 
@@ -142,7 +158,9 @@ class MessageWorker:
     def _run(self) -> None:
         while True:
             item = self._queue.get()
-            if item is _SENTINEL:
+            # Checked between items, not only at the sentinel: anything that
+            # slipped in while stop() was discarding the backlog must not run.
+            if item is _SENTINEL or self._stopping.is_set():
                 return
             kind = item[0]
             try:
