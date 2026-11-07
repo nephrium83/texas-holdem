@@ -3,6 +3,11 @@
 This measures one real 52-card shuffle proof.  A multi-seat hand performs
 one such proof per shuffler, so the report also includes serial-chain
 estimates for the supported 2-, 4-, and 9-seat configurations.
+
+Reports include the source checkout revision and clean/dirty/unknown state,
+independent of the caller's directory. For a Git-less source archive, pass
+--source-revision <full-commit-hash>; it is labelled declared, never verified.
+Unknown or dirty provenance must not be represented as clean release evidence.
 """
 from __future__ import annotations
 
@@ -11,6 +16,7 @@ import hashlib
 import json
 import math
 import platform
+import re
 import statistics
 import subprocess
 import time
@@ -19,6 +25,9 @@ from pathlib import Path
 from holdem.p2p import bg_shuffle, elgamal, ristretto as R
 from holdem.p2p.pedersen import CommitmentKey
 from holdem.p2p.shuffle_mp import random_permutation
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def _scalar(label: str) -> R.Scalar:
@@ -92,13 +101,40 @@ def _summary(records: list[dict]) -> dict:
     }
 
 
-def _commit() -> str:
-    try:
-        result = subprocess.run(["git", "rev-parse", "HEAD"],
+def _source_metadata(declared_revision: str | None = None) -> dict:
+    """Describe this source tree, never the caller's current directory.
+
+    An archive may declare its originating commit, but that is labelled as
+    supplied provenance, not a verified clean Git checkout.
+    """
+    def git(*args):
+        result = subprocess.run(["git", *args], cwd=ROOT,
                                 capture_output=True, text=True, timeout=10)
-        return (result.stdout.strip() or "unknown") if result.returncode == 0 else "unknown"
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
+        if result.returncode:
+            raise ValueError("source Git metadata unavailable")
+        return result.stdout.strip()
+
+    try:
+        # A source archive nested inside some unrelated repository must not
+        # inherit that outer repository's commit or cleanliness.
+        if Path(git("rev-parse", "--show-toplevel")).resolve() != ROOT:
+            raise ValueError("source is not the Git worktree root")
+        commit = git("rev-parse", "HEAD")
+        dirty = bool(git("status", "--porcelain", "--untracked-files=normal"))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return {"commit": declared_revision or "unknown",
+                "source_state": "unknown",
+                "revision_source": "declared" if declared_revision else "unavailable"}
+    if declared_revision and declared_revision != commit:
+        raise ValueError("--source-revision disagrees with this source checkout")
+    return {"commit": commit, "source_state": "dirty" if dirty else "clean",
+            "revision_source": "git"}
+
+
+def _revision(value: str) -> str:
+    if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+        raise argparse.ArgumentTypeError("source revision must be a full Git commit hash")
+    return value.lower()
 
 
 def main() -> None:
@@ -109,10 +145,16 @@ def main() -> None:
     parser.add_argument("--m", type=int, default=4)
     parser.add_argument("--n", type=int, default=13)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--source-revision", type=_revision,
+                        help="originating full commit hash for Git-less source distributions; labelled declared")
     args = parser.parse_args()
     if args.samples < 1 or args.m * args.n != 52:
         raise SystemExit("use positive samples and dimensions with m*n == 52")
 
+    try:
+        source_metadata = _source_metadata(args.source_revision)
+    except ValueError as exc:
+        parser.error(str(exc))
     records = [_sample(args.m, args.n, sample)
                for sample in range(args.samples)]
     summary = _summary(records)
@@ -128,7 +170,7 @@ def main() -> None:
         "metadata": {
             "python": platform.python_version(),
             "platform": platform.platform(),
-            "commit": _commit(),
+            **source_metadata,
             "quantile_method": "nearest rank: ceil(p * sample_count)",
             "proof": "bayer-groth shuffle prevention",
         },

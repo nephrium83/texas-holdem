@@ -1,5 +1,7 @@
 """Benchmark reports must not turn partial work into performance evidence."""
 import json
+import shutil
+import subprocess
 import threading
 from types import SimpleNamespace
 
@@ -119,7 +121,7 @@ def test_standalone_projection_counts_shuffler_verification(monkeypatch, capsys)
     monkeypatch.setattr(native_crypto, "initialize", lambda: None)
     monkeypatch.setattr(proof, "_sample", lambda *args: {
         "prove_ms": 10, "verify_ms": 3, "proof_bytes": 100})
-    monkeypatch.setattr(proof, "_commit", lambda: "verified-source")
+    monkeypatch.setattr(proof, "_source_metadata", lambda _revision: {"commit": "verified-source", "source_state": "clean", "revision_source": "git"})
     monkeypatch.setattr("sys.argv", ["benchmark", "--samples", "1"])
     proof.main()
     report = json.loads(capsys.readouterr().out)
@@ -154,3 +156,75 @@ def test_invalid_projection_configuration_is_rejected_before_work(monkeypatch, a
     monkeypatch.setattr("sys.argv", ["benchmark", *arguments])
     with pytest.raises(SystemExit, match="positive samples"):
         comparison.main()
+
+
+@pytest.fixture
+def source_repo(tmp_path, monkeypatch):
+    if not shutil.which("git"):
+        pytest.skip("Git needed to verify checkout provenance")
+    root = tmp_path / "source"
+    root.mkdir()
+
+    def git(*args, cwd=root):
+        return subprocess.run(["git", *args], cwd=cwd, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    git("init")
+    (root / "source.py").write_text("# original source\n")
+    git("add", "source.py")
+    git("-c", "user.name=Benchmark Test", "-c", "user.email=benchmark@example.invalid",
+        "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
+    monkeypatch.setattr(proof, "ROOT", root)
+    return root, git("rev-parse", "HEAD")
+
+
+def test_benchmark_revision_is_the_source_checkout_even_from_another_repository(source_repo, tmp_path, monkeypatch):
+    root, commit = source_repo
+    other = tmp_path / "caller"
+    other.mkdir()
+    subprocess.run(["git", "init"], cwd=other, check=True, capture_output=True)
+    monkeypatch.chdir(other)
+    assert proof._source_metadata() == {"commit": commit, "source_state": "clean", "revision_source": "git"}
+    (root / "source.py").write_text("# modified source\n")
+    assert proof._source_metadata()["source_state"] == "dirty"
+    (root / "source.py").write_text("# original source\n")
+    (root / "untracked.py").write_text("# untracked source\n")
+    assert proof._source_metadata()["source_state"] == "dirty"
+
+
+def test_distribution_nested_in_an_unrelated_repository_does_not_inherit_its_revision(source_repo, monkeypatch):
+    root, commit = source_repo
+    archive = root / "distribution"
+    archive.mkdir()
+    monkeypatch.setattr(proof, "ROOT", archive)
+    assert proof._source_metadata() == {"commit": "unknown", "source_state": "unknown", "revision_source": "unavailable"}
+    assert proof._source_metadata(commit) == {"commit": commit, "source_state": "unknown", "revision_source": "declared"}
+
+
+def test_explicit_revision_cannot_override_a_different_checkout(source_repo):
+    _, commit = source_repo
+    assert proof._source_metadata(commit)["revision_source"] == "git"
+    with pytest.raises(ValueError, match="disagrees"):
+        proof._source_metadata("0" * 40)
+
+
+def test_missing_git_leaves_source_unverified(monkeypatch):
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(proof.subprocess, "run", missing)
+    assert proof._source_metadata()["source_state"] == "unknown"
+    assert proof._source_metadata("a" * 40) == {"commit": "a" * 40, "source_state": "unknown", "revision_source": "declared"}
+
+
+def test_revision_option_requires_full_hash_and_preserves_unverified_label(monkeypatch, capsys):
+    monkeypatch.setattr(native_crypto, "initialize", lambda: None)
+    monkeypatch.setattr(proof, "_sample", lambda *args: {
+        "prove_ms": 10, "verify_ms": 3, "proof_bytes": 100})
+    monkeypatch.setattr(proof, "_source_metadata", lambda revision: {
+        "commit": revision, "source_state": "unknown", "revision_source": "declared"})
+    monkeypatch.setattr("sys.argv", ["benchmark", "--samples", "1", "--source-revision", "A" * 40])
+    proof.main()
+    assert json.loads(capsys.readouterr().out)["metadata"]["commit"] == "a" * 40
+    monkeypatch.setattr("sys.argv", ["benchmark", "--source-revision", "vague-label"])
+    with pytest.raises(SystemExit):
+        proof.main()
