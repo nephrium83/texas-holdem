@@ -34,7 +34,8 @@ func test_unknown_type_is_ignored_not_errored():
 	var client := _client()
 	# Forward compatibility (protocol section 2): unknown types are silently
 	# ignored, not treated as malformed.
-	client._route_message({"type": "future_feature", "payload": {}})
+	client._route_line(JSON.stringify({"type": "future_feature", "payload": {}}))
+	assert_signal_not_emitted(client, "malformed_message")
 	assert_signal_not_emitted(client, "snapshot_received")
 	assert_signal_not_emitted(client, "hello_received")
 	assert_signal_not_emitted(client, "command_result_received")
@@ -110,3 +111,70 @@ func test_send_command_while_disconnected_does_not_crash():
 	client.raise_to(40)
 	client.next_hand()
 	assert_false(client.is_connected_to_sidecar())
+
+
+func test_initial_connection_refusal_or_deadline_emits_failure_once():
+	var server := TCPServer.new()
+	assert_eq(server.listen(0, "127.0.0.1"), OK)
+	var port := server.get_local_port()
+	server.stop()
+	var client := _client()
+	assert_eq(client.connect_to_sidecar("127.0.0.1", port), OK)
+	# Some Windows firewalls hold loopback refusal in CONNECTING. Advance
+	# the actual process deadline, so either refusal or timeout must report.
+	client._process(SidecarClient.CONNECT_TIMEOUT_SECONDS)
+	assert_signal_emit_count(client, "connection_failed", 1)
+	assert_signal_not_emitted(client, "disconnected_from_sidecar")
+	assert_false(client.is_processing())
+	client._process(1.0)
+	client.close()
+	assert_signal_emit_count(client, "connection_failed", 1)
+
+
+func test_connection_timeout_is_bounded_and_reset_clears_partial_messages():
+	var client := _client()
+	client._connecting = true
+	client._framer.feed("partial old connection".to_utf8_buffer())
+	client._advance_connect_timeout(SidecarClient.CONNECT_TIMEOUT_SECONDS - 0.1)
+	assert_signal_not_emitted(client, "connection_failed")
+	client._advance_connect_timeout(0.2)
+	assert_signal_emit_count(client, "connection_failed", 1)
+	assert_false(client._framer.has_partial_data())
+	client._advance_connect_timeout(100.0)
+	assert_signal_emit_count(client, "connection_failed", 1)
+
+
+func test_oversized_socket_message_disconnects_once_and_resets_framer():
+	var server := TCPServer.new()
+	assert_eq(server.listen(0, "127.0.0.1"), OK)
+	var client := _client()
+	assert_eq(client.connect_to_sidecar("127.0.0.1", server.get_local_port()), OK)
+	await wait_process_frames(3)
+	assert_true(server.is_connection_available())
+	var peer := server.take_connection()
+	assert_true(client.is_connected_to_sidecar())
+	# Fill up to the exact limit first, then send the overflow through the
+	# actual socket read path; avoids relying on kernel send-buffer size.
+	var payload := PackedByteArray()
+	payload.resize(LineFramer.MAX_LINE_BYTES)
+	payload.fill(65)
+	client._framer.feed(payload)
+	assert_eq(peer.put_data("x\n".to_utf8_buffer()), OK)
+	await wait_process_frames(5)
+	assert_signal_emit_count(client, "malformed_message", 1)
+	assert_signal_emit_count(client, "disconnected_from_sidecar", 1)
+	assert_false(client.is_connected_to_sidecar())
+	assert_false(client._framer.has_partial_data())
+	assert_false(client._framer.failed())
+	client.close()
+	assert_signal_emit_count(client, "disconnected_from_sidecar", 1)
+	peer.disconnect_from_host()
+	server.stop()
+
+
+func test_connection_ending_before_success_is_not_silent():
+	var client := _client()
+	client._connecting = true
+	client._process(0.0)  # Native stream is STATUS_NONE, never connected.
+	assert_signal_emit_count(client, "connection_failed", 1)
+	assert_false(client.is_processing())

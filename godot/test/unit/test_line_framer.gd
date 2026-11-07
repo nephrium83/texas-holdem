@@ -53,3 +53,36 @@ func test_blank_lines_pass_through_as_empty_strings():
 	var framer := _framer()
 	var lines := framer.feed(_bytes("\n{\"a\":1}\n"))
 	assert_eq(lines, ["", "{\"a\":1}"])
+
+
+func test_oversized_complete_and_incremental_lines_refuse_until_reset():
+	for incremental in [false, true]:
+		var framer := _framer()
+		var payload := PackedByteArray()
+		payload.resize(LineFramer.MAX_LINE_BYTES)
+		payload.fill(65)
+		if incremental:
+			assert_eq(framer.feed(payload), [])
+			assert_false(framer.failed())
+			assert_eq(framer.feed(_bytes("x\n")), [])
+		else:
+			payload.append_array(_bytes("x\n"))
+			assert_eq(framer.feed(payload), [])
+		assert_true(framer.failed())
+		assert_false(framer.has_partial_data())
+		assert_eq(framer.feed(_bytes("{}\n")), [])
+		framer.reset()
+		assert_eq(framer.feed(_bytes("{}\n")), ["{}"])
+
+
+func test_limit_counts_each_line_not_the_whole_tcp_chunk():
+	var framer := _framer()
+	var payload := PackedByteArray()
+	payload.resize(LineFramer.MAX_LINE_BYTES)
+	payload.fill(65)
+	payload.append_array(_bytes("\n{}\n"))
+	var lines := framer.feed(payload)
+	assert_eq(lines.size(), 2)
+	assert_eq(lines[0].length(), LineFramer.MAX_LINE_BYTES)
+	assert_eq(lines[1], "{}")
+	assert_false(framer.failed())

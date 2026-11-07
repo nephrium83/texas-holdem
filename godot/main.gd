@@ -60,6 +60,7 @@ func _ready() -> void:
 	_sidecar.snapshot_received.connect(_on_snapshot_received)
 	_sidecar.command_result_received.connect(_on_command_result_received)
 	_sidecar.disconnected_from_sidecar.connect(_on_sidecar_disconnected)
+	_sidecar.connection_failed.connect(_on_sidecar_connection_failed)
 	_betting_controls.fold_pressed.connect(_on_fold_pressed)
 	_betting_controls.check_call_pressed.connect(_on_check_call_pressed)
 	_betting_controls.raise_pressed.connect(_on_raise_pressed)
@@ -99,7 +100,13 @@ func _render_snapshot(snapshot: Dictionary) -> void:
 	_table_view.set_deal_in_progress(_presentation_active)
 	_player_info_panel.apply_snapshot(snapshot)
 	var you: Dictionary = snapshot.get("you", {})
-	_betting_controls.apply_legal(you.get("legal", {}))
+	var events: Array = snapshot.get("events", [])
+	var last_seq := int(events[-1].get("seq", 0)) if not events.is_empty() else 0
+	# Clock-only updates preserve a selection. A new decision resets it even
+	# if an opponent acted and control returned between rendered snapshots.
+	var decision_key := [snapshot.get("hand_num", 0), snapshot.get("street", ""),
+		snapshot.get("seat", -1), snapshot.get("action_on", -1), last_seq]
+	_betting_controls.apply_legal(you.get("legal", {}), decision_key)
 	var turn: Dictionary = snapshot.get("turn", {})
 	var turn_state := str(turn.get("state", "lobby"))
 	_next_hand_control.apply_turn_state(
@@ -273,6 +280,8 @@ func _refusal_text(command: String, result: Dictionary) -> String:
 ## betting buttons stayed live, and a click only logged a warning. There is
 ## no reconnect, so the client says so and leaves nothing to press.
 func _on_sidecar_disconnected() -> void:
+	if _connection_lost:
+		return
 	_cancel_hand_presentation()
 	_lobby_control.start_failed("Sidecar disconnected")
 	_connection_lost = true
@@ -284,6 +293,11 @@ func _on_sidecar_disconnected() -> void:
 	_lobby_control.visible = false
 	_connection_lobby.visible = false
 	_command_status.text = ""
+
+
+func _on_sidecar_connection_failed(reason: String) -> void:
+	_on_sidecar_disconnected()
+	_connection_banner.text = reason
 
 
 func _start_failure_text(result: Dictionary) -> String:

@@ -820,3 +820,31 @@ func test_sidecar_loss_hides_the_connection_lobby():
 	main._on_sidecar_disconnected()
 	assert_false(main.get_node("%ConnectionLobby").visible)
 	assert_true(main.get_node("%ConnectionBanner").visible)
+
+
+func test_initial_connection_failure_reaches_the_screen():
+	var main := _main()
+	var sidecar: SidecarClient = main.get_node("%SidecarClient")
+	sidecar.connection_failed.emit("Could not connect to the game service")
+	assert_true(main.get_node("%ConnectionBanner").visible)
+	assert_eq(main.get_node("%ConnectionBanner").text, "Could not connect to the game service")
+	assert_false(main.get_node("%BettingControls").visible)
+	assert_false(main.get_node("%ConnectionLobby").visible)
+
+
+func test_decision_identity_ignores_clock_but_resets_after_an_action():
+	var main := _main()
+	var snapshot := _heads_up_snapshot()
+	snapshot["events"] = [{"seq": 2}]
+	main._on_snapshot_received(snapshot)
+	var controls: BettingControls = main.get_node("%BettingControls")
+	controls.get_node("%RaiseSlider").value = 400
+	snapshot = snapshot.duplicate(true)
+	snapshot["turn"]["clock"] = {"remaining_seconds": 20}
+	main._on_snapshot_received(snapshot)
+	assert_eq(controls.current_raise_amount(), 400)
+	# No intermediate non-actor snapshot: an opponent's fast response still
+	# constitutes a new decision, even with an identical legal range.
+	snapshot["events"].append({"seq": 3})
+	main._on_snapshot_received(snapshot)
+	assert_eq(controls.current_raise_amount(), 40)

@@ -37,6 +37,10 @@ func test_board_shrinking_across_snapshots_clears_stale_cards():
 	# A void/redeal can reset street progression; a stale card from a
 	# previous snapshot must not linger once the board reports fewer cards.
 	var view := _board()
-	view.apply_board(["2c", "7d", "10h"])
-	view.apply_board([])
-	assert_false(view.get_node("%Card0").visible)
+	var full := ["2c", "7d", "10h", "Ks", "3d"]
+	for length in range(5):
+		view.apply_board(full)
+		view.apply_board(full.slice(0, length))
+		for i in range(5):
+			assert_eq(view.get_node("%%Card%d" % i).visible, i < length,
+				"stale visibility at slot %d after 5 -> %d" % [i, length])

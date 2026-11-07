@@ -42,6 +42,12 @@ func _ready() -> void:
 
 
 func apply_turn_state(state: String) -> void:
+	if state in ["table_closed", "connection_lost", "disconnected"]:
+		visible = false
+		_requested = false
+		_failure = ""
+		_message_label.text = ""
+		return
 	if state == "lobby":
 		visible = true
 		_button.visible = true
