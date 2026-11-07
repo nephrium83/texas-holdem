@@ -53,7 +53,11 @@ class SimpleTcpTransport:
         self._session  = None
         self._peers: dict[str, socket.socket] = {}     # conn_id -> socket
         self._writers_lock = threading.Lock()
-        self._connected = threading.Event()             # fires after first peer connects
+        # Held THROUGH sendall (audit #83). _writers_lock only guards the
+        # peer map and was released before sending, so two producers could
+        # interleave bytes on one socket and corrupt the line framing.
+        self._send_lock = threading.Lock()
+        self._connected = threading.Event()             # set while a peer is connected
 
     # ------------------------------------------------------------------
     # Session attachment
@@ -154,10 +158,7 @@ class SimpleTcpTransport:
         with self._writers_lock:
             socks = list(self._peers.values())
         for s in socks:
-            try:
-                s.sendall(data)
-            except OSError:
-                pass
+            self._send_bytes(s, data)
 
     def broadcast_except(self, exclude_conn_id: str, msg: dict) -> None:
         """Send to all connected peers except one -- the relay seam."""
@@ -166,10 +167,7 @@ class SimpleTcpTransport:
             socks = [s for cid, s in self._peers.items()
                      if cid != exclude_conn_id]
         for s in socks:
-            try:
-                s.sendall(data)
-            except OSError:
-                pass
+            self._send_bytes(s, data)
 
     def send(self, to_conn: str, msg: dict) -> None:
         """Send to a specific peer by conn_id."""
@@ -177,10 +175,14 @@ class SimpleTcpTransport:
         with self._writers_lock:
             s = self._peers.get(to_conn)
         if s is not None:
+            self._send_bytes(s, data)
+
+    def _send_bytes(self, sock: socket.socket, data: bytes) -> None:
+        with self._send_lock:
             try:
-                s.sendall(data)
+                sock.sendall(data)
             except OSError:
-                pass
+                pass        # the reader observes the dead socket and cleans up
 
     # ------------------------------------------------------------------
     # Receive
@@ -254,22 +256,58 @@ class SimpleTcpTransport:
                     f.close()
                 except OSError:
                     pass
+                self._reader_exited(peer_id, sock)
 
         threading.Thread(target=_read, daemon=True,
                          name=f"tcp-reader-{peer_id}").start()
+
+    def _reader_exited(self, peer_id: str, sock: socket.socket) -> None:
+        """The ONE place a peer's departure is recorded (audits #80, #212).
+
+        Every reader exit -- EOF, an over-long line, a handler crash -- used
+        to close only the file wrapper. The peer stayed registered with its
+        socket open, sends went into a dead socket, the Session never saw a
+        disconnect, and the instance looked connected forever. Now: remove
+        the mapping only if it still refers to THIS socket (a replacement
+        connection is not ours to remove), close the socket, clear the
+        connected flag when no peer remains, and notify the session exactly
+        once, outside the lock.
+        """
+        with self._writers_lock:
+            owned = self._peers.get(peer_id) is sock
+            if owned:
+                del self._peers[peer_id]
+            if not self._peers:
+                self._connected.clear()
+        for step in (lambda: sock.shutdown(socket.SHUT_RDWR), sock.close):
+            try:
+                step()
+            except OSError:
+                pass
+        session = self._session
+        if owned and session is not None and hasattr(session, "handle_disconnect"):
+            try:
+                session.handle_disconnect(peer_id)
+            except Exception:
+                _log.exception("tcp: disconnect handler for %s failed", peer_id)
 
     # ------------------------------------------------------------------
     # Cleanup
     # ------------------------------------------------------------------
 
     def close(self) -> None:
+        """Local teardown. Readers then exit, but the peers are already
+        gone from the map, so no disconnect is reported for our own close."""
         with self._writers_lock:
-            for s in self._peers.values():
+            socks = list(self._peers.values())
+            self._peers.clear()
+            self._connected.clear()
+        for s in socks:
+            for step in (lambda s=s: s.shutdown(socket.SHUT_RDWR), s.close):
                 try:
-                    s.close()
+                    step()
                 except OSError:
                     pass
-            self._peers.clear()
 
 
 __all__ = ["SimpleTcpTransport"]
