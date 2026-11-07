@@ -24,6 +24,12 @@ Current source differs at these security boundaries:
 - The action lists below are historical, incomplete design lists. They are
   not a closed registry accepted by current `Session.handle_message`.
 
+**Transport lifecycle follow-up:** [PR #102](https://github.com/nephrium83/texas-holdem/pull/102)
+separates relay setup from session traffic: inbound `relay_join` control
+frames are skipped by the transport and never delivered to Session callbacks.
+This does not implement the proposed circuit-relay gameplay path below; use
+the PR and current delivery record to distinguish reviewed work from shipping code.
+
 Status (2026-07-24): **protocol core implemented; internet transport pending**.
 The mental-poker deal, signed hostless session, continuous play, and Godot
 sidecar bridge are implemented and tested headlessly. Discovery, relay/NAT
