@@ -43,8 +43,7 @@ class _FakeReader:
 
 
 def _read(blob: bytes) -> dict:
-    return asyncio.new_event_loop().run_until_complete(
-        t._read_msg(_FakeReader(blob)))
+    return asyncio.run(t._read_msg(_FakeReader(blob)))
 
 
 # --------------------------------------------------------------- C-1 transport
@@ -155,36 +154,52 @@ def test_presigned_dict_not_double_wrapped():
 # ------------------------------------------------------------ C-1 seat binding
 
 def test_action_rejects_wrong_seat_owner():
-    """A peer on conn 'B' cannot submit an action claiming seat 0 (owned by 'A')."""
-    # A host on the production transport must carry an admission policy;
-    # this suite is about frame signing, so it supplies a real one rather
-    # than dodging the requirement.
-    s = Session(is_host=True, nickname="H", avatar_b64="",
-                transport=t, clock=t.get_clock(), master_secret=bytes([9]) * 32,
-                admission=_adm_mod.HostAdmission(
-                    admission_secret=bytes(16),
-                    host_pubkey=_ident.public_key_bytes()))
-
-    class _Eng:
+    """Both authenticated author/connection and connection/seat must match."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    first = _ident.Identity(Ed25519PrivateKey.generate(), X25519PrivateKey.generate())
+    second = _ident.Identity(Ed25519PrivateKey.generate(), X25519PrivateKey.generate())
+    assert first.public_key_bytes() != second.public_key_bytes()
+    secret, host_key = bytes(16), _ident.public_key_bytes()
+    admission = _adm_mod.HostAdmission(admission_secret=secret, host_pubkey=host_key)
+    s = Session(is_host=True, nickname="H", avatar_b64="", transport=t,
+                clock=t.get_clock(), master_secret=bytes([9]) * 32, admission=admission)
+    class Engine:
         actor = 0
-    s.set_host_engine(_Eng())
+    s.set_host_engine(Engine())
     s.configure_seats(["A", "B"])
     s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
     s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
-    s._VALID_ACTIONS = {"fold", "call", "raise", "check", "bet"}
-
+    for conn, signer in (("A", first), ("B", second)):
+        admit(admission, conn, signer.public_key_bytes(), secret, host_key)
     fired = []
-    s.on_action = lambda seat, act, amt: fired.append((seat, act, amt))
+    s.on_action = lambda *args: fired.append(args)
 
-    # Correct owner acts on seat 0 -> accepted
-    s.handle_game_action("A", {"payload": {"seat": 0, "action": "call"}})
+    def deliver(conn, signer, seat=0):
+        encoded = wire.pack("action", {"seat": seat, "action": "call", "amount": 0},
+                            signer=signer, clock=t.get_clock())
+        verified = wire.unpack(encoded, clock=t.get_clock())
+        assert verified["pubkey"] == signer.public_key_bytes().hex()
+        s.handle_message(conn, verified)
+
+    deliver("A", first)
     assert fired == [(0, "call", 0)]
-
-    # Impostor on conn B claims seat 0 -> rejected
     fired.clear()
-    s.handle_game_action("B", {"payload": {"seat": 0, "action": "raise",
-                                           "amount": 50}})
+    deliver("A", second)  # correct connection/seat, WRONG authenticated key
+    deliver("B", second)  # correct key/connection, WRONG seat
+    deliver("A", first, seat=1)  # correct key/connection, another seat
     assert fired == []
+    s.handle_disconnect("A")
+    assert not admission.is_admitted("A")
+    deliver("A", first)  # old key cannot survive a socket's admission
+    assert fired == []
+    # Reusing a connection ID needs a fresh handshake; the former author
+    # cannot act after the connection has been authenticated to a new key.
+    admit(admission, "A", second.public_key_bytes(), secret, host_key)
+    deliver("A", first)
+    assert fired == []
+    deliver("A", second)
+    assert fired == [(0, "call", 0)]
 
 
 # ------------------------------------------------------------- hash-chain

@@ -159,53 +159,14 @@ def main() -> None:
 
     session.on_state_changed = _on_state_changed
 
-    # Deliver TCP messages through the queue so session methods are
-    # only called from the main thread (avoids concurrency in session.py).
-    def _on_tcp_message(peer_id: str, msg: dict) -> None:
-        evt_queue.put(("msg", peer_id, msg))
-
-    # Monkey-patch transport to queue messages instead of calling directly.
-    _orig_start_reader = transport._start_reader
-
-    def _queued_reader(peer_id: str, sock, leftover: bytes = b"") -> None:
-        """Queueing stand-in for SimpleTcpTransport._start_reader.
-
-        ``leftover`` is whatever the handshake's recv() pulled in past the
-        hello's newline. It MUST be consumed here: this override shadows
-        the production reader entirely, so a copy that ignores it
-        reintroduces the dropped-frame defect inside the worker while the
-        real transport is fixed.
-        """
-        def _read() -> None:
-            import json as _json
-            f = sock.makefile("rb")
-            carry = leftover
-            try:
-                while True:
-                    if b"\n" in carry:
-                        line, _, carry = carry.partition(b"\n")
-                        raw = line
-                    else:
-                        chunk = f.readline()
-                        if not chunk:
-                            break
-                        raw = carry + chunk
-                        carry = b""
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        msg = _json.loads(raw)
-                    except _json.JSONDecodeError:
-                        continue
-                    evt_queue.put(("msg", peer_id, msg))
-            except Exception:
-                pass
-
-        threading.Thread(target=_read, daemon=True,
-                         name=f"reader-{peer_id}").start()
-
-    transport._start_reader = _queued_reader
+    # Keep the production bounded reader and queue only delivery to the
+    # Session's owner thread, including production disconnect notifications.
+    class QueuedReceiver:
+        def handle_message(self, peer_id, msg):
+            evt_queue.put(("msg", peer_id, msg))
+        def handle_disconnect(self, peer_id):
+            evt_queue.put(("disconnect", peer_id))
+    transport.attach(QueuedReceiver())
 
     # ── connect ────────────────────────────────────────────────────────
     if is_host:
@@ -216,7 +177,7 @@ def main() -> None:
             sys.exit("--peer-port required for guest role")
         transport.connect("127.0.0.1", args.peer_port)
 
-    # Wait for handshake (connection established by _handshake → queued_reader)
+    # Wait for handshake (connection established by production _handshake/_start_reader)
     if not transport.wait_connected(timeout=15.0):
         sys.exit("timed out waiting for peer connection")
 
@@ -274,6 +235,9 @@ def main() -> None:
             except Exception as exc:
                 _emit({"type": "error", "msg": f"handle_message: {exc}"})
             _trace("msg_done", mtype=msg.get("type"))
+
+        elif item[0] == "disconnect":
+            session.handle_disconnect(item[1])
 
         elif item[0] == "cmd":
             _, cmd = item

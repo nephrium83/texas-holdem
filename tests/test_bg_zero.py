@@ -517,23 +517,43 @@ def test_transcript_binds_every_prover_message():
                      bmap.n, len(c_A), bmap, ctx, c_A, c_B,
                      p.c_A0, p.c_Bm, p.c_D),
     ]
+    # Mutate every position, including the last diagonal and generator.
+    for kind, points in (("A", c_A), ("B", c_B), ("D", p.c_D), ("G", ck.Gs)):
+        for index, point in enumerate(points):
+            changed = list(points)
+            changed[index] = _bump(point)
+            key = P.CommitmentKey(H=ck.H, Gs=changed, seed=ck.seed) if kind == "G" else ck
+            value = Z._challenge(key, bmap.n, len(c_A), bmap, ctx,
+                                 changed if kind == "A" else c_A,
+                                 changed if kind == "B" else c_B,
+                                 p.c_A0, p.c_Bm, changed if kind == "D" else p.c_D)
+            assert bytes(value) != bytes(base), (kind, index)
+    variants.append(Z._challenge(P.CommitmentKey(H=_bump(ck.H), Gs=ck.Gs, seed=ck.seed),
+                                 bmap.n, len(c_A), bmap, ctx, c_A, c_B,
+                                 p.c_A0, p.c_Bm, p.c_D))
     for v in variants:
         assert bytes(v) != bytes(base)
 
 
 def test_transcript_is_length_prefixed():
-    """Without length prefixes, a shorter context followed by a longer
-    commitment list could share a preimage with the reverse. Dimensions are
-    hashed first so this is belt-and-braces, but the property should hold
-    on its own."""
-    setup = _setup(2, 2)
-    ck, bmap, _av, _rv, _bv, _sv, c_A, c_B, _ctx = setup
-    p = _prove(setup)
-    one = Z._challenge(ck, bmap.n, len(c_A), bmap, b"ab", c_A, c_B,
-                       p.c_A0, p.c_Bm, p.c_D)
-    two = Z._challenge(ck, bmap.n, len(c_A), bmap, b"a", c_A, c_B,
-                       p.c_A0, p.c_Bm, p.c_D)
-    assert bytes(one) != bytes(two)
+    # Raw concatenation COLLIDES; the production field encoder must separate it.
+    left, right = (b"ab", b"c"), (b"a", b"bc")
+    assert b"".join(left) == b"".join(right)
+    class Recorder:
+        def __init__(self):
+            self.data = bytearray()
+        def update(self, chunk):
+            self.data.extend(chunk)
+    encoded = []
+    for fields in (left, right):
+        recorder = Recorder()
+        for field in fields:
+            Z._field(recorder, field)
+        encoded.append(bytes(recorder.data))
+    assert encoded == [b"\x00\x00\x00\x02ab\x00\x00\x00\x01c",
+                       b"\x00\x00\x00\x01a\x00\x00\x00\x02bc"]
+    assert encoded[0] != encoded[1]
+
 
 
 def test_zero_challenge_is_retried_not_rejected(monkeypatch):

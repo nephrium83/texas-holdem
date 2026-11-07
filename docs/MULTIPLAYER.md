@@ -48,6 +48,13 @@ out of scope permanently.
 
 ---
 
+Protocol failure handling (audit repairs #117): contested settlement requires
+verified hole cards for every contested seat. Missing verified cards void the
+hand instead of settling with placeholders. The action reorder buffer is bounded;
+`overflow` means that future action was refused and was not applied. Expected
+session command refusals use `CommandRefused`; other `RuntimeError` exceptions
+remain invariant failures.
+
 ## Why serverless
 
 Two independent problems, deliberately separated:

@@ -260,21 +260,30 @@ def test_send_after_stop_does_not_raise():
     T.broadcast({"type": "chat", "payload": {}})
 
 
-def test_broadcast_reports_failures():
-    """send() logged write errors; broadcast() discarded its futures
-    entirely, so a whole-table send could fail in silence."""
-    address = T.start_host(0)
-    host, port = address.rsplit(":", 1)
-    seen = []
-    T.on_task_error(seen.append)
-    client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
-    try:
-        wait_until(lambda: T.peer_ids(), timeout=3.0)
-        cid = T.peer_ids()[0]
-    finally:
-        client.close()
-    # The peer is gone but still registered; a broadcast to it must not
-    # fail silently the way an un-awaited future would.
-    wait_until(lambda: True, timeout=0.1)
-    T.broadcast({"type": "chat", "payload": {"text": "x"}})
-    assert cid, "no connection was registered to broadcast to"
+def test_broadcast_reports_failures(monkeypatch):
+    """An unexpected queued-send failure reaches exactly one error callback."""
+    import asyncio
+    sentinel = RuntimeError("deterministic broadcast failure")
+    writes, seen = [], []
+    class BrokenWriter:
+        def write(self, blob):
+            writes.append(blob)
+            raise sentinel
+    async def exercise():
+        done = asyncio.Event()
+        monkeypatch.setattr(T, "_loop", asyncio.get_running_loop())
+        monkeypatch.setattr(T, "_writers", {"target": BrokenWriter()})
+        monkeypatch.setattr(T, "_sign_frame", lambda msg: b"signed-frame")
+        def report(exc):
+            seen.append(exc)
+            done.set()
+        unsubscribe = T.on_task_error(report)
+        try:
+            assert T.peer_ids() == ["target"]
+            T.broadcast({"type": "chat", "payload": {"text": "x"}})
+            await asyncio.wait_for(done.wait(), timeout=3)
+            assert writes == [b"signed-frame"]
+            assert seen == [sentinel]
+        finally:
+            unsubscribe()
+    asyncio.run(exercise())
