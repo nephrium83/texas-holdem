@@ -52,6 +52,8 @@ class ClientServer:
         self._server: Optional[asyncio.AbstractServer] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._conns: set[_Conn] = set()
+        self._handlers: set[asyncio.Task] = set()
+        self._stopping = False
         self._prev_hook = None
         # Bound methods are equal but not identical on repeated attribute
         # access. Retain the exact object installed on the Session so stop()
@@ -64,11 +66,11 @@ class ClientServer:
         return self._port
 
     async def start(self) -> None:
-        if self._server is not None:
-            raise RuntimeError("client server already started")
+        if self._server is not None or self._stopping:
+            raise RuntimeError("client server already started or stopping")
         self._loop = asyncio.get_running_loop()
         self._server = await asyncio.start_server(
-            self._accept, self._host, self._port)
+            self._connected, self._host, self._port)
         self._port = self._server.sockets[0].getsockname()[1]
         # Chain, never clobber, any state hook already installed.
         if self._session is not None:
@@ -77,23 +79,30 @@ class ClientServer:
         _log.info("client server listening on %s:%s", self._host, self._port)
 
     async def stop(self) -> None:
-        if (self._session is not None
-                and self._session.on_state_changed is self._installed_hook):
-            self._session.on_state_changed = self._prev_hook
-        server, self._server = self._server, None
-        if server is not None:
-            server.close()
-            await server.wait_closed()
-        conns = list(self._conns)
-        for conn in conns:
-            conn.close()
-        if conns:
-            await asyncio.gather(
-                *(conn.wait_closed() for conn in conns),
-                return_exceptions=True,
-            )
-        await asyncio.sleep(0)          # let reader loops observe the close
-        self._loop = None
+        if self._stopping:
+            raise RuntimeError("client server is already stopping")
+        self._stopping = True
+        try:
+            if (self._session is not None
+                    and self._session.on_state_changed is self._installed_hook):
+                self._session.on_state_changed = self._prev_hook
+            server, self._server = self._server, None
+            if server is not None:
+                server.close()
+            # Close clients before waiting for the listener: on newer asyncio
+            # versions wait_closed also waits for accepted transports.
+            for conn in list(self._conns):
+                conn.close()
+            # Tasks are registered synchronously when asyncio accepts a socket,
+            # including handlers which have not entered _accept yet. Their
+            # finalizers join push tasks and the writer before leaving this set.
+            while self._handlers:
+                await asyncio.gather(*tuple(self._handlers), return_exceptions=True)
+            if server is not None:
+                await server.wait_closed()
+            self._loop = None
+        finally:
+            self._stopping = False
 
     # -- state push ----------------------------------------------------
 
@@ -109,7 +118,17 @@ class ClientServer:
         """Request a snapshot from a controller callback on any thread."""
         loop = self._loop
         if loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(self._mark_all_dirty)
+            try:
+                current = asyncio.get_running_loop()
+            except RuntimeError:
+                current = None
+            if current is loop:
+                # A synchronous command will send its own updated snapshot
+                # and clear this mark before yielding. Scheduling it instead
+                # makes that clear run too early, causing a duplicate push.
+                self._mark_all_dirty()
+            else:
+                loop.call_soon_threadsafe(self._mark_all_dirty)
 
     def _mark_all_dirty(self) -> None:
         for conn in self._conns:
@@ -117,15 +136,27 @@ class ClientServer:
 
     # -- connections ---------------------------------------------------
 
+    def _connected(self, reader, writer) -> None:
+        task = asyncio.create_task(self._accept(reader, writer))
+        self._handlers.add(task)
+        task.add_done_callback(self._handlers.discard)
+
     async def _accept(self, reader, writer) -> None:
+        if self._server is None:
+            writer.close()
+            await writer.wait_closed()
+            return
         conn = _Conn(self._session, reader, writer, self._start_table,
                      self._snapshot_provider, self._command_handler)
         self._conns.add(conn)
         try:
             await conn.run()
         finally:
-            self._conns.discard(conn)
             conn.close()
+            try:
+                await conn.wait_closed()
+            finally:
+                self._conns.discard(conn)
 
 
 class _Conn:
@@ -176,6 +207,11 @@ class _Conn:
         while True:
             await self.dirty.wait()
             async with self._operation:
+                # Event.wait may already have awakened before the command
+                # cleared its coalesced mark. Recheck under the operation
+                # lock instead of emitting a second identical snapshot.
+                if not self.dirty.is_set():
+                    continue
                 self.dirty.clear()
                 self._send(await self._snapshot())
                 await self._drain()
@@ -239,8 +275,8 @@ class _Conn:
         self._send(result)
         # The snapshot below already reflects this command's effect, so a
         # coalesced push queued by it would be a duplicate: clear it. A
-        # remote change racing in is only *scheduled* on the loop, so its
-        # dirty-set runs after this block and is never lost.
+        # cross-thread change racing in is scheduled on the loop, so its
+        # dirty-set runs after this synchronous block and is never lost.
         self.dirty.clear()
         self._send(client_view.snapshot(self._session))
 
