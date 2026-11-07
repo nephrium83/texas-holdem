@@ -289,3 +289,21 @@ func test_a_seat_out_before_the_end_sees_the_final_chips():
 	assert_string_contains(panel.result_text.text, "Final chips:\nYou: 0\nMaya: 0\nRavi: 2020")
 	assert_false(panel.result_text.text.contains("1040"),
 		"showed the busting hand's stacks as the outcome")
+
+
+func test_cashout_distribution_has_no_invented_pot_or_winning_hand():
+	var panel: Variant = _panel()
+	var snapshot := _settled_snapshot({
+		"headline": "Cashout distribution | you received 79",
+		"pots": [], "showdown": [],
+		"payouts": [{"seat": 0, "name": "You", "amount": 79}, {"seat": 1, "name": "Maya", "amount": 21}],
+		"refund": {"seat": 1, "name": "Maya", "amount": 250},
+		"you": {"net": 29, "stack": 79},
+	})
+	snapshot["turn"]["headline"] = "Cashout distribution | you received 79"
+	panel.apply_snapshot(snapshot)
+	assert_string_contains(panel.result_text.text, "You received 79")
+	assert_string_contains(panel.result_text.text, "Maya received 21")
+	assert_string_contains(panel.result_text.text, "250 returned to Maya (uncalled)")
+	assert_false(panel.result_text.text.contains("Main pot"))
+	assert_false(panel.result_text.text.contains("won"))
