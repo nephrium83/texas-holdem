@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 import pytest
+from peer_cleanup import close_child, close_all
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -77,10 +78,12 @@ class Peer:
         self.events: list = []
         self._lock = threading.Lock()
         self.stderr: list = []
-        threading.Thread(target=self._pump, daemon=True,
-                         name=f"peer-{label}").start()
-        threading.Thread(target=self._pump_err, daemon=True,
-                         name=f"peer-err-{label}").start()
+        self._readers = [threading.Thread(target=self._pump, daemon=True,
+                                           name=f"peer-{label}"),
+                         threading.Thread(target=self._pump_err, daemon=True,
+                                           name=f"peer-err-{label}")]
+        for thread in self._readers:
+            thread.start()
 
     def _pump(self) -> None:
         for line in self.proc.stdout:
@@ -119,16 +122,8 @@ class Peer:
             return [e for e in self.events if e.get("type") == mtype]
 
     def close(self) -> None:
-        if self.proc.poll() is not None:
-            return                     # already gone; a test killed it
-        try:
-            self.send({"op": "quit"})
-            self.proc.wait(timeout=5)
-        except Exception:                              # noqa: BLE001
-            try:
-                self.proc.terminate()
-            except Exception:                          # noqa: BLE001
-                pass
+        close_child(self.proc, quit=lambda: self.send({"op": "quit"}),
+                    readers=self._readers)
 
 
 @pytest.fixture
@@ -168,9 +163,7 @@ def three_peers(tmp_path):
                 f"{p.label} was not admitted; stderr={p.stderr[-8:]}")
         yield a, b, c
     finally:
-        for p in (c, b, a):
-            if p is not None:
-                p.close()
+        close_all([(p.label, p.close) for p in (c, b, a) if p is not None])
 
 
 def _graph(peer: Peer) -> list:
@@ -205,10 +198,9 @@ def test_production_topology_is_a_star(three_peers):
     assert len(ga) == 2, f"host should hold two connections, got {ga}"
     assert len(gb) == 1, f"joiner B should hold one connection, got {gb}"
     assert len(gc) == 1, f"joiner C should hold one connection, got {gc}"
-    # B and C know only the host, and the host's ids are per-socket, so
-    # the two joiners share no connection.
-    assert set(gb).isdisjoint(set(gc)) or gb == gc, (
-        f"unexpected id overlap: B={gb} C={gc}")
+    # These observations establish socket degrees only. Per-socket IDs
+    # have no cross-process identity meaning, so they prove no shared edge.
+
 
 
 def _status(peer, timeout=DELIVER_WAIT):

@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.timeout import FakeClock as _DependencyClock
-from holdem.p2p.session import Session
+from holdem.p2p.session import Session, CommandRefused
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
 from holdem.p2p.replica_table import PHASE_BETTING
 from holdem.client_server import ClientServer, PROTOCOL_VERSION
@@ -441,13 +441,7 @@ def test_client_server_rejects_double_start_and_can_restart():
 
 
 def test_a_session_error_answers_the_command_instead_of_dropping_the_client():
-    """A RuntimeError from the session must not close the socket.
-
-    _handle_command's catch tuple omitted RuntimeError, so a session-level
-    guard -- the bus re-entrancy guard, SessionOwner._assert_owner -- would
-    unwind the read loop and take the client's connection with it. The
-    client gets an answer it can act on instead.
-    """
+    """An expected refusal answers the client without hiding a defect."""
     class _Boom:
         def __init__(self):
             self.written = []
@@ -464,7 +458,7 @@ def test_a_session_error_answers_the_command_instead_of_dropping_the_client():
     from holdem.client_server import _Conn
 
     def explode():
-        raise RuntimeError("session guard fired")
+        raise CommandRefused("session guard fired")
 
     conn = _Conn(session=None, reader=None, writer=_Boom(),
                  start_table=explode)
@@ -484,46 +478,18 @@ def test_a_session_error_answers_the_command_instead_of_dropping_the_client():
     assert "session guard fired" in result["error"]
 
 
-def test_a_swallowed_command_error_is_logged(caplog):
-    """The other half of the RuntimeError catch, and the half that makes it
-    defensible. The catch is broad enough to swallow this codebase's own
-    loud guards -- the bus re-entrancy guard, SessionOwner._assert_owner --
-    and the client is only told "ok: false", which nothing in the Godot
-    client renders for a command it did not initiate. Without the log the
-    only trace of a real invariant breach would be gone."""
-    import logging
-
-    class _W:
-        def __init__(self):
-            self.written = []
-
-        def write(self, data):
-            self.written.append(data)
-
-        async def drain(self):
-            return None
-
-        def close(self):
-            pass
-
+def test_real_bus_reentrancy_invariant_is_not_an_ordinary_refusal():
+    from types import SimpleNamespace
     from holdem.client_server import _Conn
-    import holdem.client_view as cv
-
-    conn = _Conn(session=None, reader=None, writer=_W(),
-                 start_table=lambda: (_ for _ in ()).throw(
-                     RuntimeError("owner assertion fired")))
-    original = cv.snapshot
-    cv.snapshot = lambda _s: {"type": "snapshot"}
-    try:
-        with caplog.at_level(logging.ERROR, logger="holdem.client_server"):
-            conn._handle_command({"type": "command", "command": "start_game"})
-    finally:
-        cv.snapshot = original
-
-    assert any("owner assertion fired" in r.getMessage()
-               or (r.exc_info and "owner assertion fired" in str(r.exc_info[1]))
-               for r in caplog.records),         "a swallowed command error left no trace in the log"
-
+    bus = InMemoryBus()
+    bus.register("peer", SimpleNamespace(handle_message=lambda *_: bus.drain()))
+    bus.enqueue("sender", "peer", {"type": "probe"})
+    written = []
+    conn = _Conn(session=None, reader=None,
+                 writer=SimpleNamespace(write=written.append), start_table=bus.drain)
+    with pytest.raises(RuntimeError, match="re-entered"):
+        conn._handle_command({"type": "command", "command": "start_game"})
+    assert written == [], "an invariant was serialized as an ordinary refusal"
 
 
 def test_command_push_is_coalesced_for_sender_but_other_client_and_thread_updates_arrive():

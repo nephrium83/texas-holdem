@@ -36,12 +36,14 @@ def _clean_transport():
     """Every test starts and ends with the transport fully stopped."""
     T.stop()
     T.reset_callbacks()
-    wait_until(lambda: not transport_threads(), timeout=3.0)
+    assert wait_until(lambda: not transport_threads(), timeout=3.0), (
+        f"transport threads survived cleanup: {[t.name for t in transport_threads()]}")
     gc.collect()
     yield
     T.stop()
     T.reset_callbacks()
-    wait_until(lambda: not transport_threads(), timeout=3.0)
+    assert wait_until(lambda: not transport_threads(), timeout=3.0), (
+        f"transport threads survived cleanup: {[t.name for t in transport_threads()]}")
     gc.collect()
 
 

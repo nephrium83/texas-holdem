@@ -22,11 +22,9 @@ What this does NOT prove
 
 Test ordering note
 ------------------
-All tests in TestTwoSidecarProcess share ONE class-scoped fixture (one pair
-of processes, one TCP connection, one deal).  Tests run in definition order
-and are cumulative: later tests assume earlier ones have already advanced
-the shared session state.  This makes the suite fast (one 20-30s deal
-instead of five) and keeps each assertion focused.
+One collected scenario owns the pair, connection and deal. Its named
+stages run sequentially inside that scenario, so selecting or reordering
+collected tests cannot omit setup required by a later stage.
 """
 from __future__ import annotations
 
@@ -40,6 +38,7 @@ from pathlib import Path
 from typing import Optional
 
 import pytest
+from peer_cleanup import close_child, close_all
 
 WORKER = str(Path(__file__).parent / "peer_worker.py")
 STARTUP_TIMEOUT = 20.0   # seconds to wait for "connected" from each side
@@ -188,6 +187,7 @@ def _drain(stream, sink: StderrSink) -> threading.Thread:
 
     t = threading.Thread(target=_pump, daemon=True,
                          name=f"stderr-drain-{sink.label}")
+    stream._test_reader_thread = t
     t.start()
     return t
 
@@ -395,6 +395,7 @@ class EventCollector:
         self._new    = threading.Condition(self._lock)
         t = threading.Thread(target=self._read, daemon=True,
                              name=f"collector-{label}")
+        proc._test_reader_threads = [*getattr(proc, "_test_reader_threads", ()), t]
         t.start()
 
     def _read(self) -> None:
@@ -454,11 +455,6 @@ class EventCollector:
                 if e.get("event") == "digest_changed":
                     # _safe_emit uses new_digest= kwarg
                     return e.get("new_digest") or e.get("digest")
-                if e.get("type") == "snapshot":
-                    snap = e.get("snap", {})
-                    d = snap.get("digest") or snap.get("seq")
-                    if d is not None:
-                        return str(d)
             return None
 
     def has_any(self, predicate) -> bool:
@@ -534,18 +530,8 @@ def shared_two_process(request, tmp_path_factory):
         # still up: report volume if either side was anywhere near the pipe
         # limit. This runs on passing runs too -- that is the point.
         _report_stderr_volume(host_stderr, guest_stderr, request.config)
-        for p in (guest_proc, host_proc):
-            if p is None:
-                continue
-            try:
-                _send_cmd(p, {"op": "quit"})
-            except Exception:
-                pass
-            try:
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                p.terminate()
-                p.wait(timeout=3)
+        close_all([(label, lambda p=p: close_child(p, quit=lambda: _send_cmd(p, {"op": "quit"})))
+                   for label, p in (("guest", guest_proc), ("host", host_proc)) if p is not None])
 
 
 # ── test class ────────────────────────────────────────────────────────────────
@@ -554,19 +540,26 @@ def shared_two_process(request, tmp_path_factory):
 class TestTwoSidecarProcess:
     """Happy-path convergence: both processes reach the same state.
 
-    Tests run in definition order (pytest default) and share one
-    process pair (class-scoped fixture).  Each test builds on the
-    previous one's state.
+    Exactly one collected scenario runs all stages against its own pair.
+    No independently selectable test relies on another collected test.
     """
 
+    @pytest.mark.timeout(180)
+    def test_complete_two_process_scenario(self):
+        self._stage_01_peers_connect()
+        self._stage_02_deal_reaches_betting_phase()
+        self._stage_03_digests_converge_after_deal()
+        self._stage_04_action_propagates_to_both()
+        self._stage_05_clean_shutdown()
+
     # ---------------------------------------------------------------- step 1
-    def test_01_peers_connect(self):
+    def _stage_01_peers_connect(self):
         """Both processes establish a TCP connection."""
         assert self.host_proc.poll() is None, "host process died early"
         assert self.guest_proc.poll() is None, "guest process died early"
 
     # ---------------------------------------------------------------- step 2
-    def test_02_deal_reaches_betting_phase(self):
+    def _stage_02_deal_reaches_betting_phase(self):
         """After start_p2p_hand, both processes reach a betting phase."""
         type(self).t_start_hand = time.monotonic()
         _send_cmd(self.guest_proc, {"op": "start_hand", "args": HAND_ARGS})
@@ -613,7 +606,7 @@ class TestTwoSidecarProcess:
         )
 
     # ---------------------------------------------------------------- step 3
-    def test_03_digests_converge_after_deal(self):
+    def _stage_03_digests_converge_after_deal(self):
         """Both replicas emit the same digest once the deal is complete."""
         # digest_changed events should already be present from the deal in
         # test_02; if not, wait briefly for them to arrive.
@@ -638,53 +631,44 @@ class TestTwoSidecarProcess:
         )
 
     # ---------------------------------------------------------------- step 4
-    def test_04_action_propagates_to_both(self):
+    def _stage_04_action_propagates_to_both(self):
         """A bet action from the acting peer is reflected on both replicas."""
-        def _has_legal(e):
-            if e.get("type") != "snapshot":
-                return False
-            return "legal" in e.get("snap", {}).get("you", {})
-
-        # Identify the acting side from already-collected snapshots.
-        h_acts = self.host_col.has_any(_has_legal)
-        g_acts = self.guest_col.has_any(_has_legal)
-
-        if h_acts:
-            acting_proc, _acting_col, other_col = (
-                self.host_proc, self.host_col, self.guest_col)
-        elif g_acts:
-            acting_proc, _acting_col, other_col = (
-                self.guest_proc, self.guest_col, self.host_col)
-        else:
-            pytest.skip("neither side has a legal-action snapshot yet")
-
-        snap_count_before = other_col.event_count("snapshot")
-
+        snapshots = [self.host_col.latest_snapshot(), self.guest_col.latest_snapshot()]
+        assert all(snap and snap.get("phase") == "betting" for snap in snapshots), snapshots
+        actors = [i for i, snap in enumerate(snapshots) if "legal" in snap.get("you", {})]
+        assert len(actors) == 1, f"expected exactly one legal actor: {snapshots}"
+        side = actors[0]
+        acting_proc = (self.host_proc, self.guest_proc)[side]
+        acting_col = (self.host_col, self.guest_col)[side]
+        before = snapshots[side]
+        seat = before["seat"]
+        assert before["action_on"] == seat
+        paid = before["you"]["legal"]["to_call"]
+        assert paid > 0, "heads-up initial actor must face the blind difference"
+        old_stack = before["seats"][seat]["stack"]
+        old_bet = before["seats"][seat]["bet"]
+        digest_before = self.host_col.latest_digest()
+        assert digest_before and digest_before == self.guest_col.latest_digest()
+        ack_count = acting_col.event_count("ack")
         _send_cmd(acting_proc, {"op": "action", "action": "call", "amount": 0})
-
-        # Wait for the OTHER side to emit at least one new snapshot.
-        def _new_snap_arrived(e):
-            return (e.get("type") == "snapshot" and
-                    other_col.event_count("snapshot") > snap_count_before)
-
-        propagated = other_col.wait_for(_new_snap_arrived, timeout=ACTION_TIMEOUT)
-        assert propagated is not None, (
-            "action did not propagate to the other process within "
-            f"{ACTION_TIMEOUT}s"
-        )
-
-        # Give both sides a moment to settle, then compare digests.
-        time.sleep(0.5)
-        h_digest = self.host_col.latest_digest()
-        g_digest = self.guest_col.latest_digest()
-        if h_digest is not None and g_digest is not None:
-            assert h_digest == g_digest, (
-                f"digest diverged after action: "
-                f"host={h_digest!r} guest={g_digest!r}"
-            )
+        deadline = time.monotonic() + ACTION_TIMEOUT
+        while time.monotonic() < deadline:
+            acks = acting_col.all_of_type("ack")[ack_count:]
+            fresh = [self.host_col.latest_snapshot(), self.guest_col.latest_snapshot()]
+            applied = all(snap and snap["action_on"] != seat
+                          and snap["seats"][seat]["stack"] == old_stack - paid
+                          and snap["seats"][seat]["bet"] == old_bet + paid
+                          and snap["pot"] == before["pot"] + paid for snap in fresh)
+            hd, gd = self.host_col.latest_digest(), self.guest_col.latest_digest()
+            if (any(ack.get("op") == "action" for ack in acks)
+                    and applied and hd and hd == gd and hd != digest_before):
+                return
+            time.sleep(0.02)
+        pytest.fail(_dump("call not acknowledged/applied/converged", type(self),
+                          f"seat{seat} pays{paid}; before={before}; after={fresh}; digests={hd},{gd}"))
 
     # ---------------------------------------------------------------- step 5
-    def test_05_clean_shutdown(self):
+    def _stage_05_clean_shutdown(self):
         """Both processes exit cleanly when sent the quit command."""
         _send_cmd(self.guest_proc, {"op": "quit"})
         _send_cmd(self.host_proc,  {"op": "quit"})
@@ -695,8 +679,8 @@ class TestTwoSidecarProcess:
         except subprocess.TimeoutExpired:
             pytest.fail("one or both processes did not exit after quit")
 
-        assert self.host_proc.returncode is not None
-        assert self.guest_proc.returncode is not None
+        assert self.host_proc.returncode == self.guest_proc.returncode == 0, _dump(
+            "non-zero clean shutdown", type(self), "both worker exits == 0")
 
 
 # ── command-path classification ──────────────────────────────────────────────
@@ -718,7 +702,8 @@ def test_command_path_reports_a_healthy_host(tmp_path):
         guest = _start_worker("--role", "guest", "--peer-port",
                               str(col.all_of_type("ready")[0]["port"]),
                               config_dir=tmp_path / "guest-config")
-        EventCollector(guest, "guest")   # drain stdout so it cannot block
+        EventCollector(guest, "guest")
+        _drain(guest.stderr, StderrSink("guest"))
         try:
             assert col.wait_for(lambda e: e.get("type") == "connected",
                                 timeout=STARTUP_TIMEOUT)
@@ -731,14 +716,9 @@ def test_command_path_reports_a_healthy_host(tmp_path):
                           "cmd_dispatch"):
                 assert f"{stage}=0" not in path, f"{stage} never happened: {path}"
         finally:
-            _send_cmd(guest, {"op": "quit"})
-            guest.terminate()
+            close_child(guest, quit=lambda: _send_cmd(guest, {"op": "quit"}))
     finally:
-        try:
-            _send_cmd(proc, {"op": "quit"})
-        except Exception:
-            pass
-        proc.terminate()
+        close_child(proc, quit=lambda: _send_cmd(proc, {"op": "quit"}))
 
 
 def test_starved_consumer_is_classified_not_guessed(tmp_path):
@@ -778,6 +758,7 @@ def test_starved_consumer_is_classified_not_guessed(tmp_path):
                               str(ready["port"]),
                               config_dir=tmp_path / "guest-config")
         gcol = EventCollector(guest, "guest")
+        _drain(guest.stderr, StderrSink("guest"))
         assert hcol.wait_for(lambda e: e.get("type") == "connected",
                              timeout=STARTUP_TIMEOUT)
         assert gcol.wait_for(lambda e: e.get("type") == "connected",
@@ -812,11 +793,5 @@ def test_starved_consumer_is_classified_not_guessed(tmp_path):
         assert "IN-FLIGHT handle_message=" in path, (
             f"classifier did not identify the stuck consumer: {path}")
     finally:
-        for p in (guest, host):
-            if p is None:
-                continue
-            try:
-                p.terminate()
-                p.wait(timeout=5)
-            except Exception:
-                pass
+        close_all([(label, lambda p=p: close_child(p, quit=lambda: _send_cmd(p, {"op": "quit"})))
+                   for label, p in (("guest", guest), ("host", host)) if p is not None])

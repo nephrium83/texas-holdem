@@ -56,14 +56,20 @@ def test_legal_nesting_still_parses():
     assert wire.safe_loads(json.dumps(payload).encode()) == payload
 
 
-def test_depth_bound_covers_objects_and_mixed_nesting():
+def test_depth_bound_covers_objects_and_mixed_nesting(monkeypatch):
     deep_obj = ('{"a":' * (wire.MAX_JSON_DEPTH + 1)
                 + "1" + "}" * (wire.MAX_JSON_DEPTH + 1))
     with pytest.raises(ValueError, match="nest"):
         wire.safe_loads(deep_obj.encode())
-    mixed = ("[{" + '"k":[' * (wire.MAX_JSON_DEPTH // 2 + 2))
-    with pytest.raises(ValueError):
-        wire.safe_loads(mixed.encode())
+    # Balanced valid JSON: failure must be the depth scan, not syntax.
+    depth = wire.MAX_JSON_DEPTH // 2 + 2
+    mixed = ('[{"k":' * depth + "0" + "}]" * depth).encode()
+    json.loads(mixed)  # independent syntax sanity before installing the spy
+    calls = []
+    monkeypatch.setattr(wire.json, "loads", lambda *a, **k: calls.append(a))
+    with pytest.raises(ValueError, match="nest"):
+        wire.safe_loads(mixed)
+    assert not calls, "mixed nesting reached the allocating parser"
 
 
 def test_depth_guard_runs_before_parsing():

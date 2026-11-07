@@ -260,7 +260,8 @@ def test_a_first_hand_failure_is_not_reported_as_a_refused_table():
     start_table = _make_start_table(sessions, order, bus, _SETTINGS)
 
     assert start_table() == "hand_failed"
-    assert sessions[order[0]].state == "PLAYING",         "the table did commit; only the hand failed"
+    assert sessions[order[0]].state == "ENDED"
+    assert sessions[order[0]]._deal_policy is not None, "game_start committed before failure"
 
 
 def test_every_peer_receives_game_start_even_when_the_hand_fails():
@@ -286,7 +287,7 @@ def test_every_peer_receives_game_start_even_when_the_hand_fails():
     start_table()
 
     for cid in order:
-        assert sessions[cid].state == "PLAYING", (
+        assert sessions[cid]._deal_policy is not None, (
             f"{cid} never received game_start: a raising handler stopped "
             f"the broadcast reaching the peers behind it")
 
@@ -447,3 +448,20 @@ def test_an_undeliverable_action_surfaces_the_underlying_error():
 
     with pytest.raises(RuntimeError, match="peer is broken"):
         human.send_bet_action("call", 0)
+
+
+def test_replica_without_recovered_holes_is_failed_startup_and_owned_terminal():
+    bus, sessions, order = _make_sessions(3)
+    _wire_hand_start(sessions, order)
+    victim = sessions[order[2]]
+    original = victim.handle_message
+    def lose_deal_traffic(conn, message):
+        if message.get("type") == "game_start":
+            original(conn, message)
+    victim.handle_message = lose_deal_traffic
+    start = _make_start_table(sessions, order, bus, _SETTINGS)
+    assert start() == "hand_failed"
+    assert victim.replica is not None
+    assert victim.hands_dealt_in == 0
+    assert all(s.terminal_state == s.ABORTED_PROTOCOL for s in sessions.values())
+    assert start() == "already_started"

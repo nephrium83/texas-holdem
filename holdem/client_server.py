@@ -20,6 +20,7 @@ import json
 import logging
 from typing import Optional
 
+from holdem.p2p.session import CommandRefused
 from holdem import client_view
 
 _log = logging.getLogger(__name__)
@@ -271,18 +272,8 @@ class _Conn:
             result = client_view.apply_command(self._session, command,
                                                payload,
                                                start_table=self._start_table)
-        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-            # RuntimeError included deliberately: session-level refusals
-            # surface as one, and letting it escape unwinds the read loop
-            # and closes the client's socket. Dropping the connection is a
-            # far worse answer to a bad command than reporting the error.
-            #
-            # Logged at exception level because this catch is broad enough
-            # to swallow the codebase's own loud guards -- the bus
-            # re-entrancy guard, SessionOwner._assert_owner -- which exist
-            # precisely to be noticed. The client is told "ok: false", and
-            # nothing in the client renders an error for a command it did
-            # not initiate, so without this the only trace would be gone.
+        except (KeyError, TypeError, ValueError, CommandRefused) as exc:
+            # Expected refusals are client errors; invariant RuntimeErrors escape.
             _log.exception("client command %r failed", command)
             result = {"type": "command_result", "command": command,
                       "ok": False, "error": str(exc)}
@@ -305,7 +296,7 @@ class _Conn:
             if not isinstance(payload, dict):
                 raise ValueError("Command payload must be an object")
             result = await asyncio.to_thread(self._command_handler, command, payload)
-        except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+        except (KeyError, TypeError, ValueError, CommandRefused, OSError) as exc:
             _log.error("client command %r failed", command)
             result = {"type": "command_result", "command": command,
                       "ok": False, "error": str(exc)}
