@@ -523,3 +523,102 @@ def test_a_swallowed_command_error_is_logged(caplog):
     assert any("owner assertion fired" in r.getMessage()
                or (r.exc_info and "owner assertion fired" in str(r.exc_info[1]))
                for r in caplog.records),         "a swallowed command error left no trace in the log"
+
+
+
+def test_command_push_is_coalesced_for_sender_but_other_client_and_thread_updates_arrive():
+    async def inner():
+        bus, sessions, order = make_table(2)
+        actor = sessions[order[0]].replica.actor
+        srv = await serve(sessions[order[actor]])
+        try:
+            sender, _ = await open_client(srv)
+            observer, _ = await open_client(srv)
+            await sender.command("check_call")
+            assert (await sender.recv())["type"] == "command_result"
+            after = await sender.recv()
+            assert after["type"] == "snapshot"
+            assert await observer.recv() == after
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(sender.reader.readline(), 0.05)
+            # Cross-thread notifications still schedule a real fresh push.
+            await asyncio.to_thread(srv.notify_state_changed)
+            assert await sender.recv() == after
+            assert await observer.recv() == after
+            sender.close()
+            observer.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())
+
+
+def test_stop_joins_handler_finalization_before_returning_or_allowing_restart(monkeypatch):
+    from holdem.client_server import _Conn
+
+    async def inner():
+        entered, release = asyncio.Event(), asyncio.Event()
+        run = _Conn.run
+
+        async def delayed_finalizer(conn):
+            try:
+                await run(conn)
+            finally:
+                entered.set()
+                await release.wait()
+
+        monkeypatch.setattr(_Conn, "run", delayed_finalizer)
+        _, sessions, order = make_sessions(2)
+        srv = await serve(sessions[order[0]])
+        wire, _ = await open_client(srv)
+        stopping = asyncio.create_task(srv.stop())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            # Give an implementation which merely yields one tick a chance
+            # to return; the finalizer must still keep stop pending.
+            await asyncio.sleep(0.02)
+            assert not stopping.done(), "stop returned with a live connection handler"
+            with pytest.raises(RuntimeError, match="stopping"):
+                await srv.start()
+        finally:
+            release.set()
+            await asyncio.wait_for(stopping, 2)
+            wire.close()
+        assert not srv._handlers and not srv._conns and srv._loop is None
+        await srv.start()
+        try:
+            wire, snapshot = await open_client(srv)
+            assert snapshot["phase"] == "lobby"
+            wire.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())
+
+
+
+def test_connection_callback_queued_before_stop_cannot_create_a_late_handler():
+    async def inner():
+        class LateWriter:
+            closed = False
+            def close(self):
+                self.closed = True
+
+        _, sessions, order = make_sessions(2)
+        srv = await serve(sessions[order[0]])
+        generation = srv._generation
+        await srv.stop()
+        writer = LateWriter()
+        srv._connected(None, writer, generation)
+        assert writer.closed and not srv._handlers and not srv._conns
+        await srv.start()
+        try:
+            # Native callback delivery may occur after restart as well. It
+            # must retain the generation captured by its original listener.
+            writer = LateWriter()
+            srv._connected(None, writer, generation)
+            assert writer.closed and not srv._handlers and not srv._conns
+            wire, snapshot = await open_client(srv)
+            assert snapshot["phase"] == "lobby"
+            wire.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())

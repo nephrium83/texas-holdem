@@ -222,10 +222,19 @@ def test_foldout_settled_snapshot_reveals_nothing():
         seat = sessions[order[0]].replica.actor
         client_view.apply_command(sessions[order[seat]], "fold")
         bus.drain()
-    snap = client_view.snapshot(sessions[order[0]])
-    assert snap["phase"] == "settled"
-    for sv in snap["seats"]:
-        assert "hole" not in sv                         # no showdown -> no reveal
+    holes = {
+        cid: {client_view.contract.card_str(card) for card in sessions[cid].deal_hole_cards}
+        for cid in order
+    }
+    for cid in order:
+        snap = json_safe(client_view.snapshot(sessions[cid]))
+        assert snap["phase"] == "settled"
+        assert not snap["result"]["runs"]
+        for sv in snap["seats"]:
+            assert "hole" not in sv
+        opponents = set().union(*(cards for peer, cards in holes.items() if peer != cid))
+        assert not opponents.intersection(all_card_strings(snap)), "fold-out leaked cards outside seat views"
+        assert set(snap["you"]["hole"]) == holes[cid]
 
 
 @pytest.mark.parametrize("string_keys", [False, True])
@@ -662,14 +671,5 @@ def test_start_game_without_a_controller_is_an_error_not_a_silent_noop():
 
 
 if __name__ == "__main__":
-    passed = total = 0
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            total += 1
-            try:
-                fn()
-                passed += 1
-                print(f"  {name}: ok")
-            except Exception as exc:
-                print(f"  {name}: FAIL - {type(exc).__name__}: {exc}")
-    print(f"{passed}/{total} passed")
+    # Preserve fixtures, parametrization and a failing process exit status.
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

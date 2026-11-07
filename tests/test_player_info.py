@@ -101,26 +101,51 @@ def test_engine_events_are_sequenced_structured_and_json_safe():
     json.dumps(action)
 
 
-def test_settlement_summary_accounts_for_every_awarded_chip():
-    engine = _table(3)
-    starting_stacks = [player.stack + player.bet for player in engine.players]
-    result = _check_down(engine)
-    summary = player_info.settlement_view(
-        engine, result, seat=0, starting_stacks=starting_stacks
-    )
+@pytest.mark.parametrize("board,tied", [
+    (["2c", "5d", "7h", "9s", "Jh"], False),
+    (["10h", "Jh", "Qh", "Kh", "Ah"], True),
+])
+def test_settlement_summary_accounts_for_every_awarded_chip(board, tied):
+    from holdem.engine import Deck, FULL_DECK
 
-    assert summary["pots"]
-    for pot in summary["pots"]:
-        for award in pot["awards"]:
-            assert sum(payout["amount"] for payout in award["payouts"]) == \
-                award["amount"]
-    assert summary["showdown"]
-    assert all(
-        hand["description"]
-        for player in summary["showdown"]
-        for hand in player["hands"]
-    )
-    json.dumps(summary)
+    # Button 0: deal to seats 1,2,0. Seat 0 has aces, 1 kings, 2 queens.
+    labels = ["Kc", "Qc", "Ac", "Kd", "Qd", "Ad", *board]
+    indices = [next(i for i, card in enumerate(FULL_DECK)
+                    if player_info.card_str(card) == label) for label in labels]
+    indices += [i for i in range(52) if i not in indices]
+    starting_stacks = [100, 200, 300]
+    engine = Engine([Player(i, f"P{i}", stack) for i, stack in enumerate(starting_stacks)], 5, 10)
+    engine.button = 2
+    assert engine.start_hand(deck=Deck.from_indices(indices))
+    engine.act(0, "raise", 100)
+    engine.act(1, "call")
+    engine.act(2, "raise", 300)
+    engine.act(1, "call")
+    result = engine.settle()
+    expected = ([{0: 100, 1: 100, 2: 100}, {1: 100, 2: 100}]
+                if tied else [{0: 300}, {1: 200}])
+    expected_won = [100, 200, 200] if tied else [300, 200, 0]
+    for seat in range(3):
+        summary = player_info.settlement_view(engine, result, seat=seat, starting_stacks=starting_stacks)
+        assert summary["total_pot"] == 500
+        assert [(pot["amount"], pot["eligible"]) for pot in summary["pots"]] == [
+            (300, [0, 1, 2]), (200, [1, 2])]
+        assert [len(pot["awards"]) for pot in summary["pots"]] == [1, 1]
+        for index, pot in enumerate(summary["pots"]):
+            award = pot["awards"][0]
+            assert (award["run"], award["amount"], award["winners"]) == (
+                1, [300, 200][index], list(expected[index]))
+            assert {payout["seat"]: payout["amount"] for payout in award["payouts"]} == expected[index]
+        assert summary["refund"] == {"seat": 2, "name": "P2", "amount": 100}
+        assert {winner["seat"]: winner["won"] for winner in summary["winners"]} == {
+            i: won for i, won in enumerate(expected_won) if won}
+        assert summary["you"]["won"] == expected_won[seat]
+        assert summary["you"]["stack"] == expected_won[seat] + (100 if seat == 2 else 0)
+        assert summary["you"]["net"] == summary["you"]["stack"] - starting_stacks[seat]
+        assert sum(winner["won"] for winner in summary["winners"]) + summary["refund"]["amount"] == sum(starting_stacks)
+        assert len(summary["showdown"]) == 3
+        assert all(hand["description"] for player in summary["showdown"] for hand in player["hands"])
+        json.dumps(summary)
 
 
 def test_mucked_opponents_have_no_hand_description_or_best_five_in_summary():
@@ -154,12 +179,20 @@ def test_mucked_opponents_have_no_hand_description_or_best_five_in_summary():
 
 
 def test_deal_progress_labels_make_no_cryptographic_claim():
-    assert player_info.deal_progress_view("dealing")["state"] == "dealing"
-    assert player_info.deal_progress_view("betting")["state"] == "in_hand"
-    assert player_info.deal_progress_view("settled")["state"] == "settled"
-    voided = player_info.deal_progress_view("void", "seat 2 sent a bad proof")
-    assert voided["state"] == "voided"
-    assert "seat 2" in voided["label"]
+    expected = {
+        "lobby": {"state": "not_started", "label": "Waiting to deal"},
+        "dealing": {"state": "dealing", "label": "Dealing"},
+        "betting": {"state": "in_hand", "label": "Hand in progress"},
+        "settled": {"state": "settled", "label": "Hand settled"},
+        "void": {"state": "voided", "label": "Hand voided | protocol failure"},
+    }
+    for phase, progress in expected.items():
+        assert player_info.deal_progress_view(phase) == progress
+    # Reasons are diagnostic evidence, not a progress label's claim. Do not
+    # censor a peer name or a legitimate explanation containing crypto words.
+    reason = "seat Verified sent a bad cryptographic proof"
+    assert player_info.deal_progress_view("void", reason) == {
+        "state": "voided", "label": f"Hand voided | {reason}"}
 
 
 def test_a_void_says_chips_are_restored_unless_a_drop_forfeits_it():

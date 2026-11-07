@@ -1,8 +1,9 @@
 # P2 Timeout Semantics — Research
 
 **Type:** Research / candidate design. **Not** a normative protocol
-requirement. `docs/TIMEOUT_SPEC.md` remains the (currently incorrect)
-contract until it is deliberately revised.
+requirement. `docs/TIMEOUT_SPEC.md` is also historical and non-normative.
+Current casual runtime policy lives in `docs/CASUAL_P2P_RULES.md`; this
+candidate does not authorize changes to it.
 **Date:** 2026-08-18
 **Base:** `07f61a7` (origin/main)
 **Method:** abstract models with independent per-seat clock skew and
@@ -48,7 +49,7 @@ Four candidates were modelled under controls A–N.
 | manufactured ambiguity | **fail** | pass | pass | pass |
 | boundary straddle (D) | **fail** | **fail** | pass | pass |
 | local cutoff straddle | pass | pass | **fail** | pass |
-| honest actor uses full advertised clock | **fail** | **fail** | pass | pass |
+| honest action strictly before advertised deadline | **fail** | **fail** | pass | pass |
 | heads-up hostile opponent | pass | pass | pass | **fail** |
 
 `VOID` also fails the non-profitability invariant directly: an actor who
@@ -75,17 +76,44 @@ else                -> unresolved
 ### Parameters
 
 ```
-T = 30 s   advertised decision period   (matches TDA 2024 Rule 29: 25 + 5)
+T = 30 s   exclusive decision deadline  (nominal TDA 2024 Rule 29: 25 + 5)
 Δ = 5 s    tolerated honest timer-start skew
 L = 5 s    tolerated honest propagation/processing delay
 G = 10 s   DERIVED, = L + Δ             — never transmitted independently
 E = 40 s   peer signing threshold, = T + G
 ```
 
-`E = T + G` is the smallest signing threshold under which the advertised
-30-second deadline is actually honoured. At `E = T`, an honest player who
-used the full displayed clock is folded anyway. The 30–40 s window is a
-propagation guard, **not** extra thinking time.
+The protected decision interval is **half-open: `0 <= x < T`**. With
+`E = T + G`, delivery is guaranteed before the earliest honest signing
+threshold only when `x + L + Δ < E`. Equality does not satisfy that proof:
+an action sent at exactly `x = T` can arrive at exactly `E`, after a signer
+has emitted its signature. Certificate precedence then permits a default
+action even if the action is also in the evidence set.
+
+A candidate UI must therefore stop accepting decisions at `x >= T`; it
+must not promise an inclusive final instant or show a positive decision
+window after that cutoff. A display/input scheduling margin `ε > 0` may
+close input at `T - ε`; this margin consumes decision time and must be
+stated, not added to the propagation guarantee. The 30–40 s window is a
+propagation guard, **not** extra thinking time. No runtime timer or UI is
+changed by this research correction.
+
+### Exact-boundary controls (worked traces, not runtime results)
+
+Take the worst allowed start skew and delivery delay, so arrival at the
+early signer's clock is `x + Δ + L = x + 10`.
+
+| Actor send time `x` | Arrival | Honest signer ordering | Candidate outcome |
+|---|---|---|---|
+| `30 - ε`, `ε > 0` | `40 - ε` | action precedes eligibility at 40; signer suppresses | action; no certificate |
+| `30` | `40` | signature first, then action; all required signatures can form | certificate/default; inclusive-deadline guarantee fails |
+| `30` | `40` | action first; at least one honest required signer suppresses | action; no certificate |
+
+The two equality traces intentionally have different evidence sets. For a
+**fixed** evidence set containing both a valid action and a complete
+certificate, the outcome remains certificate/default in every delivery
+order. Local arrival order must never reinterpret that evidence set.
+Thus safety/convergence does not imply an inclusive timing guarantee.
 
 Δ and L are deliberately conservative for a first internet-capable
 version. Real inter-continental RTTs are far smaller; the budget absorbs
