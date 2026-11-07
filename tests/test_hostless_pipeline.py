@@ -12,8 +12,10 @@ These tests assert the STRUCTURE the refactor established:
 
 plus the two facts that used to be implicit and are now declared.
 """
+import ast
 import inspect
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -244,12 +246,54 @@ def test_there_is_one_explicit_hostless_type_registry():
     })
 
 
+def _dispatch_branches(fn):
+    """{literal compared in an ``if``: does that branch call anything}.
+
+    Walks the AST rather than the text, so a type mentioned in a comment
+    is not mistaken for a dispatch, and a branch whose body was reduced
+    to ``pass`` is not mistaken for one that handles the message.
+    """
+    out = {}
+    for node in ast.walk(ast.parse(textwrap.dedent(_src(fn)))):
+        if not isinstance(node, ast.If):
+            continue
+        literals = []
+        for cmp_node in ast.walk(node.test):
+            if not isinstance(cmp_node, ast.Compare):
+                continue
+            for operand in cmp_node.comparators:
+                if isinstance(operand, ast.Constant):
+                    if isinstance(operand.value, str):
+                        literals.append(operand.value)
+                elif isinstance(operand, (ast.Tuple, ast.List, ast.Set)):
+                    literals += [e.value for e in operand.elts
+                                 if isinstance(e, ast.Constant)
+                                 and isinstance(e.value, str)]
+        if not literals:
+            continue
+        calls = any(isinstance(n, ast.Call)
+                    for stmt in node.body for n in ast.walk(stmt))
+        for lit in literals:
+            out[lit] = out.get(lit, False) or calls
+    return out
+
+
 def test_the_dispatch_covers_every_registered_hostless_type():
-    """No type may be registered and then never dispatched, or vice versa."""
-    src = _src(Session.handle_message) + _src(Session._deliver_hand_message)
+    """No type may be registered and then never dispatched, or vice versa.
+
+    Structural, not textual. The previous version asserted only that the
+    type's NAME appeared somewhere in the dispatch source -- which a
+    comment satisfies, and which replacing the bet_action handler call
+    with ``pass`` does not violate. That mutant stayed green.
+    """
+    branches = {}
+    for fn in (Session.handle_message, Session._deliver_hand_message):
+        branches.update(_dispatch_branches(fn))
     for mtype in _HOSTLESS_PAYLOAD_TYPES:
-        assert f'"{mtype}"' in src, (
+        assert mtype in branches, (
             f"{mtype} is in the registry but never dispatched")
+        assert branches[mtype], (
+            f"{mtype} is matched by a dispatch branch that calls nothing")
 
 
 # ── narrow test-helper audit ──────────────────────────────────────────────

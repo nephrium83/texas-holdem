@@ -265,9 +265,13 @@ def test_wrong_author_bet_action_is_dropped_before_the_replica():
             return "applied"
 
     s._replica = _Replica()
+    # author_seq is required: without it the message dies at the sequencing
+    # SHAPE gate (wire mode refuses an unstamped body), so the test would
+    # pass with authorization entirely removed. With it, the only thing left
+    # that can refuse a stranger is _author_owns_seat -- which is the point.
     s.handle_message("A", {"type": "bet_action", "pubkey": KEY_X, "hand": 1,
                            "payload": {"seat": 1, "hand": 1, "action": "call",
-                                       "amount": 0, "seq": 0}})
+                                       "amount": 0, "seq": 0, "author_seq": 0}})
     assert not reached, "a stranger-authored bet_action reached the replica"
 
 

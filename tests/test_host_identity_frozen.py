@@ -117,11 +117,18 @@ def test_player_ack_assigns_our_id_but_no_longer_elects_the_host():
 
 
 def test_player_ack_from_a_non_host_is_refused_in_the_lobby():
+    """The offered id must DIFFER from the one the fixture already set.
+
+    Offering "peer1" -- which peer() assigns -- makes acceptance and
+    refusal indistinguishable: the assertion holds either way. Offering
+    a different id makes acceptance visible.
+    """
     s = peer("LOBBY")
+    assert s.local_conn_id == "peer1"           # the value under test
     s.handle_message("attacker", {"type": "player_ack",
-                                  "payload": {"your_conn_id": "peer1"}})
+                                  "payload": {"your_conn_id": "pwned"}})
     assert s._host_conn_id == "peer0"
-    assert s.local_conn_id == "peer1"
+    assert s.local_conn_id == "peer1", "a non-host reassigned our conn_id"
 
 
 def test_player_ack_with_a_malformed_conn_id_is_refused():
