@@ -123,12 +123,13 @@ def _local_start_seat(session, payload):
 
 
 def _save_table_defaults(values):
-    stored = cfg.load()["last_table"]
+    current = cfg.load()
+    stored = current["last_table"]
     rules = cfg.table_rules(**{**stored, **values})
     if rules["sb"] >= rules["bb"]:
         raise ValueError("Small blind must be less than big blind")
     stored.update(rules)
-    return cfg.save({}, stored)
+    return cfg.save(current["client"], stored)
 
 
 # ----------------------------------------------------------------- avatars

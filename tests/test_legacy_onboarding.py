@@ -88,12 +88,13 @@ def test_handoff_keeps_live_session_and_transport_while_releasing_dialog_callbac
 
 
 def test_saved_table_form_values_are_used_without_wiping_other_existing_rules():
-    assert settings.save({}, {"rit": "Never", "rabbit": False})
+    assert settings.save({"theme": "Classic Felt", "xp": 1234}, {"rit": "Never", "rabbit": False})
     assert onboarding._save_table_defaults({"players": 4, "sb": 25, "bb": 50, "clock_base": 40})
     saved = settings.load()["last_table"]
     assert {key: saved[key] for key in ("players", "sb", "bb", "clock_base")} == {
         "players": 4, "sb": 25, "bb": 50, "clock_base": 40}
     assert saved["rit"] == "Never" and not saved["rabbit"]
+    assert settings.get("theme") == "Classic Felt" and settings.get("xp") == 1234
     before = settings.config_path().read_bytes()
     with pytest.raises(ValueError):
         onboarding._save_table_defaults({"sb": 50, "bb": 25})
