@@ -11,6 +11,7 @@ from holdem.p2p.casual_clock import PROFILE, lobby_clocks
 from holdem.p2p.session import Player, Session
 from holdem.p2p.timeout import FakeClock
 from tests.admission_helpers import admit
+from tests import joiner_helpers as JH
 
 
 class Signer:
@@ -73,7 +74,12 @@ class SignedTable:
             s = Session(is_host=seat == 0, nickname=cid, avatar_b64="",
                         transport=endpoint, clock=self.clocks[seat],
                         master_secret=bytes([seat + 1]) * 32,
-                        admission=policy if seat == 0 else None)
+                        admission=policy if seat == 0 else None,
+                        joiner_admission=(None if seat == 0 else JH.joiner_admission(
+                            self.signers[0].public_key_bytes(),
+                            self.signers[seat].public_key_bytes())))
+            if seat:
+                JH.authenticate_host(s, "P0", self.signers[0].public_key_bytes())
             s.local_conn_id, s._host_conn_id = cid, "P0"
             s._pinned_host_pubkey = self.signers[0].public_key_bytes().hex()
             for other, name in enumerate(self.order):

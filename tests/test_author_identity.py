@@ -26,6 +26,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+from tests import joiner_helpers as JH
 
 try:
     initialize_for_tests()
@@ -75,8 +76,11 @@ def _table(local="A"):
     """Three seats, keys bound, as a peer would hold them mid-session."""
     s = Session(is_host=False, nickname="n", avatar_b64="",
                 transport=_Spy(), sink=_Sink(),
+                joiner_admission=JH.joiner_admission(bytes.fromhex(KEY_A),
+                                                     bytes.fromhex(KEY_X)),
                 clock=_DependencyClock(),
                 master_secret=bytes(range(32)))
+    JH.authenticate_host(s, "A", bytes.fromhex(KEY_A))
     s.local_conn_id = local
     s._host_conn_id = "A"
     s._seat_order = ["A", "B", "C"]
@@ -187,8 +191,11 @@ def test_seat_with_no_bound_key_is_refused_not_trusted():
     """
     s = Session(is_host=False, nickname="n", avatar_b64="",
                 transport=_Spy(), sink=_Sink(),
+                joiner_admission=JH.joiner_admission(bytes.fromhex(KEY_A),
+                                                     bytes.fromhex(KEY_X)),
                 clock=_DependencyClock(),
                 master_secret=bytes(range(32)))
+    JH.authenticate_host(s, "A", bytes.fromhex(KEY_A))
     s.local_conn_id = "A"
     s._seat_order = ["A", "B", "C"]
     s.players["A"] = Player(conn_id="A", peer_id="", nickname="A",

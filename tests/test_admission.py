@@ -852,9 +852,13 @@ def test_wire_mode_refuses_to_elect_a_replacement_host():
     holds names ONE host key, so a promoted peer cannot be authenticated by
     it. Authenticated authority transfer is a separate protocol.
     """
+    # A wire-mode joiner must carry its invite's pin (audit #72); it then
+    # authenticates the host through the real entry point, as join_auth does.
+    from tests import joiner_helpers as JH
     s = Session(is_host=False, nickname="J", avatar_b64="", transport=_Spy(),
-            clock=_DependencyClock(),
+            clock=_DependencyClock(), joiner_admission=JH.joiner_admission(),
             master_secret=bytes(range(32)))
+    JH.authenticate_host(s, "hostconn")
     s.local_conn_id = "me"
     s._host_conn_id = "hostconn"
     s._join_order = ["me", "other"]
