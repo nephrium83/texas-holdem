@@ -51,6 +51,21 @@ def test_random_permutation_is_valid():
     assert sorted(p) == list(range(52))
 
 
+def test_default_shuffle_uses_secure_permutation_source(monkeypatch):
+    calls = []
+    class RandomSource:
+        def shuffle(self, values):
+            calls.append(list(values))
+            values.reverse()
+    monkeypatch.setattr(sh.secrets, "SystemRandom", RandomSource)
+    xs, pk = _seats(2)
+    deck = eg.make_initial_deck(pk)
+    out, witness = sh.shuffle_deck(pk, deck)
+    assert calls == [list(range(52))]
+    assert witness.perm == list(reversed(range(52)))
+    assert _decrypt_deck(out, xs) == list(reversed(_decrypt_deck(deck, xs)))
+
+
 def test_inverse_permutation():
     p = sh.random_permutation(52)
     inv = sh.inverse_permutation(p)
@@ -78,20 +93,19 @@ def test_shuffle_preserves_card_multiset():
 def test_shuffle_actually_permutes_and_rerandomises():
     xs, pk = _seats(2)
     deck0 = eg.make_initial_deck(pk)
-    deck1, wit = sh.shuffle_deck(pk, deck0)
-
-    # ciphertexts differ from the input (re-randomised)
-    assert all(deck1[i].c0 != deck0[i].c0 for i in range(52) if wit.perm[i] == i) or True
-    # at least the ciphertext bytes changed everywhere (fresh scalar each pos)
-    same = sum(1 for i in range(52) if deck1[i].c0 == deck0[wit.perm[i]].c0)
-    assert same == 0, "re-encryption must change every C0"
+    perm = list(reversed(range(52)))
+    scalars = [R.Scalar((i + 1).to_bytes(32, "little")) for i in range(52)]
+    deck1, wit = sh.shuffle_deck(pk, deck0, perm=perm, scalars=scalars)
+    assert wit.perm == perm
+    assert _decrypt_deck(deck1, xs) == list(reversed(_decrypt_deck(deck0, xs)))
+    assert all(deck1[i].c0 != deck0[src].c0 for i, src in enumerate(perm))
 
 
 def test_witness_describes_the_permutation():
     xs, pk = _seats(2)
     deck0 = eg.make_initial_deck(pk)
     # force a known permutation and scalars
-    perm = sh.random_permutation(52)
+    perm = list(reversed(range(52)))
     scalars = [R.random_scalar() for _ in range(52)]
     deck1, wit = sh.shuffle_deck(pk, deck0, perm=perm, scalars=scalars)
 

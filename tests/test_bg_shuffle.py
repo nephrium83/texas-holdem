@@ -121,23 +121,28 @@ def test_multi_transcript_binds_every_round_one_message():
         statement, proof.a_commits, proof.b_commits,
         proof.multi.vector_e_k[m], proof.multi.a_0_commit,
         proof.multi.commit_b_k, proof.multi.vector_e_k)
-    variants = [
-        S._multi_challenge(
-            statement, [_bump(proof.a_commits[0]), *proof.a_commits[1:]],
-            proof.b_commits, proof.multi.vector_e_k[m],
-            proof.multi.a_0_commit, proof.multi.commit_b_k,
-            proof.multi.vector_e_k),
-        S._multi_challenge(
-            statement, proof.a_commits,
-            [_bump(proof.b_commits[0]), *proof.b_commits[1:]],
+    args = [statement, proof.a_commits, proof.b_commits,
             proof.multi.vector_e_k[m], proof.multi.a_0_commit,
-            proof.multi.commit_b_k, proof.multi.vector_e_k),
-        S._multi_challenge(
-            statement, proof.a_commits, proof.b_commits,
-            proof.multi.vector_e_k[m], _bump(proof.multi.a_0_commit),
-            proof.multi.commit_b_k, proof.multi.vector_e_k),
-    ]
-    assert all(bytes(value) != bytes(base) for value in variants)
+            proof.multi.commit_b_k, proof.multi.vector_e_k]
+    variants = [("statement", 0, statement + b"!")]
+    for arg_index in (1, 2, 5):
+        for index, point in enumerate(args[arg_index]):
+            changed = list(args[arg_index])
+            changed[index] = _bump(point)
+            variants.append((f"arg{arg_index}[{index}]", arg_index, changed))
+    variants.append(("a_0_commit", 4, _bump(args[4])))
+    for component in ("c0", "c1"):
+        variants.append((f"product.{component}", 3,
+                         replace(args[3], **{component: _bump(getattr(args[3], component))})))
+        for index, cipher in enumerate(args[6]):
+            changed = list(args[6])
+            changed[index] = replace(cipher, **{component: _bump(getattr(cipher, component))})
+            variants.append((f"vector_e_k[{index}].{component}", 6, changed))
+    for label, index, replacement in variants:
+        changed = list(args)
+        changed[index] = replacement
+        assert bytes(S._multi_challenge(*changed)) != bytes(base), label
+
 
 
 def test_wrong_witness_rejected_by_prover():
