@@ -579,8 +579,13 @@ def test_settings_load_tolerates_garbage(tmp_path, monkeypatch):
     cfg.config_path().write_text("{ not valid json ]")
     d = cfg.load()                       # must not raise
     assert d["client"]["theme"] == "Cyberpunk"
-    # unknown keys and invalid values are dropped/clamped on save+load
-    cfg.save({"theme": "Nope", "bogus": 1, "hints": True}, {"sb": -5})
+    # Failed-read defaults must never overwrite the corrupt original.
+    original = cfg.config_path().read_bytes()
+    assert not cfg.save({"theme": "Nope", "bogus": 1, "hints": True}, {"sb": -5})
+    assert cfg.config_path().read_bytes() == original
+    # Test normalization separately, without discarding recovery data.
+    monkeypatch.setenv("HOLDEM_CONFIG_DIR", str(tmp_path / "valid-settings"))
+    assert cfg.save({"theme": "Nope", "bogus": 1, "hints": True}, {"sb": -5})
     d2 = cfg.load()
     assert d2["client"]["theme"] == "Cyberpunk"
     assert "bogus" not in d2["client"]
