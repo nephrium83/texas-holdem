@@ -99,7 +99,7 @@ class LoopWatch:
 
 
 def measure_loop_latency(loop, samples: int = 20,
-                         interval: float = 0.005) -> float:
+                         interval: float = 0.005, timeout: float = 5.0) -> float:
     """Worst observed scheduling delay on *loop*, in milliseconds.
 
     Schedules a no-op repeatedly and measures how late it runs. A loop
@@ -112,12 +112,13 @@ def measure_loop_latency(loop, samples: int = 20,
         sent = time.perf_counter()
         done = threading.Event()
 
-        def _mark():
+        def _mark(done=done, sent=sent):
             nonlocal worst
             worst = max(worst, (time.perf_counter() - sent) * 1000)
             done.set()
 
         loop.call_soon_threadsafe(_mark)
-        done.wait(timeout=5)
+        if not done.wait(timeout=timeout):
+            raise TimeoutError(f"loop latency callback did not run within {timeout}s")
         time.sleep(interval)
     return worst
