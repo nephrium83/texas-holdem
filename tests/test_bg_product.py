@@ -78,12 +78,11 @@ def test_wrong_public_product_rejected_by_prover():
 
 @pytest.mark.parametrize("m,n", [(1, 2), (3, 1)])
 def test_dimensions_below_theorem_8_bounds_rejected(m, n):
-    setup = _setup(max(m, 2), n)
-    a = setup[1][:m]
-    r = setup[2][:m]
-    c_A = setup[3][:m]
-    with pytest.raises(ValueError):
-        PARG.prove(setup[0], c_A, a, r, setup[4], setup[5])
+    # Every other input is consistent with this exact shape, including b.
+    ck, a, r, c_A, b, context = _setup(m, n)
+    boundary = "m" if m < 2 else "n"
+    with pytest.raises(ValueError, match=rf"requires {boundary} >= 2"):
+        PARG.prove(ck, c_A, a, r, b, context)
 
 
 def test_changed_public_statement_rejected():
