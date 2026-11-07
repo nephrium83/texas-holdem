@@ -76,7 +76,7 @@ def test_stun_xor_mapped_address_decode():
     header = struct.pack(">HHI", 0x0101, len(attr), MAGIC_COOKIE) + txid
     response = header + attr
 
-    decoded_ip, decoded_port = _parse_response(response)
+    decoded_ip, decoded_port = _parse_response(response, txid)
     assert decoded_ip   == ip_str, f"IP mismatch: {decoded_ip} != {ip_str}"
     assert decoded_port == port,   f"Port mismatch: {decoded_port} != {port}"
 
@@ -86,13 +86,100 @@ def test_stun_error_on_wrong_magic():
     txid     = b'\x00' * 12
     response = struct.pack(">HHI", 0x0101, 0, 0xDEADBEEF) + txid  # bad magic
     with pytest.raises(STUNError, match="magic cookie"):
-        _parse_response(response)
+        _parse_response(response, txid)
 
 
 def test_stun_error_on_short_response():
     """A response shorter than 20 bytes must raise STUNError."""
     with pytest.raises(STUNError, match="too short"):
-        _parse_response(b'\x00' * 10)
+        _parse_response(b'\x00' * 10, b'\x00' * 12)
+
+
+# --- audit #79: a reply must be OURS, and its lengths must be honest -------
+
+def _stun_reply(txid, ip="93.184.216.34", port=4321, *, length_delta=0,
+                attr_len=8):
+    import socket
+    ip_int = struct.unpack(">I", socket.inet_aton(ip))[0]
+    body = struct.pack(">BBHI", 0, 1, port ^ (MAGIC_COOKIE >> 16), ip_int ^ MAGIC_COOKIE)
+    attr = struct.pack(">HH", 0x0020, attr_len) + body
+    return struct.pack(">HHI", 0x0101, len(attr) + length_delta, MAGIC_COOKIE) + txid + attr
+
+
+def test_stun_reply_for_another_transaction_is_refused():
+    with pytest.raises(STUNError, match="transaction ID"):
+        _parse_response(_stun_reply(b"\x01" * 12), b"\x02" * 12)
+
+
+@pytest.mark.parametrize("delta", [-4, 4, 1])
+def test_stun_declared_length_must_match_the_datagram(delta):
+    with pytest.raises(STUNError, match="length"):
+        _parse_response(_stun_reply(b"\x01" * 12, length_delta=delta), b"\x01" * 12)
+
+
+def test_stun_attribute_cannot_overrun_the_message():
+    with pytest.raises(STUNError, match="overruns"):
+        _parse_response(_stun_reply(b"\x01" * 12, attr_len=200), b"\x01" * 12)
+
+
+def test_stun_lookup_ignores_spoofed_and_mismatched_datagrams(monkeypatch):
+    """End to end against a local fake STUN server. Before the reply, an
+    attacker socket sends a forged answer straight at our port (the
+    connected socket never sees it), and the server sends one reply for the
+    WRONG transaction (skipped). Only the genuine reply is used."""
+    import asyncio
+    import socket
+    import threading
+    from holdem.p2p import stun
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    server.settimeout(5)
+    attacker = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    monkeypatch.setattr(stun, "STUN_HOST", "127.0.0.1")
+    monkeypatch.setattr(stun, "STUN_PORT", server.getsockname()[1])
+
+    def serve():
+        request, client = server.recvfrom(1024)
+        txid = request[8:20]
+        attacker.sendto(_stun_reply(txid, "6.6.6.6", 666), client)      # spoof
+        server.sendto(_stun_reply(b"\xee" * 12, "7.7.7.7", 777), client)  # wrong txid
+        server.sendto(_stun_reply(txid, "93.184.216.34", 4321), client)   # genuine
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        assert asyncio.run(stun.get_public_address()) == ("93.184.216.34", 4321)
+    finally:
+        t.join(5)
+        server.close()
+        attacker.close()
+
+
+def test_stun_lookup_times_out_when_only_foreign_replies_arrive(monkeypatch):
+    import asyncio
+    import socket
+    import threading
+    from holdem.p2p import stun
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind(("127.0.0.1", 0))
+    server.settimeout(5)
+    monkeypatch.setattr(stun, "STUN_HOST", "127.0.0.1")
+    monkeypatch.setattr(stun, "STUN_PORT", server.getsockname()[1])
+
+    def serve():
+        request, client = server.recvfrom(1024)
+        server.sendto(_stun_reply(b"\xee" * 12), client)              # never ours
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    try:
+        with pytest.raises(STUNError, match="timed out"):
+            asyncio.run(stun.get_public_address())
+    finally:
+        t.join(5)
+        server.close()
 
 
 # ---------------------------------------------------------------------------
