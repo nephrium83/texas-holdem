@@ -283,10 +283,9 @@ def _wrap_with_drain(session, bus: InMemoryBus) -> None:
     consistency, which is how they came to swallow delivery failures and
     report a bet as applied when peers never saw it. The three call sites
     genuinely differ: start_table must survive a partial failure and turn
-    it into a verdict; these must not invent one. An escaping error here is
-    now safe -- client_server answers CommandRefused; invariant RuntimeErrors surface rather than
-    dropping the socket as it once did -- so the simple thing is also the
-    correct thing.
+    it into a verdict; these must not invent one. An escaping RuntimeError here is
+    an invariant defect. client_server answers typed CommandRefused errors;
+    unexpected RuntimeErrors propagate instead of becoming ordinary refusals.
     """
     orig_send_bet_action = session.send_bet_action
     orig_next_p2p_hand   = session.next_p2p_hand
