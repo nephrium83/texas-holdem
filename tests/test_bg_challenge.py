@@ -332,21 +332,63 @@ def test_hadamard_agrees_across_a_retry(monkeypatch):
     assert H.verify(ck, c_A, c_b, n, CTX, proof)
 
 
-# ------------------------------------------------------------- no stragglers
+# ------------------------------------------------------ full shuffle retries
 
-def test_no_module_still_raises_on_a_zero_challenge():
-    """The point of this commit: one derivation rule, not four spellings
-    of a rejection."""
-    import inspect
-    for mod in (S, Z, H):
-        src = inspect.getsource(mod)
-        assert "reduced to zero" not in src, mod.__name__
-        assert "nonzero_challenge" in src, mod.__name__
-
-
-def test_shuffle_uses_the_shared_helper():
-    import inspect
+@pytest.mark.parametrize("path,label", [("_challenge_x", b""),
+                                        ("_challenge_yz", b"y"),
+                                        ("_challenge_yz", b"z"),
+                                        ("_multi_challenge", b"")])
+def test_shuffle_prover_and_verifier_retry_each_challenge(monkeypatch, path, label):
     from holdem.p2p import bg_shuffle as SH
-    src = inspect.getsource(SH)
-    assert "reduced to zero" not in src
-    assert src.count("nonzero_challenge") >= 4
+    from holdem.p2p import elgamal as E
+    ck = P.CommitmentKey.generate(2, seed=b"challenge-shuffle")
+    pk = R.mul_base(_sc(1))
+    ins = [E.encrypt(pk, R.mul_base(_sc(i + 2)), _sc(i + 10)) for i in range(4)]
+    perm = [3, 2, 1, 0]
+    scalars = [_sc(i + 20) for i in range(4)]
+    outs = [E.reencrypt(pk, ins[src], scalars[i]) for i, src in enumerate(perm)]
+    poisoned = set()
+    active = False
+    entered = 0
+    zero_hits = 0
+    real_path = getattr(SH, path)
+    real_helper = SH.nonzero_challenge
+    real_R = C.R
+
+    class Reducer:
+        def __getattr__(self, name):
+            return getattr(real_R, name)
+        def scalar_reduce(self, wide):
+            nonlocal zero_hits
+            if bytes(wide) in poisoned:
+                zero_hits += 1
+                return ZERO
+            return real_R.scalar_reduce(wide)
+
+    def selected_path(*args):
+        nonlocal active, entered
+        entered += 1
+        active = True
+        try:
+            return real_path(*args)
+        finally:
+            active = False
+
+    def helper(h, draw_label=b""):
+        if active and draw_label == label:
+            # Poison this exact counter-zero transcript for BOTH peers.
+            attempt = h.copy()
+            attempt.update(len(draw_label).to_bytes(4, "big"))
+            attempt.update(draw_label)
+            attempt.update(bytes(4))
+            poisoned.add(attempt.digest())
+        return real_helper(h, draw_label)
+
+    monkeypatch.setattr(C, "R", Reducer())
+    monkeypatch.setattr(SH, path, selected_path)
+    monkeypatch.setattr(SH, "nonzero_challenge", helper)
+    proof = SH.prove(pk, ck, ins, outs, perm, scalars, 2, 2, CTX)
+    assert SH.verify(pk, ck, ins, outs, 2, 2, CTX, proof)
+    assert entered == 2, "both prover and verifier must exercise the selected path"
+    assert len(poisoned) == 1, "the peers must reconstruct the same transcript"
+    assert zero_hits == 2, "both peers must hit zero and retry, rather than bypass the helper"
