@@ -12,10 +12,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Only a genuinely missing native library may skip this module (the same
+# narrow gate test_mental_deal uses after audits #161/#165). A broad
+# RuntimeError here would turn a regression in the crypto modules into a
+# silent skip of these small-order-key and malleability tests.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+
 try:
-    importlib.import_module("holdem.p2p.elgamal")       # libsodium guard
-except RuntimeError as exc:
+    initialize_for_tests()
+except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium/ristretto unavailable: {exc}", allow_module_level=True)
+importlib.import_module("holdem.p2p.elgamal")
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
