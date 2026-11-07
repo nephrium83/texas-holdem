@@ -50,6 +50,7 @@ def _play():
         "".join(traceback.format_exception(e, v, t)))
 
     app = gui.Holdem(root)
+    app.hand_logger._history_path = Path(os.environ["HOLDEM_CONFIG_DIR"]) / "history.jsonl"
     app.v_players.set(PLAYERS)
     app.v_stack.set(STACK)
     app.v_speed.set("Instant")
