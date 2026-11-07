@@ -241,3 +241,17 @@ func test_reraise_preset_clamps_to_min_to():
 			"min_to": 100, "max_to": 500}))
 	controls.get_node("%PresetHalfPot").pressed.emit()
 	assert_eq(controls.current_raise_amount(), 100)
+
+
+func test_new_turn_resets_wager_but_same_decision_preserves_edits():
+	var controls := _controls()
+	controls.apply_legal(_legal(), [7, 1])
+	controls.get_node("%RaiseSlider").value = 400
+	controls.apply_legal(_legal(), [7, 1])
+	assert_eq(controls.current_raise_amount(), 400)
+	controls.apply_legal(_legal(), [7, 2])
+	assert_eq(controls.current_raise_amount(), 20)
+	controls.get_node("%RaiseSlider").value = 300
+	controls.apply_legal({})
+	controls.apply_legal(_legal(), [7, 2])
+	assert_eq(controls.current_raise_amount(), 20)

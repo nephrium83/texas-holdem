@@ -7,27 +7,45 @@ extends RefCounted
 ## chunk, so this holds partial data across feed() calls rather than
 ## assuming one read equals one message.
 
+# A malformed local peer must not grow the renderer without bound.
+const MAX_LINE_BYTES := 1024 * 1024
+const _NEWLINE := 10
 var _buffer: PackedByteArray = PackedByteArray()
+var _failed := false
 
-const _NEWLINE := 10  # "\n"
 
-
-## Feed newly-read bytes in; returns zero or more complete lines (as
-## UTF-8 decoded strings, newline stripped). Incomplete trailing data is
-## kept for the next feed() call.
+## Lines exclude the newline. An oversized complete OR partial line poisons
+## this connection; no further messages are accepted until reset(). Check
+## failed() after each feed and close the socket rather than truncating JSON.
 func feed(data: PackedByteArray) -> Array[String]:
-	_buffer.append_array(data)
 	var lines: Array[String] = []
-	while true:
-		var newline_index := _buffer.find(_NEWLINE)
-		if newline_index == -1:
+	if _failed:
+		return lines
+	var start := 0
+	while start < data.size():
+		var newline := data.find(_NEWLINE, start)
+		var end := data.size() if newline == -1 else newline
+		if _buffer.size() + end - start > MAX_LINE_BYTES:
+			_failed = true
+			_buffer.clear()
+			return []
+		_buffer.append_array(data.slice(start, end))
+		if newline == -1:
 			break
-		var line_bytes := _buffer.slice(0, newline_index)
-		_buffer = _buffer.slice(newline_index + 1)
-		lines.append(line_bytes.get_string_from_utf8())
+		lines.append(_buffer.get_string_from_utf8())
+		_buffer.clear()
+		start = newline + 1
 	return lines
 
 
-## True if bytes are buffered that haven't formed a complete line yet.
+func failed() -> bool:
+	return _failed
+
+
+func reset() -> void:
+	_buffer.clear()
+	_failed = false
+
+
 func has_partial_data() -> bool:
 	return not _buffer.is_empty()

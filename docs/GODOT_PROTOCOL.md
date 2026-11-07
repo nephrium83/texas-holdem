@@ -842,3 +842,15 @@ These will be added as message types without breaking §4–§6.
 
 Build the Godot client against these. When in doubt, run a sidecar and read
 the actual JSON.
+
+
+### Renderer receive limits
+
+The Godot sidecar client accepts at most 1 MiB (1,048,576 bytes) per
+newline-delimited JSON line, excluding the newline. This applies to both
+complete lines and incrementally received partial lines. An oversized line
+reports a malformed message and closes that connection; the client never
+truncates and interprets it as valid JSON. Socket reads are bounded to 16 KiB
+per process tick, and a fresh connection clears partial/error framing state.
+Initial connection refusal or a 10-second connection timeout is shown in the
+connection banner with controls disabled.

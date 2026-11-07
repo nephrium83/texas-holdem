@@ -13,6 +13,7 @@ extends Node
 
 signal connected_to_sidecar
 signal disconnected_from_sidecar
+signal connection_failed(reason: String)
 signal hello_received(protocol_version: int)
 signal snapshot_received(snapshot: Dictionary)
 signal command_result_received(result: Dictionary)
@@ -24,6 +25,10 @@ signal malformed_message(raw_line: String)
 var _stream: StreamPeerTCP = StreamPeerTCP.new()
 var _framer := LineFramer.new()
 var _connected := false
+var _connecting := false
+var _connect_elapsed := 0.0
+const CONNECT_TIMEOUT_SECONDS := 10.0
+const READ_CHUNK_BYTES := 16384
 
 
 ## Begin connecting to the sidecar. Actual connection completion (and
@@ -31,51 +36,79 @@ var _connected := false
 ## observed asynchronously via _process(); connect connected_to_sidecar
 ## rather than assuming this call is synchronous.
 func connect_to_sidecar(host: String = "127.0.0.1", port: int = 0) -> Error:
+	close()
+	_connecting = true
+	_connect_elapsed = 0.0
 	var err := _stream.connect_to_host(host, port)
 	if err == OK:
 		set_process(true)
+	else:
+		_fail_connection("Could not connect to the game service: %s" % error_string(err))
 	return err
 
 
 func close() -> void:
+	var was_connected := _connected
+	_connected = false
+	_connecting = false
 	_stream.disconnect_from_host()
-	if _connected:
-		_connected = false
-		disconnected_from_sidecar.emit()
+	_framer.reset()
 	set_process(false)
+	if was_connected:
+		disconnected_from_sidecar.emit()
+
+
+func _fail_connection(reason: String) -> void:
+	var was_connecting := _connecting
+	var was_connected := _connected
+	close()
+	if was_connecting and not was_connected:
+		connection_failed.emit(reason)
 
 
 func is_connected_to_sidecar() -> bool:
 	return _connected
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_stream.poll()
 	match _stream.get_status():
 		StreamPeerTCP.STATUS_CONNECTED:
 			if not _connected:
 				_connected = true
+				_connecting = false
 				connected_to_sidecar.emit()
 			_drain_socket()
 		StreamPeerTCP.STATUS_ERROR, StreamPeerTCP.STATUS_NONE:
-			if _connected:
-				_connected = false
-				disconnected_from_sidecar.emit()
-			set_process(false)
+			_fail_connection("Could not connect to the game service — close and relaunch")
 		StreamPeerTCP.STATUS_CONNECTING:
-			pass  # keep polling until it resolves
+			_advance_connect_timeout(delta)
+
+
+func _advance_connect_timeout(delta: float) -> void:
+	if not _connecting:
+		return
+	_connect_elapsed += delta
+	if _connect_elapsed >= CONNECT_TIMEOUT_SECONDS:
+		_fail_connection("Connecting to the game service timed out — close and relaunch")
 
 
 func _drain_socket() -> void:
 	var available := _stream.get_available_bytes()
 	if available <= 0:
 		return
-	var result: Array = _stream.get_partial_data(available)
+	var result: Array = _stream.get_partial_data(mini(available, READ_CHUNK_BYTES))
 	var err: Error = result[0]
 	if err != OK:
+		_fail_connection("Could not read from the game service")
 		return
 	var chunk: PackedByteArray = result[1]
-	for line in _framer.feed(chunk):
+	var lines := _framer.feed(chunk)
+	if _framer.failed():
+		malformed_message.emit("Game service message exceeded the size limit")
+		_fail_connection("Game service message exceeded the size limit")
+		return
+	for line in lines:
 		_route_line(line)
 
 

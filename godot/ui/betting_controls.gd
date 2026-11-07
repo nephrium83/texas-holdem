@@ -24,6 +24,7 @@ signal raise_pressed(amount: int)
 @onready var _preset_all_in: Button = %PresetAllIn
 
 var _legal: Dictionary = {}
+var _decision_key: Array = []
 
 
 func _ready() -> void:
@@ -41,7 +42,9 @@ func _ready() -> void:
 ## this seat's turn (phase != "betting" or action_on != this seat). An
 ## empty dict hides and disables every control, matching the protocol's
 ## cue that there is nothing to decide right now.
-func apply_legal(legal: Dictionary) -> void:
+func apply_legal(legal: Dictionary, decision_key: Array = []) -> void:
+	var new_decision := _legal.is_empty() or decision_key != _decision_key
+	_decision_key = decision_key.duplicate()
 	_legal = legal
 	var has_turn := not legal.is_empty()
 	visible = has_turn
@@ -61,7 +64,7 @@ func apply_legal(legal: Dictionary) -> void:
 		var max_to := int(legal.get("max_to", 0))
 		_raise_slider.min_value = min_to
 		_raise_slider.max_value = max_to
-		_raise_slider.value = clamp(_raise_slider.value, min_to, max_to)
+		_raise_slider.value = min_to if new_decision else clamp(_raise_slider.value, min_to, max_to)
 		_update_raise_display()
 
 

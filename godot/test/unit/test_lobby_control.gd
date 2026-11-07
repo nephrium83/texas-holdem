@@ -184,3 +184,17 @@ func test_a_genuinely_live_hand_clears_a_failure():
 		control.apply_turn_state(state)
 		assert_false(control.visible,
 			"stayed visible over a live hand in state: %s" % state)
+
+
+func test_terminal_states_clear_a_stale_start_failure():
+	var control := _control()
+	for state in ["table_closed", "connection_lost", "disconnected"]:
+		control.apply_turn_state("lobby")
+		control.get_node("%StartGameButton").pressed.emit()
+		control.start_failed("Old first-hand failure")
+		control.apply_turn_state(state)
+		assert_false(control.visible)
+		assert_eq(control.get_node("%LobbyMessageLabel").text, "")
+		control.apply_turn_state("lobby")
+		assert_eq(control.get_node("%LobbyMessageLabel").text, "Ready to start")
+		assert_false(control.get_node("%StartGameButton").disabled)
