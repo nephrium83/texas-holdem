@@ -101,6 +101,11 @@ def _game_rule(ui, key, local_variable):
     return local_variable.get()
 
 
+def _game_constant(ui, key, fallback):
+    rules = getattr(ui, "_mp_rules", None)
+    return rules[key] if getattr(ui, "_mp_mode", False) and rules is not None else fallback
+
+
 def _bet_shortcut_model(raw):
     """Validate the complete preference before configuration or widgets change."""
     if not isinstance(raw, str) or not raw.strip() or len(raw) > 64:
@@ -239,7 +244,7 @@ class Holdem:
 
         # session state
         self.buyin = 0
-        self.bank = float(BANK_START)
+        self.bank = float(_game_constant(self, 'bank_start', BANK_START))
         self.clock_job = None
         self.clock_until = 0.0
         self.clock_phase = "off"        # off | base | bank
@@ -953,7 +958,7 @@ class Holdem:
         if cash:
             br = cfg.get('bankroll')
             cfg.set('bankroll', max(0, br - stack))
-        self.bank = float(BANK_START)
+        self.bank = float(_game_constant(self, 'bank_start', BANK_START))
         self.level_started = time.time()
         self.level_idx = 0
         self.straddle_armed = False
@@ -1064,7 +1069,7 @@ class Holdem:
 
         # Common state reset
         self.buyin  = stack
-        self.bank   = float(BANK_START)
+        self.bank   = float(_game_constant(self, 'bank_start', BANK_START))
         self.level_started    = time.time()
         self.straddle_armed   = False
         self.rabbit_cards     = None
@@ -1593,7 +1598,7 @@ class Holdem:
         cfg.set('hands_played_total', cfg.get('hands_played_total') + 1)
         self.update_xp(hands=1)
         if e.bb_i == local and e.players[local].in_seat:
-            self.bank = min(BANK_CAP, self.bank + BANK_TOPUP)
+            self.bank = min(_game_constant(self, 'bank_cap', BANK_CAP), self.bank + _game_constant(self, 'bank_topup', BANK_TOPUP))
         self.flush_log()
         self.l_blinds.config(
             text=f"Blinds {e.sb}/{e.bb}"
@@ -2152,7 +2157,7 @@ class Holdem:
                 or e.players[self.hero_seat].sitting_out):
             return
         self.clock_phase = "base"
-        self.clock_until = time.time() + CLOCK_BASE
+        self.clock_until = time.time() + _game_constant(self, 'clock_base', CLOCK_BASE)
         self._clock_tick()
 
     def stop_clock(self):
@@ -2731,6 +2736,8 @@ class Holdem:
             """Live table-rule change (single-player only): update the
             contract and its hash. At a live table this needs unanimous
             signed consent instead."""
+            if self._mp_mode:
+                return  # admitted multiplayer rules need a protocol change
             self.table_rules = cfg.table_rules(
                 **self._bucket(cfg.TABLE_RULE))
             l_hash.config(
