@@ -1,9 +1,22 @@
 # Explicit legacy Tkinter harness build; never the Godot player release.
+import os
+import sys
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(SPECPATH).parent
-block_cipher = None
+# Reuse the release input verifier; never discover an arbitrary developer DLL.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from tools.prepare_ice_sodium import verify_result
+
+receipt = os.environ.get("POKER_SODIUM_RESULT")
+if not receipt:
+    raise SystemExit(
+        "Legacy Tk packaging requires POKER_SODIUM_RESULT from "
+        "tools/prepare_ice_sodium.py; see docs/BUILD_WINDOWS.md"
+    )
+sodium = verify_result(receipt)
 
 # Collect entire packages so DLLs / rust bindings / data are included
 datas_c, binaries_c, hiddenimports_c = collect_all('cryptography')
@@ -12,8 +25,12 @@ datas_p, binaries_p, hiddenimports_p = collect_all('pygame')
 a = Analysis(
     [str(ROOT / 'packaging' / 'legacy_tk_entrypoint.py')],
     pathex=[str(ROOT)],
-    binaries=binaries_c + binaries_p,
-    datas=datas_c + datas_p,
+    binaries=binaries_c + binaries_p + [(sodium["dll"], "native")],
+    datas=datas_c + datas_p + [
+        (sodium["license"], "licenses"),
+        (sodium["attribution"], "licenses"),
+        (sodium["manifest"], "."),
+    ],
     hiddenimports=(
         hiddenimports_c
         + hiddenimports_p
@@ -50,17 +67,15 @@ a = Analysis(
     excludes=['matplotlib', 'scipy', 'pandas', 'PIL', 'cv2', 'test'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
-    a.zipfiles,
     a.datas,
     [],
     name='Texas_Holdem_Legacy_Tk',
