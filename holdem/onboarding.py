@@ -42,6 +42,94 @@ try:
 except ImportError:
     _PIL_OK = False
 
+# Serializes session ownership changes with cancelled workers' late cleanup.
+_join_owner_lock = threading.RLock()
+
+
+class _JoinAttempt:
+    """Own one legacy dialog's callbacks and any late dial result."""
+    def __init__(self, session, transport, holder):
+        self.session, self.transport, self.holder = session, transport, holder
+        self.cancelled = threading.Event()
+        self.transferred = False
+        self.conn_id = None
+        self._late_cleaned = False
+
+    @property
+    def active(self):
+        return (not self.cancelled.is_set() and not self.transferred
+                and self.holder._session is self.session)
+
+    def guard(self, callback):
+        def guarded():
+            if self.active:
+                callback()
+        return guarded
+
+    def cancel(self):
+        with _join_owner_lock:
+            if self.transferred or self.cancelled.is_set():
+                return
+            self.cancelled.set()
+            self.session.on_player_list_changed = None
+            self.session.on_game_start = None
+            if self.holder._session is self.session:
+                self.holder._session = None
+                self.transport.reset_callbacks()
+                self.transport.stop()
+
+    def accept_connection(self, conn_id, begin):
+        with _join_owner_lock:
+            self.conn_id = conn_id
+            if not self.active:
+                self.transport.disconnect(conn_id)
+                self.cleanup_late()
+                return False
+            begin(conn_id)
+            return True
+
+    def cleanup_late(self):
+        with _join_owner_lock:
+            # A cancelled dial may have started the transport loop after the
+            # dialog's first cleanup. Never stop a newer session's loop.
+            if (self.cancelled.is_set() and not self._late_cleaned
+                    and self.holder._session is None):
+                self._late_cleaned = True
+                self.transport.reset_callbacks()
+                self.transport.stop()
+
+    def handoff(self):
+        with _join_owner_lock:
+            if not self.active:
+                raise ValueError("join attempt is no longer active")
+            self.transferred = True
+            self.session.on_player_list_changed = None
+            self.session.on_game_start = None
+
+
+def _local_start_seat(session, payload):
+    if not isinstance(payload, dict):
+        raise ValueError("Game start must contain a seat roster")
+    order = payload.get("seat_order")
+    if (not isinstance(order, (list, tuple)) or not 2 <= len(order) <= 9
+            or any(not isinstance(cid, str) or not cid for cid in order)
+            or len(set(order)) != len(order)):
+        raise ValueError("Game start has an invalid or duplicate seat roster")
+    local = session.local_conn_id
+    if not local or local not in order:
+        raise ValueError("The authenticated local player is missing from the seat roster")
+    return order.index(local)
+
+
+def _save_table_defaults(values):
+    stored = cfg.load()["last_table"]
+    rules = cfg.table_rules(**{**stored, **values})
+    if rules["sb"] >= rules["bb"]:
+        raise ValueError("Small blind must be less than big blind")
+    stored.update(rules)
+    return cfg.save({}, stored)
+
+
 # ----------------------------------------------------------------- avatars
 
 AVATARS: list[tuple[str, str, str, str]] = [
@@ -644,7 +732,8 @@ class OnboardingFlow:
             clock      = _transport.get_clock(),
             secret_provider = _device_secret.load_or_create,
         )
-        _p2p_pkg._session = sess
+        with _join_owner_lock:
+            _p2p_pkg._session = sess
 
         # H-12: register the host under a stable local ID derived from the
         # Ed25519 public key — NOT inside an on_connect callback (which fires
@@ -670,9 +759,9 @@ class OnboardingFlow:
                                  parent=self.root)
             return
 
-        # Configure relay fallback (may not be reachable yet — that's OK)
-        _transport.set_relay_address("192.168.1.10", 7890)
-        relay_addr = ("192.168.1.10", 7890)
+        # No public relay has been configured/verified for this legacy path.
+        # A private fleet address is not an Internet fallback for guests.
+        relay_addr = None
 
         # STUN result may not be available yet — get_public_address() returns
         # None until the background query completes (~1–3 s).
@@ -930,7 +1019,28 @@ class OnboardingFlow:
         bar = tk.Frame(win, bg=_PANEL)
         bar.pack(fill="x", padx=20, pady=(0, 14))
 
+        attempt_ref = [None]
+        dialog_closed = [False]
+
+        def _cancel_attempt():
+            dialog_closed[0] = True
+            if attempt_ref[0] is not None:
+                attempt_ref[0].cancel()
+
+        def _close():
+            _cancel_attempt()
+            win.destroy()
+
+        def _destroyed(event):
+            if event.widget is win:
+                _cancel_attempt()
+
+        win.protocol("WM_DELETE_WINDOW", _close)
+        win.bind("<Destroy>", _destroyed)
+
         def _connect():
+            if dialog_closed[0] or (attempt_ref[0] is not None and attempt_ref[0].active):
+                return
             code = v_code.get().strip()
             if not code:
                 messagebox.showwarning("Room code required",
@@ -1001,7 +1111,13 @@ class OnboardingFlow:
 
                 Pinned structurally by tests/test_join_auth.py.
                 """
-                win.after(0, fn)
+                if not attempt.active:
+                    return
+                fn = attempt.guard(fn)
+                try:
+                    win.after(0, fn)
+                except tk.TclError:
+                    log.info("Join dialog closed before a queued update")
 
 
             # ---- authentication is armed BEFORE anything is dialed ----
@@ -1029,7 +1145,10 @@ class OnboardingFlow:
                 clock      = _transport.get_clock(),
                 secret_provider = _device_secret.load_or_create,
             )
-            _p2p_pkg._session = sess
+            with _join_owner_lock:
+                _p2p_pkg._session = sess
+            attempt = _JoinAttempt(sess, _transport, _p2p_pkg)
+            attempt_ref[0] = attempt
             _sess_ref[0] = sess              # C-2: expose to _handle_start
 
             def _on_game_start(payload):
@@ -1075,7 +1194,14 @@ class OnboardingFlow:
             _transport.on_disconnect(lambda cid: sess.handle_disconnect(cid))
 
 
+            def _dial(address):
+                if not attempt.active:
+                    raise ConnectionError("Join was cancelled")
+                return _transport.connect(address)
+
             def _do_connect():
+                if not attempt.active:
+                    return
                 public_ip   = parsed.get("public_ip")
                 public_port = parsed.get("public_port")
                 relay_host  = parsed.get("relay_host")
@@ -1086,12 +1212,12 @@ class OnboardingFlow:
                 try:
                     if addr_override:
                         # Manual override: direct connect (existing behaviour)
-                        conn_id = _transport.connect(addr_override)
+                        conn_id = _dial(addr_override)
 
                     elif public_ip and public_port:
                         # Try direct TCP to the STUN-discovered address (3 s)
                         try:
-                            conn_id = _transport.connect(
+                            conn_id = _dial(
                                 f"{public_ip}:{public_port}"
                             )
                         except ConnectionError as direct_exc:
@@ -1117,7 +1243,7 @@ class OnboardingFlow:
                                         relay_port,
                                         _invite.public_room_id(parsed),
                                     )
-                                    conn_method[0] = "Relay (via errantsaints.space)"
+                                    conn_method[0] = "Relay connection"
                                 except ConnectionError as relay_exc:
                                     # Last resort: try LAN multicast
                                     host_addr = _transport.find_peer(
@@ -1129,7 +1255,7 @@ class OnboardingFlow:
                                             f"Direct and relay both failed:\n{e}",
                                         ))
                                         return
-                                    conn_id = _transport.connect(host_addr)
+                                    conn_id = _dial(host_addr)
                             else:
                                 # No relay in code — try LAN multicast as fallback
                                 host_addr = _transport.find_peer(
@@ -1141,7 +1267,7 @@ class OnboardingFlow:
                                         f"Direct connect failed and no relay available:\n{e}",
                                     ))
                                     return
-                                conn_id = _transport.connect(host_addr)
+                                conn_id = _dial(host_addr)
 
                     else:
                         # No STUN address in code → fall back to LAN multicast
@@ -1155,7 +1281,7 @@ class OnboardingFlow:
                                 "override field.",
                             ))
                             return
-                        conn_id = _transport.connect(host_addr)
+                        conn_id = _dial(host_addr)
 
                     # The connection that actually survived routing. Every
                     # step below belongs to THIS conn_id and no other: a
@@ -1168,7 +1294,8 @@ class OnboardingFlow:
                     # that failed cannot be completed on its replacement.
                     _conn_id_ref[0]     = conn_id
                     _conn_method_ref[0] = conn_method[0]
-                    _auth_ref[0].begin(conn_id)
+                    if not attempt.accept_connection(conn_id, _auth_ref[0].begin):
+                        return
 
                     _ui_post(lambda m=conn_method[0]: status_lbl.config(
                         text=f"Connected ({m}) — authenticating host…",
@@ -1177,9 +1304,13 @@ class OnboardingFlow:
 
                 except Exception as exc:
                     _ui_post(lambda e=exc: _on_error("Connection failed", str(e)))
+                finally:
+                    if not attempt.active:
+                        attempt.cleanup_late()
 
 
             def _on_error(title, msg):
+                attempt.cancel()
                 connect_btn.config(state="normal")
                 status_lbl.config(text="Connection failed.", fg="#e33b6d")
                 messagebox.showerror(title, msg, parent=win)
@@ -1215,10 +1346,6 @@ class OnboardingFlow:
                         fill="x", padx=6, pady=1)
 
             def _handle_start(payload):
-                seat_order = payload.get("seat_order", [])
-                local_cid  = _conn_id_ref[0]
-                local_seat = (seat_order.index(local_cid)
-                              if local_cid in seat_order else 1)
                 ts = payload.get("table_settings",
                                  {"sb": 10, "bb": 20, "stack": 1000})
 
@@ -1241,7 +1368,7 @@ class OnboardingFlow:
                 #
                 # Asserted rather than assumed: reaching a game start on an
                 # unauthenticated session would mean the gate leaked.
-                if not getattr(sess, "_host_authenticated", True):
+                if not getattr(sess, "_host_authenticated", False):
                     _ui_post(lambda: _on_error(
                         "Host verification failed",
                         "The game started on a connection that never "
@@ -1249,6 +1376,12 @@ class OnboardingFlow:
                     ))
                     return
 
+                try:
+                    local_seat = _local_start_seat(sess, payload)
+                    attempt.handoff()
+                except ValueError as exc:
+                    _on_error("Invalid game start", str(exc))
+                    return
                 win.destroy()
                 self._launch_mp_game(sess, is_host=False,
                                      local_seat=local_seat,
@@ -1259,7 +1392,7 @@ class OnboardingFlow:
 
         connect_btn = _btn(bar, "Connect  →", _connect, accent=True)
         connect_btn.pack(side="right")
-        _btn(bar, "Cancel", win.destroy).pack(side="left")
+        _btn(bar, "Cancel", _close).pack(side="left")
 
     def _create_table_dialog(self) -> None:
         win = tk.Toplevel(self.root)
@@ -1301,38 +1434,43 @@ class OnboardingFlow:
                              insertbackground=_TEXT, relief="flat")
             w.pack(side="left")
 
-        v_name    = tk.StringVar(value="Table #1")
-        v_players = tk.IntVar(value=6)
-        v_sb      = tk.IntVar(value=10)
-        v_bb      = tk.IntVar(value=20)
-        v_clock   = tk.IntVar(value=25)
+        stored = cfg.load()["last_table"]
+        v_players = tk.IntVar(value=stored["players"])
+        v_sb      = tk.IntVar(value=stored["sb"])
+        v_bb      = tk.IntVar(value=stored["bb"])
+        v_clock   = tk.IntVar(value=stored["clock_base"])
 
-        _row("Table name",           v_name)
         _row("Max players",          v_players, lo=2,  hi=9)
         _row("Small blind",          v_sb,      lo=1,  hi=5000)
         _row("Big blind",            v_bb,      lo=2,  hi=10000)
         _row("Seconds per action",   v_clock,   lo=10, hi=120)
 
         tk.Label(body,
-                 text="Networking is not yet implemented.\n"
-                      "Tables will appear in the lobby once\n"
-                      "the P2P layer is added.",
+                 text="Save defaults for your next table.\n"
+                      "Use Create Game to open a network lobby.",
                  bg=_PANEL, fg=_DIM,
                  font=("Segoe UI", 8), justify="center").pack(pady=(14, 0))
 
         bar = tk.Frame(win, bg=_PANEL)
         bar.pack(fill="x", padx=22, pady=14)
         _btn(bar, "Cancel", win.destroy).pack(side="left")
-        _btn(bar, "Create Table",
-             lambda: (
-                 messagebox.showinfo(
-                     "Table created",
-                     "Your table settings have been saved.\n\n"
-                     "Multiplayer networking isn't wired up yet —\n"
-                     "use Practice (Solo) to play now.",
-                     parent=win),
-                 win.destroy()),
-             accent=True).pack(side="right")
+        def _save_defaults():
+            try:
+                saved = _save_table_defaults({
+                    "players": v_players.get(), "sb": v_sb.get(),
+                    "bb": v_bb.get(), "clock_base": v_clock.get()})
+            except (ValueError, tk.TclError) as exc:
+                messagebox.showerror("Invalid table settings", str(exc), parent=win)
+                return
+            if not saved:
+                messagebox.showerror("Could not save settings",
+                                     "The settings file could not be saved. Your previous file is preserved.", parent=win)
+                return
+            messagebox.showinfo("Table defaults saved",
+                                "These settings will be used for your next table.", parent=win)
+            win.destroy()
+
+        _btn(bar, "Save defaults", _save_defaults, accent=True).pack(side="right")
 
     # ---- multiplayer game launch
 
