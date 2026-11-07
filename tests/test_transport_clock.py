@@ -91,6 +91,9 @@ def test_explicit_disconnect_reason_is_forwarded_and_reset_clears_subscribers(
         def call_soon_threadsafe(self, fn):
             fn()
 
+        def is_closed(self):            # disconnect() now checks it (audit #88)
+            return False
+
     monkeypatch.setattr(transport, "_ensure_loop", lambda: None)
     monkeypatch.setattr(transport, "_loop", Loop())
     writer = _Writer()
