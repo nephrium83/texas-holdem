@@ -118,12 +118,28 @@ def test_apply_command_fold_matches_direct_act():
     assert e.players[actor].folded
 
 
-def test_apply_command_check_call_is_legal():
+@pytest.mark.parametrize("checking", [False, True], ids=["call", "check"])
+def test_apply_command_check_call_is_legal(checking):
     e = _table()
+    if checking:
+        # Reach the big blind's option using real calls, not synthetic state.
+        while e.legal(e.actor)["to_call"]:
+            e.act(e.actor, "call")
     actor = e.actor
+    p = e.players[actor]
+    owed = e.legal(actor)["to_call"]
+    assert (owed == 0) is checking
+    stack, bet, pot = p.stack, p.bet, e.pot
+    event_count = len(e.public_events)
     contract.apply_command(e, actor, "check_call")
-    # after acting, either we matched the bet or checked; not folded
-    assert not e.players[actor].folded
+    assert not p.folded
+    assert (p.stack, p.bet, e.pot) == (stack - owed, bet + owed, pot + owed)
+    assert e.actor != actor
+    assert len(e.public_events) == event_count + 1
+    event = e.public_events[-1]
+    assert (event["event"], event["seat"], event["action"], event["amount"]) == (
+        "action", actor, "check" if checking else "call", owed)
+    assert p.last_action == ("CHECK" if checking else f"CALL {owed}")
 
 
 def test_apply_command_raise_to_is_absolute():
