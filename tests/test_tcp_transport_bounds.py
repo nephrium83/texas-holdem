@@ -108,45 +108,67 @@ def _handshake(client, conn_id="attacker"):
 
 # ------------------------------------------------------ bounded reads
 
-def test_handshake_without_a_newline_is_bounded(listening):
-    """Pre-authentication memory exhaustion: connect, never send a newline.
+def _drain_hello(client):
+    client.settimeout(_HANDSHAKE_WAIT)
+    buf = b""
+    while b"\n" not in buf:
+        chunk = client.recv(4096)
+        assert chunk, "server closed before greeting"
+        buf += chunk
+    assert wire.safe_loads(buf.split(b"\n", 1)[0])["conn_id"]
 
-    The peer must be dropped rather than buffered indefinitely. Sending
-    somewhat more than the cap is enough -- if the bound were absent this
-    would be limited only by how long the test is willing to write.
-    """
-    _transport, _rec, client, _port = listening
-    blob = b"x" * (MAX_LINE // 4)
-    dropped = False
+
+def _expect_closed(client):
+    client.settimeout(3)
     try:
-        for _ in range(8):
-            client.sendall(blob)
-            time.sleep(0.02)
-    except OSError:
-        dropped = True          # server closed on us, which is the fix working
-    # Either the send failed or the connection is now dead; confirm the
-    # server is no longer willing to talk to this socket.
-    if not dropped:
-        client.settimeout(2)
-        try:
-            assert client.recv(4096) == b"", "server kept the over-long peer"
-        except OSError:
-            pass
+        data = client.recv(4096)
+    except (ConnectionResetError, ConnectionAbortedError):
+        return
+    except socket.timeout:
+        pytest.fail("overlong peer timed out instead of reaching EOF/reset")
+    assert data == b"", f"overlong peer remained open: {data[:100]!r}"
+
+
+def _overflow(client, char):
+    try:
+        client.sendall(char * (MAX_LINE + 1))
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        pass
+    # Observe the drop while the line is STILL unterminated. Otherwise an
+    # invalid JSON parse at the newline could impersonate the length guard.
+    _expect_closed(client)
+    try:
+        client.sendall(b'\n{"type":"chat","payload":{"text":"after"}}\n')
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        pass
+
+
+def _expect_removed(transport, peer):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        with transport._writers_lock:
+            removed = peer not in transport._peers
+        readers = [t for t in threading.enumerate() if t.name == f"tcp-reader-{peer}"]
+        if removed and not readers:
+            return
+        time.sleep(0.01)
+    pytest.fail(f"overlong peer/reader survived: {_server_state(transport)}")
+
+
+def test_handshake_without_a_newline_is_bounded(listening):
+    """Pre-auth overflow must close, rather than merely stop sending data."""
+    transport, recorder, client, _port = listening
+    _drain_hello(client)  # receive host greeting without sending our identity
+    _overflow(client, b"x")
+    assert not transport._peers and not recorder.messages
 
 
 def test_over_long_line_after_handshake_drops_the_peer(listening):
-    """Same attack, post-handshake: one enormous line with no newline."""
     transport, recorder, client, _port = listening
     _handshake(client)
-    try:
-        for _ in range(8):
-            client.sendall(b"y" * (MAX_LINE // 4))
-            time.sleep(0.02)
-        client.sendall(b"\n")
-    except OSError:
-        pass
-    time.sleep(0.2)
-    assert not recorder.messages, "an over-long line was delivered as a frame"
+    _overflow(client, b"y")
+    _expect_removed(transport, "attacker")
+    assert not recorder.messages, "overflow or later frame reached the Session"
 
 
 def _server_state(transport):
@@ -228,25 +250,10 @@ def test_leftover_does_not_bypass_the_line_cap(listening):
     """
     transport, recorder, client, _port = listening
     client.sendall(b'{"conn_id": "greedy"}\n' + b"z" * (MAX_LINE // 2))
-    try:
-        for _ in range(8):
-            client.sendall(b"z" * (MAX_LINE // 4))
-            time.sleep(0.02)
-        client.sendall(b"\n")
-        # The reader must have stopped, so a following legal frame is not
-        # served either. Asserting on the delivered frames is the property
-        # the transport actually provides: breaking the read loop leaves
-        # the peer connected but deaf, because closing the makefile does
-        # not close the underlying socket. An earlier version of this test
-        # asserted the socket reached EOF and failed on all three Linux
-        # jobs for that reason -- the bound was working, the assertion was
-        # describing a shutdown the transport never performs.
-        client.sendall(b'{"type": "chat", "payload": {"text": "after"}}\n')
-    except OSError:
-        pass                               # server hung up, also acceptable
-    time.sleep(0.5)
-    assert not recorder.messages, (
-        f"over-long batched line was served: {recorder.messages}")
+    _drain_hello(client)
+    _overflow(client, b"z")
+    _expect_removed(transport, "greedy")
+    assert not recorder.messages, "overflow or later frame reached the Session"
 
 
 def test_handshake_leftover_is_handed_to_the_reader(listening):
