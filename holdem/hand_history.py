@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 
 log = logging.getLogger(__name__)
@@ -34,12 +33,13 @@ from typing import Dict, List, Optional, Set
 class HandRecord:
     hand_id: str
     timestamp: float
-    seats: List[dict]           # [{name, stack_start}]
+    seats: List[dict]           # [{seat, name, stack_start}]; old records may omit seat
     actions: List[dict]         # [{seat, action_type, amount, street, text}]
     community: List[List[str]]  # cards per street: [[flop...],[turn],[river]]
     hole_cards: Dict[int, List[str]]   # seat_idx -> [card_str, ...]
     winners: Set[int]
     pot_final: int
+    boards: Dict[int, List[str]] = field(default_factory=dict)
 
     @property
     def ts_label(self) -> str:
@@ -48,12 +48,18 @@ class HandRecord:
             "%Y-%m-%d %H:%M")
 
     @property
+    def seat_names(self) -> Dict[int, str]:
+        # Preserve old compact records' positional meaning, but new records
+        # always carry their actual engine seat index.
+        return {int(seat.get("seat", offset)): seat["name"]
+                for offset, seat in enumerate(self.seats)}
+
+    def seat_name(self, seat: int) -> str:
+        return self.seat_names.get(seat, f"S{seat}")
+
+    @property
     def winner_names(self) -> str:
-        return ", ".join(
-            s["name"] for i, s in enumerate(self.seats)
-            if i in self.winners
-            # seats list may be indexed differently from winner seat indices
-        )
+        return ", ".join(self.seat_name(seat) for seat in sorted(self.winners))
 
 
 # ----------------------------------------------------------------- logger
@@ -70,13 +76,8 @@ class HandLogger:
             or (Path.home() / ".texas_holdem_history.jsonl")
         )
         self._current: Optional[HandRecord] = None
-        self._current_street: str = "preflop"
-        self._name_to_seat: dict[str, int] = {}
-        self._seat_to_name: dict[int, str] = {}
-        self._community_this_street: List[str] = []
-        self._flop_done = False
-        self._turn_done = False
-        self._river_done = False
+        self._engine = None
+        self._event_cursor = 0
 
     # -------------------------------------------------------------- API
 
@@ -87,12 +88,13 @@ class HandLogger:
         for p in seated:
             # stack_start = what they had before posting blinds this hand
             seats_info.append({
+                "seat": p.idx,
                 "name": p.name,
-                "stack_start": p.stack + p.bet + p.total_live + p.total_dead,
+                "stack_start": p.stack + p.total_live + p.total_dead,
             })
 
-        self._name_to_seat = {p.name: p.idx for p in players}
-        self._seat_to_name = {p.idx: p.name for p in players}
+        self._engine = engine
+        self._event_cursor = 0
         self._current = HandRecord(
             hand_id=str(uuid.uuid4()),
             timestamp=time.time(),
@@ -103,27 +105,21 @@ class HandLogger:
             winners=set(),
             pot_final=0,
         )
-        self._current_street = "preflop"
-        self._community_this_street = []
-        self._flop_done = self._turn_done = self._river_done = False
 
     def feed(self, events) -> None:
-        """Process a batch of (kind, text) events from engine.drain()."""
-        if self._current is None:
-            return
-        for kind, text in events:
-            self._process(kind, text)
+        """GUI drain notification; consume authoritative structured events.
+
+        The legacy (kind, text) argument is retained for existing callers.
+        Its wording and player names never determine seat/action/card data.
+        """
+        self._capture_events()
 
     def on_settle(self, result, engine) -> None:
         """Call after engine.settle() to finalise and store the record."""
         if self._current is None:
             return
+        self._capture_events()
         rec = self._current
-
-        # Flush any remaining community cards
-        if self._community_this_street:
-            rec.community.append(list(self._community_this_street))
-            self._community_this_street = []
 
         # Hole cards at showdown
         for p in engine.players:
@@ -139,6 +135,7 @@ class HandLogger:
         self.records.append(rec)
         self._persist(rec)
         self._current = None
+        self._engine = None
 
     def last_n(self, n: int = 10) -> List[HandRecord]:
         """Return up to *n* most-recent hands, newest first."""
@@ -147,70 +144,31 @@ class HandLogger:
 
     # -------------------------------------------------------------- internals
 
-    def _process(self, kind: str, text: str) -> None:
+    def _capture_events(self) -> None:
         rec = self._current
-        if rec is None:
+        if rec is None or self._engine is None:
             return
-
-        if kind == "street":
-            # "=== FLOP  [2♦ 5♥ K♠] ===" / TURN / RIVER / showdown
-            if "FLOP" in text:
-                cards = self._parse_board_cards(text)
-                rec.community.append(cards)
-                self._current_street = "flop"
-            elif "TURN" in text:
-                cards = self._parse_board_cards(text)
-                rec.community.append(cards)
-                self._current_street = "turn"
-            elif "RIVER" in text:
-                cards = self._parse_board_cards(text)
-                rec.community.append(cards)
-                self._current_street = "river"
-            elif "SHOWDOWN" in text or "showdown" in text.lower():
-                self._current_street = "showdown"
-            return
-
-        if kind in ("fold", "check", "bet", "raise"):
-            action_rec = self._parse_action(kind, text)
-            if action_rec:
-                rec.actions.append(action_rec)
-
-    @staticmethod
-    def _parse_board_cards(text: str) -> List[str]:
-        """Extract card tokens between [ and ] in a street-header event."""
-        m = re.search(r"\[(.+?)\]", text)
-        if not m:
-            return []
-        return m.group(1).split()
-
-    def _parse_action(self, kind: str, text: str) -> Optional[dict]:
-        for name, seat_idx in self._name_to_seat.items():
-            if not text.startswith(name + " "):
-                continue
-            rest = text[len(name) + 1:]
-            street = self._current_street
-            if kind == "fold":
-                return dict(seat=seat_idx, action_type="fold",
-                            amount=0, street=street, text=text)
-            if kind == "check":
-                return dict(seat=seat_idx, action_type="check",
-                            amount=0, street=street, text=text)
-            if kind == "bet":
-                m = re.match(r"calls (\d+)", rest)
-                amt = int(m.group(1)) if m else 0
-                return dict(seat=seat_idx, action_type="call",
-                            amount=amt, street=street, text=text)
-            if kind == "raise":
-                m = re.match(r"(bets|raises to|is all-in for) (\d+)", rest)
-                if m:
-                    amt = int(m.group(2))
-                    atype = "bet" if m.group(1) == "bets" else "raise"
-                else:
-                    amt = 0
-                    atype = "raise"
-                return dict(seat=seat_idx, action_type=atype,
-                            amount=amt, street=street, text=text)
-        return None
+        events = self._engine.public_events
+        for event in events[self._event_cursor:]:
+            if event.get("event") == "action":
+                rec.actions.append({
+                    "seat": event["seat"],
+                    "action_type": event["action"],
+                    "amount": event.get("amount", 0),  # chips added, not raise-to
+                    "to": event.get("to", 0),
+                    "street": event["street"],
+                    "text": event.get("text", ""),
+                })
+            elif event.get("event") == "deal_board":
+                run = int(event.get("run", 1))
+                board = [str(card) for card in event["board"]]
+                rec.boards[run] = board
+                if run == 1:
+                    # Engine board events are cumulative. Store each street's
+                    # cards once; a complete runout follows the same layout.
+                    rec.community = [cards for cards in (
+                        board[:3], board[3:4], board[4:5]) if cards]
+        self._event_cursor = len(events)
 
     def _persist(self, rec: HandRecord) -> None:
         try:
@@ -221,6 +179,7 @@ class HandLogger:
                     "seats": rec.seats,
                     "actions": rec.actions,
                     "community": rec.community,
+                    "boards": rec.boards,
                     "hole_cards": {
                         str(k): v for k, v in rec.hole_cards.items()
                     },
@@ -289,20 +248,8 @@ def open_history_viewer(parent, logger: HandLogger, theme: dict) -> None:
 
     hands = logger.last_n(10)
     for rec in hands:
-        name_part = ", ".join(
-            s["name"] for i, s in enumerate(rec.seats)
-            if i in rec.winners
-        )
-        # Build winner display using seat index -> name mapping
-        winner_names = []
-        seat_by_idx = {i: s["name"] for i, s in enumerate(rec.seats)}
-        # rec.winners has engine seat indices; match by seat name via seats_info
-        all_names = {s["name"] for s in rec.seats}
-        for w_idx in sorted(rec.winners):
-            if w_idx < len(rec.seats):
-                winner_names.append(rec.seats[w_idx]["name"])
         label = (f"{rec.ts_label}  pot {rec.pot_final}\n"
-                 f"  ⇒ {', '.join(winner_names) or '?'}")
+                 f"  ⇒ {rec.winner_names or '?'}")
         lb.insert("end", label)
 
     # ---- Right: action detail ------------------------------------------
@@ -386,18 +333,17 @@ def open_history_viewer(parent, logger: HandLogger, theme: dict) -> None:
         if rec.hole_cards:
             lines.append(("street", "── Showdown ──"))
             for seat_idx, cards in sorted(rec.hole_cards.items()):
-                seat_name = (rec.seats[seat_idx]["name"]
-                             if seat_idx < len(rec.seats) else f"S{seat_idx}")
+                seat_name = rec.seat_name(seat_idx)
                 lines.append(("hole",
                               f"  {seat_name}: {' '.join(cards)}"))
-        # winners
-        winner_names = []
-        for w_idx in sorted(rec.winners):
-            if w_idx < len(rec.seats):
-                winner_names.append(rec.seats[w_idx]["name"])
+        # Additional runouts are separate boards, not repeated streets.
+        for run, board in sorted(rec.boards.items()):
+            if run > 1:
+                lines.append(("street", f"── Run {run}  [{' '.join(board)}] ──"))
+        winner_names = rec.winner_names
         if winner_names:
             lines.append(("info",
-                          f"Winner: {', '.join(winner_names)}  +{rec.pot_final}"))
+                          f"Winner: {winner_names}  +{rec.pot_final}"))
         return lines
 
     def _show_up_to_step(step):
