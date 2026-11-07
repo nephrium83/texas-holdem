@@ -93,6 +93,26 @@ SPEEDS = {"Slow": 950, "Normal": 550, "Fast": 260, "Instant": 60}
 HERO = 0   # default seat for solo play; see Holdem.hero_seat property for MP
 
 
+def _bet_shortcut_model(raw):
+    """Validate the complete preference before configuration or widgets change."""
+    if not isinstance(raw, str) or not raw.strip() or len(raw) > 64:
+        raise ValueError("Enter 1–8 comma-separated pot fractions (at most 64 characters).")
+    tokens = raw.split(",")
+    if len(tokens) > 8:
+        raise ValueError("Use no more than 8 bet shortcuts.")
+    model = []
+    for token in tokens:
+        try:
+            fraction = float(token.strip())
+        except ValueError:
+            raise ValueError("Every bet shortcut must be a number.") from None
+        if not math.isfinite(fraction) or not 0 < fraction <= 100:
+            raise ValueError("Bet shortcuts must be finite numbers greater than 0 and at most 100.")
+        label = {0.5: "1/2 pot", 0.75: "3/4 pot", 1.0: "Pot"}.get(fraction, f"{fraction:g}x pot")
+        model.append((fraction, label))
+    return model
+
+
 def rrect(cv, x1, y1, x2, y2, r, **kw):
     """Rounded rectangle via a smoothed polygon."""
     r = min(r, abs(x2 - x1) / 2, abs(y2 - y1) / 2)
@@ -3310,56 +3330,41 @@ class Holdem:
 
     # -------------------------------------------------- bet button helpers
 
-    def _rebuild_bet_buttons(self):
-        """Destroy existing bet-size buttons and rebuild from settings."""
-        for b in self.size_btns:
+    def _rebuild_bet_buttons(self, model=None):
+        """Prepare valid replacements before removing the existing controls."""
+        if model is None:
             try:
-                b.destroy()
-            except Exception:
-                pass
-        self.size_btns = []
-        t = self.theme
-        raw = self.v_bet_buttons.get() if hasattr(self, "v_bet_buttons") else "0.5,1,2,3"
-        fracs: list[float] = []
-        for tok in raw.split(","):
-            tok = tok.strip()
-            try:
-                fracs.append(float(tok))
+                model = _bet_shortcut_model(self.v_bet_buttons.get())
             except ValueError:
-                pass
-        if not fracs:
-            fracs = [0.5, 1.0, 2.0, 3.0]
-
-        def _frac_label(f: float) -> str:
-            if f == 0.5:
-                return "1/2 pot"
-            if f == 0.75:
-                return "3/4 pot"
-            if f == 1.0:
-                return "Pot"
-            n = int(f) if f == int(f) else f
-            return f"{n}x pot"
-
-        for frac in fracs:
-            lbl = _frac_label(frac)
-            b = tk.Button(self.sizes, text=lbl, width=6, relief="flat",
-                          bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
-                          cursor="hand2",
-                          command=lambda fr=frac: self.preset(fr))
-            b.pack(side="left", padx=2)
-            self.size_btns.append(b)
-        # All-in is always the last button
-        b_ai = tk.Button(self.sizes, text="All-in", width=6, relief="flat",
-                         bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
-                         cursor="hand2", command=lambda: self.preset(None))
-        b_ai.pack(side="left", padx=2)
-        self.size_btns.append(b_ai)
+                logging.getLogger(__name__).warning("Invalid saved bet shortcuts; using defaults")
+                model = _bet_shortcut_model("0.5,1,2,3")
+        t = self.theme
+        new_buttons = []
+        try:
+            for fraction, label in [*model, (None, "All-in")]:
+                button = tk.Button(self.sizes, text=label, width=6, relief="flat",
+                                   bg=t["btn"], fg=t["btn_text"], font=("Segoe UI", 8),
+                                   cursor="hand2", command=lambda fr=fraction: self.preset(fr))
+                new_buttons.append(button)
+        except Exception:
+            for button in new_buttons:
+                button.destroy()
+            raise
+        for button in self.size_btns:
+            button.destroy()
+        self.size_btns = new_buttons
+        for button in new_buttons:
+            button.pack(side="left", padx=2)
 
     # ------------------------------------------------- preferences dialog
 
     def open_preferences(self):
         """Open the Preferences dialog for UI polish options."""
         t = self.theme
+        draft_felt = tk.StringVar(value=self.v_felt_color.get())
+        draft_deck = tk.BooleanVar(value=self.v_four_color_deck.get())
+        draft_sounds = tk.BooleanVar(value=self.v_sounds_enabled.get())
+        draft_volume = tk.IntVar(value=self.v_sound_volume.get())
         win = tk.Toplevel(self.root)
         win.title("Preferences")
         win.configure(bg=t["panel"])
@@ -3389,20 +3394,18 @@ class Holdem:
         tk.Label(felt_row, text="Felt color:", bg=t["panel"], fg=t["text"],
                  font=("Segoe UI", 9), width=16, anchor="e").pack(side="left")
         _felt_preview = tk.Label(felt_row, width=4,
-                                 bg=self.v_felt_color.get(), relief="solid")
+                                 bg=draft_felt.get(), relief="solid")
         _felt_preview.pack(side="left", padx=(4, 0))
 
         def _pick_felt():
-            cur = self.v_felt_color.get()
+            cur = draft_felt.get()
             result = colorchooser.askcolor(color=cur,
                                            title="Table Felt Color",
                                            parent=win)
             if result and result[1]:
                 hex_col = result[1]
-                self.v_felt_color.set(hex_col)
-                cfg.set("felt_color", hex_col)
+                draft_felt.set(hex_col)
                 _felt_preview.config(bg=hex_col)
-                self.redraw()
 
         tk.Button(felt_row, text="Pick...", relief="flat",
                   bg=t["btn"], fg=t["btn_text"],
@@ -3411,13 +3414,10 @@ class Holdem:
 
         tk.Checkbutton(
             body, text="Four-color deck  (clubs=green, diamonds=blue)",
-            variable=self.v_four_color_deck, bg=t["panel"],
+            variable=draft_deck, bg=t["panel"],
             fg=t["text"], selectcolor=t["bg"],
             activebackground=t["panel"], activeforeground=t["text"],
-            font=("Segoe UI", 9),
-            command=lambda: (cfg.set("four_color_deck",
-                                     self.v_four_color_deck.get()),
-                             self.redraw())
+            font=("Segoe UI", 9)
         ).pack(anchor="w", pady=2)
 
         # Betting section
@@ -3439,47 +3439,43 @@ class Holdem:
         # Sound section
         _section("SOUND")
 
-        def _on_sounds_toggle():
-            _audio.set_enabled(self.v_sounds_enabled.get())
-
         tk.Checkbutton(
             body, text="Sound effects enabled",
-            variable=self.v_sounds_enabled, bg=t["panel"],
+            variable=draft_sounds, bg=t["panel"],
             fg=t["text"], selectcolor=t["bg"],
             activebackground=t["panel"], activeforeground=t["text"],
-            font=("Segoe UI", 9), command=_on_sounds_toggle
+            font=("Segoe UI", 9)
         ).pack(anchor="w", pady=2)
         vol_row2 = tk.Frame(body, bg=t["panel"])
         vol_row2.pack(anchor="w", pady=2)
         tk.Label(vol_row2, text="Volume:", bg=t["panel"], fg=t["text"],
                  font=("Segoe UI", 9), width=16, anchor="e").pack(side="left")
 
-        def _on_vol(_v=None):
-            _audio.set_volume(self.v_sound_volume.get() / 100)
-
-        tk.Scale(vol_row2, variable=self.v_sound_volume,
+        tk.Scale(vol_row2, variable=draft_volume,
                  from_=0, to=100, orient="horizontal", length=180,
                  showvalue=True, bg=t["panel"], fg=t["text"],
                  troughcolor=t["bg"], highlightthickness=0,
-                 activebackground=t["accent"], relief="flat",
-                 command=_on_vol).pack(side="left", padx=(4, 0))
+                 activebackground=t["accent"], relief="flat").pack(side="left", padx=(4, 0))
 
         def _save_prefs():
             raw = v_bb_entry.get().strip()
-            valid = []
-            for tok in raw.split(","):
-                try:
-                    valid.append(str(float(tok.strip())))
-                except ValueError:
-                    pass
-            if valid:
-                clean = ",".join(valid)
-                self.v_bet_buttons.set(clean)
-                cfg.set("bet_buttons", clean)
-                self._rebuild_bet_buttons()
-            cfg.set("four_color_deck", self.v_four_color_deck.get())
-            cfg.set("sounds_enabled", self.v_sounds_enabled.get())
-            cfg.set("sound_volume", self.v_sound_volume.get())
+            try:
+                model = _bet_shortcut_model(raw)
+            except ValueError as exc:
+                messagebox.showerror("Invalid bet shortcuts", str(exc), parent=win)
+                return
+            changes = {"bet_buttons": raw, "felt_color": draft_felt.get(),
+                       "four_color_deck": draft_deck.get(),
+                       "sounds_enabled": draft_sounds.get(), "sound_volume": draft_volume.get()}
+            if not cfg.save(changes, {}):
+                messagebox.showerror("Preferences not saved", "Settings could not be saved. Try again.", parent=win)
+                return
+            for name, value in changes.items():
+                getattr(self, "v_" + name).set(value)
+            _audio.set_enabled(changes["sounds_enabled"])
+            _audio.set_volume(changes["sound_volume"] / 100)
+            self._rebuild_bet_buttons(model)
+            self.redraw()
             win.destroy()
 
         bbar = tk.Frame(win, bg=t["panel"])
