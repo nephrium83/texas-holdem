@@ -204,17 +204,11 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
             #     hands along when it returns and hole cards reset per
             #     hand; it failed the real-socket reachability test.
             #
-            # KNOWN GAP, deliberately left rather than chased with a fifth
-            # attempt: the replica is built BEFORE the deal runs, so a seat
-            # that accepts game_start and then dies on deal traffic has one
-            # and is reported as started, leaving the client on a table
-            # frozen at "Dealing". Catching that needs a stable notion of
-            # "this hand is progressing", which this seam does not have --
-            # it is a synchronous drain over an open-ended amount of play.
+            # Monotonic receipt survives bot advancement and hand resets.
             missing = [cid for cid, sess in sessions.items()
-                       if sess.replica is None]
+                       if sess.hands_dealt_in < 1]
             if bus.pending or missing:
-                _log.error("table started but seats %s never began a hand "
+                _log.error("table started but seats %s never recovered hole cards "
                            "(%d message(s) undelivered, clean=%s)",
                            missing or "-", bus.pending, delivered)
                 verdict = "hand_failed"
@@ -223,6 +217,10 @@ def _make_start_table(sessions: dict, order: list, bus: InMemoryBus,
                 # verdict: every seat has a hand and nothing is queued.
                 _log.warning("start_table: delivery hit an error but "
                              "recovered; the table is playing")
+        if verdict == "hand_failed":
+            for session in sessions.values():
+                session.terminate(Session.ABORTED_PROTOCOL,
+                                  "table startup failed before every seat recovered hole cards")
         return verdict
 
     return start_table
