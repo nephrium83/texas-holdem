@@ -34,12 +34,14 @@ from lifecycle import measure_loop_latency, transport_threads, wait_until
 def _clean_transport():
     T.stop()
     T.reset_callbacks()
-    wait_until(lambda: not transport_threads(), timeout=3.0)
+    assert wait_until(lambda: not transport_threads(), timeout=3.0), (
+        f"transport threads survived cleanup: {[t.name for t in transport_threads()]}")
     gc.collect()
     yield
     T.stop()
     T.reset_callbacks()
-    wait_until(lambda: not transport_threads(), timeout=3.0)
+    assert wait_until(lambda: not transport_threads(), timeout=3.0), (
+        f"transport threads survived cleanup: {[t.name for t in transport_threads()]}")
     gc.collect()
 
 
