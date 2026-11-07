@@ -71,9 +71,28 @@ def test_tampered_payload_rejected():
         _read(_framed(env))
 
 
-def test_relay_control_frame_allowed_unsigned():
-    m = _read(_framed({"type": "relay_join", "room": "ABCD", "peer_id": "00"}))
-    assert m["type"] == "relay_join"
+def test_inbound_relay_control_frame_is_never_delivered():
+    """Audit #84. This test used to assert the opposite -- that an unsigned
+    inbound relay_join IS returned -- which is how an attacker-shaped object
+    reached session callbacks on a transport advertising verified envelopes.
+    Relay control is client -> relay only; inbound, it is skipped and the
+    next (verified) frame is what gets delivered."""
+    relay = _framed({"type": "relay_join", "room": "ABCD", "peer_id": "00"})
+    signed = t._sign_frame({"type": "chat", "payload": {"text": "after"}})
+    m = _read(relay + signed)
+    assert m["type"] == "chat" and m["payload"]["text"] == "after"
+
+
+def test_a_stream_of_only_relay_control_frames_delivers_nothing():
+    relay = _framed({"type": "relay_join", "room": "ABCD", "peer_id": "00"})
+    with pytest.raises(asyncio.IncompleteReadError):
+        _read(relay * 3)
+
+
+def test_outbound_relay_join_is_still_sent_unsigned():
+    """The client -> relay handshake itself is unchanged."""
+    blob = t._sign_frame({"type": "relay_join", "room": "ABCD", "peer_id": "00"})
+    assert b'"sig"' not in blob
 
 
 def test_sign_frame_roundtrips():
