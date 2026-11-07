@@ -50,6 +50,10 @@ class ChaosBus(InMemoryBus):
         super().__init__()
         self.rewrite = rewrite
         self.rng = rng
+        # Every (from, to, msg) actually handed to a session -- what a
+        # duplicate-delivery test replays (audit #144: it used to replay a
+        # `_delivered` attribute that never existed, i.e. nothing).
+        self.delivered = []
 
     def drain(self, max_steps: int = 100000) -> int:
         steps = 0
@@ -78,11 +82,16 @@ class ChaosBus(InMemoryBus):
                     continue
             sess = self._sessions.get(to_conn)
             if sess is not None:
+                self.delivered.append((from_conn, to_conn, dict(msg)))
                 sess.handle_message(from_conn, dict(msg))
         return steps
 
 
-def make_table(n, rewrite=None, seed=None, prevention=False, stacks=None):
+def make_table(n, rewrite=None, seed=None, prevention=False, stacks=None,
+               registry=None):
+    """``registry``, if given, is filled with the sessions BEFORE any message
+    is delivered, so a rewrite callback can consult them mid-drain (audit
+    #141: callbacks read a dict make_table had not returned yet)."""
     rng = random.Random(seed) if seed is not None else None
     bus = ChaosBus(rewrite=rewrite, rng=rng)
     order = [f"peer{i}" for i in range(n)]
@@ -104,6 +113,8 @@ def make_table(n, rewrite=None, seed=None, prevention=False, stacks=None):
     for i, cid in enumerate(order):
         sessions[cid].players[cid] = Player(conn_id=cid, peer_id=cid,
                                             nickname=f"P{i}", avatar_b64="")
+    if registry is not None:
+        registry.update(sessions)
     names = [f"P{i}" for i in range(n)]
     for cid in order:
         sessions[cid].start_p2p_hand(
@@ -121,21 +132,51 @@ def outcome(sessions, order):
         deal = s._deal_driver.deal if s._deal_driver else None
         out[cid] = {
             "voided": bool(s.hand_voided),
+            "settled": s.hand_result is not None,
             "deck": tuple(ct.to_hex() for ct in deal.deck) if deal and deal.deck
                     else None,
             "phase": deal.phase.value if deal else None,
+            "abort": deal.abort_reason if deal else None,
+            "holes": deal.hole_complete() if deal else False,
         }
     return out
 
 
 def assert_converged(sessions, order):
+    """Every peer agrees, and the agreement is coherent (audit #143): the
+    old check compared only the void flag and, if not void, the deck -- so
+    peers on different phases, with different abort states, or stalled
+    without holes all passed."""
     out = outcome(sessions, order)
     voided = {o["voided"] for o in out.values()}
     assert len(voided) == 1, f"peers disagree on whether the hand voided: {out}"
+    assert not any(o["voided"] and o["settled"] for o in out.values()), \
+        f"a peer both voided and settled the hand: {out}"
     if not voided.pop():
-        decks = {o["deck"] for o in out.values()}
-        assert len(decks) == 1, "peers completed on different decks"
+        for key in ("deck", "phase", "abort", "holes"):
+            values = {o[key] for o in out.values()}
+            assert len(values) == 1, f"peers disagree on {key}: {out}"
+        assert all(o["abort"] is None for o in out.values()), out
+        assert all(o["holes"] for o in out.values()), \
+            f"a live hand has a peer without hole cards: {out}"
     return out
+
+
+def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
+    """Liveness: advance every peer's clock past its deadline, run the
+    public timeout path, deliver what it emits -- until every peer has
+    reached a terminal outcome for the hand (or fail)."""
+    def terminal(s):
+        return s.hand_voided or s.hand_result is not None or s.terminal_state
+    for _ in range(rounds):
+        if all(terminal(sessions[c]) for c in order):
+            return
+        for c in order:
+            sessions[c]._clock.advance(step)
+            sessions[c].check_deadlines()
+        bus.drain()
+    stuck = [c for c in order if not terminal(sessions[c])]
+    pytest.fail(f"peers never reached a terminal outcome: {stuck}")
 
 
 # ------------------------------------------- randomized delivery order
@@ -185,15 +226,21 @@ def test_duplicate_messages_are_idempotent(seed):
         return msg
 
     bus, sessions, order = make_table(3, rewrite=duplicate, seed=seed)
+    before = outcome(sessions, order)
     # Replay everything a second time, in a fresh random order.
     rng = random.Random(seed + 1000)
-    replay = list(bus._delivered) if hasattr(bus, "_delivered") else []
+    replay = list(bus.delivered)
+    types = {m.get("type") for _, _, m in replay}
+    assert len(replay) > 0, "nothing was delivered, so nothing was replayed"
+    assert {"key_announce", "deck_round", "deal_share"} <= types, types
     rng.shuffle(replay)
     for from_conn, to_conn, msg in replay:
         sess = bus._sessions.get(to_conn)
         if sess is not None:
             sess.handle_message(from_conn, dict(msg))
+    bus.drain()
     assert_converged(sessions, order)
+    assert outcome(sessions, order) == before, "a duplicate changed the outcome"
     for cid in order:
         assert sessions[cid]._deal_driver.deal.hole_complete()
 
@@ -207,15 +254,28 @@ def test_equivocating_key_announce_converges_on_a_terminal_outcome():
 
     The hand must not proceed with peers holding different joint keys.
     """
-    alt = R.mul_base(R.scalar_reduce(b"\x07" * 64))
+    # Audit #142: the second announcement must be individually VALID -- a
+    # different scalar with its own matching proof under seat 0's real
+    # context -- or it is rejected as an ordinary bad proof, which is not
+    # the equivocation threat at all.
+    from holdem.p2p import keygen_pop
+    from holdem.p2p.mental_deal import _pop_ctx
+    alt_x = R.scalar_reduce(b"\x07" * 64)
+    registry, fired = {}, []
 
     def equivocate(msg, from_conn, to_conn):
         body = msg.get("payload", msg)
         if body.get("type") == "key_announce" or msg.get("type") == "key_announce":
             if body.get("seat") == 0 and to_conn == "peer2":
-                forged = dict(msg)
+                deal = registry["peer0"]._deal_driver.deal
+                ctx = _pop_ctx(deal.session_id, deal.hand_no, 0)
                 inner = dict(body)
-                inner["X_hex"] = bytes(alt).hex()
+                inner["X_hex"] = bytes(R.mul_base(alt_x)).hex()
+                inner["pop_hex"] = keygen_pop.prove(alt_x, ctx).hex()
+                assert keygen_pop.verify(R.mul_base(alt_x),
+                                         bytes.fromhex(inner["pop_hex"]), ctx)
+                fired.append(1)
+                forged = dict(msg)
                 if "payload" in forged:
                     forged["payload"] = inner
                 else:
@@ -223,7 +283,9 @@ def test_equivocating_key_announce_converges_on_a_terminal_outcome():
                 return forged
         return msg
 
-    bus, sessions, order = make_table(3, rewrite=equivocate)
+    bus, sessions, order = make_table(3, rewrite=equivocate, registry=registry)
+    assert fired, "the equivocating announcement was never delivered"
+    drive_to_terminal(bus, sessions, order)
     assert_converged(sessions, order)
     assert all(sessions[cid].hand_voided for cid in order), \
         "an equivocated key ceremony must not produce a playable hand"
@@ -232,13 +294,19 @@ def test_equivocating_key_announce_converges_on_a_terminal_outcome():
 def test_equivocating_final_deck_converges_on_a_terminal_outcome():
     """The sharp case: equivocation on the LAST shuffle round, where no
     later round can overwrite the divergence."""
+    registry, fired = {}, []
+
     def equivocate(msg, from_conn, to_conn):
         body = msg.get("payload", msg)
-        if body.get("round") == 3 and to_conn == "peer2":
+        # Round 3 is shuffled BY peer2 and a broadcast is not echoed to its
+        # sender, so peer2 never receives it: the original rewrite targeted
+        # a delivery that cannot happen. peer1 does receive it.
+        if body.get("round") == 3 and to_conn == "peer1":
+            fired.append(1)
             forged = dict(msg)
             inner = dict(body)
             deck = [eg.Ciphertext.from_hex(p) for p in inner["deck"]]
-            pk = sessions["peer2"]._deal_driver.deal.joint_pk
+            pk = registry["peer1"]._deal_driver.deal.joint_pk
             inner["deck"] = [eg.reencrypt(pk, ct, R.random_scalar()).to_hex()
                              for ct in deck]
             if "payload" in forged:
@@ -248,9 +316,11 @@ def test_equivocating_final_deck_converges_on_a_terminal_outcome():
             return forged
         return msg
 
-    sessions = {}
-    bus, sessions, order = make_table(3, rewrite=equivocate)
-    assert_converged(sessions, order)
+    bus, sessions, order = make_table(3, rewrite=equivocate, registry=registry)
+    assert fired, "the round-3 equivocation branch never ran (audit #141)"
+    out = assert_converged(sessions, order)
+    assert all(o["voided"] for o in out.values()), \
+        f"peers on different final decks must not play the hand: {out}"
 
 
 @pytest.mark.parametrize("victim", ["peer1", "peer2"])
@@ -269,3 +339,33 @@ def test_selective_omission_terminates_deterministically(victim):
     assert not deal.hole_complete(), \
         "the victim cannot have completed without the withheld round"
     assert not deal.is_shuffle_complete()
+    # Audit #143 -- SAFETY, which does hold: nobody plays or settles a hand
+    # whose shuffle chain one peer never saw, and peers that did finish the
+    # shuffle agree on the deck. (Liveness -- reaching a terminal outcome --
+    # is pinned separately below as a known gap.)
+    out = outcome(sessions, order)
+    assert not any(o["settled"] for o in out.values()), out
+    done = {o["deck"] for c, o in out.items()
+            if sessions[c]._deal_driver.deal.is_shuffle_complete()}
+    assert len(done) <= 1, f"peers finished the shuffle on different decks: {out}"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "Known liveness gap (audit #194): on the core session path a stalled deal "
+    "has no public recovery -- timeout_proposals are refused everywhere until "
+    "rule 9's timekeeper exists (Session._on_timeout_proposal), so a withheld "
+    "shuffle round stalls the hand. Casual-continuation tables have their own "
+    "reliability path. strict=True: this flips to a FAILURE the moment a "
+    "timekeeper makes it pass, so the marker cannot outlive the gap."))
+@pytest.mark.parametrize("victim", ["peer1", "peer2"])
+def test_selective_omission_reaches_a_terminal_outcome(victim):
+    def omit(msg, from_conn, to_conn):
+        body = msg.get("payload", msg)
+        if body.get("round") == 1 and to_conn == victim:
+            return None
+        return msg
+
+    bus, sessions, order = make_table(3, rewrite=omit)
+    drive_to_terminal(bus, sessions, order)
+    out = assert_converged(sessions, order)
+    assert all(o["voided"] for o in out.values()), out
