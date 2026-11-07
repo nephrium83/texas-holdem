@@ -3,6 +3,8 @@
 import base64
 import io
 import math
+import logging
+import queue
 import random
 import threading
 import datetime
@@ -213,6 +215,7 @@ class Holdem:
         self.clock_job = None
         self.clock_until = 0.0
         self.clock_phase = "off"        # off | base | bank
+        self._clock_remaining = None
         self.level_started = 0.0
         self.straddle_armed = False
         self.rabbit_cards = None
@@ -234,6 +237,10 @@ class Holdem:
         self.eq_value = None
         self.eq_pending = False
         self._eq_signature = None
+        self._equity_results = queue.SimpleQueue()
+        self._equity_poll_job = None
+        self._equity_closed = False
+        root.bind("<Destroy>", self._equity_destroyed, add="+")
         self._hand_start_stacks = None
         self.hand_over = True
         self.game_over = False
@@ -466,6 +473,7 @@ class Holdem:
         _t.broadcast({"type": "pause", "payload": {"reason": "host paused"}})
         self._mp_game_paused = True
         self.paused = True
+        self._pause_clock()
         self._btn_host_pause.config(state="disabled")
         self._btn_host_resume.config(state="normal")
         self.lock()
@@ -476,7 +484,8 @@ class Holdem:
         from .p2p import transport as _t
         _t.broadcast({"type": "resume", "payload": {}})
         self._mp_game_paused = False
-        self.paused = False
+        self.paused = getattr(self, "settings_win", None) is not None
+        self._resume_clock()
         self._btn_host_pause.config(state="normal")
         self._btn_host_resume.config(state="disabled")
         self._mp_hide_pause_overlay()
@@ -885,6 +894,7 @@ class Holdem:
     # ---------------------------------------------------------- game set-up
 
     def new_game(self):
+        self._invalidate_equity()
         self.table_rules = cfg.table_rules(**self._bucket(cfg.TABLE_RULE))
         self.save_config()
         r = self.table_rules
@@ -988,6 +998,7 @@ class Holdem:
 
     def _mp_new_game(self) -> None:
         """Create the Engine for a multiplayer session (host or peer)."""
+        self._invalidate_equity()
         sess = self._mp_session
         ts   = getattr(sess, '_last_table_settings',
                        {"sb": 10, "bb": 20, "stack": 1000})
@@ -1426,13 +1437,15 @@ class Holdem:
         """Peer: host has paused the game."""
         self._mp_game_paused = True
         self.paused = True
+        self._pause_clock()
         self.lock()
         self._mp_show_pause_overlay()
 
     def _mp_on_resume(self) -> None:
         """Peer: host has resumed the game."""
         self._mp_game_paused = False
-        self.paused = False
+        self.paused = getattr(self, "settings_win", None) is not None
+        self._resume_clock()
         self._mp_hide_pause_overlay()
         if self._mp_remote_state:
             self._mp_apply_state(self._mp_remote_state)
@@ -1463,6 +1476,7 @@ class Holdem:
         cfg.set("player_level", level)
 
     def deal(self):
+        self._invalidate_equity()
         if self._mp_mode and not self._mp_is_host:
             return   # peer: host deals for us
         if self._defer(self.deal):
@@ -1564,6 +1578,7 @@ class Holdem:
             self._mp_after_deal()
 
     def finish_game(self, live):
+        self._invalidate_equity()
         self.stop_clock()
         self.game_over = True
         self.hand_over = True
@@ -2106,7 +2121,7 @@ class Holdem:
     def start_clock(self):
         self.stop_clock()
         e = self.engine
-        if (not self.v_clock.get() or self.v_observe.get() or e is None
+        if (self.paused or not self.v_clock.get() or self.v_observe.get() or e is None
                 or e.players[self.hero_seat].sitting_out):
             return
         self.clock_phase = "base"
@@ -2121,12 +2136,34 @@ class Holdem:
                 pass
             self.clock_job = None
         if self.clock_phase == "bank":
-            self.bank = max(0.0, self.clock_until - time.time())
+            frozen = getattr(self, "_clock_remaining", None)
+            self.bank = frozen if frozen is not None else max(0.0, self.clock_until - time.time())
+        self._clock_remaining = None
         self.clock_phase = "off"
         if hasattr(self, "l_clock"):
             self.l_clock.config(text="")
 
+    def _pause_clock(self):
+        if self.clock_phase == "off" or getattr(self, "_clock_remaining", None) is not None:
+            return
+        self._clock_remaining = max(0.0, self.clock_until - time.time())
+        if self.clock_job is not None:
+            self.root.after_cancel(self.clock_job)
+            self.clock_job = None
+
+    def _resume_clock(self):
+        remaining = getattr(self, "_clock_remaining", None)
+        if remaining is None or self.paused:
+            return
+        self._clock_remaining = None
+        if self.clock_phase != "off":
+            self.clock_until = time.time() + remaining
+            self._clock_tick()
+
     def _clock_tick(self):
+        if self.paused:
+            self._pause_clock()
+            return
         e = self.engine
         if e is None or e.actor != self.hero_seat or self.clock_phase == "off":
             return
@@ -2518,7 +2555,7 @@ class Holdem:
             self.settings_win.lift()
             return
         self.paused = True
-        self.stop_clock()
+        self._pause_clock()
         t = self.theme
         win = tk.Toplevel(self.root)
         self.settings_win = win
@@ -2727,7 +2764,7 @@ class Holdem:
             except tk.TclError:
                 pass
             self.settings_win = None
-        self.paused = False
+        self.paused = bool(getattr(self, "_mp_game_paused", False))
         if not self.v_hint.get():
             self.l_hint.config(text="")
         if not self.v_odds.get():
@@ -2748,7 +2785,10 @@ class Holdem:
         if (e is not None and e.actor == self.hero_seat and not self.hand_over
                 and not self.v_observe.get()
                 and not e.players[self.hero_seat].sitting_out):
-            self.start_clock()
+            if getattr(self, "_clock_remaining", None) is None:
+                self.start_clock()
+            else:
+                self._resume_clock()
 
     def _sync_resume(self):
         if self.engine is not None and not self.game_over:
@@ -2774,10 +2814,20 @@ class Holdem:
 
     # -------------------------------------------------------------- equity
 
+    def _invalidate_equity(self):
+        self.eq_gen += 1
+        self.eq_pending = False
+        self._eq_signature = None
+        self.eq_value = None
+        self.eq_text = "-"
+        self.eq_bars = (0, 0, 0)
+
     def start_equity(self):
+        if self._equity_closed:
+            return
         e = self.engine
-        hero = e.players[self.hero_seat]
-        if (not self.v_odds.get() or not self.aids_ok()
+        hero = e.players[self.hero_seat] if e is not None else None
+        if (hero is None or not self.v_odds.get() or not self.aids_ok()
                 or not hero.hole or hero.folded):
             self.eq_gen += 1
             self.eq_text = "-"
@@ -2789,10 +2839,14 @@ class Holdem:
             return
         opp = len([p for p in e.contested() if p.idx != self.hero_seat])
         if opp == 0:
+            self.eq_gen += 1
+            self._eq_signature = None
             self.eq_text = "You're the only one left."
             self.eq_bars = (1, 0, 0)
             self.eq_value = 1.0
             self.eq_pending = False
+            self.draw_equity()
+            self._refresh_player_panel()
             return
         hole = list(hero.hole)
         board = list(e.board)
@@ -2818,14 +2872,60 @@ class Holdem:
         self.draw_equity()
         sims = 3000 if len(board) >= 3 else 1600
 
+        results = self._equity_results
+        # Schedule on the Tk owner BEFORE starting work; the worker only owns
+        # immutable inputs and a queue, never the interpreter or widgets.
+        if self._equity_poll_job is None:
+            self._equity_poll_job = self.root.after(50, self._poll_equity)
+
         def work():
-            r = equity(hole, board, opp, sims, random.Random())
-            self.root.after(0, lambda: self._equity_done(gen, r, board,
-                                                         hole, opp))
-        threading.Thread(target=work, daemon=True).start()
+            try:
+                result = equity(hole, board, opp, sims, random.Random())
+            except Exception:
+                logging.getLogger(__name__).exception("Equity calculation failed")
+                result = None
+            results.put((gen, result, board, hole, opp))
+        try:
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            logging.getLogger(__name__).exception("Equity worker could not start")
+            results.put((gen, None, board, hole, opp))
+
+    def _poll_equity(self):
+        self._equity_poll_job = None
+        if self._equity_closed:
+            return
+        while True:
+            try:
+                result = self._equity_results.get_nowait()
+            except queue.Empty:
+                break
+            self._equity_done(*result)
+        if self.eq_pending:
+            self._equity_poll_job = self.root.after(50, self._poll_equity)
+
+    def _equity_destroyed(self, event):
+        if event.widget is not self.root:
+            return
+        self._equity_closed = True
+        self.eq_gen += 1
+        self.eq_pending = False
+        self._eq_signature = None
+        if self._equity_poll_job is not None:
+            self.root.after_cancel(self._equity_poll_job)
+            self._equity_poll_job = None
 
     def _equity_done(self, gen, r, board, hole, opp):
-        if gen != self.eq_gen or r is None:
+        if self._equity_closed or gen != self.eq_gen:
+            return
+        self.eq_pending = False
+        if r is None:
+            self._eq_signature = None
+            self.eq_value = None
+            self.eq_bars = (0, 0, 0)
+            self.eq_text = "Equity unavailable."
+            self.draw_equity()
+            self._refresh_player_panel()
             return
         win, tie, eq = r
         made = player_info.made_hand_view(hole, board)
