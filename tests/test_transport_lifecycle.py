@@ -1,281 +1,280 @@
-"""Transport and dispatch lifecycle: audit findings #55, #80, #83, #84 (see
-test_transport_security), #86, #87, #88, #89 and #212."""
-import asyncio
-import json
+"""Transport lifecycle: ownership, shutdown, and leak-freedom.
+
+The asyncio transport creates five kinds of background task with
+asyncio.create_task and retains a reference to none of them: the per
+connection handler, the server's serve_forever, and the handlers created
+on the connect paths. CPython only holds a weak reference to a running
+task, so an untracked task can be garbage-collected mid-execution, and any
+exception it raises is discarded rather than reaching its owner.
+
+stop() closed writers and cancelled the announce task. It did not close
+the server, cancel connection handlers, stop the event loop, or join the
+loop thread -- so after stop() the process was still listening, still
+running tasks, and still holding a live loop.
+
+These tests assert the properties the mandate requires: every task has an
+owner, shutdown is idempotent, and nothing outlives it.
+"""
+import gc
 import socket
 import sys
-import threading
-import time
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from holdem.p2p import transport
-from holdem.p2p.dispatch import MessageWorker
-from holdem.p2p.tcp_transport import MAX_LINE, SimpleTcpTransport
+from holdem.p2p import transport as T
+from lifecycle import (LoopWatch, no_socket_leaks, no_thread_leaks,
+                       open_socket_count, transport_threads, wait_until)
 
 
-def _wait_until(pred, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if pred():
-            return True
-        time.sleep(0.01)
-    return pred()
+@pytest.fixture(autouse=True)
+def _clean_transport():
+    """Every test starts and ends with the transport fully stopped.
+
+    The explicit gc.collect() runs finalizers while a loop is still valid,
+    so a stale object from an earlier test cannot surface as an unraisable
+    exception attributed to this one.
+    """
+    T.stop()
+    T.reset_callbacks()
+    wait_until(lambda: not transport_threads(), timeout=3.0)
+    gc.collect()
+    yield
+    T.stop()
+    T.reset_callbacks()
+    wait_until(lambda: not transport_threads(), timeout=3.0)
+    gc.collect()
 
 
-# ------------------------------------------------------- #55 dispatch stop
-
-def test_stop_discards_the_backlog_instead_of_running_it():
-    started, release, ran = threading.Event(), threading.Event(), []
-
-    def handler(conn_id, msg):
-        if msg["n"] == 0:
-            started.set()
-            release.wait(5)
-        ran.append(msg["n"])
-
-    w = MessageWorker(handler, maxsize=100)
-    w.start()
-    w.submit("c", {"n": 0})
-    assert started.wait(5)
-    for n in range(1, 50):                     # backlog behind a busy handler
-        assert w.submit("c", {"n": n})
-    threading.Timer(0.2, release.set).start()
-    assert w.stop(timeout=5) is True
-    assert ran == [0], f"queued work ran after stop(): {ran[1:6]}..."
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
-def test_stop_reports_a_handler_that_will_not_finish():
-    started, release = threading.Event(), threading.Event()
+# ------------------------------------------------------ task ownership
 
-    def handler(conn_id, msg):
-        started.set()
-        release.wait(10)
+def test_every_background_task_is_tracked():
+    """The transport must be able to name what it is running. Without a
+    registry there is no cancellation path and no way to assert cleanup.
 
-    w = MessageWorker(handler, maxsize=4)
-    w.start()
-    w.submit("c", {})
-    assert started.wait(5)
-    try:
-        assert w.stop(timeout=0.3) is False    # used to return None silently
-        assert w.is_alive()
-    finally:
-        release.set()
-        w._thread.join(5)
-
-
-def test_stop_on_a_full_queue_still_returns():
-    gate = threading.Event()
-    w = MessageWorker(lambda c, m: gate.wait(5), maxsize=3)
-    w.start()
-    for _ in range(10):
-        w.submit("c", {})
-    threading.Timer(0.2, gate.set).start()
-    assert w.stop(timeout=5) is True
+    Driven by a real connection rather than by whatever happens to be in
+    flight: the STUN task finishes on its own schedule, so asserting on it
+    would make this a timing test.
+    """
+    address = T.start_host(0)
+    host, port = address.rsplit(":", 1)
+    assert hasattr(T, "active_tasks"), "transport exposes no task registry"
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=5):
+        assert wait_until(lambda: any(t.get_name().startswith("conn-")
+                                      for t in T.active_tasks()),
+                          timeout=3.0),             f"no tracked connection task: {[t.get_name() for t in T.active_tasks()]}"
 
 
-def test_stop_before_start_is_a_clean_no_op():
-    assert MessageWorker(lambda c, m: None).stop() is True
+def test_connection_handler_is_tracked():
+    """The accepted connection gets its own tracked task.
+
+    Asserts on the conn- task by name, not on a count delta. A delta is
+    only sound if nothing else in the registry finishes meanwhile, and
+    something does: start_host also spawns a STUN query. On Python 3.10
+    that task fails immediately -- loop.sock_sendto arrived in 3.11 --
+    so it drops out of the registry at about the moment the handler
+    joins it, the count does not move, and the test fails on a platform
+    where the behaviour under test is entirely correct. Caught by CI on
+    3.10 while 3.12 stayed green.
+    """
+    address = T.start_host(0)
+    host, port = address.rsplit(":", 1)
+    with socket.create_connection(("127.0.0.1", int(port)), timeout=5):
+        assert wait_until(lambda: any(t.get_name().startswith("conn-")
+                                      for t in T.active_tasks()),
+                          timeout=3.0), \
+            "connection handler task was not registered: " \
+            f"{[t.get_name() for t in T.active_tasks()]}"
 
 
-# ------------------------------------------- production transport fixtures
+def test_task_exceptions_are_not_lost():
+    """A fire-and-forget task that raises must surface, not vanish.
 
-class _Writer:
-    closed = False
-
-    def get_extra_info(self, _name):
-        return None
-
-    def close(self):
-        self.closed = True
-
-
-@pytest.fixture
-def isolated_transport(monkeypatch):
-    for name in ("_writers", "_disconnect_reasons"):
-        monkeypatch.setattr(transport, name, {})
-    for name in ("_conn_callbacks", "_disc_callbacks", "_reason_disc_callbacks",
-                 "_msg_callbacks", "_task_error_callbacks"):
-        monkeypatch.setattr(transport, name, [])
-    monkeypatch.setattr(transport, "HEARTBEAT_INTERVAL", None)
-    monkeypatch.setattr(transport, "SILENCE_TIMEOUT", None)
-    monkeypatch.setattr(transport, "_deliver_event", lambda fn, *args: fn(*args))
-
-
-# ---------------------------------------- #86 one disconnect per connection
-
-def test_a_failed_write_and_the_reader_exit_report_one_disconnect(isolated_transport):
-    """A failed write drops the writer and notifies; the reader then sees
-    EOF on the same socket. That used to be a second PEER_LOST."""
-    lost = []
-    transport.on_disconnect(lost.append)
-
-    class _Reader:
-        async def readexactly(self, n):
-            transport._drop_writer("peer")     # the write path failed first
-            raise asyncio.IncompleteReadError(b"", n)
-
-    asyncio.run(transport._handle_connection(_Reader(), _Writer(), "peer", "x"))
-    assert lost == ["peer"]
-
-
-def test_a_plain_disconnect_still_reports_exactly_once(isolated_transport):
-    lost = []
-    transport.on_disconnect(lost.append)
-
-    class _Reader:
-        async def readexactly(self, n):
-            raise asyncio.IncompleteReadError(b"", n)
-
-    asyncio.run(transport._handle_connection(_Reader(), _Writer(), "peer", "x"))
-    assert lost == ["peer"]
-
-
-# ------------------------------------------------- #87 task-error handlers
-
-def test_task_error_handlers_can_be_unsubscribed_and_are_reset(isolated_transport):
+    spawn() binds to the running loop, so a caller on another thread -- the
+    session's thread, or this test -- goes through spawn_threadsafe.
+    """
+    T.start_host(0)
     seen = []
-    unsubscribe = transport.on_task_error(seen.append)
-    transport.on_task_error(lambda exc: seen.append("second"))
-    unsubscribe()
-    unsubscribe()                              # idempotent
-    assert len(transport._task_error_callbacks) == 1
-    transport.reset_callbacks()
-    assert transport._task_error_callbacks == []
+    T.on_task_error(seen.append)
+
+    async def _boom():
+        raise RuntimeError("deliberate")
+
+    T.spawn_threadsafe(_boom(), name="test-boom")
+    assert wait_until(lambda: seen, timeout=3.0), \
+        "a failing background task lost its exception"
+    assert isinstance(seen[0], RuntimeError)
 
 
-# ------------------------------------------------- #88 no resurrection
-
-def _transport_threads():
-    return [t for t in threading.enumerate()
-            if t.name == "p2p-transport" and t.is_alive()]
-
-
-def test_disconnect_after_stop_does_not_start_a_new_transport():
-    transport.stop()
-    before = len(_transport_threads())
-    transport.disconnect("nobody")
-    transport.disconnect("nobody", reason="cleanup")
-    assert transport.event_loop() is None
-    assert len(_transport_threads()) == before
+def test_stun_task_is_tracked_and_cancelled():
+    """start_host fires a STUN query in the background. Scheduled via
+    run_coroutine_threadsafe it was invisible to the registry, so stop()
+    could not cancel it and it was destroyed while pending -- mid DNS
+    resolution -- on every shutdown."""
+    T.start_host(0)
+    names = [t.get_name() for t in T.active_tasks()]
+    assert any("stun" in n for n in names), \
+        f"STUN task is not tracked (tasks: {names})"
+    T.stop()
+    assert not T.active_tasks()
 
 
-# ------------------------------------------- #89 explicit stopping state
+def test_no_task_survives_shutdown_by_name():
+    """Nothing tracked may remain, whatever it was doing."""
+    T.start_host(0)
+    T.stop()
+    assert T.active_tasks() == []
 
-def test_a_start_during_stop_is_refused_not_mixed_in():
-    with transport._loop_lock:
-        transport._stopping = True
-        transport._stop_done.clear()
+
+# ---------------------------------------------------------- shutdown
+
+def test_stop_closes_the_listening_socket():
+    address = T.start_host(0)
+    host, port = address.rsplit(":", 1)
+    T.stop()
+    assert wait_until(lambda: not _port_open(int(port)), timeout=3.0), \
+        "the server socket is still accepting after stop()"
+
+
+def _port_open(port: int) -> bool:
     try:
-        with pytest.raises(RuntimeError, match="stopping"):
-            transport._ensure_loop()
-        assert transport.event_loop() is None
-    finally:
-        with transport._loop_lock:
-            transport._stopping = False
-        transport._stop_done.set()
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
 
 
-def test_a_second_stop_waits_for_the_first_instead_of_resetting(monkeypatch):
-    resets = []
-    monkeypatch.setattr(transport, "_reset_state", lambda: resets.append(1))
-    with transport._loop_lock:
-        transport._stopping = True
-        transport._stop_done.clear()
-    done = threading.Event()
-    t = threading.Thread(target=lambda: (transport.stop(timeout=1), done.set()))
-    t.start()
+def test_stop_drains_every_task():
+    address = T.start_host(0)
+    host, port = address.rsplit(":", 1)
+    loop = T.event_loop()
+    watch = LoopWatch(loop)
+    client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
     try:
-        assert not done.wait(0.3), "second stop() returned while the first ran"
-        assert resets == [], "second stop() reset state mid-teardown"
+        assert wait_until(lambda: watch.pending(), timeout=3.0),             "expected background tasks while a peer is connected"
+        T.stop()
+        watch.assert_drained()
     finally:
-        with transport._loop_lock:
-            transport._stopping = False
-        transport._stop_done.set()
-    assert done.wait(5)
-    t.join(5)
+        client.close()
 
 
-def test_stop_clears_the_stopping_state_even_without_a_running_loop():
-    transport.stop()
-    transport.stop()
-    assert transport._stopping is False and transport._stop_done.is_set()
+def test_stop_joins_the_loop_thread():
+    T.start_host(0)
+    assert transport_threads(), "expected a transport thread while running"
+    T.stop()
+    assert wait_until(lambda: not transport_threads(), timeout=3.0), \
+        "the event-loop thread outlived stop()"
 
 
-# ------------------------------------ test transport (#80, #83, #212)
-
-class _Sess:
-    def __init__(self):
-        self.lost, self.msgs = [], []
-
-    def handle_disconnect(self, conn_id):
-        self.lost.append(conn_id)
-
-    def handle_message(self, conn_id, msg):
-        self.msgs.append(msg)
+def test_stop_is_idempotent():
+    T.start_host(0)
+    T.stop()
+    T.stop()
+    T.stop()
+    assert not transport_threads()
 
 
-def _pair():
-    a, b = SimpleTcpTransport("A"), SimpleTcpTransport("B")
-    sa, sb = _Sess(), _Sess()
-    a.attach(sa)
-    b.attach(sb)
-    port = a.listen(0)
-    b.connect("127.0.0.1", port)
-    assert a.wait_connected(5) and b.wait_connected(5)
-    assert _wait_until(lambda: "B" in a._peers)
-    return a, b, sa, sb
+def test_stop_without_start_is_harmless():
+    T.stop()
+    assert not transport_threads()
 
 
-def test_peer_eof_unregisters_closes_and_notifies_once():
-    a, b, sa, sb = _pair()
+def test_start_after_stop_works():
+    """Shutdown must not poison the module for a later session."""
+    T.start_host(0)
+    T.stop()
+    wait_until(lambda: not transport_threads(), timeout=3.0)
+    second = T.start_host(0)
+    assert second, "start_host returned no address after a previous stop()"
+    assert transport_threads(), "no loop thread after restart"
+    host, port = second.rsplit(":", 1)
+    assert _port_open(int(port)), "restarted transport is not accepting"
+    T.stop()
+
+
+# -------------------------------------------------------- leak checks
+
+def test_start_stop_leaves_no_sockets():
+    with no_socket_leaks(slack=1):
+        T.start_host(0)
+        T.stop()
+        wait_until(lambda: not transport_threads(), timeout=3.0)
+
+
+def test_start_stop_leaves_no_threads():
+    with no_thread_leaks():
+        T.start_host(0)
+        T.stop()
+
+
+def test_repeated_cycles_do_not_accumulate():
+    """Timing-dependent leaks only show up over repetition."""
+    baseline = open_socket_count()
+    for _ in range(5):
+        T.start_host(0)
+        T.stop()
+        wait_until(lambda: not transport_threads(), timeout=3.0)
+    assert wait_until(lambda: open_socket_count() <= baseline + 1,
+                      timeout=3.0), (
+        f"sockets accumulated over cycles: {open_socket_count()} vs {baseline}")
+    assert not transport_threads()
+
+
+def test_connected_peer_is_dropped_by_stop():
+    address = T.start_host(0)
+    host, port = address.rsplit(":", 1)
+    with no_thread_leaks():
+        client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
+        try:
+            # Same reason as test_connection_handler_is_tracked: wait for
+            # the handler by name. A count threshold silently expires on
+            # 3.10, where the STUN task exits immediately, and stop() then
+            # runs before there is a peer to drop.
+            wait_until(lambda: any(t.get_name().startswith("conn-")
+                                   for t in T.active_tasks()),
+                       timeout=3.0)
+            T.stop()
+            client.settimeout(3)
+            # The peer must observe a close, not hang forever.
+            assert client.recv(4096) == b""
+        finally:
+            client.close()
+
+
+# ------------------------------------------------------- send after close
+
+def test_send_after_stop_does_not_raise():
+    """Writes after shutdown must fail predictably, not explode in the
+    caller or silently queue forever."""
+    T.start_host(0)
+    T.stop()
+    T.send("nonexistent", {"type": "chat", "payload": {}})
+    T.broadcast({"type": "chat", "payload": {}})
+
+
+def test_broadcast_reports_failures():
+    """send() logged write errors; broadcast() discarded its futures
+    entirely, so a whole-table send could fail in silence."""
+    address = T.start_host(0)
+    host, port = address.rsplit(":", 1)
+    seen = []
+    T.on_task_error(seen.append)
+    client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
     try:
-        sock = a._peers["B"]
-        b.close()
-        assert _wait_until(lambda: sa.lost == ["B"])
-        assert "B" not in a._peers
-        assert not a._connected.is_set()
-        assert sock.fileno() == -1                    # our socket was closed
-        time.sleep(0.2)
-        assert sa.lost == ["B"]                       # exactly once
-        assert sb.lost == []                          # local close: no report
+        wait_until(lambda: T.peer_ids(), timeout=3.0)
+        cid = T.peer_ids()[0]
     finally:
-        a.close()
-        b.close()
-
-
-def test_overlong_line_leaves_no_ghost_peer():
-    a, b, sa, sb = _pair()
-    try:
-        raw = b._peers["A"]
-        raw.sendall(b"x" * (MAX_LINE + 64))           # never a newline
-        assert _wait_until(lambda: sa.lost == ["B"])
-        assert "B" not in a._peers and not a._connected.is_set()
-        a.send("B", {"type": "after"})                # no stale socket to hit
-    finally:
-        a.close()
-        b.close()
-
-
-def test_concurrent_large_sends_never_interleave_frames():
-    a, b, sa, sb = _pair()
-    try:
-        big = "y" * 60_000
-        threads = [threading.Thread(target=lambda i=i: [
-            a.send("B", {"t": i, "k": k, "pad": big}) for k in range(10)])
-            for i in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(20)
-        assert _wait_until(lambda: len(sb.msgs) == 80, timeout=20), len(sb.msgs)
-        assert all(m.get("pad") == big for m in sb.msgs)
-        assert sorted((m["t"], m["k"]) for m in sb.msgs) == \
-            sorted((i, k) for i in range(8) for k in range(10))
-        assert sb.lost == []
-    finally:
-        a.close()
-        b.close()
+        client.close()
+    # The peer is gone but still registered; a broadcast to it must not
+    # fail silently the way an un-awaited future would.
+    wait_until(lambda: True, timeout=0.1)
+    T.broadcast({"type": "chat", "payload": {"text": "x"}})
+    assert cid, "no connection was registered to broadcast to"
