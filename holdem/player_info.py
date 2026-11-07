@@ -113,6 +113,26 @@ def _result_winners(result: Mapping[str, Any] | None) -> set[int]:
     return {int(seat) for seat in result.get("winners", [])}
 
 
+def cashout_receipt(split, original_pot, seat, equity):
+    """Aggregate distribution receipt; never invent ranked pots or winners."""
+    payouts = {int(key): int(amount) for key, amount in split["payouts"].items() if amount > 0}
+    refund = split["refund"]
+    total = sum(payouts.values())
+    if total + (refund[1] if refund else 0) != original_pot:
+        raise ValueError("cashout distribution does not conserve the original pot")
+    return dict(v=1, seat=seat, equity=equity, original_pot=original_pot,
+                total_pot=total, payouts=payouts, refund=refund,
+                eligible_pot=split["eligible_pot"], gross=split["gross"],
+                fee=split["fee"], paid=split["net"])
+
+
+def _cashout_amount(result, seat):
+    receipt = result.get("cashout") if result else None
+    if receipt and receipt.get("v") == 1:
+        return int(_mapping_value(receipt["payouts"], seat, 0))
+    return None
+
+
 def turn_view(
     engine,
     seat: int,
@@ -158,7 +178,9 @@ def turn_view(
     elif phase == "settled":
         state = "hand_complete"
         cashout = result.get("cashout") if result else None
-        if cashout and int(cashout.get("seat", -1)) == seat:
+        if _cashout_amount(result, seat) is not None:
+            headline = f"Cashout distribution | you received {_cashout_amount(result, seat)}"
+        elif cashout and int(cashout.get("seat", -1)) == seat:
             headline = f"You cashed out for {int(cashout['paid'])}"
         elif seat in winners:
             headline = f"You won {player.won}"
@@ -398,7 +420,10 @@ def settlement_view(
         }
 
     cashout = result.get("cashout")
-    if cashout and int(cashout.get("seat", -1)) == seat:
+    if _cashout_amount(result, seat) is not None:
+        outcome = "cashout"
+        headline = f"Cashout distribution | you received {_cashout_amount(result, seat)}"
+    elif cashout and int(cashout.get("seat", -1)) == seat:
         outcome = "cashout"
         headline = f"You cashed out for {int(cashout['paid'])}"
     elif seat in winners:
@@ -414,7 +439,9 @@ def settlement_view(
     return {
         "headline": headline,
         "outcome": outcome,
-        "total_pot": sum(pot["amount"] for pot in pots),
+        "total_pot": cashout["total_pot"] if cashout and cashout.get("v") == 1 else sum(pot["amount"] for pot in pots),
+        "payouts": [{"seat": int(recipient), "name": engine.players[int(recipient)].name, "amount": int(amount)}
+                    for recipient, amount in cashout["payouts"].items()] if cashout and cashout.get("v") == 1 else [],
         "winners": [
             {
                 "seat": winner,

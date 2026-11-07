@@ -1215,7 +1215,7 @@ class Holdem:
         if self._mp_is_host:
             sess.set_host_engine(self.engine)
             sess.configure_seats(seat_order)
-            sess.on_action = lambda seat, act, amt: _game_after(self, 
+            sess.on_action = lambda seat, act, amt: _game_after(self,
                 0, lambda s=seat, a=act, m=amt: self._mp_peer_acted(s, a, m))
             self.say("hand", "=== Multiplayer Game (Host) ===")
             self.b_next.config(state="disabled")
@@ -1891,7 +1891,7 @@ class Holdem:
                 if act == "raise":
                     _emote = "\U0001f44d"
             if _emote:
-                _game_after(self, 
+                _game_after(self,
                     max(60, self.delay // 2),
                     lambda si=i, em=_emote: self._show_emote(si, em))
         _game_after(self, max(60, self.delay // 3), self.loop)
@@ -2537,14 +2537,15 @@ class Holdem:
         if not messagebox.askyesno("EV Cashout", msg):
             return False
 
+        receipt = player_info.cashout_receipt(split, pot, local, hero_eq)
         # --- Award chips ---
         if split["refund"] is not None:          # uncalled bet goes back
             seat, back = split["refund"]
             e.players[seat].stack += back
-        for seat, amount in split["payouts"].items():
-            if amount:
-                e.players[seat].stack += amount
-                e.players[seat].won = amount
+        for player in e.players:
+            amount = split["payouts"][player.idx]
+            player.won = amount
+            player.stack += amount
         pot = eligible_pot
 
         # Clear all betting state (bypassing engine.settle)
@@ -2557,20 +2558,13 @@ class Holdem:
 
         self.hand_over = True
         self.result = {
-            "winners": {local}, "pots": [{"amount": pot, "eligible": [local], "runs": []}],
-            "runs": [], "shown": {local}, "mucked": set(),
-            "order": [local], "refund": split["refund"], "tabled": False,
-            "cashout": {
-                "seat": local,
-                "equity": hero_eq,
-                "gross": gross,
-                "fee": gross - net,
-                "paid": net,
-            },
+            "winners": set(receipt["payouts"]), "pots": [], "runs": [],
+            "shown": {local}, "mucked": set(), "order": [],
+            "refund": split["refund"], "tabled": False, "cashout": receipt,
         }
         # H-8: record the cashout in hand history (was previously bypassed)
         self.hand_logger.on_settle(self.result, e)
-        self.l_status.config(text=f"Cashed out for {net:,}  "
+        self.l_status.config(text=f"Cashout received {receipt['payouts'].get(local, 0):,}  "
                                    f"({hero_eq:.0%} equity).")
         self.l_hint.config(text="")
         self.b_next.config(state="normal")
@@ -2581,13 +2575,14 @@ class Holdem:
             self._hand_start_stacks[local]
             if self._hand_start_stacks is not None else hero.stack
         )
-        self.set_showdown_text(
-            f"You cashed out for {net:,}\n"
-            f"Estimated equity: {hero_eq:.0%}\n"
-            f"Gross value: {gross:,}\n"
-            f"Fee: {gross - net:,}\n"
-            f"Your net: {hero.stack - start:+,} | stack {hero.stack:,}"
-        )
+        distribution = ["Cashout distribution"]
+        distribution += [f"{e.players[seat].name} received {amount:,}" for seat, amount in receipt["payouts"].items()]
+        if split["refund"]:
+            refund_seat, returned = split["refund"]
+            distribution.append(f"Uncalled returned to {e.players[refund_seat].name}: {returned:,}")
+        distribution += [f"Equity-priced portion: {net:,} (gross {gross:,}, fee {gross - net:,})",
+                         f"Your net: {hero.stack - start:+,} | stack {hero.stack:,}"]
+        self.set_showdown_text("\n".join(distribution))
         self.redraw()
 
         alive_next = [p for p in e.players if p.stack > 0]
@@ -3305,7 +3300,7 @@ class Holdem:
             return
 
         active = e.actor == p.idx and not self.hand_over
-        winner = self.result and p.idx in self.result["winners"]
+        winner = self.result and not self.result.get("cashout") and p.idx in self.result["winners"]
         if p.folded:
             fill, edge, ew = t["seat_fold"], t["rail"], 1
         elif winner:
@@ -3420,6 +3415,7 @@ class Holdem:
                       face_up=show, dim=p.folded,
                       glow=(show and (c.v, c.s) in self.highlight
                             and self.result is not None
+                            and not self.result.get("cashout")
                             and p.idx in self.result["winners"]))
 
         if p.last_action:
