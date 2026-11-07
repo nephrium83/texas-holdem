@@ -54,6 +54,7 @@ class ClientServer:
         self._conns: set[_Conn] = set()
         self._handlers: set[asyncio.Task] = set()
         self._stopping = False
+        self._generation = 0
         self._prev_hook = None
         # Bound methods are equal but not identical on repeated attribute
         # access. Retain the exact object installed on the Session so stop()
@@ -69,8 +70,11 @@ class ClientServer:
         if self._server is not None or self._stopping:
             raise RuntimeError("client server already started or stopping")
         self._loop = asyncio.get_running_loop()
+        self._generation += 1
+        generation = self._generation
         self._server = await asyncio.start_server(
-            self._connected, self._host, self._port)
+            lambda reader, writer: self._connected(reader, writer, generation),
+            self._host, self._port)
         self._port = self._server.sockets[0].getsockname()[1]
         # Chain, never clobber, any state hook already installed.
         if self._session is not None:
@@ -100,6 +104,10 @@ class ClientServer:
                 await asyncio.gather(*tuple(self._handlers), return_exceptions=True)
             if server is not None:
                 await server.wait_closed()
+            # Let native listener cancellation finish (Windows proactor).
+            # Any late connection callback is generation-fenced and closes
+            # synchronously, without creating an untracked handler.
+            await asyncio.sleep(0)
             self._loop = None
         finally:
             self._stopping = False
@@ -136,7 +144,13 @@ class ClientServer:
 
     # -- connections ---------------------------------------------------
 
-    def _connected(self, reader, writer) -> None:
+    def _connected(self, reader, writer, generation) -> None:
+        # Native connection_made may still be queued when an old listener
+        # closes (notably on Python 3.10). Reject before creating a handler,
+        # including if this server has already restarted by callback time.
+        if self._stopping or self._server is None or generation != self._generation:
+            writer.close()
+            return
         task = asyncio.create_task(self._accept(reader, writer))
         self._handlers.add(task)
         task.add_done_callback(self._handlers.discard)

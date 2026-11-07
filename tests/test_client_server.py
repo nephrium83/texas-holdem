@@ -592,3 +592,33 @@ def test_stop_joins_handler_finalization_before_returning_or_allowing_restart(mo
         finally:
             await srv.stop()
     asyncio.run(inner())
+
+
+
+def test_connection_callback_queued_before_stop_cannot_create_a_late_handler():
+    async def inner():
+        class LateWriter:
+            closed = False
+            def close(self):
+                self.closed = True
+
+        _, sessions, order = make_sessions(2)
+        srv = await serve(sessions[order[0]])
+        generation = srv._generation
+        await srv.stop()
+        writer = LateWriter()
+        srv._connected(None, writer, generation)
+        assert writer.closed and not srv._handlers and not srv._conns
+        await srv.start()
+        try:
+            # Native callback delivery may occur after restart as well. It
+            # must retain the generation captured by its original listener.
+            writer = LateWriter()
+            srv._connected(None, writer, generation)
+            assert writer.closed and not srv._handlers and not srv._conns
+            wire, snapshot = await open_client(srv)
+            assert snapshot["phase"] == "lobby"
+            wire.close()
+        finally:
+            await srv.stop()
+    asyncio.run(inner())
