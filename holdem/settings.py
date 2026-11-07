@@ -21,8 +21,13 @@ verify it is playing the same game.
 from __future__ import annotations
 
 import hashlib
+import contextlib
+import logging
 import json
 import os
+import tempfile
+import threading
+import time
 from pathlib import Path
 
 CLIENT = "client"
@@ -206,7 +211,90 @@ def _valid(key, value):
 
 # ---------------------------------------------------------------- config
 
-_cache: dict | None = None   # M-14: in-memory cache; invalidated on save()
+# Retained for older callers/tests which clear it; disk reads are fresh.
+_cache: dict | None = None
+_log = logging.getLogger(__name__)
+_writer_lock = threading.RLock()
+
+
+class _Bucket(dict):
+    def __init__(self, values):
+        super().__init__(values)
+        self.baseline = dict(values)
+
+
+@contextlib.contextmanager
+def _json_lock(path: Path):
+    """Serialize local threads and processes around a fresh read/merge/write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _writer_lock, open(path.with_name(path.name + ".lock"), "a+b") as lock:
+        if os.name == "nt":
+            import msvcrt
+            if lock.seek(0, os.SEEK_END) == 0:
+                lock.write(b"0")
+                lock.flush()
+            deadline = time.monotonic() + 5
+            while True:
+                lock.seek(0)
+                try:
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("settings/notes writer lock timed out")
+                    time.sleep(0.01)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _read_json_mapping(path: Path) -> dict:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    return raw
+
+
+def _write_json(path: Path, value: dict) -> None:
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+        with os.fdopen(fd, "w", encoding="utf-8") as target:
+            json.dump(value, target, indent=2, sort_keys=True, ensure_ascii=True)
+            target.write("\n")
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def _settings_from_raw(raw: dict) -> dict:
+    result = {"client": defaults(CLIENT), "last_table": defaults(TABLE_RULE)}
+    for name, values in result.items():
+        source = raw.get(name, {})
+        if not isinstance(source, dict):
+            raise ValueError(f"settings bucket {name} must be an object")
+        for key, value in source.items():
+            if key in values:
+                normalized = _valid(key, value)
+                if normalized is not None:
+                    values[key] = normalized
+    return result
 
 
 def config_dir() -> Path:
@@ -225,31 +313,19 @@ def config_path() -> Path:
 
 
 def load() -> dict:
-    """Return {'client': {...}, 'last_table': {...}}, always complete.
+    """Fresh complete settings; missing files default, other failures log.
 
-    Unknown keys are dropped, invalid values fall back to defaults, and a
-    missing or corrupt file yields pure defaults. Never raises.
-    Result is cached in memory until save() invalidates it (M-14).
+    Failed reads are never cached or made into a writable replacement. A
+    later save re-reads under the writer lock and refuses corrupt/unreadable
+    input, preserving its bytes for explicit recovery.
     """
-    global _cache
-    if _cache is not None:
-        return _cache
-    client = defaults(CLIENT)
-    table = defaults(TABLE_RULE)
     try:
-        raw = json.loads(config_path().read_text(encoding="utf-8"))
-    except Exception:
-        raw = {}
-    for bucket, store in (("client", client), ("last_table", table)):
-        src = raw.get(bucket)
-        if not isinstance(src, dict):
-            continue
-        for k, v in src.items():
-            ok = _valid(k, v)
-            if ok is not None and k in store:
-                store[k] = ok
-    _cache = {"client": client, "last_table": table}
-    return _cache
+        stored = _settings_from_raw(_read_json_mapping(config_path()))
+        stored["last_table"] = table_rules(**stored["last_table"])
+    except (OSError, ValueError, TypeError) as exc:
+        _log.warning("settings read failed; original preserved: %s", exc)
+        stored = {"client": defaults(CLIENT), "last_table": defaults(TABLE_RULE)}
+    return {name: _Bucket(values) for name, values in stored.items()}
 
 
 def get(key: str):
@@ -257,43 +333,58 @@ def get(key: str):
     spec = SPEC.get(key)
     if spec is None or spec["scope"] != CLIENT:
         raise KeyError(key)
-    return load()["client"].get(key, spec["default"])
+    return load()["client"][key]
 
 
 def set(key: str, value) -> bool:
-    """Write a single CLIENT key atomically. Returns True on success."""
+    """Write only the requested CLIENT key in a locked fresh transaction."""
     spec = SPEC.get(key)
     if spec is None or spec["scope"] != CLIENT:
         raise KeyError(key)
-    stored = load()
-    # Mutate a copy so the cache stays valid if save() fails
-    import copy
-    stored = copy.deepcopy(stored)
-    stored["client"][key] = value
-    return save(stored["client"], stored["last_table"])
+    if _valid(key, value) is None:
+        return False
+    return save({key: value}, {})
+
+
+def _changes(bucket: dict, scope: str) -> dict:
+    baseline = getattr(bucket, "baseline", {})
+    changes = {}
+    for key, value in bucket.items():
+        if key not in SPEC or SPEC[key]["scope"] != scope:
+            continue
+        normalized = _valid(key, value)
+        if normalized is not None and normalized != baseline.get(key):
+            changes[key] = normalized
+    return changes
 
 
 def save(client: dict, last_table: dict) -> bool:
-    """Atomically persist both buckets. Best-effort: never raises.
-    Invalidates the in-memory cache on success (M-14)."""
+    """Persist normalized changes with interprocess serialization.
+
+    Buckets returned by load retain their baseline, so unrelated values in
+    stale snapshots never overwrite newer disk values. Plain dicts are
+    explicit patches: supplied keys are intentional, omitted keys preserved.
+    Failure returns False and logs; no unreadable original is overwritten.
+    """
     global _cache
-    out = {
-        "client": {k: v for k, v in client.items()
-                   if _valid(k, v) is not None and SPEC[k]["scope"] == CLIENT},
-        "last_table": {k: v for k, v in last_table.items()
-                       if _valid(k, v) is not None
-                       and SPEC[k]["scope"] == TABLE_RULE},
-    }
     try:
-        d = config_dir()
-        d.mkdir(parents=True, exist_ok=True)
-        tmp = d / "settings.json.tmp"
-        tmp.write_text(json.dumps(out, indent=2, sort_keys=True),
-                       encoding="utf-8")
-        os.replace(tmp, config_path())
-        _cache = None   # invalidate cache after successful write
+        patches = {"client": _changes(client, CLIENT),
+                   "last_table": _changes(last_table, TABLE_RULE)}
+        path = config_path()
+        with _json_lock(path):
+            current = _settings_from_raw(_read_json_mapping(path))
+            for name, changes in patches.items():
+                current[name].update(changes)
+            current["last_table"] = table_rules(**current["last_table"])
+            _write_json(path, current)
+        _cache = None
+        for bucket, scope in ((client, CLIENT), (last_table, TABLE_RULE)):
+            if isinstance(bucket, _Bucket):
+                bucket.baseline = {key: _valid(key, value) for key, value in bucket.items()
+                                   if key in SPEC and SPEC[key]["scope"] == scope}
         return True
-    except Exception:
+    except (OSError, ValueError, TypeError) as exc:
+        _log.warning("settings save failed; original preserved: %s", exc)
         return False
 
 
@@ -307,6 +398,14 @@ def table_rules(**values) -> dict:
         ok = _valid(k, v)
         if ok is not None and k in rules:
             rules[k] = ok
+    if rules["sb"] >= rules["bb"]:
+        raise ValueError("small blind must be less than big blind")
+    if rules["stack"] < rules["bb"]:
+        raise ValueError("starting stack must cover the big blind")
+    if rules["buyin_min_bb"] > rules["buyin_max_bb"]:
+        raise ValueError("minimum buy-in must not exceed maximum buy-in")
+    if rules["bank_start"] > rules["bank_cap"]:
+        raise ValueError("initial time bank must not exceed its cap")
     return rules
 
 
@@ -314,6 +413,7 @@ def rules_hash(rules: dict) -> str:
     """Ten hex chars identifying the contract. Canonical (sorted keys,
     compact separators) so every client derives the same value -- this is
     what a multiplayer join code embeds."""
+    rules = table_rules(**rules)
     canon = json.dumps({k: rules[k] for k in sorted(TABLE_RULE_KEYS)},
                        separators=(',', ':'), sort_keys=True)
     return hashlib.sha256(canon.encode('utf-8')).hexdigest()[:10]

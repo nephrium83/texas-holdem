@@ -7,7 +7,7 @@ Each entry is keyed by peer_id (hex connection-id string) and holds:
   note       : str  -- free-text note about this player
   last_seen  : str  -- ISO-8601 timestamp of the last update
 
-API (write-through on every change; load on first access):
+API (fresh reads and locked atomic writes; mutations return success):
   get(peer_id)                  -> dict
   set_color(peer_id, color, nickname=None)
   set_note(peer_id, text,  nickname=None)
@@ -17,8 +17,12 @@ API (write-through on every change; load on first access):
 from __future__ import annotations
 
 import datetime
-import json
+import logging
 from pathlib import Path
+
+from holdem.settings import _json_lock, _read_json_mapping, _write_json
+
+_log = logging.getLogger(__name__)
 
 _NOTES_FILE: Path = Path.home() / ".texas_holdem_notes.json"
 
@@ -40,26 +44,35 @@ def _now() -> str:
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _read_disk() -> dict:
+    raw = _read_json_mapping(_NOTES_FILE)
+    if any(not isinstance(entry, dict) for entry in raw.values()):
+        raise ValueError("notes entries must be objects")
+    return raw
+
+
 def _load() -> dict[str, dict]:
+    try:
+        return _read_disk()
+    except (OSError, ValueError) as exc:
+        _log.warning("notes read failed; original preserved: %s", exc)
+        return {}
+
+
+def _update(peer_id: str, **changes) -> bool:
     global _data
-    if _data is not None:
-        return _data
     try:
-        raw = json.loads(_NOTES_FILE.read_text(encoding="utf-8"))
-        _data = raw if isinstance(raw, dict) else {}
-    except Exception:
-        _data = {}
-    return _data
-
-
-def _save() -> None:
-    try:
-        _NOTES_FILE.write_text(
-            json.dumps(_data, indent=2, ensure_ascii=True),
-            encoding="utf-8",
-        )
-    except Exception:
-        pass
+        with _json_lock(_NOTES_FILE):
+            current = _read_disk()
+            entry = {**_defaults(), **current.get(peer_id, {}), **changes}
+            entry["last_seen"] = _now()
+            current[peer_id] = entry
+            _write_json(_NOTES_FILE, current)
+        _data = current
+        return True
+    except (OSError, ValueError, TypeError) as exc:
+        _log.warning("notes save failed; original preserved: %s", exc)
+        return False
 
 
 # ------------------------------------------------------------------ public API
@@ -76,37 +89,20 @@ def get(peer_id: str) -> dict:
     return result
 
 
-def set_color(peer_id: str, color: str, nickname: str | None = None) -> None:
-    """Persist a color label for peer_id.  color must be in _VALID_COLORS."""
+def set_color(peer_id: str, color: str, nickname: str | None = None) -> bool:
+    """Persist a color label; report a failed write instead of pretending."""
     if color not in _VALID_COLORS:
-        return
-    d = _load()
-    entry = d.setdefault(peer_id, _defaults())
-    entry["color"] = color
-    if nickname:
-        entry["nickname"] = nickname
-    entry["last_seen"] = _now()
-    _save()
+        return False
+    return _update(peer_id, color=color, **({"nickname": nickname} if nickname else {}))
 
 
-def set_note(peer_id: str, text: str, nickname: str | None = None) -> None:
-    """Persist a free-text note for peer_id."""
-    d = _load()
-    entry = d.setdefault(peer_id, _defaults())
-    entry["note"] = text
-    if nickname:
-        entry["nickname"] = nickname
-    entry["last_seen"] = _now()
-    _save()
+def set_note(peer_id: str, text: str, nickname: str | None = None) -> bool:
+    """Persist a free-text note in a fresh locked read/merge/write."""
+    return _update(peer_id, note=text, **({"nickname": nickname} if nickname else {}))
 
 
-def update_nickname(peer_id: str, nickname: str) -> None:
-    """Update the last-seen nickname for peer_id without touching other fields."""
-    d = _load()
-    entry = d.setdefault(peer_id, _defaults())
-    entry["nickname"] = nickname
-    entry["last_seen"] = _now()
-    _save()
+def update_nickname(peer_id: str, nickname: str) -> bool:
+    return _update(peer_id, nickname=nickname)
 
 
 def all() -> list[dict]:
