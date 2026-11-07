@@ -191,11 +191,36 @@ def test_unknown_seat_aborts():
     ms = _secrets(seats)
     d = MentalDeal("s", 1, 0, list(seats), 0, ms[0])
     d.start()
-    d.handle({"type": "key_announce", "seat": 5,
-                    "X_hex": bytes(R.mul_base(R.random_scalar())).hex(),
-                    "pop_hex": keygen_pop.prove(R.random_scalar(), b"x").hex()})
+    # Audit #162: the announce is otherwise VALID -- X matches the proven
+    # scalar and the proof uses the protocol's own context for seat 5 -- so
+    # only the membership check can reject it. (The old version also carried
+    # a proof for a different scalar under a junk context, which would abort
+    # even with the membership check deleted.)
+    from holdem.p2p.mental_deal import _pop_ctx
+    x = R.random_scalar()
+    announce = {"type": "key_announce", "seat": 5,
+                "X_hex": bytes(R.mul_base(x)).hex(),
+                "pop_hex": keygen_pop.prove(x, _pop_ctx("s", 1, 5)).hex()}
+    assert keygen_pop.verify(R.mul_base(x), bytes.fromhex(announce["pop_hex"]),
+                             _pop_ctx("s", 1, 5))
+    d.handle(announce)
     assert d.phase == Phase.ABORTED
     assert d.bad_seat == 5
+    assert "unknown seat" in d.abort_reason
+
+
+def test_the_same_valid_construction_is_accepted_for_a_real_seat():
+    """Control for test_unknown_seat_aborts: identical construction, a seat
+    that IS in the hand -- accepted, so the abort above is membership alone."""
+    from holdem.p2p.mental_deal import _pop_ctx
+    seats = [0, 1, 2]
+    d = MentalDeal("s", 1, 0, list(seats), 0, _secrets(seats)[0])
+    d.start()
+    x = R.random_scalar()
+    d.handle({"type": "key_announce", "seat": 1,
+              "X_hex": bytes(R.mul_base(x)).hex(),
+              "pop_hex": keygen_pop.prove(x, _pop_ctx("s", 1, 1)).hex()})
+    assert d.phase != Phase.ABORTED
 
 
 def test_malformed_announce_aborts():
@@ -358,11 +383,22 @@ def test_stale_round_ignored_not_aborted():
     observer.handle({"type": "deck_round", "round": 1, "seat": 0,
                      "deck": [ct.to_hex() for ct in deck1]})
     assert observer._shuffle_round == 1 and observer.phase == Phase.SHUFFLE
-    # re-send round 1 -> ignored, still round 1, not aborted
-    observer.handle({"type": "deck_round", "round": 1, "seat": 0,
-                     "deck": [ct.to_hex() for ct in deck1]})
+    # Audit #163: replay round 1 with a DIFFERENT, well-formed deck. An
+    # identical replay could not reveal a handler that wrongly accepted it.
+    other, _ = shuffle_mp.shuffle_deck(observer.joint_pk, eg.make_trivial_deck())
+    assert [c.to_hex() for c in other] != [c.to_hex() for c in deck1]
+
+    def state():
+        return ([c.to_hex() for c in observer.deck],
+                [[c.to_hex() for c in d] for d in observer.round_decks],
+                observer._shuffle_round, observer.phase)
+
+    before = state()
+    out = observer.handle({"type": "deck_round", "round": 1, "seat": 0,
+                           "deck": [ct.to_hex() for ct in other]})
+    assert out == [], "a stale round produced traffic"
+    assert state() == before, "a stale round changed the deck or its history"
     assert observer.phase == Phase.SHUFFLE
-    assert observer._shuffle_round == 1
 
 
 # ------------------------------------------------------ Phase C: the deal
@@ -453,11 +489,23 @@ def test_board_reveal_by_street():
     deals = run_broadcast(seats, ms)
     by_pos = _omniscient(deals[0].deck, seats, ms)
     bp = dmap.board_positions(0, seats)
-    for street, slots in [("flop", (0, 1, 2)), ("turn", (3,)), ("river", (4,))]:
+    streets = [("flop", (0, 1, 2)), ("turn", (3,)), ("river", (4,))]
+    revealed = []
+    for street, slots in streets:
         _reveal_all(deals, seats, street)
-        for slot in slots:
-            for s in seats:
+        revealed.extend(slots)
+        future = [x for x in range(5) if x not in revealed]
+        for s in seats:
+            for slot in revealed:
                 assert deals[s].board[slot] == by_pos[bp[slot]]
+            # Audit #164: the whole board shape, not just this street. A
+            # future slot is unrevealed AND no seat holds a single share for
+            # its position -- so it cannot be combined early either.
+            for slot in future:
+                assert deals[s].board[slot] is None, (street, slot)
+                assert not deals[s]._shares.get(bp[slot]), (
+                    f"after the {street}, seat {s} holds shares for future "
+                    f"board slot {slot}")
     for s in seats:
         assert deals[s].board_complete()
         # board cards are real and distinct from each other
