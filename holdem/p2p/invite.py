@@ -148,6 +148,27 @@ def _pack_ipv4(address):
     return struct.pack(">I", packed)
 
 
+def _exact_hex(value, size, name):
+    """Hex text that decodes to exactly ``size`` bytes, else ValueError."""
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a hex string")
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} is not valid hex") from exc
+    if len(decoded) != size:
+        raise ValueError(
+            f"{name} must be exactly {size} bytes ({2 * size} hex characters), "
+            f"got {len(decoded)}")
+    return decoded
+
+
+def _pack_port(port):
+    if type(port) is not int or not 0 <= port <= 0xFFFF:
+        raise ValueError("port must be an integer from 0 to 65535")
+    return struct.pack(">H", port)
+
+
 def _unpack_ipv4(packed):
     """Render the four payload bytes as canonical dotted decimal."""
     return ".".join(str(octet) for octet in packed)
@@ -187,36 +208,41 @@ def generate_room_code(
             f"host_pubkey must be exactly {HOST_PUBKEY_LEN} bytes, got "
             f"{len(key)} -- V2 pins the whole key, not a prefix")
 
+    # Reused values must be EXACTLY right (audit #63): silently truncating a
+    # longer token or secret let two different inputs produce the same room
+    # id / capability, and a short one used to surface as an AssertionError.
     if discovery_token is not None:
-        token = bytes.fromhex(discovery_token)[:DISCOVERY_TOKEN_LEN]
+        token = _exact_hex(discovery_token, DISCOVERY_TOKEN_LEN, "discovery_token")
     else:
         token = secrets.token_bytes(DISCOVERY_TOKEN_LEN)
 
     if admission_secret is not None:
-        secret = bytes.fromhex(admission_secret)[:ADMISSION_SECRET_LEN]
+        secret = _exact_hex(admission_secret, ADMISSION_SECRET_LEN, "admission_secret")
     else:
         secret = secrets.token_bytes(ADMISSION_SECRET_LEN)
-    if len(secret) != ADMISSION_SECRET_LEN:
-        raise ValueError(
-            f"admission_secret must be {ADMISSION_SECRET_LEN} bytes")
+
+    if type(flags) is not int or not 0 <= flags <= 0xFF:
+        raise ValueError("flags must be an integer from 0 to 255")
 
     if public_address:
         pub_ip_bytes   = _pack_ipv4(public_address[0])
-        pub_port_bytes = struct.pack(">H", public_address[1])
+        pub_port_bytes = _pack_port(public_address[1])
     else:
         pub_ip_bytes, pub_port_bytes = _NULL_IP, _NULL_PORT
 
     if relay_address:
         relay_ip_bytes   = _pack_ipv4(relay_address[0])
-        relay_port_bytes = struct.pack(">H", relay_address[1])
+        relay_port_bytes = _pack_port(relay_address[1])
     else:
         relay_ip_bytes, relay_port_bytes = _NULL_IP, _NULL_PORT
 
     raw = (bytes([VERSION]) + key + token + secret
            + pub_ip_bytes   + pub_port_bytes
            + relay_ip_bytes + relay_port_bytes
-           + bytes([flags & 0xFF]))
-    assert len(raw) == PAYLOAD_LEN, f"payload {len(raw)} != {PAYLOAD_LEN}"
+           + bytes([flags]))
+    # A real check, not an assert: assertions vanish under python -O.
+    if len(raw) != PAYLOAD_LEN:
+        raise ValueError(f"payload {len(raw)} != {PAYLOAD_LEN}")
 
     return format_code(base64.b32encode(raw).decode().rstrip("="))
 

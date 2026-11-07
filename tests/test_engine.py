@@ -387,8 +387,15 @@ def test_run_it_twice():
     ids = {(c.v, c.s) for c in e.board} | {(c.v, c.s) for c in e.board2}
     assert len(ids) == 10 or len(e.board) + len(e.board2) - len(ids) == 0
     assert len(res["runs"]) == 2
-    main = res["pots"][0]
-    assert sum(r["amount"] for r in main["runs"]) == main["amount"]
+    # Audit #147: conservation alone would pass a biased split. Every pot
+    # is halved across the two runs, the odd chip to the first run, and
+    # each run pays out exactly its half.
+    for pot in res["pots"]:
+        runs = pot["runs"]
+        assert [r["amount"] for r in runs] == [(pot["amount"] + 1) // 2,
+                                               pot["amount"] // 2]
+        for r in runs:
+            assert sum(r["payouts"].values()) == r["amount"]
     assert sum(p.stack for p in ps) == 1500
 
 
@@ -415,7 +422,13 @@ def test_run_it_twice_conservation_fuzz():
                 a, m = brain.decide(e, e.actor)
                 e.act(e.actor, a, m)
             runs = 2 if (e.betting_locked() and len(e.board) < 5) else 1
-            e.settle(runs=runs)
+            res = e.settle(runs=runs)
+            if runs == 2:        # audit #147: side pots and odd sizes too
+                for pot in res["pots"]:
+                    assert [r["amount"] for r in pot["runs"]] == [
+                        (pot["amount"] + 1) // 2, pot["amount"] // 2]
+                    for r in pot["runs"]:
+                        assert sum(r["payouts"].values()) == r["amount"]
             e.drain()
             assert sum(p.stack for p in ps) == 1200, f"seed {seed}"
 

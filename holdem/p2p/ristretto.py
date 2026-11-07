@@ -108,13 +108,30 @@ class Point(bytes):
         return f'Point({self.hex()[:16]}...)'
 
 
+# The Ristretto255 group order.
+GROUP_ORDER = 2**252 + 27742317777372353535851937790883648493
+
+
 class Scalar(bytes):
-    """A scalar in the Ristretto255 group-order field (little-endian)."""
+    """A scalar in the Ristretto255 group-order field (little-endian).
+
+    Only the CANONICAL encoding (value < GROUP_ORDER) is accepted (audit
+    #66). Otherwise one field element has several byte forms: the encoded
+    order itself is zero yet failed is_zero_scalar(), and transcript hashes,
+    equality checks and zero-safe multiplication could disagree about the
+    same value -- the raw material of proof malleability. Every internal
+    source (libsodium results, constants, small integers) is already
+    canonical; this closes the wire doors (DLEQ / proof-of-possession /
+    Bayer-Groth proofs and shuffle witnesses), which all construct a
+    Scalar directly and turn ValueError into a rejection.
+    """
     __slots__ = ()
 
     def __new__(cls, data: bytes):
         if len(data) != SCALAR_BYTES:
             raise ValueError(f'scalar must be {SCALAR_BYTES} bytes, got {len(data)}')
+        if int.from_bytes(data, 'little') >= GROUP_ORDER:
+            raise ValueError('non-canonical scalar (not reduced below the group order)')
         return super().__new__(cls, data)
 
     def __repr__(self) -> str:
