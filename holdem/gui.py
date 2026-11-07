@@ -2431,7 +2431,8 @@ class Holdem:
         # Load existing first so onboarding keys (nickname, avatar_*) are
         # preserved — they're not in _varmap and would otherwise be wiped.
         existing = cfg.load()
-        client_data = {**existing["client"], **self._bucket(cfg.CLIENT)}
+        client_data = existing["client"]
+        client_data.update(self._bucket(cfg.CLIENT))
         cfg.save(client_data, self._bucket(cfg.TABLE_RULE))
 
     def aids_ok(self):
