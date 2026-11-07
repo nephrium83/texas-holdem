@@ -53,9 +53,28 @@ def test_different_seeds_give_different_generators():
     assert a.Gs != b.Gs
 
 
-def test_generators_are_nums():
-    """The anti-Scytl property: every generator recomputes from the seed."""
-    ck = P.CommitmentKey.generate(10, seed=b"nums")
+@pytest.mark.parametrize("seed,expected,digest", [
+    (b"nums", ["8ccb17b9cd0d00048d21d33ddc3992e73684e3b169f5b121046a082ddd9a8877",
+               "18146ba815d2626df1177af0741365dae696049f3d447356e955ecce8404542b",
+               "160b3fbb7b3a786a22c1a60e8923a6e19c61cec153d4891ae0f65b545ba31144"],
+     "352ddae50082aca6a0709154fb1a42cd8c46c683efca66828b48c2bb7bc38825"),
+    (b"other", ["aa5864e4c997cd924da2a17aac0235e2e8195fd006ee6f1cf25710565cac764b",
+                "263b688b12a42cbfb408db162e3740ab272a8b4c7bd346bc017bf623a005f154",
+                "6a4305b40c690215202a65530b42db269b40c5ebe0711c395ec79da42cb9a265"],
+     "92c6a45b5dd20084562ca1cfa47c525d9e8bf2566df7d5aa75c2d393cfd8afb9"),
+])
+def test_generators_are_nums(seed, expected, digest):
+    # Fixed vectors independently generated via ctypes calling libsodium's
+    # crypto_core_ristretto255_from_hash(SHA512(domain|seed|label|uint32be(index))).
+    # Domain: poker.bg.pedersen.gen.v1; H/0 then G/0 through G/12.
+    # digest is SHA256 of all fourteen native point encodings in that order.
+    # No production derivation helper is used to construct the oracle.
+    ck = P.CommitmentKey.generate(13, seed=seed)
+    points = [ck.H, *ck.Gs]
+    assert [bytes(p).hex() for p in points[:3]] == expected
+    assert hashlib.sha256(b"".join(bytes(p) for p in points)).hexdigest() == digest
+    assert all(bytes(p) != bytes(32) for p in points)
+    assert len({bytes(p) for p in points}) == 14
     assert ck.verify_nums() is True
 
 
