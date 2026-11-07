@@ -256,14 +256,26 @@ def decode(data: Any, m: Optional[int] = None,
 
     Supplying ``m`` and ``n`` pins every list to the exact length those
     dimensions imply, so a structurally wrong proof is rejected here
-    rather than deeper inside verification. Omitting them accepts any
-    self-consistent shape up to a fixed allocation cap.
+    rather than deeper inside verification. Omitting either one accepts
+    any SELF-CONSISTENT shape: the missing dimension is read once from the
+    proof's own top-level lists (m from ``a_commits``, n from
+    ``product.svp.a_tilde``) and every nested list must then agree with it.
+
+    Audit #133: "self-consistent" used to be claimed but not checked --
+    without dimensions each list was only capped, so e.g. an element could
+    be inserted into or removed from ``multi.a_blinded`` independently of
+    every other list that encodes the same n.
     """
-    if m is not None and n is not None and (m < 2 or n < 2):
-        raise ValueError("shuffle dimensions require m,n >= 2")
     try:
         if not isinstance(data, dict):
             raise ValueError("shuffle proof must be an object")
+        if m is None:
+            m = len(_seq(data, "a_commits", None))
+        if n is None:
+            svp = _obj(_obj(data, "product"), "svp")
+            n = len(_seq(svp, "a_tilde", None))
+        if m < 2 or n < 2:
+            raise ValueError("shuffle dimensions require m,n >= 2")
         return ShuffleProof(
             a_commits=_d_pts(data, "a_commits", m),
             b_commits=_d_pts(data, "b_commits", m),
