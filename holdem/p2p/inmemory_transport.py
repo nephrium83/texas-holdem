@@ -22,6 +22,7 @@ test harnesses.
 """
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Dict, List, Optional, Tuple
 
@@ -62,7 +63,7 @@ class InMemoryBus:
         self._sessions.pop(conn_id, None)
 
     def enqueue(self, from_conn: str, to_conn: Optional[str], msg: dict) -> None:
-        self._queue.append((from_conn, to_conn, msg))
+        self._queue.append((from_conn, to_conn, copy.deepcopy(msg)))
 
     def enqueue_except(self, from_conn: str, exclude_conn: str,
                        msg: dict) -> None:
@@ -73,7 +74,7 @@ class InMemoryBus:
         """
         for c in list(self._sessions):
             if c != from_conn and c != exclude_conn:
-                self._queue.append((from_conn, c, msg))
+                self._queue.append((from_conn, c, copy.deepcopy(msg)))
 
     def drain(self, max_steps: int = 100000) -> int:
         """Deliver queued messages until the queue is empty. Returns the
@@ -123,7 +124,11 @@ class InMemoryBus:
                     if sess is None:
                         continue
                     try:
-                        sess.handle_message(from_conn, dict(msg))
+                        # Audit #64: each recipient gets its OWN copy, as each
+                        # gets its own decoded frame on the real wire. dict(msg)
+                        # was shallow, so one recipient mutating a nested field
+                        # changed what every later recipient saw.
+                        sess.handle_message(from_conn, copy.deepcopy(msg))
                     except Exception as exc:       # noqa: BLE001 - re-raised
                         if first_error is None:
                             first_error = exc

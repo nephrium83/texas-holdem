@@ -58,6 +58,13 @@ PHASE_SHOWDOWN = "showdown"        # river betting closed; audit + settle
 PHASE_HAND_OVER = "hand_over"      # folded down to one; settle now
 PHASE_SETTLED = "settled"
 
+# Forward window for out-of-order actions, and the buffer's capacity.
+MAX_PENDING = 64
+
+
+class UnverifiedHolesError(RuntimeError):
+    """A contested showdown would be scored on dummy (unaudited) holes."""
+
 
 def _hand_seed(session_id: str, hand_no: int) -> int:
     h = hashlib.sha256(f"replica.v1|{session_id}|{hand_no}".encode()).digest()
@@ -95,6 +102,10 @@ class ReplicaTable:
         self.phase = PHASE_BETTING
         self._pending: Dict[int, tuple] = {}     # seq -> (seat, action, amount)
         self.result: Optional[dict] = None
+        # Seats whose REAL hole cards are in the engine (audit #65): the local
+        # seat via set_own_hole, the rest via set_all_holes after the audit.
+        # Every other seat still holds the dummy deal's cards.
+        self._real_holes: set = set()
 
     # ------------------------------------------------------------- lifecycle
 
@@ -153,6 +164,7 @@ class ReplicaTable:
         if len(cards) != 2 or any(c is None for c in cards):
             raise ValueError("need two recovered cards")
         self.engine.players[seat].hole = list(cards)
+        self._real_holes.add(seat)
 
     # ------------------------------------------------------------- actions
 
@@ -169,8 +181,18 @@ class ReplicaTable:
         if seq < self.next_seq:
             return "stale"
         if seq > self.next_seq:
-            if len(self._pending) < 64 and seq not in self._pending:
-                self._pending[seq] = (seat, action, amount)
+            # Audit #67: "buffered" used to be returned even when nothing was
+            # stored (buffer full), so a legitimate reordered action vanished
+            # while its caller was told it was kept. Now the verdict says what
+            # happened: "buffered" only if stored (or already stored
+            # identically), "overflow" when it is beyond the forward window
+            # or the buffer is full, "rejected" for a conflicting duplicate.
+            entry = (seat, action, amount)
+            if seq in self._pending:
+                return "buffered" if self._pending[seq] == entry else "rejected"
+            if seq - self.next_seq > MAX_PENDING or len(self._pending) >= MAX_PENDING:
+                return "overflow"
+            self._pending[seq] = entry
             return "buffered"
         verdict = self._apply_now(seat, action, amount)
         if verdict == "applied":
@@ -242,10 +264,19 @@ class ReplicaTable:
     def set_all_holes(self, holes_by_seat: Dict[int, List[Card]]) -> None:
         """Inject the audit-revealed true hole cards for every seat given
         (at minimum every contested seat) before settling a showdown."""
+        seen = {(c.v, c.s) for c in self.engine.board}
         for seat, cards in holes_by_seat.items():
+            if not 0 <= seat < len(self.engine.players):
+                raise ValueError(f"seat {seat}: no such seat")
             if len(cards) != 2 or any(c is None for c in cards):
                 raise ValueError(f"seat {seat}: need two cards")
+            for c in cards:
+                if (c.v, c.s) in seen:
+                    raise ValueError(f"seat {seat}: card {c} is dealt twice")
+                seen.add((c.v, c.s))
+        for seat, cards in holes_by_seat.items():
             self.engine.players[seat].hole = list(cards)
+            self._real_holes.add(seat)
 
     def finish(self, force_tabled: bool = False) -> dict:
         """Settle the hand (runs pinned to 1 -- run-it-twice deals from the
@@ -265,9 +296,18 @@ class ReplicaTable:
         last_settled_stacks."""
         if self.phase not in (PHASE_SHOWDOWN, PHASE_HAND_OVER):
             raise RuntimeError(f"cannot settle in phase {self.phase}")
-        if len(self.engine.contested()) > 1 and len(self.engine.board) < 5:
+        contested = self.engine.contested()
+        if len(contested) > 1 and len(self.engine.board) < 5:
             raise RuntimeError("board incomplete: reveal remaining streets "
                                "via the mental deal before settling")
+        # Audit #65: a contested seat still holding DUMMY cards would be
+        # scored on them -- a wrong winner, invisible to chip conservation
+        # because a wrong payout still sums correctly. Refuse instead.
+        unverified = sorted(p.idx for p in contested if p.idx not in self._real_holes)
+        if len(contested) > 1 and unverified:
+            raise UnverifiedHolesError(
+                f"cannot settle hand {self.hand_no}: contested seat(s) "
+                f"{unverified} have no audit-verified hole cards")
         raw = self.engine.settle(runs=1, force_tabled=force_tabled)
         total = sum(self.stacks)
         if total != self.start_total:

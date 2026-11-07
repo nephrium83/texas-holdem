@@ -260,6 +260,22 @@ class HandRecord:
     sequence: int
 
 
+class CommandRefused(RuntimeError):
+    """An EXPECTED refusal: the request is not allowed in the current state.
+
+    Cross-owner handoff C94. The session signalled ordinary refusals ("only
+    the host can start the game", "cannot change seat order during an active
+    hand", anything on a terminated session) and genuine invariant failures
+    ("mental-deal flush did not terminate", owner-thread violations, seat
+    key inconsistencies) with the same RuntimeError, so the client command
+    boundary had to catch both and could not tell a bad command from a bug.
+
+    Subclasses RuntimeError so existing broad catches keep working; a caller
+    should catch THIS to report a refusal, and let any other RuntimeError
+    surface as the defect it is.
+    """
+
+
 def _is_seat(value) -> bool:
     """A usable seat index: a real int, never a bool.
 
@@ -665,6 +681,15 @@ class Session:
         # --- hostless betting (L5): per-peer replica engine + orchestration ---
         self._replica = None                    # ReplicaTable for the current hand
         self._own_hole_set = False              # local holes fed to replica yet?
+        # Monotonic startup evidence (cross-owner handoff C116): the number
+        # of hands in which THIS seat recovered its own hole cards. Never
+        # reset. Holes land only after key generation, the whole shuffle
+        # chain and every other seat's DLEQ-proven shares have worked, so
+        # ">= 1" means "this seat really was dealt in" -- unlike "has a
+        # replica" (built BEFORE the deal runs, so a seat that died on deal
+        # traffic still has one) or per-hand flags that reset each hand
+        # (useless once bots have played several hands ahead).
+        self.hands_dealt_in = 0
         self._pumping = False                   # re-entrancy guard for _pump_hand
         self._hand_record: Optional[HandRecord] = None
         self._hand_seq = 0
@@ -1251,15 +1276,15 @@ class Session:
         exists. All entry points use one rule so the checks cannot drift.
         """
         if self.terminal_state is not None:
-            raise RuntimeError(
+            raise CommandRefused(
                 f"cannot begin a hand: session terminated "
                 f"({self.terminal_state}: {self.terminal_reason})")
         if self._deal_policy is None:
-            raise RuntimeError(
+            raise CommandRefused(
                 "cannot begin hand: no deal policy has been adopted; a hand "
                 "must follow an accepted table")
         if self._continuation_policy is None:
-            raise RuntimeError("cannot begin hand: no continuation policy has been adopted")
+            raise CommandRefused("cannot begin hand: no continuation policy has been adopted")
         # Keyed to the ADOPTED POLICY first, and to author_mode second.
         # A table that settled on Bayer-Groth must enforce it on every
         # peer path; verification is not optional merely because the
@@ -1315,7 +1340,7 @@ class Session:
             seats_in = list(range(len(order)))
         local = order.index(self.local_conn_id)
         if local not in seats_in:
-            raise RuntimeError("cannot begin hand: local seat is not dealt in "
+            raise CommandRefused("cannot begin hand: local seat is not dealt in "
                                "(busted seats spectate via next_p2p_hand)")
         prevention = self.prevention
         outbox = []
@@ -2223,6 +2248,15 @@ class Session:
         # declined to authorize, and apply it unchecked.
         if not _is_seat(msg.get("seat")):
             return
+        # Audit #75: authentic is not enough -- the seat must be PLAYING this
+        # hand. Ingress proves the message is signed by the seat it claims; a
+        # busted seat is still connected and still holds that key, so it
+        # could otherwise void every later hand and force an endless redeal.
+        r = self._replica
+        if r is not None and msg["seat"] not in r.seats_dealt:
+            _log.warning("session: hand_void from seat %s, which was not dealt "
+                         "into hand %s -- ignoring", msg["seat"], self._hand_no)
+            return
         reason = str(msg.get("reason", "peer voided the hand"))[:512]
         self._void_hand(reason, announce=False)
 
@@ -2776,7 +2810,7 @@ class Session:
         Returns what happened, for the terminal reason.
         """
         from holdem.engine import settle_forfeit
-        from holdem.p2p.replica_table import ChipConservationError
+        from holdem.p2p.replica_table import ChipConservationError, UnverifiedHolesError
         r = self._replica
         if r is None or self._eliminated():
             return ""
@@ -2822,7 +2856,7 @@ class Session:
         if in_hand == [lost]:
             try:
                 self.hand_result = r.finish()
-            except ChipConservationError as exc:
+            except (ChipConservationError, UnverifiedHolesError) as exc:
                 return f"; hand {h} was not settled: {exc}" + disputed
             return (f"; everyone else had folded hand {h}, so it is paid "
                     f"the pot" + disputed)
@@ -2981,7 +3015,7 @@ class Session:
         the replica starts first and the deal is begun with
         replica.button."""
         if self.terminal_state is not None:
-            raise RuntimeError(
+            raise CommandRefused(
                 f"cannot start a hand: session terminated "
                 f"({self.terminal_state}: {self.terminal_reason})")
         self._assert_deal_preconditions()
@@ -3410,7 +3444,7 @@ class Session:
         """One orchestration step. Returns True iff progress was made."""
         from holdem.p2p.replica_table import (
             PHASE_STREET_OVER, PHASE_SHOWDOWN, PHASE_HAND_OVER,
-            ChipConservationError)
+            ChipConservationError, UnverifiedHolesError)
         r = self._replica
         # 1. local hole cards -> replica, as soon as the deal recovers them
         if not self._own_hole_set:
@@ -3418,6 +3452,7 @@ class Session:
             if all(c is not None for c in hole):
                 r.set_own_hole(self.local_seat, hole)
                 self._own_hole_set = True
+                self.hands_dealt_in += 1          # monotonic; see __init__
                 return True
         # 2. a betting round closed: reveal the next street, then advance
         #    the replica with the REAL recovered board cards
@@ -3444,7 +3479,7 @@ class Session:
                 r.set_all_holes(holes)
             try:
                 result = r.finish(force_tabled=(r.phase == PHASE_SHOWDOWN))
-            except ChipConservationError as exc:
+            except (ChipConservationError, UnverifiedHolesError) as exc:
                 # The existing void path: the payout the replica computed is
                 # discarded, and the reason lands in the hand record. Peers
                 # that settled the hand end the table over the void (see
@@ -4387,11 +4422,11 @@ class Session:
     def start_game(self, table_settings: dict) -> None:
         """Host starts the game: broadcast game_start and transition to PLAYING."""
         if self.terminal_state is not None:
-            raise RuntimeError(
+            raise CommandRefused(
                 f"cannot start a game: session terminated "
                 f"({self.terminal_state}: {self.terminal_reason})")
         if not self.is_host:
-            raise RuntimeError("Only the host can start the game")
+            raise CommandRefused("Only the host can start the game")
         # Parsed AFTER the terminal and host checks, so those keep winning:
         # a terminated session must still report that it is terminated
         # rather than complaining about a settings dict it will never use.
@@ -4410,7 +4445,7 @@ class Session:
         if continuation is None:
             raise ValueError("cannot start a game: an explicit supported continuation_policy is required")
         if not self._adopt_deal_policy(policy) or not self._adopt_continuation_policy(continuation):
-            raise RuntimeError(
+            raise CommandRefused(
                 "cannot start a game: an adopted deal or continuation policy cannot change")
         with self._lock:
             seat_order = [p.conn_id for p in self.players.values()]
@@ -4514,7 +4549,7 @@ class Session:
         if self.state != "LOBBY" or self.terminal_state is not None:
             return "already_started"
         if not self.is_host:
-            raise RuntimeError("Only the host can start the game")
+            raise CommandRefused("Only the host can start the game")
         if not 2 <= self.peer_count() <= 9 or not self.all_ready:
             return "not_ready"
         self.start_game(table_settings)
@@ -4608,7 +4643,7 @@ class Session:
             RuntimeError: called during an active hand
         """
         if self._replica is not None and not self.hand_voided and self.hand_result is None:
-            raise RuntimeError("cannot change seat order during an active hand")
+            raise CommandRefused("cannot change seat order during an active hand")
         if len(order) < 2:
             raise ValueError(f"seat order needs at least 2 seats, got {len(order)}")
         if len(order) > 9:
@@ -4660,7 +4695,7 @@ class Session:
                 "seat_local_table is for local tables only; a session on a "
                 "verified-envelope transport seats peers through admission")
         if self.terminal_state is not None:
-            raise RuntimeError(
+            raise CommandRefused(
                 f"cannot seat a table: session terminated "
                 f"({self.terminal_state}: {self.terminal_reason})")
         # configure_seats owns the structural rules (2-9 seats, unique ids,

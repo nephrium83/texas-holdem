@@ -159,6 +159,10 @@ class AuditReport:
     cards: List[Optional[str]]          # per-position recovered card (None = not a card)
     bad_seats: List[int] = field(default_factory=list)
     problems: List[str] = field(default_factory=list)
+    # Audit #53: every required share present and DLEQ-valid. When False the
+    # combined plaintexts prove nothing about the DECK, so a failed report
+    # must not be pinned on a shuffler (see first_corrupt_round).
+    shares_valid: bool = True
 
 
 def audit_deck(
@@ -216,14 +220,18 @@ def audit_deck(
             bad_seats.append(s)
 
     if structural:
+        share_short = any(len(sh) != n for sh in shares_by_seat)
         return AuditReport(ok=False, cards=[], bad_seats=sorted(set(bad_seats)),
-                           problems=problems + structural)
+                           problems=problems + structural,
+                           shares_valid=not share_short)
 
+    shares_ok = True
     # DLEQ verification, per seat: the share for position i must be proven
     # against THIS seat's pubkey and THIS position's C0.
     for s, (X, shares) in enumerate(zip(seat_pubkeys, shares_by_seat)):
         for i, ps in enumerate(shares):
             if not dleq.verify(X, ps.share, deck[i].c0, ps.proof):
+                shares_ok = False
                 bad_seats.append(s)
                 problems.append(f"seat {s}: DLEQ failed at position {i}")
                 break                      # one attribution per seat is enough
@@ -251,7 +259,8 @@ def audit_deck(
 
     bad_seats = sorted(set(bad_seats))
     return AuditReport(ok=not problems and not bad_seats,
-                       cards=cards, bad_seats=bad_seats, problems=problems)
+                       cards=cards, bad_seats=bad_seats, problems=problems,
+                       shares_valid=shares_ok)
 
 
 def first_corrupt_round(reports: Sequence[AuditReport]) -> Optional[int]:
@@ -262,8 +271,15 @@ def first_corrupt_round(reports: Sequence[AuditReport]) -> Optional[int]:
     final audit failed, auditing each round's broadcast output in order
     and taking the first failure attributes the corruption to that
     round's shuffler: their input deck audited clean, their output did not.
+
+    Audit #53: a round whose report failed only because a decryptor's
+    share evidence was invalid or missing says nothing about that round's
+    DECK, so it must not be attributed to the shuffler. Such a report makes
+    the result indeterminate (None); its bad_seats name the decryptor.
     """
     for i, rep in enumerate(reports):
+        if not rep.shares_valid:
+            return None
         if not rep.ok:
             return i
     return None
