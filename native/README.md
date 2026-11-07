@@ -21,10 +21,59 @@ enabled** here and explicit host startup will find it. libsodium's standard buil
 includes that API; PyNaCl's bundled copy does **not** expose it, so a
 generic `pip install pynacl` is not sufficient.
 
-## Building libsodium on Windows (MSVC)
+## Pinned dependency inputs
 
-Requires Visual Studio Build Tools with the C++ workload (any recent
-version). From a clone of https://github.com/jedisct1/libsodium:
+Use **libsodium 1.0.22**, source commit
+`77e1ce5d6dee871c49ef211222ba18ef0c486bda`, for these instructions.
+The upstream annotated `1.0.22-RELEASE` tag resolves to that commit.
+[Release source](https://github.com/jedisct1/libsodium/tree/77e1ce5d6dee871c49ef211222ba18ef0c486bda)
+and [upstream build guidance](https://doc.libsodium.org/installation) identify
+the source and platform prerequisites. Do not build a moving default branch
+or substitute a newly resolved tag without reviewing the dependency update.
+
+### Windows release runtime (recommended)
+
+From this repository root, the existing preparation helper downloads the
+official x64 MSVC archive, verifies its SHA-256 and size, extracts only the
+pinned DLL and exact license, and verifies the isolated ABI:
+
+```powershell
+python tools/prepare_ice_sodium.py --output-dir build/sodium-runtime --result build/sodium-runtime-result.json
+```
+
+Use a fresh result path for each preparation; the helper refuses to replace an
+existing receipt. `tools/prepare_ice_sodium.py` is the authoritative pin set:
+
+- Archive: `libsodium-1.0.22-msvc.zip`, release `1.0.22-RELEASE`.
+- Archive SHA-256: `3e03a726fac4bc09cb61d8f29d658ef7a5eca0811de59082130414f7ca2e4279`.
+- DLL member: `libsodium/x64/Release/v143/dynamic/libsodium.dll`.
+- DLL SHA-256: `f656aeb789bfc3a2ac587fae1d7cfe278bbe8ce73f28da73b4d08282ea8f9fe3`.
+
+The returned receipt names the verified DLL. Point `HOLDEM_LIBSODIUM` at that
+file for a process-local development run. Packaging consumes the verified
+receipt; a manually built DLL is not a substitute for that release input.
+
+### Source checkout for developer builds (all platforms)
+
+Run in a separate build workspace; Git refuses an already-existing destination:
+
+```sh
+git clone --no-checkout https://github.com/jedisct1/libsodium.git libsodium-1.0.22
+cd libsodium-1.0.22
+git checkout --detach 77e1ce5d6dee871c49ef211222ba18ef0c486bda
+git rev-parse HEAD
+git status --porcelain
+```
+
+Stop if checkout fails, the printed revision differs, or status is not empty.
+Record the compiler, SDK, configure/MSBuild flags and output library hash with
+your build evidence. The pinned source is reproducible provenance; it does
+not promise byte-identical binaries across toolchains.
+
+### Windows developer build (MSVC)
+
+Requires Visual Studio Build Tools with the C++ workload. From the verified
+checkout, in a Developer Command Prompt (adjust the installed toolset and SDK):
 
 ```bat
 call "<VS>\VC\Auxiliary\Build\vcvars64.bat"
@@ -36,21 +85,24 @@ msbuild libsodium.sln ^
   /p:UseEnv=true
 ```
 
-`/p:UseEnv=true` is required: it makes MSBuild honor the `INCLUDE`/`LIB`
-paths that `vcvars64.bat` set, so the CRT/SDK headers resolve. Without
-it the build fails with "cannot open include file 'stddef.h'".
+`/p:UseEnv=true` makes MSBuild honor the `INCLUDE`/`LIB` paths from
+`vcvars64.bat`. For these flags the DLL lands at
+`bin\x64\Release\v145\dynamic\libsodium.dll` relative to the checkout root.
+Copy the developer artifact to this game's `native/libsodium.dll` or select
+its absolute path with `HOLDEM_LIBSODIUM`.
 
-The DLL lands at
-`bin\x64\Release\v145\dynamic\libsodium.dll`; copy it here as
-`native/libsodium.dll`.
+### Linux / macOS developer build
 
-## Building on Linux / macOS
+From the same verified checkout, with the platform C compiler and Make installed:
 
 ```sh
-git clone https://github.com/jedisct1/libsodium
-cd libsodium && ./configure && make -j
-# copy src/libsodium/.libs/libsodium.so (or .dylib) into native/
+./configure && make -j && make check
+# copy src/libsodium/.libs/libsodium.so (or .dylib) into the game's native/
 ```
+
+Keep `make check` in the build, and stop on failure. These commands build a
+local artifact; they do not install system-wide or modify the game's release
+runtime pins.
 
 ## Verifying
 
