@@ -27,6 +27,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+from tests import joiner_helpers as JH
 
 try:
     initialize_for_tests()
@@ -117,8 +118,12 @@ def _table():
         s = Session(is_host=(cid == "A"), nickname=cid, avatar_b64="",
                     transport=StarTransport(bus, cid), sink=_Sink(),
                     admission=host_admission if cid == "A" else None,
+                    joiner_admission=(None if cid == "A" else JH.joiner_admission(
+                        _HOST_KEY, bytes.fromhex(KEY[cid]))),
                     clock=_DependencyClock(),
                     master_secret=bytes(range(32)))
+        if cid != "A":
+            JH.authenticate_host(s, "A", _HOST_KEY)
         s.local_conn_id = cid
         s._host_conn_id = "A"
         s._seat_order = ["A", "B", "C"]

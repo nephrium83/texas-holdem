@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+from tests import joiner_helpers as JH
 
 try:
     initialize_for_tests()
@@ -84,8 +85,10 @@ class _WireTransport:
 def _wire_joiner():
     s = Session(is_host=False, nickname="J", avatar_b64="",
                 transport=_WireTransport(),
+                joiner_admission=JH.joiner_admission(),
                 clock=_DependencyClock(),
                 master_secret=bytes(range(32)))
+    JH.authenticate_host(s, "host")
     s.local_conn_id = "me"
     s._host_conn_id = "host"
     return s

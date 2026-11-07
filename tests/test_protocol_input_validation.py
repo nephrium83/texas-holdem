@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
+from tests import joiner_helpers as JH
 
 try:
     initialize_for_tests()
@@ -188,6 +189,7 @@ class _Replica:
 def _bet_session():
     s = Session(is_host=False, nickname="P", avatar_b64="",
                 transport=J.FakeTransport(), clock=FakeClock(),
+                joiner_admission=JH.joiner_admission(),
                 master_secret=bytes([7]) * 32)
     s._replica = _Replica()
     s._hand_msg_ok = lambda conn_id, msg: True

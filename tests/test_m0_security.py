@@ -37,6 +37,7 @@ from holdem.p2p.session import (
     AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Player, Session,
     _duplicate_seat_ids,
 )
+from tests import joiner_helpers as JH
 
 
 def wire_session(cid="peer0", is_host=False):
@@ -45,6 +46,7 @@ def wire_session(cid="peer0", is_host=False):
     s = Session(is_host=is_host, nickname="P", avatar_b64="",
                 transport=InMemoryTransport(bus, cid),
                 author_mode=AUTHOR_MODE_WIRE,
+                joiner_admission=None if is_host else JH.joiner_admission(),
                 master_secret=b"\x02" * 32,
                 clock=_DependencyClock())
     s.local_conn_id = cid

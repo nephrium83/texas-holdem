@@ -28,6 +28,7 @@ from holdem.p2p.session import (
     AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, _HOSTLESS_PAYLOAD_TYPES, Player,
     Session,
 )
+from tests import joiner_helpers as JH
 
 KEY_A = "aa" * 32
 KEY_B = "bb" * 32
@@ -62,8 +63,13 @@ class _Spy:
 
 
 def _session(transport, mode=None):
+    # Only a WIRE-mode joiner needs (and may only be built with) a pin; a
+    # compat joiner given one would be gated on a handshake it never runs.
+    wire = mode == AUTHOR_MODE_WIRE or (
+        mode is None and getattr(transport, "delivers_verified_envelopes", None) is True)
     s = Session(is_host=False, nickname="n", avatar_b64="",
                 transport=transport, author_mode=mode,
+                joiner_admission=JH.joiner_admission() if wire else None,
                 clock=_DependencyClock(),
                 master_secret=bytes(range(32)))
     s.local_conn_id = "A"
@@ -87,7 +93,7 @@ def test_the_production_transport_declares_verified_envelopes():
         "the production transport no longer declares verified envelopes; "
         "Session would drop to conn_id trust in production")
     assert Session(is_host=False, nickname="n", avatar_b64="",
-                   transport=_prod,
+                   transport=_prod, joiner_admission=JH.joiner_admission(),
                    clock=_DependencyClock(),
                    master_secret=bytes(range(32))).author_mode == AUTHOR_MODE_WIRE
 
