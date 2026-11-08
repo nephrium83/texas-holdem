@@ -341,21 +341,108 @@ def test_stale_and_garbage_rejected():
     assert reps[0].state_digest() == d
 
 
-def test_settle_requires_complete_board():
-    reps = make_replicas(2, ["A", "B"], [500, 500])
+def _observable(rep):
+    """Everything a refused settlement must leave exactly as it was."""
+    return (rep.phase, rep.result, rep.next_seq, rep.state_digest(),
+            tuple(p.stack for p in rep.engine.players),
+            tuple(str(c) for c in rep.engine.board))
+
+
+def _lockup(reps):
+    """Drive a 2-handed all-in lockup preflop: contested 2, board 0."""
     r = reps[0]
     seq = 0
-    # get to an all-in lockup preflop (contested 2, board 0)
-    while r.phase == PHASE_BETTING:
+    # Bounded, and the verdict is checked -- the bare `while` here
+    # discarded it, so a refused action spun forever (audit #179/#195).
+    for _ in range(64):
+        if r.phase != PHASE_BETTING:
+            break
         seat = r.actor
         lg = r.engine.legal(seat)
         act = ("raise", lg["max_to"]) if lg["can_raise"] else ("call", 0)
-        for rep in reps:
-            rep.apply_action(seq, seat, act[0], act[1])
+        assert apply_all(reps, seq, seat, act[0], act[1]) == "applied"
         seq += 1
+    else:
+        raise AssertionError(
+            f"never reached a lockup: phase={r.phase} "
+            f"street={r.engine.street} seq={seq}")
     assert r.phase == PHASE_STREET_OVER
-    with pytest.raises(RuntimeError):
-        r.finish()                                  # board incomplete
+    assert len(r.engine.board) == 0
+    assert len(r.engine.contested()) == 2
+
+
+def test_settle_refuses_a_phase_that_cannot_settle():
+    """What the old test_settle_requires_complete_board actually caught.
+
+    From a preflop lockup the phase is street_over, and finish() checks
+    the PHASE before the board, so this is the refusal that setup
+    produces. The old test asserted a bare RuntimeError and so could not
+    tell the two apart -- see the test below for what it was named after.
+    """
+    reps = make_replicas(2, ["A", "B"], [500, 500])
+    _lockup(reps)
+    before = [_observable(rep) for rep in reps]
+    with pytest.raises(RuntimeError, match="cannot settle in phase street_over"):
+        reps[0].finish()
+    assert [_observable(rep) for rep in reps] == before, \
+        "a refused settlement left state behind"
+    assert_synced(reps)
+
+
+def test_settle_requires_complete_board():
+    """The incomplete-board guard -- which the old test never reached.
+
+    The old body was `with pytest.raises(RuntimeError): r.finish()` from
+    PHASE_STREET_OVER. finish() checks the phase FIRST, so what it caught
+    was "cannot settle in phase street_over"; the board guard below it was
+    never executed, in a test named after it. A gate above the one under
+    test, answering first -- audit #125, #166 and #190 all over again.
+    And with nothing asserted about the aftermath, an attempt that
+    half-settled (credited a pot, moved a phase, diverged one replica from
+    another) passed too (audit #172).
+
+    On the honest path PHASE_SHOWDOWN implies a full board, because the
+    only route to the river is advance_street. So the state this guard
+    exists for must be constructed: it defends against a defect -- or a
+    peer -- presenting a showdown the board never caught up with.
+    """
+    reps = make_replicas(2, ["A", "B"], [500, 500])
+    r = reps[0]
+    _lockup(reps)
+    for rep in reps:
+        rep.phase = PHASE_SHOWDOWN          # the state the guard defends
+
+    before = [_observable(rep) for rep in reps]
+    with pytest.raises(RuntimeError, match="board incomplete"):
+        r.finish()
+    assert [_observable(rep) for rep in reps] == before, \
+        "a refused settlement left state behind"
+    assert_synced(reps)
+
+    # Positive control: the SAME hand settles once the board and the holes
+    # are there. Without it the refusal above is also what an unsettleable
+    # hand looks like, and this test would pass if finish() never worked
+    # at all.
+    for rep in reps:
+        rep.phase = PHASE_STREET_OVER       # advance_street requires it
+    for cards in ([C("2c"), C("7d"), C("9h")], [C("Js")], [C("3h")]):
+        assert reps[0].phase == PHASE_STREET_OVER
+        for rep in reps:
+            rep.advance_street(cards)
+        assert_synced(reps)
+    assert r.phase == PHASE_SHOWDOWN
+    assert len(r.engine.board) == 5
+    holes = {0: [C("As"), C("Ah")], 1: [C("Kd"), C("Qd")]}
+    results = []
+    for rep in reps:
+        rep.set_all_holes(holes)
+        results.append(rep.finish())
+    assert all(res == results[0] for res in results), "replicas settled apart"
+    assert results[0]["winners"] == [0], "aces did not win"
+    assert all(rep.phase == PHASE_SETTLED for rep in reps)
+    assert sum(p.stack for p in reps[0].engine.players) == 1000
+
+
 
 
 def test_settle_that_does_not_conserve_chips_is_refused():

@@ -67,6 +67,27 @@ def make_session(conn_id="peer0", is_host=True, sink=None, clock=None):
     return s, bus
 
 
+def counts(sink):
+    """{event name: how many times it fired}.
+
+    Several tests in this file advertise cardinality in their NAMES --
+    "fires once per hand" -- and checked only that the event had happened
+    at least once, via last(). A duplicate passed, and a consumer that
+    double-counts hands is exactly what that would cause (audit #148).
+    """
+    out = {}
+    for event in sink.events:
+        name = event.get("event")
+        out[name] = out.get(name, 0) + 1
+    return out
+
+
+def positions(sink, event_name):
+    """Indices of an event within the whole stream, for ordering checks."""
+    return [i for i, e in enumerate(sink.events)
+            if e.get("event") == event_name]
+
+
 def make_table_with_sink(n=2, sinks=None):
     """N-player table; sinks[i] is the ListSink for peer i."""
     bus = InMemoryBus()
@@ -249,6 +270,13 @@ class TestHandStarted:
         ev = sinks[0].last("hand_started")
         assert ev is not None
         assert ev["hand"] == 1
+        # "once" is in the name and was never checked: last() is satisfied
+        # by one event or by five. Both peers, because a duplicate on the
+        # non-local side double-counts just as badly.
+        for i, sink in enumerate(sinks):
+            assert counts(sink).get("hand_started") == 1, (
+                f"peer {i} saw {counts(sink).get('hand_started')} "
+                f"hand_started events for one hand")
 
     def test_hand_started_has_digest(self):
         sinks = [ListSink(), ListSink()]
@@ -279,9 +307,13 @@ class TestActionEvents:
         sessions[actor_conn].send_bet_action("call")
         bus.drain()
 
-        # Both peers should see action_applied
-        assert sinks[0].last("action_applied") is not None
-        assert sinks[1].last("action_applied") is not None
+        # Both peers should see action_applied -- exactly once. last() was
+        # satisfied by a duplicate, which is a double-counted action in any
+        # consumer rebuilding the hand from the stream.
+        for i, sink in enumerate(sinks):
+            assert counts(sink).get("action_applied") == 1, (
+                f"peer {i} saw {counts(sink).get('action_applied')} "
+                f"action_applied events for one action")
 
     def test_action_applied_has_seat_and_action(self):
         sinks = [ListSink(), ListSink()]
@@ -297,7 +329,15 @@ class TestActionEvents:
         assert ev["action"] == "call"
 
     def test_action_received_fires_on_remote_peer(self):
-        """The non-acting peer should see action_received before action_applied."""
+        """The non-acting peer sees action_received BEFORE action_applied.
+
+        The ordering is the whole claim of this test's docstring, and the
+        old body never checked it: it took last("action_received"),
+        asserted it existed and carried action == "call", and stopped. A
+        stream that emitted them in the other order -- so a consumer
+        reconstructing the action audit read the chronology backwards --
+        passed (audit #148).
+        """
         sinks = [ListSink(), ListSink()]
         bus, sessions, order = make_table_with_sink(n=2, sinks=sinks)
         s0 = sessions[order[0]]
@@ -307,15 +347,24 @@ class TestActionEvents:
             # peer0 is the actor — peer1 will see the action_received
             sessions[order[0]].send_bet_action("call")
             bus.drain()
-            ev = sinks[1].last("action_received")
+            watcher = sinks[1]
         else:
             # peer1 is the actor — peer0 will see the action_received
             sessions[order[1]].send_bet_action("call")
             bus.drain()
-            ev = sinks[0].last("action_received")
+            watcher = sinks[0]
 
+        ev = watcher.last("action_received")
         assert ev is not None
         assert ev["action"] == "call"
+
+        received = positions(watcher, "action_received")
+        applied = positions(watcher, "action_applied")
+        assert len(received) == 1, f"action_received fired {len(received)}x"
+        assert len(applied) == 1, f"action_applied fired {len(applied)}x"
+        assert received[0] < applied[0], (
+            f"action_received at index {received[0]} came AFTER "
+            f"action_applied at {applied[0]}")
 
 
 # ---------------------------------------------------------------------------
