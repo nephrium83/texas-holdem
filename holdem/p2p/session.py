@@ -5083,33 +5083,85 @@ class Session:
         nothing here (correction from Codex's review of bb44ca0, which
         this docstring had described wrongly).
 
-        Scoped to _STALL_ENDS_PHASES -- the deal phases, which every peer
-        waits on identically. A betting deadline is asymmetric by design
-        (the actor has none), so ending on one would end everyone except
-        the player being waited for. A slow player on a table with no
-        agreed rule to act for them is a product question, not this one.
+        Two conditions, not one. SYMMETRY: scoped to _STALL_ENDS_PHASES,
+        the deal phases, which every peer waits on identically -- a betting
+        deadline is asymmetric by design (the actor has none), so ending on
+        one would end everyone except the player being waited for.
+        SUBSTANCE: the deal must actually report a missing public
+        contribution, because the phase label alone is true during ordinary
+        betting as well.
+
+        A slow player on a table with no agreed rule to act for them is a
+        product question, not this one, and the owner decided on
+        2026-11-08 to leave it alone.
         """
         self._assert_owner()
         if self.terminal_state is not None or not self._deadline_expired():
             return
         token = self._current_deadline_token
+
+        # Two different questions, and both have to be answered yes.
+        #
+        # SYMMETRY -- is this a deadline every peer shares? Ending on an
+        # asymmetric one ends everybody except the peer being waited for
+        # (see _STALL_ENDS_PHASES).
+        #
+        # Belt and braces, and said plainly: the substance check below
+        # already blocks every case this one does, so its own mutant is
+        # MASKED -- removing this line alone leaves
+        # test_a_slow_betting_actor_does_not_split_the_table green. It
+        # cannot currently be the operative guard, because the betting
+        # branch of _maybe_start_deadline is only reached once deal_done()
+        # is true, i.e. MentalDeal phase DONE, and public_waits() returns
+        # [] for DONE. Kept anyway: it states the symmetry requirement at
+        # the point it matters, so a future change that let a betting
+        # deadline coexist with outstanding waits cannot quietly start
+        # splitting tables. Do not "simplify" it away without re-checking
+        # that implication.
         if token.phase not in _STALL_ENDS_PHASES:
-            # Only a phase every peer waits on identically. See
-            # _STALL_ENDS_PHASES: ending on an asymmetric deadline ends
-            # everyone but the peer being waited for.
             return
+
+        # SUBSTANCE -- is anything actually missing? The phase LABEL is not
+        # evidence. _maybe_start_deadline keeps labelling a deadline
+        # "deal_shuffle" until deal_done(), and deal_done() ->
+        # MentalDeal.is_done() only becomes true after the POST-HAND AUDIT,
+        # so an ordinary betting turn on a perfectly healthy table carries
+        # one too. Ending on the label alone killed a table where nobody
+        # had withheld anything, because one player took thirty seconds:
+        #
+        #     replica=betting  deadline=deal_shuffle
+        #     is_shuffle_complete=True  hole_complete=True
+        #     -> all three peers ABORTED_PROTOCOL
+        #
+        # public_waits() is the method built for this question -- one
+        # descriptor per missing public contribution, and empty whenever
+        # nothing is outstanding. Measured: empty on a healthy betting
+        # table, and [{'phase': 'shuffle', 'actor': 1, 'detail': '2'}] on
+        # the withheld-round case #194 is actually about.
+        #
+        # Found by Codex reviewing ccfde7c. My own first reproduction had
+        # printed this exact state and I read past it, because I was
+        # looking for a split rather than at what had died.
+        deal = self._deal_driver.deal if self._deal_driver is not None else None
+        waits = deal.public_waits() if deal is not None else []
+        if not waits:
+            return
+
         # Read here and nowhere earlier: a sequence hole is only evidence
         # once a deadline has already decided that waiting became failure.
         holes = self.author_seq_hole_report()
-        waited_on = ("" if token.actor is None
-                     else f" from seat {token.actor}")
+        missing = ", ".join(
+            f"seat {w.get('actor')} ({w.get('phase')} {w.get('detail')})"
+            for w in waits)
         self.terminate(
             self.ABORTED_PROTOCOL,
-            f"no reply within the {token.phase} timeout{waited_on}; this "
-            f"table has no timekeeper, so there is no agreed way to recover",
+            f"still waiting on {missing} after the {token.phase} timeout; "
+            f"this table has no timekeeper, so there is no agreed way to "
+            f"recover",
             seat=token.actor,
             event={"token_phase": token.phase,
                    "action_seq": token.action_seq,
+                   "public_waits": waits,
                    "author_seq_holes": holes},
         )
 

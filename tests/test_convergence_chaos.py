@@ -457,3 +457,52 @@ def test_a_slow_betting_actor_does_not_split_the_table():
     assert not ended, (
         f"a slow betting actor ended {ended} but not "
         f"{sorted(set(order) - set(ended))}: the table split")
+
+
+def test_a_slow_turn_on_a_healthy_deal_ends_nobody():
+    """A slow betting turn must not end a table where nothing is missing.
+
+    Regression for Codex's second P1 on PR #138, and the more dangerous of
+    the two. _maybe_start_deadline keeps labelling a deadline
+    "deal_shuffle" until deal_done(), and deal_done() ->
+    MentalDeal.is_done() only becomes true after the POST-HAND AUDIT. So an
+    ordinary betting turn on a perfectly healthy table carries a
+    deal_shuffle deadline, and a stall-ending path that trusted the label
+    terminated all three peers:
+
+        replica=betting  deadline=deal_shuffle
+        is_shuffle_complete=True  hole_complete=True
+        -> peer0/peer1/peer2 ABORTED_PROTOCOL,
+           "no reply within the deal_shuffle timeout"
+
+    Nobody had withheld anything. One player was slow.
+
+    The sibling test reaches the betting branch by removing every deal
+    driver, which is exactly why it could not see this: with no driver
+    there is no misleading deal_shuffle label. This one keeps the REAL
+    driver attached, which is the production shape.
+    """
+    bus, sessions, order = make_table(3)
+
+    # The conditions this test exists for, asserted rather than assumed --
+    # if the fixture stops producing them it stops testing anything.
+    probe = sessions[order[0]]
+    deal = probe._deal_driver.deal
+    assert probe._deal_driver is not None, "no real deal driver attached"
+    assert probe._current_deadline_token.phase == "deal_shuffle", (
+        f"expected the misleading label, got "
+        f"{probe._current_deadline_token.phase!r}")
+    assert deal.is_shuffle_complete() and deal.hole_complete(), \
+        "the deal is genuinely incomplete, so this is a real stall"
+    assert deal.public_waits() == [], \
+        f"something really is missing: {deal.public_waits()}"
+
+    for _ in range(10):
+        for cid in order:
+            sessions[cid]._clock.advance(60.0)
+            sessions[cid].reliability_tick()
+        bus.drain()
+
+    ended = {cid: sessions[cid].terminal_reason
+             for cid in order if sessions[cid].terminal_state}
+    assert not ended, f"a healthy table was ended by a slow turn: {ended}"
