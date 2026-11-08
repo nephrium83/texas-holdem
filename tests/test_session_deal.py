@@ -208,22 +208,5 @@ def test_seat_spoof_is_rejected():
 
 
 if __name__ == "__main__":
-    passed = total = 0
-    for name, fn in sorted(globals().items()):
-        if not name.startswith("test_") or not callable(fn):
-            continue
-        marks = getattr(fn, "pytestmark", [])
-        params = None
-        for m in marks:
-            if m.name == "parametrize":
-                params = m.args[1]
-        cases = params if params else [None]
-        for c in cases:
-            total += 1
-            try:
-                fn(c) if params else fn()
-                passed += 1
-                print(f"  {name}{'['+str(c)+']' if params else ''}: ok")
-            except Exception as exc:
-                print(f"  {name}{'['+str(c)+']' if params else ''}: FAIL - {exc}")
-    print(f"{passed}/{total} passed")
+    # Preserve fixtures, parametrization and a failing process exit status.
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
