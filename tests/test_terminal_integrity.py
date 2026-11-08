@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
-from holdem.p2p.session import Player, Session
+from holdem.p2p.session import CommandRefused, Player, Session
 
 
 def table(n=3, stacks=None, hand_no=1):
@@ -66,8 +66,18 @@ def table(n=3, stacks=None, hand_no=1):
     return bus, sessions, order
 
 
-def snapshot(s):
-    """Everything a terminated session must hold still."""
+def snapshot(s, bus=None):
+    """Everything a terminated session must hold still.
+
+    The roster, the host flag and the outbound traffic used to be missing,
+    so the sweep below compared two identical snapshots and passed while
+    add_local_player and set_ready both wrote to a terminated session AND
+    broadcast the result to peers. Audit #190.
+
+    Every field is captured BY VALUE. Holding the Player objects would
+    alias the very mutation this is meant to detect, which is audit #156
+    in the relay tests.
+    """
     return {
         "state": s.state,
         "terminal_state": s.terminal_state,
@@ -86,6 +96,19 @@ def snapshot(s):
         "msg_buffer": len(s._msg_buffer),
         "deadline": s._current_deadline_token,
         "outbox": len(s._deal_outbox),
+        # ── roster and identity: the omission that hid audit #190 ──
+        "players": tuple(sorted(
+            (c, p.nickname, p.ready, p.unavailable, p.seat_index, p.is_host,
+             p.ed25519_pubkey_hex, p.x25519_pubkey_hex)
+            for c, p in s.players.items())),
+        "join_order": tuple(s._join_order),
+        "is_host": s.is_host,
+        "hand_voided": s.hand_voided,
+        "last_game_state": repr(s._last_game_state),
+        # A terminated peer must not put anything on the wire either. That
+        # is half of what made this a real defect rather than a local
+        # inconsistency, and it is what send_bet_action was fixed for.
+        "sent": None if bus is None else len(bus._queue),
     }
 
 
@@ -143,12 +166,12 @@ def test_no_local_entry_point_mutates_after_termination(name, call):
     s = sessions["peer1"]
     s.is_host = True                    # widen the reachable surface
     s.terminate(Session.HOST_LOST, "host dropped")
-    before = snapshot(s)
+    before = snapshot(s, bus)
     try:
         call(s)
     except RuntimeError:
         pass                            # refusing loudly is acceptable
-    assert snapshot(s) == before, f"{name} mutated a terminated session"
+    assert snapshot(s, bus) == before, f"{name} mutated a terminated session"
 
 
 @pytest.mark.parametrize("msg", HOSTILE_MESSAGES,
@@ -157,9 +180,10 @@ def test_no_inbound_message_mutates_after_termination(msg):
     bus, sessions, order = table()
     s = sessions["peer1"]
     s.terminate(Session.HOST_LOST, "host dropped")
-    before = snapshot(s)
+    before = snapshot(s, bus)
     s.handle_message("peer2", dict(msg))
-    assert snapshot(s) == before, f"{msg['type']} mutated a terminated session"
+    assert snapshot(s, bus) == before, \
+        f"{msg['type']} mutated a terminated session"
 
 
 def test_send_bet_action_after_termination_is_inert():
@@ -185,7 +209,7 @@ def test_termination_is_absorbing_under_a_full_sweep():
     s = sessions["peer1"]
     s.is_host = True
     s.terminate(Session.HOST_LOST, "host dropped")
-    before = snapshot(s)
+    before = snapshot(s, bus)
     for _name, call in MUTATORS:
         try:
             call(s)
@@ -193,7 +217,58 @@ def test_termination_is_absorbing_under_a_full_sweep():
             pass
     for msg in HOSTILE_MESSAGES:
         s.handle_message("peer2", dict(msg))
-    assert snapshot(s) == before
+    assert snapshot(s, bus) == before
+
+
+def lobby_table(n=3):
+    """A table terminated BEFORE any hand -- so _replica is None.
+
+    table() always starts a hand, which leaves configure_seats refusing
+    with "cannot change seat order during an active hand". That refusal is
+    not the absorbing property, and while it fired the real question was
+    never asked.
+    """
+    bus = InMemoryBus()
+    order = [f"peer{i}" for i in range(n)]
+    s = Session(is_host=True, nickname="P0", avatar_b64="",
+                transport=InMemoryTransport(bus, "peer0"),
+                master_secret=bytes(32), clock=_DependencyClock())
+    s.local_conn_id = "peer0"
+    s._host_conn_id = "peer0"
+    for c in order:
+        s.players[c] = Player(conn_id=c, peer_id=c, nickname=c, avatar_b64="")
+    s.configure_seats(list(order))
+    bus.register("peer0", s)
+    return bus, s, order
+
+
+def test_lobby_terminated_session_refuses_every_setup_command():
+    """The reachable path that made audit #190 a defect, not an omission.
+
+    With no hand ever started the active-hand gate is open, so these three
+    reached their bodies on a terminated session: configure_seats rewrote
+    the seat order -- to ids that are not even in the roster -- while
+    add_local_player and set_ready wrote the roster and then BROADCAST it
+    to a table this peer had already left.
+
+    terminate(LOCAL_SHUTDOWN) is callable at any time and the lobby is
+    exactly where all three are normally driven from, so this is not a
+    contrived state.
+    """
+    bus, s, order = lobby_table()
+    assert s._replica is None, "no hand may be running, or the wrong gate answers"
+    s.terminate(Session.LOCAL_SHUTDOWN, "user quit")
+    bus._queue.clear()
+    before = snapshot(s, bus)
+
+    with pytest.raises(CommandRefused):
+        s.configure_seats(["peer0", "zzz"])
+    with pytest.raises(CommandRefused):
+        s.add_local_player("intruder", public_key=bytes(range(32)))
+    s.set_ready("peer1", True)        # inert, not raising: see set_ready
+
+    assert snapshot(s, bus) == before, "a setup command mutated after termination"
+    assert not bus._queue, "a terminated session broadcast"
 
 
 # ------------------------------------------------ competing terminal causes
@@ -310,9 +385,18 @@ def test_concurrent_terminal_requests_yield_one_winner():
         # participate, or it would wait for a party that never arrives.
         gate = threading.Barrier(3)
 
+        errors = []
+
         def fire(state, reason):
-            gate.wait()
-            s.terminate(state, reason)
+            # Both the barrier wait and terminate() are inside the guard: a
+            # worker that died before reaching the barrier used to break it
+            # for the others, and an unbounded join() then hung the suite
+            # for 500 trials with no output.
+            try:
+                gate.wait()
+                s.terminate(state, reason)
+            except BaseException as exc:   # noqa: BLE001 - surfaced below
+                errors.append(exc)
 
         threads = [
             threading.Thread(target=fire, args=(Session.HOST_LOST, "A")),
@@ -322,7 +406,11 @@ def test_concurrent_terminal_requests_yield_one_winner():
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(10)
+        assert all(not t.is_alive() for t in threads), "a terminate() thread hung"
+        # Previously these raised into the interpreter's stderr and the test
+        # went green regardless.
+        assert not errors, f"a terminate() thread raised: {errors[:3]}"
         assert len(seen) == 1, f"{len(seen)} notifications"
         assert s.terminal_record is seen[0]
 
