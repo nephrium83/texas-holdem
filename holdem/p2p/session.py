@@ -4415,6 +4415,16 @@ class Session:
     def add_local_player(self, conn_id: str, *, public_key: bytes,
                          x25519_public_key: bytes = b"") -> None:
         """Register the local host with public keys supplied by its host app."""
+        # Absorbing, like every other setup command. Without this a
+        # terminated session accepted a new Player -- with is_host taken
+        # from self and ready=True -- and then BROADCAST the roster to a
+        # table this peer had already left. Same defect as the one
+        # send_bet_action was fixed for; found by audit #190, which is the
+        # test that could not see it because snapshot() omitted the roster.
+        if self.terminal_state is not None:
+            raise CommandRefused(
+                f"cannot add a local player: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
         if not isinstance(public_key, bytes) or len(public_key) != 32:
             raise ValueError("local Ed25519 public key must be 32 bytes")
         if (not isinstance(x25519_public_key, bytes)
@@ -4447,7 +4457,20 @@ class Session:
 
     @owned
     def set_ready(self, conn_id: str, ready: bool) -> None:
-        """Update a player's ready flag; host re-broadcasts the player list."""
+        """Update a player's ready flag; host re-broadcasts the player list.
+
+        Inert once terminal, rather than raising. This returns no verdict
+        and is driven both by a client toggle and by the ready ingress
+        (_on_ready), so refusing loudly would surface an exception in
+        callers that have no channel for one -- the same reason
+        send_bet_action returns "rejected" instead of raising. Before the
+        guard existed a terminated session wrote the flag and then
+        broadcast the roster into a table it had already left (audit #190).
+        """
+        if self.terminal_state is not None:
+            _log.debug("session: set_ready ignored — session is %s",
+                       self.terminal_state)
+            return
         with self._lock:
             if conn_id in self.players:
                 self.players[conn_id].ready = ready
@@ -4683,8 +4706,20 @@ class Session:
 
         Raises:
             ValueError:  order fails structural validation
-            RuntimeError: called during an active hand
+            RuntimeError: called during an active hand, or once terminal
         """
+        # Checked BEFORE the active-hand rule, not after. With no terminal
+        # guard at all, a session terminated in LOBBY -- where _replica is
+        # None, so the active-hand gate is open -- rewrote its seat order,
+        # and accepted ids that are not even in the roster. The sweep in
+        # test_terminal_integrity never saw it because its fixture leaves a
+        # hand running, so the active-hand refusal fired first and the real
+        # question was never reached (audit #190; the same shape as #125
+        # and #166).
+        if self.terminal_state is not None:
+            raise CommandRefused(
+                f"cannot change seat order: session terminated "
+                f"({self.terminal_state}: {self.terminal_reason})")
         if self._replica is not None and not self.hand_voided and self.hand_result is None:
             raise CommandRefused("cannot change seat order during an active hand")
         if len(order) < 2:
