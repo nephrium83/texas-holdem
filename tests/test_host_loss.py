@@ -63,11 +63,63 @@ def test_lobby_host_loss_elects_the_lowest_join_order():
 
 
 def test_lobby_election_does_not_promote_a_non_candidate():
+    """Declining the promotion is only half of it.
+
+    "not me" is also what a table with NO host looks like, so the old
+    assertions held just as well if the election had never run -- the worse
+    of the two failures. Audit #152 named the gap precisely: "an
+    implementation that promotes peer1 locally but leaves other peers
+    targeting or trusting the departed host would pass".
+
+    That was the implementation. _elect_new_host computed _join_order[0] on
+    every peer but recorded it only on the winner, so a non-candidate kept
+    pointing at the departed host and refused admin traffic -- and the new
+    host's own roster -- from the peer it had just elected.
+    """
     bus, sessions, order = make_peers(3)
-    peer2 = sessions["peer2"]
-    peer2.handle_disconnect("peer0")
+    peer1, peer2 = sessions["peer1"], sessions["peer2"]
+    changed = []
+    peer2.on_host_changed = changed.append
+
+    for cid in ("peer1", "peer2"):
+        sessions[cid].handle_disconnect("peer0")
+    bus.drain()
+
+    # The non-candidate did not promote itself, and the election DID run:
+    # on_host_changed(False) is what separates "I lost" from "nothing
+    # happened", which the old assertions could not tell apart.
     assert peer2.is_host is False
     assert peer2.terminal_state is None
+    assert changed == [False], f"the election did not run on peer2: {changed}"
+
+    # And every survivor agrees on who won.
+    assert peer1.is_host is True, "nobody was actually elected"
+    assert peer1._host_conn_id == "peer1"
+    assert peer2._host_conn_id == "peer1", (
+        f"non-candidate still targets {peer2._host_conn_id!r}")
+
+    # The roster is the OTHER representation of host identity, and the one
+    # a client renders the lobby from. The election used to set only
+    # self.is_host, so the winner broadcast a roster in which nobody was
+    # host and every peer faithfully adopted that -- two representations of
+    # the same fact, disagreeing.
+    #
+    # Asserted on a roster sent AFTER both peers have converged,
+    # deliberately. The broadcast _elect_new_host makes during the winner's
+    # own election can arrive at a peer that has not yet processed the
+    # disconnect, whose _host_conn_id still names the departed host, and is
+    # refused then with no retry. That ordering is a separate gap, recorded
+    # rather than fixed here: _host_conn_id, which every authority gate
+    # consults, is correct either way.
+    #
+    # (The "player_list from non-host peer1" warnings this test logs come
+    # from peer0 -- the departed host is still registered on the in-memory
+    # bus and refuses the new host's roster. Not peer2, which accepts it.)
+    with peer1._owner:
+        peer1._broadcast_player_list()
+    bus.drain()
+    assert peer2.players["peer1"].is_host is True, (
+        "the elected host broadcast a roster naming no host")
 
 
 def test_repeated_lobby_disconnect_is_idempotent():
