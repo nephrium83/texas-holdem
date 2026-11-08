@@ -244,12 +244,133 @@ def test_there_is_one_explicit_hostless_type_registry():
     })
 
 
+#: Which handler each registered hostless type must reach. Written out by
+#: hand, deliberately: deriving it from the dispatch would make the test
+#: agree with whatever the dispatch does, which is the circularity audit
+#: #126 is about. Asserted to cover the registry exactly, so a type added
+#: to _HOSTLESS_PAYLOAD_TYPES without an entry here fails rather than
+#: being silently unchecked.
+EXPECTED_HANDLER = {
+    "key_announce":         "_on_deal_message",
+    "deck_round":           "_on_deal_message",
+    "deal_share":           "_on_deal_message",
+    "audit_open":           "_on_deal_message",
+    "bet_action":           "_on_bet_action",
+    "hand_void":            "_on_hand_void",
+    "hand_settled":         "_on_hand_settled",
+    "session_end":          "_on_session_end",
+    "timeout_proposal":     "_on_timeout_proposal",
+    "peer_lost":            "_on_peer_lost",
+    "casual_clock_fault":   "clock_fault",
+    "casual_drop_observed": "receive_observation",
+    "casual_drop":          "receive_drop",
+    "casual_drop_ack":      "receive_ack",
+    "casual_drop_dispute":  "receive_dispute",
+}
+
+
 def test_the_dispatch_covers_every_registered_hostless_type():
-    """No type may be registered and then never dispatched, or vice versa."""
-    src = _src(Session.handle_message) + _src(Session._deliver_hand_message)
-    for mtype in _HOSTLESS_PAYLOAD_TYPES:
-        assert f'"{mtype}"' in src, (
-            f"{mtype} is in the registry but never dispatched")
+    """Every registered type must reach ITS OWN handler, exactly once.
+
+    Three earlier versions of this test passed for the wrong reason:
+
+      1. The first asserted only that the type's NAME appeared somewhere
+         in the dispatch source. A comment satisfies that.
+      2. The second walked the AST and required the matching branch to
+         contain a call. ANY call satisfied that, so rewriting the
+         bet_action branch to call print() left the test green while the
+         handler stopped being invoked at all.
+      3. The third -- this one, before the current fix -- recorded at
+         runtime but asserted only that SOMETHING fired. Routing
+         bet_action to _on_hand_void still appended a name, so the check
+         was satisfied and the mutant stayed green. Its own docstring
+         claimed a branch "pointed at the wrong handler ... records
+         nothing and fails", which was simply untrue: the assertion was
+         weaker than the sentence describing it, which is the defect this
+         suite exists to catch.
+
+    No reading of the source can settle the claim, because what it asserts
+    is where a message of each registered type ARRIVES. So each
+    destination gets a recorder, each type gets a message, and the result
+    is compared against EXPECTED_HANDLER -- a map written out by hand
+    above, not derived from the dispatch -- requiring exactly one call to
+    exactly the named destination.
+    """
+    from tests.test_session_hand import make_table
+
+    bus, sessions, order = make_table(2)
+    s = sessions["peer0"]
+    fired = []
+
+    def _recorder(name):
+        def handler(*a, **k):
+            fired.append(name)
+        return handler
+
+    # Every destination handle_message / _deliver_hand_message can route a
+    # hostless type to. hasattr first: a renamed handler must fail here
+    # rather than silently install a recorder nothing ever calls.
+    for attr in ("_on_deal_message", "_on_bet_action", "_on_hand_void",
+                 "_on_hand_settled", "_on_session_end",
+                 "_on_timeout_proposal", "_on_peer_lost"):
+        assert hasattr(s, attr), f"Session has no {attr}"
+        setattr(s, attr, _recorder(attr))
+
+    class _Continuation:
+        """The casual_drop_* family dispatches through this collaborator."""
+
+        departed = frozenset()
+        pending = None
+        carry = None
+
+        def receive_observation(self, body):
+            fired.append("receive_observation")
+
+        def receive_drop(self, body):
+            fired.append("receive_drop")
+
+        def receive_ack(self, body):
+            fired.append("receive_ack")
+
+        def receive_dispute(self, body):
+            fired.append("receive_dispute")
+
+    s._casual_continuation = _Continuation()
+
+    from holdem.p2p import casual_runtime
+    original_clock_fault = casual_runtime.clock_fault
+    casual_runtime.clock_fault = lambda session, body: fired.append(
+        "clock_fault")
+    # The expectation map and the registry must describe the same set, or a
+    # type could be registered and dispatched while nothing here says where
+    # it is supposed to land.
+    only_map = sorted(set(EXPECTED_HANDLER) - set(_HOSTLESS_PAYLOAD_TYPES))
+    only_reg = sorted(set(_HOSTLESS_PAYLOAD_TYPES) - set(EXPECTED_HANDLER))
+    assert not only_map and not only_reg, (
+        f"EXPECTED_HANDLER and the registry disagree: only in map "
+        f"{only_map}, only in registry {only_reg}")
+
+    try:
+        wrong = {}
+        for mtype in sorted(_HOSTLESS_PAYLOAD_TYPES):
+            fired.clear()
+            # Seatless and handless on purpose. In compat mode a body with
+            # no seat clears _admit_hostless without a bound seat key, and
+            # no "hand" keeps it out of the future-hand buffer -- so what
+            # the message has to survive is the dispatch, which is the
+            # subject, and not the authorization gate, which has its own
+            # tests in test_author_identity.
+            s.handle_message("peer1", {"type": mtype, "payload": {}})
+            # Exactly one call, to exactly the named destination. "Some
+            # handler ran" is what the previous version accepted, and a
+            # type routed to the WRONG handler satisfies that.
+            if fired != [EXPECTED_HANDLER[mtype]]:
+                wrong[mtype] = (list(fired), [EXPECTED_HANDLER[mtype]])
+        assert not wrong, (
+            "types that did not reach exactly their own handler "
+            f"(got, expected): {wrong}")
+    finally:
+        casual_runtime.clock_fault = original_clock_fault
 
 
 # ── narrow test-helper audit ──────────────────────────────────────────────

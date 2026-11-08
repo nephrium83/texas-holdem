@@ -3,6 +3,7 @@ at different times (no host to synchronize them), so deal/bet messages carry
 a hand number and are buffered until the local peer begins that hand. Without
 this an early key_announce is dropped and the deal deadlocks.
 """
+import itertools
 import sys
 from pathlib import Path
 
@@ -73,36 +74,65 @@ def test_early_begin_then_late_peers_still_deal():
     assert all(d == decks[0] for d in decks)
 
 
-def test_fully_staggered_start_in_any_interleaving():
+@pytest.mark.parametrize(
+    "perm", list(itertools.permutations(range(3))),
+    ids=lambda p: "".join(str(i) for i in p))
+def test_fully_staggered_start_in_any_interleaving(perm):
     """Each peer begins and drains before the next even starts -- the most
-    extreme skew. Buffering must still converge."""
+    extreme skew. Buffering must still converge.
+
+    EVERY start order, not one. "Any interleaving" was previously a claim
+    the body did not make: it ran the fixed order peer0, peer1, peer2.
+    """
     bus, sessions, order = make_table(3)
-    for cid in order:
-        sessions[cid].start_p2p_hand(hand_no=1, button=0, **_cfg(3))
+    for i in perm:
+        sessions[order[i]].start_p2p_hand(hand_no=1, button=0, **_cfg(3))
         bus.drain()                             # drain between each start
     for cid in order:
         assert all(c is not None for c in sessions[cid].deal_hole_cards)
         assert not sessions[cid].hand_voided
 
 
-def test_future_hand_bet_action_buffered_not_dropped():
-    """A bet_action for a hand a peer hasn't reached yet is buffered and
-    applied once it begins that hand, not dropped."""
+def test_future_hand_bet_action_buffered_and_then_applied():
+    """Buffered AND applied -- the second half is the point.
+
+    The previous version never applied anything: its loop over (1, 2)
+    copied the buffer onto itself, and it then re-filtered that buffer in
+    the test and asserted the item was still present. The replay
+    machinery could be deleted outright and it stayed green.
+    """
     bus, sessions, order = make_table(2)
-    # peer1 is 'ahead': craft a hand-2 bet_action and deliver it to peer0
-    # while peer0 is still at hand 0 (no hand begun)
+    peer0 = sessions["peer0"]
     future = {"type": "bet_action", "hand": 2, "seq": 0, "seat": 1,
               "action": "call", "amount": 0}
-    sessions["peer0"].handle_message("peer1", future)
-    assert sessions["peer0"]._msg_buffer          # buffered, awaiting hand 2
-    # peer0 progresses to hand 2 (start hand 1, then 2)
-    for h in (1, 2):
-        sessions["peer0"]._msg_buffer = [b for b in sessions["peer0"]._msg_buffer]
-        # (hand 1 has no partner here; we only check the buffer survives to h2)
-    # after reaching hand 2 the buffered bet is eligible; drop-stale check:
-    sessions["peer0"]._hand_no = 2
-    kept = [b for b in sessions["peer0"]._msg_buffer if b.incoming.hand >= 2]
-    assert kept, "hand-2 action should still be buffered at hand 2"
+    peer0.handle_message("peer1", future)
+    assert peer0._msg_buffer, "hand-2 action was not buffered"
+
+    applied = []
+
+    class _Replica:
+        next_seq = 0
+        phase = "BETTING"
+
+        def apply_action(self, *a):
+            applied.append(a)
+            return "applied"
+
+        def state_digest(self):
+            return "digest"
+
+    # Reaching hand 2 is what makes the buffered action eligible; replay is
+    # what must then deliver it to the replica.
+    peer0._hand_no = 2
+    peer0._replica = _Replica()
+    peer0._replay_buffer()
+
+    # Exactly the buffered action, exactly once. Asserting only
+    # applied[0][:2] admitted (0, 1, "fold", 99) -- a different action, for a
+    # different amount -- and admitted the same action being applied twice,
+    # which is the specific failure replay has to avoid.
+    assert applied == [(0, 1, "call", 0)], f"wrong replay: {applied}"
+    assert not peer0._msg_buffer, "the applied action stayed buffered"
 
 
 def test_stale_hand_message_ignored():
