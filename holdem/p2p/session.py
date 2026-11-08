@@ -97,6 +97,33 @@ FUTURE_HAND_WINDOW = 1
 FUTURE_PER_AUTHOR = 16
 FUTURE_BUFFER_MESSAGES = 128
 FUTURE_BUFFER_BYTES = 2 * 1024 * 1024
+#: Deadline phases on which a table with no timekeeper ends itself. The
+#: DEAL phases only, and the restriction is load-bearing (audit #194; P1
+#: from Codex on PR #138).
+#:
+#: A deal deadline carries actor=None and _maybe_start_deadline sets it on
+#: every peer alike, so ending on it is symmetric -- the whole table draws
+#: the same conclusion on its own clock, which is what makes this a
+#: liveness fix rather than a split.
+#:
+#: A BETTING deadline is deliberately asymmetric: "it is our turn; we set
+#: no deadline on ourselves". The acting peer therefore has NO deadline to
+#: expire, so ending on betting ends every peer EXCEPT the actor. That
+#: splits an honest table whenever a player merely takes too long, and
+#: leaves that player's UI accepting actions against peers that have
+#: already stopped. Reproduced before this restriction existed: peer0 and
+#: peer2 ABORTED_PROTOCOL, peer1 (the actor) still non-terminal after an
+#: hour of ticks.
+#:
+#: Nor is a slow player what #194 is about. That finding is a withheld
+#: shuffle round -- no human agency, and the protocol cannot proceed
+#: whatever anyone does. A slow human is resolved on casual tables by
+#: acting for them (auto check/fold at 30s) or dropping them (timekeeper
+#: at 45s, rule 9); a non-casual table has neither rule, and inventing one
+#: here would be a product decision rather than a liveness repair. Left
+#: for the owner, and recorded as such.
+_STALL_ENDS_PHASES = frozenset({"deal_shuffle", "deal_decrypt"})
+
 _DEFERRED_HAND_TYPES = frozenset({
     "key_announce", "deck_round", "deal_share", "audit_open",
     "bet_action", "hand_void", "hand_settled",
@@ -5049,11 +5076,22 @@ class Session:
         No proposal is sent. A message every recipient refuses is noise on
         the wire and a warning in each of their logs; the forensics belong
         in the terminal record, where they survive the transition.
+
+        Scoped to _STALL_ENDS_PHASES -- the deal phases, which every peer
+        waits on identically. A betting deadline is asymmetric by design
+        (the actor has none), so ending on one would end everyone except
+        the player being waited for. A slow player on a table with no
+        agreed rule to act for them is a product question, not this one.
         """
         self._assert_owner()
         if self.terminal_state is not None or not self._deadline_expired():
             return
         token = self._current_deadline_token
+        if token.phase not in _STALL_ENDS_PHASES:
+            # Only a phase every peer waits on identically. See
+            # _STALL_ENDS_PHASES: ending on an asymmetric deadline ends
+            # everyone but the peer being waited for.
+            return
         # Read here and nowhere earlier: a sequence hole is only evidence
         # once a deadline has already decided that waiting became failure.
         holes = self.author_seq_hole_report()

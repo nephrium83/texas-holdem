@@ -412,3 +412,48 @@ def test_selective_omission_reaches_a_terminal_outcome(victim):
         reason = sessions[cid].terminal_reason
         assert "deal_shuffle" in reason, reason
         assert "no agreed way to recover" in reason, reason
+
+
+def test_a_slow_betting_actor_does_not_split_the_table():
+    """Ending a stalled table must not end everyone EXCEPT the actor.
+
+    Regression for the P1 Codex raised on PR #138. A betting deadline is
+    asymmetric by design -- _maybe_start_deadline clears it on the acting
+    peer, "it is our turn; we set no deadline on ourselves" -- so a
+    stall-ending path that fired on any expired deadline ended every peer
+    but the one being waited for. Observed: peer0 and peer2
+    ABORTED_PROTOCOL, the actor still non-terminal after an hour of ticks,
+    its UI accepting actions against peers that had already stopped. An
+    honest table split by nothing worse than a player taking too long.
+
+    _end_if_stalled is restricted to _STALL_ENDS_PHASES for that reason:
+    the deal phases carry actor=None and are set on every peer alike, so
+    ending on one is symmetric. This pins the betting case staying whole.
+    """
+    bus, sessions, order = make_table(3)
+    # No deal driver puts _maybe_start_deadline on its betting branch,
+    # which is where the asymmetry lives (same route test_timeout takes).
+    for cid in order:
+        s = sessions[cid]
+        s._deal_driver = None
+        with s._owner:
+            s._maybe_start_deadline()
+
+    actor_conn = order[sessions[order[0]].replica.actor]
+    assert sessions[actor_conn]._current_deadline_token is None, (
+        "the actor has a deadline on itself, so this test no longer "
+        "exercises the asymmetry it was written for")
+    assert all(sessions[c]._current_deadline_token is not None
+               for c in order if c != actor_conn), \
+        "the watching peers have no betting deadline to expire"
+
+    for _ in range(60):
+        for cid in order:
+            sessions[cid]._clock.advance(60.0)
+            sessions[cid].reliability_tick()
+        bus.drain()
+
+    ended = sorted(c for c in order if sessions[c].terminal_state)
+    assert not ended, (
+        f"a slow betting actor ended {ended} but not "
+        f"{sorted(set(order) - set(ended))}: the table split")
