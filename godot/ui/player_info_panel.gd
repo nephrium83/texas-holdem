@@ -178,6 +178,9 @@ func _apply_result(snapshot: Dictionary, state: String) -> void:
 	var lines := PackedStringArray([turn_headline])
 	if summary_headline != turn_headline:
 		lines.append(summary_headline)
+	for payout in summary.get("payouts", []):
+		if payout is Dictionary:
+			lines.append("%s received %d" % [str(payout.get("name", "Seat")), int(payout.get("amount", 0))])
 	# The settlement view has always carried the showdown hands and any
 	# refund; the panel dropped both, so the hands that decided a showdown
 	# and an uncalled bet coming back appeared nowhere a player could read.

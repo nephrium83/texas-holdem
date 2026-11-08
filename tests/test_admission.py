@@ -407,16 +407,19 @@ def _joiner_session():
 
 
 def _perimeter(s):
-    """Everything a pre-auth message must not be able to move."""
-    return {
-        "players":        sorted(s.players),
-        "join_order":     list(s._join_order),
-        "peer_last_hash": dict(s._peer_last_hash),
-        "host_conn_id":   s._host_conn_id,
-        "local_conn_id":  s.local_conn_id,
-        "state":          s.state,
-        "seat_order":     list(s._seat_order),
-    }
+    """Deep state plus outbound effects, not merely roster key names."""
+    from copy import deepcopy
+    fields = ("_join_order", "_peer_last_hash", "_host_conn_id", "local_conn_id",
+              "state", "_seat_order", "_host_authenticated", "_pinned_host_pubkey",
+              "_roster_signing_keys", "_seat_keys", "_author_seq_out", "_author_seq_seen",
+              "_deal_policy", "_continuation_policy", "_deal_context_id", "_deal_outbox",
+              "_deal_hole", "_deal_board", "_hand_no", "_hand_seq", "_msg_buffer",
+              "_table_cfg", "_hand_stacks", "_deadline_started_at", "_current_deadline_token",
+              "terminal_state", "terminal_reason", "_last_table_settings", "_last_game_state")
+    return deepcopy({**{name: getattr(s, name) for name in fields},
+                     "players": {cid: vars(player) for cid, player in s.players.items()},
+                     "admission": vars(s._joiner_admission) if s._joiner_admission is not None else None,
+                     "sent": s._transport.sent})
 
 
 PRE_AUTH_FORGERIES = [
@@ -429,6 +432,18 @@ PRE_AUTH_FORGERIES = [
     ("chat",        {"payload": {"nickname": "x", "text": "hi"}}),
     ("key_announce", {"payload": {"seat": 0, "hand": 1}}),
 ]
+
+# Maintained independently from Session's dispatch registry. Every non-admission
+# surface must remain behind the same pre-authentication gate.
+PRE_AUTH_FORGERIES += [(kind, {"payload": {"seat": 0, "hand": 1, "seq": 0,
+                                        "action": "call", "amount": 0}})
+                       for kind in ("ready", "action", "game_state", "deal_private", "pause",
+                                    "resume", "kick", "adjust_blinds", "deck_round", "deal_share",
+                                    "audit_open", "bet_action", "hand_void", "hand_settled",
+                                    "session_end", "timeout_proposal", "peer_lost",
+                                    "casual_drop_observed", "casual_drop", "casual_drop_ack",
+                                    "casual_drop_dispute", "casual_clock_fault",
+                                    "casual_clock_request", "casual_clock_sample")]
 
 
 @pytest.mark.parametrize("mtype,extra", PRE_AUTH_FORGERIES,
@@ -444,11 +459,27 @@ def test_pre_auth_traffic_is_inert_and_moves_nothing(mtype, extra):
     unadmitted peer cannot seed per-peer state.
     """
     s = _joiner_session()
+    from holdem.p2p.session import Player
+    s.players["existing"] = Player(conn_id="existing", peer_id="existing",
+                                    nickname="Retained", avatar_b64="")
+
+    effects = []
+    handlers = ("_on_player_info", "_on_player_list", "_on_player_ack", "_on_game_start",
+                "_on_ready", "handle_game_action", "_on_game_state", "_on_deal_private",
+                "_on_chat", "_on_pause", "_on_resume", "_on_kick", "_on_adjust_blinds",
+                "_deliver_hand_message", "_on_session_end", "_on_timeout_proposal", "_on_peer_lost")
+    for name in handlers:
+        assert callable(getattr(s, name))
+        setattr(s, name, lambda *args, _name=name, **kwargs: effects.append(_name))
+    for name in ("on_deal_private", "on_chat", "on_game_start", "on_player_list_changed",
+                 "on_state_changed", "on_action", "on_pause", "on_resume", "on_kick"):
+        setattr(s, name, lambda *args, _name=name, **kwargs: effects.append(_name))
     before = _perimeter(s)
     msg = {"type": mtype, "pubkey": K2.hex(), "ts": 1, "prev": "0" * 64,
            "sig": "ff" * 64, "hash": "ab" * 32}
     msg.update(extra)
     s.handle_message("impostor", msg)
+    assert effects == [], f"pre-auth dispatch/callback invoked: {effects}"
     assert _perimeter(s) == before, (
         f"a pre-auth {mtype} moved session state before host authentication")
 
@@ -836,6 +867,7 @@ def test_malformed_handshake_input_is_dropped_not_raised(body):
     s.handle_message("c1", {"type": "admission_hello", "pubkey": K1.hex(),
                             "payload": body})
     assert not h.is_admitted("c1")
+    assert not h._pending and not h._admitted and not t.sent
 
 
 # ═══════════════════════ HOST LOSS DOES NOT MIGRATE (review finding 2)
@@ -1192,3 +1224,27 @@ def test_seat_local_table_is_refused_for_a_wire_mode_joiner_too():
         s.seat_local_table(["me", "someone_else"])
 
     assert s.players == {}
+
+
+@pytest.mark.parametrize("field", ["client_nonce", "server_nonce", "mac"])
+@pytest.mark.parametrize("bad", [None, "zz", [], "00" * 4])
+def test_malformed_response_with_live_challenge_never_admits_or_sends(field, bad):
+    from copy import deepcopy
+    h, t = _host_adm(), _Spy()
+    s = Session(is_host=True, nickname="H", avatar_b64="", transport=t, admission=h,
+                clock=_DependencyClock(), master_secret=bytes(range(32)))
+    cn = adm.new_nonce()
+    challenge = h.on_hello("c1", K1, cn)
+    h.on_hello("unrelated", K2, adm.new_nonce())
+    pending = deepcopy(h._pending)
+    sn = bytes.fromhex(challenge["server_nonce"])
+    body = dict(client_nonce=cn.hex(), server_nonce=sn.hex(), mac=_mac_for(cn, sn).hex())
+    body[field] = bad
+    s.handle_message("c1", {"type": "admission_response", "pubkey": K1.hex(), "payload": body})
+    assert not h._admitted and not t.sent
+    assert h._pending["unrelated"] == pending["unrelated"]
+    if bad == "00" * 4:
+        # Decodable wrong-size responses consume exactly their own attempt.
+        assert "c1" not in h._pending
+    else:
+        assert h._pending == pending  # rejected before invoking on_response

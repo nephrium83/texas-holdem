@@ -336,18 +336,57 @@ def _code_only(module) -> str:
     return "\n".join(out)
 
 
-def test_lan_and_relay_use_only_public_routing_data():
-    """No capability may reach discovery or the relay operator."""
-    code = _code_only(_onboarding)
-    assert "find_peer(discovery_token" in code, "LAN discovery lost its token"
-    assert "public_room_id(parsed)" in code, (
-        "the relay is no longer given the public room id")
-    assert "strip_code(code)" not in code, (
-        "the whole invite is being handed to the relay again")
-    assert "admission_secret" not in code.split("connect_via_relay")[1][:400], (
-        "a capability is reaching the relay call")
-    assert "args=(discovery_token" in code, (
-        "multicast announce is no longer publishing only the public token")
+@pytest.mark.parametrize("route", ["relay", "relay-to-lan", "lan"])
+def test_lan_and_relay_use_only_public_routing_data(route):
+    """Drive the shipped routing closure and inspect actual boundary arguments."""
+    from types import SimpleNamespace
+    parsed, _host = _invite_pair()
+    parsed = dict(parsed, public_ip="203.0.113.1", public_port=3456,
+                  relay_host="relay.invalid", relay_port=4567)
+    if route == "lan":
+        parsed["public_ip"] = None
+    routed, admitted, errors = [], [], []
+    def connect(address):
+        routed.append(("direct", address))
+        if address != "192.0.2.1:5678":
+            raise ConnectionError("direct refused")
+        return "lan-connection"
+    def relay(host, port, room):
+        routed.append(("relay", host, port, room))
+        if route == "relay-to-lan":
+            raise ConnectionError("relay refused")
+        return "relay-connection"
+    def find(token, timeout):
+        routed.append(("discovery", token, timeout))
+        return "192.0.2.1:5678"
+    def accept(conn, begin):
+        begin(conn)
+        return True
+    namespace = dict(parsed=parsed, addr_override="", discovery_token=parsed["discovery_token"],
+                     attempt=SimpleNamespace(active=True, accept_connection=accept),
+                     _transport=SimpleNamespace(connect=connect, connect_via_relay=relay, find_peer=find),
+                     _invite=inv, _ui_post=lambda fn: fn(),
+                     status_lbl=SimpleNamespace(config=lambda **kwargs: None),
+                     _DIM="dim", log=_onboarding.log, _conn_id_ref=[None], _conn_method_ref=[None],
+                     _auth_ref=[SimpleNamespace(begin=admitted.append)],
+                     _on_error=lambda *args: errors.append(args))
+    tree = ast.parse(inspect.getsource(_onboarding))
+    functions = [next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == name)
+                 for name in ("_dial", "_do_connect")]
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "<actual join routing>", "exec"), namespace)
+    namespace["_do_connect"]()
+    assert not errors, errors
+    assert admitted == ["relay-connection" if route == "relay" else "lan-connection"]
+    relay_calls = [call for call in routed if call[0] == "relay"]
+    discovery_calls = [call for call in routed if call[0] == "discovery"]
+    assert relay_calls == ([] if route == "lan" else [
+        ("relay", "relay.invalid", 4567, parsed["discovery_token"])])
+    assert parsed["discovery_token"] != parsed["admission_secret"]
+    assert all(argument != parsed["admission_secret"]
+               for call in relay_calls + discovery_calls for argument in call[1:])
+    assert discovery_calls == ([] if route == "relay" else [
+        ("discovery", parsed["discovery_token"], 15 if route == "lan" else 5)])
 
 
 # ── the UI-marshalling seam ───────────────────────────────────────────────
@@ -512,3 +551,22 @@ def test_the_join_path_does_not_persist_the_invite():
 # protection: it greps the shipped source for last_room_code and fires
 # when the write returns. Narrower than the deleted test pretended to be,
 # and unlike it, capable of failing.
+
+
+@pytest.mark.parametrize("kind", ["admission_challenge", "admission_accept"])
+@pytest.mark.parametrize("field", ["client_nonce", "server_nonce"])
+@pytest.mark.parametrize("bad", [None, "zz", [], "00" * 4])
+def test_malformed_host_handshake_cannot_reveal_identity_or_authenticate(kind, field, bad):
+    from copy import deepcopy
+    parsed, host, t, ja, sess, auth, events = _wire_up()
+    auth.begin("conn-1")
+    cn = bytes.fromhex(t.sent[-1][1]["client_nonce"])
+    challenge, sn = _challenge_from(host, "conn-1", _identity.public_key_bytes(), cn)
+    if kind == "admission_accept":
+        auth.route("conn-1", challenge)
+    body = dict(client_nonce=cn.hex(), server_nonce=sn.hex())
+    body[field] = bad
+    before = deepcopy(t.sent)
+    auth.route("conn-1", {"type": kind, "pubkey": HOST_KEY.hex(), "payload": body})
+    assert not sess._host_authenticated and not events["auth"]
+    assert t.sent == before, "malformed host input caused an admission reply or identity reveal"

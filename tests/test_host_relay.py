@@ -19,6 +19,7 @@ values, not original bytes.
 """
 from __future__ import annotations
 
+import copy
 import sys
 from pathlib import Path
 
@@ -95,6 +96,12 @@ class StarTransport:
                 self._bus.deliver(self._cid, t, msg)
 
     def send(self, to, msg):
+        # The star has no joiner-to-joiner edge. Permitting one lets a test
+        # "pass" over a path production cannot carry -- which is exactly the
+        # delivery the relay exists to provide, so a relay that silently
+        # stopped working could still look covered.
+        assert to in self._bus._peers_of(self._cid), (
+            f"{self._cid} -> {to} is not an edge of the star")
         if to in self._bus.sessions:
             self._bus.deliver(self._cid, to, msg)
 
@@ -166,14 +173,23 @@ def test_host_relays_a_joiner_message_to_the_other_joiner():
 
 
 def test_relay_preserves_every_signed_field():
-    """Courier, not author. The eight signed fields must be identical."""
+    """Courier, not author. The eight signed fields must be identical.
+
+    Compared against a DEEP copy taken before delivery. dict(env) is
+    shallow, so env["payload"] and the delivered dict are one object: a
+    host that mutated the payload in place would satisfy
+    got["payload"] == env["payload"] by aliasing, and the field this
+    test most needs to protect would be the one it could not see.
+    """
     bus, s = _table()
     env = _env("B", seat=1)
-    s["A"].handle_message("B", dict(env))
+    expected = copy.deepcopy(env)
+    s["A"].handle_message("B", copy.deepcopy(env))
     got = _received_by(bus, "C")[0]
     for field in ("v", "type", "payload", "pubkey", "ts", "prev", "sig",
                   "hash"):
-        assert got[field] == env[field], f"host altered {field!r} in transit"
+        assert got[field] == expected[field], (
+            f"host altered {field!r} in transit")
 
 
 def test_relayed_message_authenticates_as_the_original_author():
