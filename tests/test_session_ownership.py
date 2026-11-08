@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
-from holdem.p2p.session import Player, Session, SessionOwner
+from holdem.p2p.session import CommandRefused, Player, Session, SessionOwner
 
 
 def table(n=3):
@@ -166,21 +166,51 @@ def test_a_foreign_thread_blocks_until_the_owner_releases():
     assert s.terminal_state == Session.ABORTED_PROTOCOL
 
 
+#: Public Session methods that are deliberately NOT @owned, each with the
+#: reason it mutates no protocol state. An entry here is a claim that has to
+#: stay true; the test below also fails if one of these disappears, so the
+#: exemption cannot outlive what it exempts.
+NOT_MUTATORS = {
+    "peer_count":             "returns len(self.players) under _lock",
+    "player_list":            "copies the roster out under _lock",
+    "read_state":             "contextmanager: takes _owner and yields self",
+    "deal_done":              "predicate over _deal_driver.is_done()",
+    "deal_aborted":           "predicate over _deal_driver.aborted()",
+    "author_seq_holes":       "derived gap report over _author_seq_seen",
+    "author_seq_hole_report": "formats author_seq_holes for a hand",
+    "send_private_cards":     "legacy host send; writes no session state",
+}
+
+
 def test_every_public_mutator_is_owned():
-    """Guards against a future method being added without ownership."""
-    expected = [
-        "handle_message", "handle_disconnect", "terminate", "begin_hand",
-        "start_p2p_hand", "next_p2p_hand", "send_bet_action", "start_game",
-        "configure_seats", "reveal_board_street", "open_deal_audit",
-        "add_local_player", "set_ready", "check_deadlines", "mark_host_authenticated",
-        "broadcast_game_state", "handle_game_action", "set_host_engine",
-        "casual_drop", "reliability_tick",
-        "reliability_started", "reliability_view", "reliability_lobby_status",
-    ]
-    for name in expected:
-        method = getattr(Session, name)
-        assert getattr(method, "__owned__", False), \
-            f"Session.{name} mutates protocol state but is not @owned"
+    """Derived from the class, not from a list someone has to remember.
+
+    The old version iterated a hardcoded `expected` list of 23 names, so a
+    public method added without ownership was invisible to it -- which is
+    the thing it claimed to guard against. Three had already been added and
+    never reached the list: casual_timekeeper_seat, seat_local_table and
+    start_ready_game. All three happen to be @owned, which the old test
+    could not have told us either way.
+
+    Now the public surface is enumerated from Session itself, and every
+    entry must be either @owned or declared a non-mutator above with its
+    reason. A new public method fails here until it is classified.
+    """
+    public = {name: value for name, value in vars(Session).items()
+              if not name.startswith("_")
+              and not isinstance(value, property)
+              and callable(value)}
+    assert len(public) > 25, f"the surface scan found only {len(public)}"
+
+    unclassified = sorted(
+        name for name, method in public.items()
+        if not getattr(method, "__owned__", False) and name not in NOT_MUTATORS)
+    assert not unclassified, (
+        "public Session methods that are neither @owned nor a declared "
+        f"non-mutator: {unclassified}")
+
+    stale = sorted(set(NOT_MUTATORS) - set(public))
+    assert not stale, f"NOT_MUTATORS exempts methods that no longer exist: {stale}"
 
 
 # ------------------------------------------------- deterministic races
@@ -233,43 +263,67 @@ def test_disconnect_message_timeout_and_shutdown_race(trial):
     seen = []
     s.on_session_terminated = seen.append
 
+    # (name, callable, may it raise an ownership error). Only _void_hand is
+    # private and called from outside an owned context, so only it may; a
+    # public entry point raising one is a real failure, which a blanket
+    # `except RuntimeError: pass` used to absorb along with the refusals.
     actions = [
-        lambda: s.handle_disconnect("peer0"),
-        lambda: s.handle_message("peer2", {"type": "bet_action", "hand": 1,
-                                           "seq": 0, "seat": 2,
-                                           "action": "call", "amount": 0}),
-        lambda: s.check_deadlines(),
-        lambda: s.terminate(Session.LOCAL_SHUTDOWN, "user quit"),
-        lambda: s._void_hand("protocol failure"),
-        lambda: s.send_bet_action("call", 0),
+        ("handle_disconnect", lambda: s.handle_disconnect("peer0"), False),
+        ("handle_message",
+         lambda: s.handle_message("peer2", {"type": "bet_action", "hand": 1,
+                                            "seq": 0, "seat": 2,
+                                            "action": "call", "amount": 0}),
+         False),
+        ("check_deadlines", lambda: s.check_deadlines(), False),
+        ("terminate",
+         lambda: s.terminate(Session.LOCAL_SHUTDOWN, "user quit"), False),
+        ("_void_hand", lambda: s._void_hand("protocol failure"), True),
+        ("send_bet_action", lambda: s.send_bet_action("call", 0), False),
     ]
     gate = threading.Barrier(len(actions))
 
-    def run(fn):
-        gate.wait()
-        try:
-            fn()
-        except RuntimeError:
-            pass                          # refusing loudly is acceptable
+    errors = []
+    completed = []
 
-    threads = [threading.Thread(target=run, args=(f,)) for f in actions]
+    def run(name, fn, may_disown):
+        try:
+            gate.wait()
+            fn()
+            completed.append(name)
+        except CommandRefused:
+            completed.append(name)        # refusing loudly is acceptable
+        except BaseException as exc:      # noqa: BLE001 - surfaced below
+            if may_disown and isinstance(exc, RuntimeError):
+                completed.append(name)
+            else:
+                errors.append((name, exc))
+
+    threads = [threading.Thread(target=run, args=a) for a in actions]
     for t in threads:
         t.start()
     for t in threads:
         t.join(10)
 
     assert all(not t.is_alive() for t in threads), "a racing thread hung"
-    assert len(seen) <= 1, f"{len(seen)} terminal notifications"
-    if seen:
-        assert s.terminal_record is seen[0]
-        assert s.terminal_state == seen[0].terminal_state
-        # Absorbing: nothing may move it afterwards.
-        before = (s.terminal_state, s.terminal_reason, s.terminal_record)
-        s.terminate(Session.ABORTED_PROTOCOL, "late")
-        s.handle_disconnect("peer0")
-        s._void_hand("late")
-        assert (s.terminal_state, s.terminal_reason,
-                s.terminal_record) == before
+    # A thread raising anything other than a tolerated refusal used to
+    # vanish: the interpreter prints it and the test never saw it.
+    assert not errors, f"racing threads raised: {errors[:3]}"
+    assert sorted(completed) == sorted(n for n, _f, _d in actions), (
+        f"not every action ran: {sorted(completed)}")
+    # terminate(LOCAL_SHUTDOWN) is unconditional among the actions, so one
+    # terminal transition ALWAYS happens. `<= 1` was satisfied by every one
+    # of them being lost -- and `if seen:` then made the whole absorbing
+    # half of this test optional, which is where its value is.
+    assert len(seen) == 1, f"{len(seen)} terminal notifications"
+    assert s.terminal_record is seen[0]
+    assert s.terminal_state == seen[0].terminal_state
+    # Absorbing: nothing may move it afterwards.
+    before = (s.terminal_state, s.terminal_reason, s.terminal_record)
+    s.terminate(Session.ABORTED_PROTOCOL, "late")
+    s.handle_disconnect("peer0")
+    s._void_hand("late")
+    assert (s.terminal_state, s.terminal_reason,
+            s.terminal_record) == before
 
 
 def test_concurrent_local_and_inbound_commands_do_not_interleave():

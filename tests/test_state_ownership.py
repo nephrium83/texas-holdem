@@ -58,14 +58,22 @@ def _frame(msg_type: str, payload: dict) -> bytes:
 def test_messages_and_disconnects_share_one_thread():
     """The core ownership property. If these ran on different threads they
     would race on Session state that has no lock."""
+    # (name, ident), not name alone. Thread names are not unique, so two
+    # distinct dispatch threads -- exactly what a second worker would look
+    # like, and the race this test exists to rule out -- collapsed into one
+    # set entry and passed. Idents cannot collide while both are alive.
     threads = {"msg": set(), "disc": set(), "conn": set()}
     disconnected = threading.Event()
 
-    T.on_message(lambda cid, m: threads["msg"].add(threading.current_thread().name))
-    T.on_connect(lambda cid, a: threads["conn"].add(threading.current_thread().name))
+    def mark(bucket):
+        threads[bucket].add((threading.current_thread().name,
+                             threading.get_ident()))
+
+    T.on_message(lambda cid, m: mark("msg"))
+    T.on_connect(lambda cid, a: mark("conn"))
 
     def on_disc(cid):
-        threads["disc"].add(threading.current_thread().name)
+        mark("disc")
         disconnected.set()
 
     T.on_disconnect(on_disc)
@@ -74,14 +82,19 @@ def test_messages_and_disconnects_share_one_thread():
     host, port = address.rsplit(":", 1)
     client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
     client.sendall(_frame("chat", {"text": "x"}))
-    wait_until(lambda: threads["msg"], timeout=5)
+    assert wait_until(lambda: threads["msg"], timeout=5), \
+        "the message callback never ran"
     client.close()
     assert disconnected.wait(5), "disconnect callback never ran"
+
+    # Nothing below means anything if no callback ran.
+    assert threads["msg"], "no message callback ran"
+    assert threads["disc"], "no disconnect callback ran"
 
     observed = threads["msg"] | threads["disc"] | threads["conn"]
     assert len(observed) == 1, (
         f"transport callbacks ran on multiple threads: {observed}")
-    assert observed == {"p2p-dispatch"}, observed
+    assert {name for name, _ident in observed} == {"p2p-dispatch"}, observed
 
 
 def test_no_transport_callback_runs_on_the_event_loop():
@@ -95,9 +108,16 @@ def test_no_transport_callback_runs_on_the_event_loop():
     host, port = address.rsplit(":", 1)
     client = socket.create_connection(("127.0.0.1", int(port)), timeout=5)
     client.sendall(_frame("chat", {"text": "x"}))
-    wait_until(lambda: len(seen) >= 2, timeout=5)
+    assert wait_until(lambda: len(seen) >= 2, timeout=5), \
+        f"connect and message callbacks did not both run: {seen}"
     client.close()
-    wait_until(lambda: len(seen) >= 3, timeout=5)
+    assert wait_until(lambda: len(seen) >= 3, timeout=5), \
+        f"the disconnect callback did not run: {seen}"
+    # wait_until does not assert, so an empty `seen` satisfied the check
+    # below vacuously: no callback anywhere is not proof that none ran on
+    # the event loop. Connect, message and disconnect are all expected.
+    assert len(seen) >= 3, (
+        f"callbacks did not run, so where they ran is unproven: {seen}")
     assert not any("p2p-transport" in name for name in seen), \
         f"a callback ran on the event-loop thread: {seen}"
 

@@ -78,20 +78,68 @@ def act(bus, sessions, order, action, amount=0, ref=0, alive=None):
     assert_synced(sessions, order, alive)
 
 
+#: 9 seats across 4 streets, with room for a raise war on each. A hand that
+#: needs more actions than this is not progressing, and the job of the
+#: bound is to say so with the protocol state attached rather than to spin
+#: until the CI job dies (audit #179).
+MAX_ACTIONS_PER_HAND = 160
+
+
+def _progress(replica):
+    """What accepting an action has to change.
+
+    Any one of these moving is progress; none of them moving means the
+    action was absorbed, which is the regression that used to hang here.
+    The digest is included because a chip movement that leaves actor and
+    phase alone is still progress.
+    """
+    return (replica.phase, replica.actor, replica.next_seq,
+            replica.state_digest())
+
+
+def _drive(bus, sessions, order, choose, ref=0, alive=None):
+    """Act until betting ends -- bounded, and asserting progress each time.
+
+    These loops were `while phase == PHASE_BETTING` with nothing checking
+    that the hand advanced. act() does assert the verdict, so a REFUSED
+    action already failed loudly; what did not was an action accepted
+    without moving the actor, the street or the phase. That spun forever,
+    so a localized state-machine regression presented as the whole suite
+    hanging instead of as one failing assertion.
+    """
+    ref_s = sessions[order[ref]]
+    for n in range(MAX_ACTIONS_PER_HAND):
+        if ref_s.replica.phase != PHASE_BETTING:
+            return
+        before = _progress(ref_s.replica)
+        choose(ref_s.replica)
+        after = _progress(ref_s.replica)
+        assert after != before, (
+            f"action {n} was accepted but changed nothing: "
+            f"phase={before[0]} actor={before[1]} seq={before[2]}")
+    r = ref_s.replica
+    raise AssertionError(
+        f"betting did not end within {MAX_ACTIONS_PER_HAND} actions; last "
+        f"state phase={r.phase} actor={r.actor} seq={r.next_seq} "
+        f"street={r.engine.street} digest={r.state_digest()[:16]}")
+
+
 def checkdown(bus, sessions, order, ref=0, alive=None):
-    while sessions[order[ref]].replica.phase == PHASE_BETTING:
-        act(bus, sessions, order, "call", ref=ref, alive=alive)
+    _drive(bus, sessions, order,
+           lambda _r: act(bus, sessions, order, "call", ref=ref, alive=alive),
+           ref=ref, alive=alive)
 
 
 def allin_hand(bus, sessions, order, ref=0, alive=None):
-    while sessions[order[ref]].replica.phase == PHASE_BETTING:
-        r = sessions[order[ref]].replica
+    def shove(r):
         lg = r.engine.legal(r.actor)
         if lg["can_raise"]:
             act(bus, sessions, order, "raise", lg["max_to"],
                 ref=ref, alive=alive)
         else:
             act(bus, sessions, order, "call", ref=ref, alive=alive)
+
+    _drive(bus, sessions, order, shove, ref=ref, alive=alive)
 
 
 def next_all(bus, sessions, order):
