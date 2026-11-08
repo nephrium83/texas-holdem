@@ -142,6 +142,29 @@ def allin_hand(bus, sessions, order, ref=0, alive=None):
     _drive(bus, sessions, order, shove, ref=ref, alive=alive)
 
 
+def assert_one_seat_rotation(buttons, seats):
+    """The button advances exactly one seat per hand.
+
+    Three tests in this file advertised rotation and checked only that the
+    button CHANGED -- `a != b`, or "it visited every seat eventually". A
+    button that jumped two seats, or walked backwards, satisfied all of
+    them, and a misplaced button is misplaced blinds and the wrong preflop
+    order (audit #180).
+
+    Measured as uniform for 3, 4 and 5 seats with everyone still in: the
+    sequence is (prev + 1) % seats with no exceptions. Seats busting out
+    engage the engine's dead-button rule, which trails the BB and can
+    leave the button on a busted seat -- deliberately NOT asserted here.
+    That belongs to test_elimination_drops_seat_and_shrinks_next_deal and
+    test_busted_seat_spectates_survivors_play_on, which set it up.
+    """
+    assert len(buttons) >= 2, f"need two hands to see rotation: {buttons}"
+    for i, (a, b) in enumerate(zip(buttons, buttons[1:])):
+        assert b == (a + 1) % seats, (
+            f"hand {i + 2}: button moved {a} -> {b}, expected "
+            f"{(a + 1) % seats} (sequence {buttons})")
+
+
 def next_all(bus, sessions, order):
     """Every session advances (starts hand N+1 / spectates / ends), THEN
     the bus drains -- so all participants have begun before any hand-N+1
@@ -175,7 +198,7 @@ def test_two_hands_carry_stacks_and_rotate_button():
     # hand 2 opens with hand 1's settled stacks (minus this hand's blinds,
     # which the replicas all posted identically); button moved forward.
     btn2 = sessions[order[0]].replica.button
-    assert btn2 != btn1
+    assert_one_seat_rotation([btn1, btn2], 3)
     # fresh private holes for hand 2 (deal actually re-ran)
     every = []
     for cid in order:
@@ -187,14 +210,17 @@ def test_button_walks_full_orbit_over_many_hands():
     """Over several hands the button visits every seat: the dead-button
     chain is advancing, not sticking."""
     bus, sessions, order = make_table(4, stacks=[10000] * 4)
-    seen = {sessions[order[0]].replica.button}
+    seen = [sessions[order[0]].replica.button]
     for _ in range(8):
         checkdown(bus, sessions, order)
         v = next_all(bus, sessions, order)
         if set(v.values()) == {"session_over"}:
             break
-        seen.add(sessions[order[0]].replica.button)
-    assert len(seen) == 4, f"button only visited {seen}"
+        seen.append(sessions[order[0]].replica.button)
+    # Visiting every seat was the only thing asserted, and a button that
+    # jumped 0 -> 2 -> 1 -> 3 visits every seat too.
+    assert len(set(seen)) == 4, f"button only visited {sorted(set(seen))}"
+    assert_one_seat_rotation(seen, 4)
 
 
 def test_next_hand_not_ready_mid_hand():
@@ -610,9 +636,14 @@ def test_button_advances_one_seat_each_hand():
         v = next_all(bus, sessions, order)
         if set(v.values()) != {"started"}:
             break
-    # buttons are distinct hand-to-hand and every peer saw the same ones
-    for a, b in zip(seen, seen[1:]):
-        assert a != b
+    # "advances one seat each hand" is this test's name; `a != b` was the
+    # whole check, and a two-seat jump satisfies it.
+    assert_one_seat_rotation(seen, 4)
+    # And every peer agrees on where it is. `a != b` was read off peer 0
+    # alone, so a replica that rotated differently was never consulted.
+    final = {cid: sessions[cid].replica.button for cid in order}
+    assert len(set(final.values())) == 1, (
+        f"peers disagree on the button: {final}")
 
 
 def test_not_ready_before_hand_completes():

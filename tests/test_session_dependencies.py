@@ -4,6 +4,9 @@ from __future__ import annotations
 import builtins
 import io
 import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -171,6 +174,125 @@ def test_memory_session_never_selects_host_resources(tmp_path, monkeypatch):
         assert session._deal_master_secret == b"supplied-in-memory"
         session.terminate(Session.LOCAL_SHUTDOWN, "memory session complete")
     assert not config.exists()
+
+
+#: Imported in a FRESH interpreter with the guard already installed, so
+#: coupling that happens AT IMPORT TIME is visible. Parameterised by the
+#: module under test so the control below can point it at a module that
+#: really is host-coupled -- a probe that cannot fail proves nothing.
+_IMPORT_PROBE = """
+import builtins, sys
+
+FORBIDDEN = {
+    "holdem.p2p.identity", "holdem.p2p.device_secret",
+    "holdem.p2p.transport", "holdem.settings", "socket", "asyncio",
+}
+target = sys.argv[1]
+_real = builtins.__import__
+offenders = []
+
+def guard(name, globals=None, locals=None, fromlist=(), level=0):
+    requested = {name}
+    for entry in fromlist or ():
+        requested.add(name + "." + entry)
+    bad = requested & FORBIDDEN
+    if bad:
+        offenders.append(sorted(bad))
+    return _real(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guard
+failure = None
+try:
+    __import__(target)
+except BaseException as exc:
+    failure = "%s: %s" % (type(exc).__name__, exc)
+finally:
+    builtins.__import__ = _real
+
+# Checked twice over: nothing forbidden was REQUESTED through
+# builtins.__import__, and nothing forbidden is RESIDENT in sys.modules --
+# which catches an import routed around it, e.g. through importlib.
+resident = sorted(m for m in FORBIDDEN if m in sys.modules)
+if offenders or resident:
+    # Reported BEFORE the import failure is considered, so a target that
+    # trips the guard and then dies still says what it tripped.
+    print("REQUESTED=%r RESIDENT=%r" % (offenders, resident))
+    sys.exit(1)
+if failure is not None:
+    # A distinct code: the import did not complete, so this run proves
+    # nothing either way about the boundary.
+    print("IMPORT_FAILED=%s" % failure)
+    sys.exit(2)
+print("CLEAN")
+"""
+
+
+def _run_import_probe(target, tmp_path):
+    repo = str(Path(__file__).resolve().parents[1])
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = repo
+    environment["HOLDEM_CONFIG_DIR"] = str(tmp_path / "config")
+    return subprocess.run(
+        [sys.executable, "-c", _IMPORT_PROBE, target],
+        cwd=repo, env=environment, capture_output=True, text=True,
+        timeout=180)
+
+
+def test_importing_session_selects_no_host_resource(tmp_path):
+    """Import-time coupling, which the in-process test cannot see.
+
+    test_memory_session_never_selects_host_resources patches
+    builtins.__import__ inside its own body -- but this module imports
+    holdem.p2p.session at the top, so by the time the patch is installed
+    the import has already happened, and everything session.py pulls in AT
+    IMPORT TIME is invisible to it. A regression that put `import socket`,
+    a settings read, or a device-secret load at module scope would pass
+    that test unchanged (audit #174).
+
+    Run in a fresh interpreter instead, with the guard installed before
+    the subject is imported.
+    """
+    proc = _run_import_probe("holdem.p2p.session", tmp_path)
+    assert proc.returncode == 0, (
+        "importing holdem.p2p.session selected a host resource:\n"
+        f"{proc.stdout}{proc.stderr}")
+    assert "CLEAN" in proc.stdout, proc.stdout + proc.stderr
+    assert not (tmp_path / "config").exists(), \
+        "importing the session module created a config directory"
+
+
+def test_control_the_import_probe_fires_on_a_host_module(tmp_path):
+    """The probe above is worthless unless it can fail.
+
+    Pointed at ``socket``, which is on the forbidden list and is in the
+    standard library, so this control holds in any environment.
+
+    It used to target holdem.p2p.transport, which is host-coupled by design
+    -- but importing it reaches wire -> signing -> cryptography, and
+    cryptography is an OPTIONAL extra here: pyproject declares
+    ``dependencies = []`` and lists it only under desktop/p2p/introducer/
+    dev. So without that extra the control died on ModuleNotFoundError
+    before reporting anything, failing for a reason that has nothing to do
+    with the boundary -- in the one file whose whole purpose is to assert
+    that the embeddable core needs only the standard library. Found by
+    Codex reviewing a94d617.
+    """
+    proc = _run_import_probe("socket", tmp_path)
+    assert proc.returncode == 1, (
+        "the import probe passed on a forbidden module, so it cannot be "
+        f"trusted on session:\n{proc.stdout}{proc.stderr}")
+    assert "RESIDENT=" in proc.stdout or "REQUESTED=" in proc.stdout, \
+        proc.stdout + proc.stderr
+
+
+def test_control_the_import_probe_separates_a_crash_from_a_violation(tmp_path):
+    """A target that cannot be imported must not read as a clean boundary
+    -- nor as a violated one. Exit 2 says the run proves nothing."""
+    proc = _run_import_probe("holdem.p2p.no_such_module", tmp_path)
+    assert proc.returncode == 2, (
+        f"an unimportable target did not report IMPORT_FAILED:\n"
+        f"{proc.stdout}{proc.stderr}")
+    assert "IMPORT_FAILED=" in proc.stdout, proc.stdout + proc.stderr
 
 
 def test_event_and_terminal_records_use_the_supplied_clock():
