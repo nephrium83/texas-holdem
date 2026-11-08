@@ -138,6 +138,9 @@ def outcome(sessions, order):
             "phase": deal.phase.value if deal else None,
             "abort": deal.abort_reason if deal else None,
             "holes": deal.hole_complete() if deal else False,
+            # A third shape, introduced by #194: a table with no agreed way
+            # to recover ends rather than voiding or settling.
+            "terminal": s.terminal_state,
         }
     return out
 
@@ -152,20 +155,44 @@ def assert_converged(sessions, order):
     assert len(voided) == 1, f"peers disagree on whether the hand voided: {out}"
     assert not any(o["voided"] and o["settled"] for o in out.values()), \
         f"a peer both voided and settled the hand: {out}"
-    if not voided.pop():
-        for key in ("deck", "phase", "abort", "holes"):
-            values = {o[key] for o in out.values()}
-            assert len(values) == 1, f"peers disagree on {key}: {out}"
-        assert all(o["abort"] is None for o in out.values()), out
-        assert all(o["holes"] for o in out.values()), \
-            f"a live hand has a peer without hole cards: {out}"
+    if voided.pop():
+        return out
+
+    # An ENDED table is the third outcome (#194). With no timekeeper there
+    # is no agreed recovery, so the session terminates instead of voiding;
+    # such a peer holds no hole cards and is not a live hand, so the
+    # live-hand checks below cannot apply to it. What must still hold is
+    # that every peer agrees it ended, and ended the same way -- a table
+    # where one peer ended and the others play on IS disagreement, and the
+    # single-value assertion catches it.
+    ended = {o["terminal"] for o in out.values()}
+    if any(ended):
+        assert len(ended) == 1, f"peers disagree on the terminal state: {out}"
+        assert not any(o["settled"] for o in out.values()), \
+            f"a peer both ended the session and settled the hand: {out}"
+        return out
+
+    for key in ("deck", "phase", "abort", "holes"):
+        values = {o[key] for o in out.values()}
+        assert len(values) == 1, f"peers disagree on {key}: {out}"
+    assert all(o["abort"] is None for o in out.values()), out
+    assert all(o["holes"] for o in out.values()), \
+        f"a live hand has a peer without hole cards: {out}"
     return out
 
 
 def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
     """Liveness: advance every peer's clock past its deadline, run the
-    public timeout path, deliver what it emits -- until every peer has
-    reached a terminal outcome for the hand (or fail)."""
+    PRODUCTION periodic path, deliver what it emits -- until every peer has
+    reached a terminal outcome for the hand (or fail).
+
+    reliability_tick, not check_deadlines. check_deadlines reports a wait
+    and applies nothing by design, and has no production caller;
+    reliability_tick is what a host app polls, and it is where a stalled
+    table without a timekeeper is ended (#194). Driving the report-only
+    path meant this helper exercised an announcement rather than the
+    behaviour its name describes.
+    """
     def terminal(s):
         return s.hand_voided or s.hand_result is not None or s.terminal_state
     for _ in range(rounds):
@@ -173,7 +200,7 @@ def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
             return
         for c in order:
             sessions[c]._clock.advance(step)
-            sessions[c].check_deadlines()
+            sessions[c].reliability_tick()
         bus.drain()
     stuck = [c for c in order if not terminal(sessions[c])]
     pytest.fail(f"peers never reached a terminal outcome: {stuck}")
@@ -350,15 +377,22 @@ def test_selective_omission_terminates_deterministically(victim):
     assert len(done) <= 1, f"peers finished the shuffle on different decks: {out}"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known liveness gap (audit #194): on the core session path a stalled deal "
-    "has no public recovery -- timeout_proposals are refused everywhere until "
-    "rule 9's timekeeper exists (Session._on_timeout_proposal), so a withheld "
-    "shuffle round stalls the hand. Casual-continuation tables have their own "
-    "reliability path. strict=True: this flips to a FAILURE the moment a "
-    "timekeeper makes it pass, so the marker cannot outlive the gap."))
 @pytest.mark.parametrize("victim", ["peer1", "peer2"])
 def test_selective_omission_reaches_a_terminal_outcome(victim):
+    """A withheld shuffle round must not leave the table waiting for ever.
+
+    Audit #194, and the owner decision of 2026-11-07: recover under the
+    table's agreed rules, or end clearly. This table runs no casual
+    reliability, so it has no timekeeper and no drop rule -- there is
+    nothing to recover under, and _end_if_stalled ends it.
+
+    It does NOT void. The previous expectation here was a void, which
+    assumed the timekeeper rule 9 defines for CASUAL tables and that this
+    path has never had: a void is recoverable and redeals the same seats at
+    the same button, so on a clock it would redeal straight back into the
+    same stall. That expectation rode along under a strict xfail, so it was
+    never run against the behaviour it described.
+    """
     def omit(msg, from_conn, to_conn):
         body = msg.get("payload", msg)
         if body.get("round") == 1 and to_conn == victim:
@@ -368,4 +402,107 @@ def test_selective_omission_reaches_a_terminal_outcome(victim):
     bus, sessions, order = make_table(3, rewrite=omit)
     drive_to_terminal(bus, sessions, order)
     out = assert_converged(sessions, order)
-    assert all(o["voided"] for o in out.values()), out
+
+    assert all(o["terminal"] == Session.ABORTED_PROTOCOL
+               for o in out.values()), out
+    assert not any(o["voided"] or o["settled"] for o in out.values()), out
+    # The reason has to say what was waited on, or an operator reading a
+    # dead table learns nothing from it.
+    for cid in order:
+        reason = sessions[cid].terminal_reason
+        assert "deal_shuffle" in reason, reason
+        assert "no agreed way to recover" in reason, reason
+
+
+def test_a_slow_betting_actor_does_not_split_the_table():
+    """Ending a stalled table must not end everyone EXCEPT the actor.
+
+    Regression for the P1 Codex raised on PR #138. A betting deadline is
+    asymmetric by design -- _maybe_start_deadline clears it on the acting
+    peer, "it is our turn; we set no deadline on ourselves" -- so a
+    stall-ending path that fired on any expired deadline ended every peer
+    but the one being waited for. Observed: peer0 and peer2
+    ABORTED_PROTOCOL, the actor still non-terminal after an hour of ticks,
+    its UI accepting actions against peers that had already stopped. An
+    honest table split by nothing worse than a player taking too long.
+
+    _end_if_stalled is restricted to _STALL_ENDS_PHASES for that reason:
+    the deal phases carry actor=None and are set on every peer alike, so
+    ending on one is symmetric. This pins the betting case staying whole.
+    """
+    bus, sessions, order = make_table(3)
+    # No deal driver puts _maybe_start_deadline on its betting branch,
+    # which is where the asymmetry lives (same route test_timeout takes).
+    for cid in order:
+        s = sessions[cid]
+        s._deal_driver = None
+        with s._owner:
+            s._maybe_start_deadline()
+
+    actor_conn = order[sessions[order[0]].replica.actor]
+    assert sessions[actor_conn]._current_deadline_token is None, (
+        "the actor has a deadline on itself, so this test no longer "
+        "exercises the asymmetry it was written for")
+    assert all(sessions[c]._current_deadline_token is not None
+               for c in order if c != actor_conn), \
+        "the watching peers have no betting deadline to expire"
+
+    for _ in range(60):
+        for cid in order:
+            sessions[cid]._clock.advance(60.0)
+            sessions[cid].reliability_tick()
+        bus.drain()
+
+    ended = sorted(c for c in order if sessions[c].terminal_state)
+    assert not ended, (
+        f"a slow betting actor ended {ended} but not "
+        f"{sorted(set(order) - set(ended))}: the table split")
+
+
+def test_a_slow_turn_on_a_healthy_deal_ends_nobody():
+    """A slow betting turn must not end a table where nothing is missing.
+
+    Regression for Codex's second P1 on PR #138, and the more dangerous of
+    the two. _maybe_start_deadline keeps labelling a deadline
+    "deal_shuffle" until deal_done(), and deal_done() ->
+    MentalDeal.is_done() only becomes true after the POST-HAND AUDIT. So an
+    ordinary betting turn on a perfectly healthy table carries a
+    deal_shuffle deadline, and a stall-ending path that trusted the label
+    terminated all three peers:
+
+        replica=betting  deadline=deal_shuffle
+        is_shuffle_complete=True  hole_complete=True
+        -> peer0/peer1/peer2 ABORTED_PROTOCOL,
+           "no reply within the deal_shuffle timeout"
+
+    Nobody had withheld anything. One player was slow.
+
+    The sibling test reaches the betting branch by removing every deal
+    driver, which is exactly why it could not see this: with no driver
+    there is no misleading deal_shuffle label. This one keeps the REAL
+    driver attached, which is the production shape.
+    """
+    bus, sessions, order = make_table(3)
+
+    # The conditions this test exists for, asserted rather than assumed --
+    # if the fixture stops producing them it stops testing anything.
+    probe = sessions[order[0]]
+    deal = probe._deal_driver.deal
+    assert probe._deal_driver is not None, "no real deal driver attached"
+    assert probe._current_deadline_token.phase == "deal_shuffle", (
+        f"expected the misleading label, got "
+        f"{probe._current_deadline_token.phase!r}")
+    assert deal.is_shuffle_complete() and deal.hole_complete(), \
+        "the deal is genuinely incomplete, so this is a real stall"
+    assert deal.public_waits() == [], \
+        f"something really is missing: {deal.public_waits()}"
+
+    for _ in range(10):
+        for cid in order:
+            sessions[cid]._clock.advance(60.0)
+            sessions[cid].reliability_tick()
+        bus.drain()
+
+    ended = {cid: sessions[cid].terminal_reason
+             for cid in order if sessions[cid].terminal_state}
+    assert not ended, f"a healthy table was ended by a slow turn: {ended}"
