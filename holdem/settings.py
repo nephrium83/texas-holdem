@@ -372,7 +372,14 @@ def save(client: dict, last_table: dict) -> bool:
                    "last_table": _changes(last_table, TABLE_RULE)}
         path = config_path()
         with _json_lock(path):
-            current = _settings_from_raw(_read_json_mapping(path))
+            raw = _read_json_mapping(path)
+            current = _settings_from_raw(raw)
+            # An unrelated preference write must not manufacture a normalized
+            # wallet balance. Only an explicit bankroll patch may replace it;
+            # financial transfers validate the raw stored value themselves.
+            for wallet_key in ("bankroll", "player_level", "last_daily_bonus_date"):
+                if wallet_key not in patches["client"] and wallet_key in raw.get("client", {}):
+                    current["client"][wallet_key] = raw["client"][wallet_key]
             for name, changes in patches.items():
                 current[name].update(changes)
             current["last_table"] = table_rules(**current["last_table"])

@@ -8,7 +8,10 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize("module", ["test_bg_svp.py", "test_dleq.py", "test_ristretto.py"])
+@pytest.mark.parametrize("module", ["test_bg_svp.py", "test_dleq.py", "test_ristretto.py",
+                                    "test_pedersen.py", "test_elgamal.py", "test_keygen_pop.py",
+                                    "test_contract.py", "test_shuffle_mp.py", "test_shuffle_proof.py",
+                                    "test_client_view.py"])
 @pytest.mark.parametrize("failing", [False, True])
 def test_direct_runner_preserves_pytest_exit(module, failing, tmp_path):
     source = (Path(__file__).parent / module).read_text()
