@@ -4775,10 +4775,19 @@ class Session:
     def check_deadlines(self) -> None:
         """Report the current deadline to the table once it has expired.
 
-        Call this periodically from the event loop (e.g. every second).
+        NOT the periodic entry point -- reliability_tick is. This reports a
+        wait and applies nothing, by design: the report is a
+        timeout_proposal, which no game applies, this one included (see
+        _on_timeout_proposal). A host app that polled only this would get
+        the announcement and never the consequence, which is the #194
+        behaviour the owner decision rejected. reliability_tick routes a
+        stalled non-casual table to _end_if_stalled, and a casual one to
+        its timekeeper.
+
+        Note that reporting CLEARS the deadline, so this and _end_if_stalled
+        are alternatives for one wait, not a sequence. Kept because the
+        report is useful forensics and test_timeout pins its contract.
         Tests advance the FakeClock then call this directly — no sleeping.
-        The report is a timeout_proposal, which no game applies, this one
-        included (see _on_timeout_proposal).
         """
         if self._deadline_expired():
             self._broadcast_timeout_proposal(self._current_deadline_token)
@@ -4989,6 +4998,76 @@ class Session:
         elif self._casual_reliability:
             from holdem.p2p.casual_runtime import runtime
             runtime(self).tick(self)
+        if not self._casual_reliability:
+            # No timekeeper exists on this table, so there is no agreed rule
+            # to recover under. See _end_if_stalled.
+            #
+            # Deliberately NOT gated on self.state. A hand can be in flight
+            # while state is still LOBBY -- nothing forces a host app to set
+            # it, and the deadline machinery keys off _replica/_deal_driver
+            # rather than state (see _maybe_start_deadline), which is how
+            # the convergence-chaos tables run. A deadline is only ever
+            # started with a live replica, and the lobby phase timeouts in
+            # DEFAULT_PHASE_TIMEOUTS are never used as a token phase, so
+            # the live deadline is the gate and this cannot end a lobby.
+            self._end_if_stalled()
+
+    def _end_if_stalled(self) -> None:
+        """End a table that has no agreed way to recover (audit #194).
+
+        Casual tables recover under rule 9: once a phase clock expires the
+        timekeeper sends a signed drop notice naming its sender and play
+        continues (casual_runtime.tick, CASUAL_P2P_RULES.md rule 9). A
+        table that is not running casual reliability has no timekeeper and
+        no drop rule, so a withheld shuffle round or a silent actor leaves
+        it waiting for a message that is never coming.
+
+        Before this, the only public response was check_deadlines ->
+        _broadcast_timeout_proposal, which reports the wait, sends a
+        proposal NO game applies -- including the sender, see
+        _on_timeout_proposal -- and then CLEARS the deadline so each wait
+        is reported once. The wait was announced and the table stayed
+        blocked for good. check_deadlines also had no production caller at
+        all, so in production even the announcement never happened.
+
+        Owner decision (2026-11-07, OWNER_DECISION_194): recover under the
+        table's agreed rules, or end clearly. With no agreed rule to
+        recover under, this ends.
+
+        Inside standing invariant 3 -- "evidence decides, clocks do not,"
+        whose own exception is that clocks decide when THIS player's game
+        acts. This game acts on its own clock and applies nothing to shared
+        state. In particular it does not void the hand: a void is
+        RECOVERABLE and redeals the same seats at the same button, so on a
+        clock it would redeal straight back into the same stall, and acting
+        on a clock against shared state is exactly the divergence
+        _on_timeout_proposal refuses. Termination is absorbing and mutates
+        nothing. Every peer runs the same phase timeout and ends on its
+        own, in the same state for the same reason; they may end seconds
+        apart, which is liveness, not disagreement.
+
+        No proposal is sent. A message every recipient refuses is noise on
+        the wire and a warning in each of their logs; the forensics belong
+        in the terminal record, where they survive the transition.
+        """
+        self._assert_owner()
+        if self.terminal_state is not None or not self._deadline_expired():
+            return
+        token = self._current_deadline_token
+        # Read here and nowhere earlier: a sequence hole is only evidence
+        # once a deadline has already decided that waiting became failure.
+        holes = self.author_seq_hole_report()
+        waited_on = ("" if token.actor is None
+                     else f" from seat {token.actor}")
+        self.terminate(
+            self.ABORTED_PROTOCOL,
+            f"no reply within the {token.phase} timeout{waited_on}; this "
+            f"table has no timekeeper, so there is no agreed way to recover",
+            seat=token.actor,
+            event={"token_phase": token.phase,
+                   "action_seq": token.action_seq,
+                   "author_seq_holes": holes},
+        )
 
     @owned
     def reliability_started(self) -> None:

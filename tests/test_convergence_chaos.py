@@ -138,6 +138,9 @@ def outcome(sessions, order):
             "phase": deal.phase.value if deal else None,
             "abort": deal.abort_reason if deal else None,
             "holes": deal.hole_complete() if deal else False,
+            # A third shape, introduced by #194: a table with no agreed way
+            # to recover ends rather than voiding or settling.
+            "terminal": s.terminal_state,
         }
     return out
 
@@ -152,20 +155,44 @@ def assert_converged(sessions, order):
     assert len(voided) == 1, f"peers disagree on whether the hand voided: {out}"
     assert not any(o["voided"] and o["settled"] for o in out.values()), \
         f"a peer both voided and settled the hand: {out}"
-    if not voided.pop():
-        for key in ("deck", "phase", "abort", "holes"):
-            values = {o[key] for o in out.values()}
-            assert len(values) == 1, f"peers disagree on {key}: {out}"
-        assert all(o["abort"] is None for o in out.values()), out
-        assert all(o["holes"] for o in out.values()), \
-            f"a live hand has a peer without hole cards: {out}"
+    if voided.pop():
+        return out
+
+    # An ENDED table is the third outcome (#194). With no timekeeper there
+    # is no agreed recovery, so the session terminates instead of voiding;
+    # such a peer holds no hole cards and is not a live hand, so the
+    # live-hand checks below cannot apply to it. What must still hold is
+    # that every peer agrees it ended, and ended the same way -- a table
+    # where one peer ended and the others play on IS disagreement, and the
+    # single-value assertion catches it.
+    ended = {o["terminal"] for o in out.values()}
+    if any(ended):
+        assert len(ended) == 1, f"peers disagree on the terminal state: {out}"
+        assert not any(o["settled"] for o in out.values()), \
+            f"a peer both ended the session and settled the hand: {out}"
+        return out
+
+    for key in ("deck", "phase", "abort", "holes"):
+        values = {o[key] for o in out.values()}
+        assert len(values) == 1, f"peers disagree on {key}: {out}"
+    assert all(o["abort"] is None for o in out.values()), out
+    assert all(o["holes"] for o in out.values()), \
+        f"a live hand has a peer without hole cards: {out}"
     return out
 
 
 def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
     """Liveness: advance every peer's clock past its deadline, run the
-    public timeout path, deliver what it emits -- until every peer has
-    reached a terminal outcome for the hand (or fail)."""
+    PRODUCTION periodic path, deliver what it emits -- until every peer has
+    reached a terminal outcome for the hand (or fail).
+
+    reliability_tick, not check_deadlines. check_deadlines reports a wait
+    and applies nothing by design, and has no production caller;
+    reliability_tick is what a host app polls, and it is where a stalled
+    table without a timekeeper is ended (#194). Driving the report-only
+    path meant this helper exercised an announcement rather than the
+    behaviour its name describes.
+    """
     def terminal(s):
         return s.hand_voided or s.hand_result is not None or s.terminal_state
     for _ in range(rounds):
@@ -173,7 +200,7 @@ def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
             return
         for c in order:
             sessions[c]._clock.advance(step)
-            sessions[c].check_deadlines()
+            sessions[c].reliability_tick()
         bus.drain()
     stuck = [c for c in order if not terminal(sessions[c])]
     pytest.fail(f"peers never reached a terminal outcome: {stuck}")
@@ -350,15 +377,22 @@ def test_selective_omission_terminates_deterministically(victim):
     assert len(done) <= 1, f"peers finished the shuffle on different decks: {out}"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known liveness gap (audit #194): on the core session path a stalled deal "
-    "has no public recovery -- timeout_proposals are refused everywhere until "
-    "rule 9's timekeeper exists (Session._on_timeout_proposal), so a withheld "
-    "shuffle round stalls the hand. Casual-continuation tables have their own "
-    "reliability path. strict=True: this flips to a FAILURE the moment a "
-    "timekeeper makes it pass, so the marker cannot outlive the gap."))
 @pytest.mark.parametrize("victim", ["peer1", "peer2"])
 def test_selective_omission_reaches_a_terminal_outcome(victim):
+    """A withheld shuffle round must not leave the table waiting for ever.
+
+    Audit #194, and the owner decision of 2026-11-07: recover under the
+    table's agreed rules, or end clearly. This table runs no casual
+    reliability, so it has no timekeeper and no drop rule -- there is
+    nothing to recover under, and _end_if_stalled ends it.
+
+    It does NOT void. The previous expectation here was a void, which
+    assumed the timekeeper rule 9 defines for CASUAL tables and that this
+    path has never had: a void is recoverable and redeals the same seats at
+    the same button, so on a clock it would redeal straight back into the
+    same stall. That expectation rode along under a strict xfail, so it was
+    never run against the behaviour it described.
+    """
     def omit(msg, from_conn, to_conn):
         body = msg.get("payload", msg)
         if body.get("round") == 1 and to_conn == victim:
@@ -368,4 +402,13 @@ def test_selective_omission_reaches_a_terminal_outcome(victim):
     bus, sessions, order = make_table(3, rewrite=omit)
     drive_to_terminal(bus, sessions, order)
     out = assert_converged(sessions, order)
-    assert all(o["voided"] for o in out.values()), out
+
+    assert all(o["terminal"] == Session.ABORTED_PROTOCOL
+               for o in out.values()), out
+    assert not any(o["voided"] or o["settled"] for o in out.values()), out
+    # The reason has to say what was waited on, or an operator reading a
+    # dead table learns nothing from it.
+    for cid in order:
+        reason = sessions[cid].terminal_reason
+        assert "deal_shuffle" in reason, reason
+        assert "no agreed way to recover" in reason, reason
