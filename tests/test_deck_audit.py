@@ -255,14 +255,5 @@ def test_first_corrupt_round_none_when_clean():
 
 
 if __name__ == "__main__":
-    fns = [(k, v) for k, v in sorted(globals().items())
-           if k.startswith("test_") and callable(v)]
-    passed = 0
-    for name, fn in fns:
-        try:
-            fn()
-            print(f"  {name}: ok")
-            passed += 1
-        except Exception as exc:
-            print(f"  {name}: FAIL - {type(exc).__name__}: {exc}")
-    print(f"{passed}/{len(fns)} passed")
+    # Preserve fixtures, parametrization and a failing process exit status.
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
