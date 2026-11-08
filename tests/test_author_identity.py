@@ -257,12 +257,24 @@ def test_wrong_author_bet_action_is_dropped_before_the_replica():
     reached = []
 
     class _Replica:
-        def next_seq(self):
-            return 0
+        # Shaped like the real ReplicaTable, where next_seq is an ATTRIBUTE
+        # and the post-apply emit reads .phase and .state_digest().
+        #
+        # The incomplete version made the mutation check lie. With
+        # authorization removed the message DID reach apply_action, and the
+        # test then died on AttributeError('phase') inside _on_bet_action --
+        # so the red result proved the double was unfinished, not that the
+        # gate was what refused the stranger. "rejected" keeps the post-apply
+        # block out of it entirely; the recording below is the evidence.
+        next_seq = 0
+        phase = "BETTING"
 
         def apply_action(self, *a, **k):
             reached.append(a)
-            return "applied"
+            return "rejected"
+
+        def state_digest(self):
+            return "digest"
 
     s._replica = _Replica()
     # author_seq is required: without it the message dies at the sequencing

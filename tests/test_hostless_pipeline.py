@@ -12,10 +12,8 @@ These tests assert the STRUCTURE the refactor established:
 
 plus the two facts that used to be implicit and are now declared.
 """
-import ast
 import inspect
 import sys
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -246,54 +244,87 @@ def test_there_is_one_explicit_hostless_type_registry():
     })
 
 
-def _dispatch_branches(fn):
-    """{literal compared in an ``if``: does that branch call anything}.
-
-    Walks the AST rather than the text, so a type mentioned in a comment
-    is not mistaken for a dispatch, and a branch whose body was reduced
-    to ``pass`` is not mistaken for one that handles the message.
-    """
-    out = {}
-    for node in ast.walk(ast.parse(textwrap.dedent(_src(fn)))):
-        if not isinstance(node, ast.If):
-            continue
-        literals = []
-        for cmp_node in ast.walk(node.test):
-            if not isinstance(cmp_node, ast.Compare):
-                continue
-            for operand in cmp_node.comparators:
-                if isinstance(operand, ast.Constant):
-                    if isinstance(operand.value, str):
-                        literals.append(operand.value)
-                elif isinstance(operand, (ast.Tuple, ast.List, ast.Set)):
-                    literals += [e.value for e in operand.elts
-                                 if isinstance(e, ast.Constant)
-                                 and isinstance(e.value, str)]
-        if not literals:
-            continue
-        calls = any(isinstance(n, ast.Call)
-                    for stmt in node.body for n in ast.walk(stmt))
-        for lit in literals:
-            out[lit] = out.get(lit, False) or calls
-    return out
-
-
 def test_the_dispatch_covers_every_registered_hostless_type():
-    """No type may be registered and then never dispatched, or vice versa.
+    """Every registered type must REACH a handler -- observed at runtime.
 
-    Structural, not textual. The previous version asserted only that the
-    type's NAME appeared somewhere in the dispatch source -- which a
-    comment satisfies, and which replacing the bet_action handler call
-    with ``pass`` does not violate. That mutant stayed green.
+    Two earlier versions of this test passed for the wrong reason, both
+    times because they read the dispatch instead of exercising it:
+
+      1. The first asserted only that the type's NAME appeared somewhere in
+         the dispatch source. A comment satisfies that.
+      2. The second walked the AST and required the matching branch to
+         contain a call. ANY call satisfied that, so rewriting the
+         bet_action branch to call print() left the test green while the
+         handler stopped being invoked at all.
+
+    No reading of the source can settle this, because what the test claims
+    is that a message of each registered type arrives somewhere that
+    handles it. So each destination gets a recorder and each type gets a
+    message. A branch reduced to ``pass``, pointed at the wrong handler, or
+    calling something other than its handler records nothing and fails.
     """
-    branches = {}
-    for fn in (Session.handle_message, Session._deliver_hand_message):
-        branches.update(_dispatch_branches(fn))
-    for mtype in _HOSTLESS_PAYLOAD_TYPES:
-        assert mtype in branches, (
-            f"{mtype} is in the registry but never dispatched")
-        assert branches[mtype], (
-            f"{mtype} is matched by a dispatch branch that calls nothing")
+    from tests.test_session_hand import make_table
+
+    bus, sessions, order = make_table(2)
+    s = sessions["peer0"]
+    fired = []
+
+    def _recorder(name):
+        def handler(*a, **k):
+            fired.append(name)
+        return handler
+
+    # Every destination handle_message / _deliver_hand_message can route a
+    # hostless type to. hasattr first: a renamed handler must fail here
+    # rather than silently install a recorder nothing ever calls.
+    for attr in ("_on_deal_message", "_on_bet_action", "_on_hand_void",
+                 "_on_hand_settled", "_on_session_end",
+                 "_on_timeout_proposal", "_on_peer_lost"):
+        assert hasattr(s, attr), f"Session has no {attr}"
+        setattr(s, attr, _recorder(attr))
+
+    class _Continuation:
+        """The casual_drop_* family dispatches through this collaborator."""
+
+        departed = frozenset()
+        pending = None
+        carry = None
+
+        def receive_observation(self, body):
+            fired.append("receive_observation")
+
+        def receive_drop(self, body):
+            fired.append("receive_drop")
+
+        def receive_ack(self, body):
+            fired.append("receive_ack")
+
+        def receive_dispute(self, body):
+            fired.append("receive_dispute")
+
+    s._casual_continuation = _Continuation()
+
+    from holdem.p2p import casual_runtime
+    original_clock_fault = casual_runtime.clock_fault
+    casual_runtime.clock_fault = lambda session, body: fired.append(
+        "clock_fault")
+    try:
+        undispatched = []
+        for mtype in sorted(_HOSTLESS_PAYLOAD_TYPES):
+            fired.clear()
+            # Seatless and handless on purpose. In compat mode a body with
+            # no seat clears _admit_hostless without a bound seat key, and
+            # no "hand" keeps it out of the future-hand buffer -- so what
+            # the message has to survive is the dispatch, which is the
+            # subject, and not the authorization gate, which has its own
+            # tests in test_author_identity.
+            s.handle_message("peer1", {"type": mtype, "payload": {}})
+            if not fired:
+                undispatched.append(mtype)
+        assert not undispatched, (
+            f"registered but never reached a handler: {undispatched}")
+    finally:
+        casual_runtime.clock_fault = original_clock_fault
 
 
 # ── narrow test-helper audit ──────────────────────────────────────────────

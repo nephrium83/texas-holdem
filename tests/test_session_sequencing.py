@@ -127,8 +127,11 @@ def test_future_hand_bet_action_buffered_and_then_applied():
     peer0._replica = _Replica()
     peer0._replay_buffer()
 
-    assert applied, "the buffered hand-2 action was never applied"
-    assert applied[0][:2] == (0, 1), f"wrong action replayed: {applied[0]}"
+    # Exactly the buffered action, exactly once. Asserting only
+    # applied[0][:2] admitted (0, 1, "fold", 99) -- a different action, for a
+    # different amount -- and admitted the same action being applied twice,
+    # which is the specific failure replay has to avoid.
+    assert applied == [(0, 1, "call", 0)], f"wrong replay: {applied}"
     assert not peer0._msg_buffer, "the applied action stayed buffered"
 
 
