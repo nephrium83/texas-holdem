@@ -202,20 +202,5 @@ def test_deal_map_predicts_engine_board():
 
 
 if __name__ == "__main__":
-    passed = total = 0
-    for name, fn in sorted(globals().items()):
-        if not name.startswith("test_") or not callable(fn):
-            continue
-        marks = getattr(fn, "pytestmark", [])
-        skip = any(m.name == "skipif" and m.args and m.args[0] for m in marks)
-        if skip:
-            print(f"  {name}: SKIP")
-            continue
-        total += 1
-        try:
-            fn()
-            passed += 1
-            print(f"  {name}: ok")
-        except Exception as exc:
-            print(f"  {name}: FAIL - {type(exc).__name__}: {exc}")
-    print(f"{passed}/{total} passed")
+    # Preserve fixtures, parametrization and a failing process exit status.
+    raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
