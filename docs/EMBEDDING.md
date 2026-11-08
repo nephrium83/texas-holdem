@@ -143,3 +143,17 @@ The optional `[p2p]` extra installs Python cryptography dependencies, while
 the mental-poker path also needs a compatible libsodium native runtime.
 The tavern demo opens no sockets or router mappings, starts no services,
 and makes no network fairness or different-network play claim.
+
+
+### Legacy practice bankroll
+
+The retained Tk harness funds solo Cash tables from its local practice bankroll.
+Buy-ins, rebuys and top-ups debit that bankroll; winnings stay in the table stack
+until departure. Switching or leaving returns only the uncommitted stack, once.
+Abandoning a live hand forfeits committed chips. Failed transfers preserve the
+wallet and table; normal Quit stays open if the stack cannot be returned.
+Multiplayer and tournament stacks are table-local play chips and never debit or
+credit this practice wallet. Legacy multiplayer rebuy/top-up is unavailable until
+an acknowledged host operation exists. Embedding hosts continue to own their own
+wallets. This in-process transfer repair does not provide durable reservation
+recovery after a crash; it does not revive the parked journal project.

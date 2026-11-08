@@ -116,7 +116,13 @@ def _bankroll_transfer(delta=0, stack_changes=(), bonus_date=None):
             if type(balance) is not int or not 0 <= balance <= maximum:
                 raise ValueError("stored wallet balance is invalid")
             if bonus_date is not None:
-                if client.get("last_daily_bonus_date") == bonus_date:
+                datetime.date.fromisoformat(bonus_date)
+                last_bonus = client.get("last_daily_bonus_date", "")
+                if not isinstance(last_bonus, str):
+                    raise ValueError("stored bonus date is invalid")
+                if last_bonus:
+                    datetime.date.fromisoformat(last_bonus)
+                if last_bonus == bonus_date:
                     return True, 0
                 level = client.get("player_level", 1)
                 if type(level) is not int or not 1 <= level <= 50:
@@ -992,7 +998,10 @@ class Holdem:
         self._tourn_tick_gen = getattr(self, "_tourn_tick_gen", 0) + 1
         self.level_gen = getattr(self, "level_gen", 0) + 1
         self.game_over = True
-        self.stop_clock()
+        try:
+            self.stop_clock()
+        except tk.TclError:
+            logging.getLogger(__name__).warning("Clock widget already closed during table cleanup")
         self._invalidate_equity()
 
     def _fund_table(self, staged, cash):
@@ -1007,9 +1016,10 @@ class Holdem:
             if not ok:
                 messagebox.showerror("Practice bankroll", "Not enough practice chips, or the wallet could not be saved.")
                 return False
-        self._stop_gameplay()
+        # Publish refund ownership before any fallible widget cleanup.
         self._cash_engine = staged if funded else None
         self._cash_seat = self.hero_seat
+        self._stop_gameplay()
         return True
 
     def _buy_practice_chips(self, amount):
@@ -1047,7 +1057,6 @@ class Holdem:
     def new_game(self):
         self._invalidate_equity()
         self.table_rules = cfg.table_rules(**self._bucket(cfg.TABLE_RULE))
-        self.save_config()
         r = self.table_rules
         n = r["players"]
         sb = r["sb"]
@@ -1074,6 +1083,7 @@ class Holdem:
         if not self._fund_table(staged, cash=cash):
             return
         self.engine = staged
+        self.save_config()
         self.buyin = stack
         self.bank = float(_game_constant(self, 'bank_start', BANK_START))
         self.level_started = time.time()
@@ -1212,6 +1222,7 @@ class Holdem:
         self._retheme()
         self._show(self.table)
 
+        self.say("hand", "Multiplayer uses table-local play chips; the practice bankroll is separate.")
         if self._mp_is_host:
             sess.set_host_engine(self.engine)
             sess.configure_seats(seat_order)
@@ -2240,7 +2251,7 @@ class Holdem:
         if (_game_rule(self, 'rabbit', self.v_rabbit) and len(e.board) < 5
                 and _game_rule(self, 'mode', self.v_mode) == "Cash"):
             self.b_rabbit.config(state="normal")
-        if _game_rule(self, 'mode', self.v_mode) == "Cash":
+        if not self._mp_mode and _game_rule(self, 'mode', self.v_mode) == "Cash":
             hero = e.players[local]
             cap_bb = self.table_rules.get("buyin_max_bb", 100)
             if hero.stack + hero.total < cap_bb * e.bb:
