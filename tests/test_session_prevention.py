@@ -9,6 +9,7 @@ whose absence meant detection-only -- is how every shipped game came to run
 without shuffle proofs while the Bayer-Groth implementation sat complete
 and unreferenced. A table that does not say how it deals is refused.
 """
+import json
 import sys
 from pathlib import Path
 
@@ -24,7 +25,8 @@ try:
     from holdem.p2p.timeout import FakeClock as _DependencyClock
     from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
     from holdem.p2p.session import (
-        AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, Player, Session,
+        AUTHOR_MODE_COMPAT, AUTHOR_MODE_WIRE, AUTHOR_SEQ_START, Player,
+        Session,
     )
 except NativeCryptoUnavailable as exc:
     pytest.skip(f"libsodium unavailable: {exc}", allow_module_level=True)
@@ -650,3 +652,435 @@ def test_reseating_clears_the_cached_deal_context():
     s.configure_seats(["peer0", "peer1", "peer2"])
     assert s._recorded_session_id() != first, \
         "the cached deal context survived a seat-order change"
+
+
+# ===========================================================================
+# Prevention over the VERIFIED-ENVELOPE path, with one identity per peer
+# (audit #181)
+#
+# Everything above runs on InMemoryBus, which hands flat dicts straight
+# across. A Session on it selects AUTHOR_MODE_COMPAT, where seat authority
+# falls back to the delivering conn_id -- correct there, because the bus
+# really is authoritative about who sent what, but it means those tests
+# contain no author identities to get wrong. The wire-mode tests above go
+# the other way: a lone Session on _WireTransport, a double that collects
+# messages and never delivers one, so no hand can run.
+#
+# So "full prevention integration" was proven on a path with no signatures
+# and no distinct keys, which is what #181 says. These run a real
+# Bayer-Groth hand the production way instead: every message packed with
+# THAT peer's own Ed25519 key, verified on arrival, seats frozen onto those
+# keys, and each peer holding its own master secret.
+# ===========================================================================
+
+
+class SignedBus(InMemoryBus):
+    """InMemoryBus that really signs and verifies, one signer per peer.
+
+    Packing happens at enqueue, where the sender is known, and the
+    inherited drain then delivers an already-verified envelope -- so the
+    queueing, fan-out and drain-loop protection are the ones every other
+    suite uses, and only the envelope handling is new.
+
+    It does what transport.py does at that boundary, including folding flat
+    hostless fields into payload through the PRODUCTION helper rather than
+    a copy of it, so the envelope shape cannot drift from the real one.
+    """
+
+    def __init__(self, clock, tamper=None):
+        super().__init__()
+        self._clock = clock
+        self._signers = {}
+        #: Applied to each outgoing message BEFORE it is signed, so the
+        #: envelope that arrives is VALIDLY signed by its real author and
+        #: carries bad content. That is the threat worth testing: a peer
+        #: that signs a wrong proof. Forging a signature is not -- unpack
+        #: rejects it, which the signing layer's own suites cover.
+        self._tamper = tamper
+        #: (from, to, envelope) for every delivery, so a test can replay
+        #: real traffic rather than a hand-built imitation of it.
+        self.log = []
+
+    def register_signer(self, conn_id, signer):
+        self._signers[conn_id] = signer
+
+    def envelope(self, from_conn, msg):
+        from holdem.p2p import wire as _wire
+        from holdem.p2p.transport import _wire_payload
+        if "sig" in msg:
+            return msg              # pre-packed, as production passes through
+        if self._tamper is not None:
+            msg = self._tamper(from_conn, msg) or msg
+        raw = _wire.pack(msg.get("type", ""), _wire_payload(msg),
+                         signer=self._signers[from_conn], clock=self._clock)
+        # unpack is the verification step: a bad signature raises here, so
+        # nothing unverified can reach a Session through this bus.
+        return _wire.unpack(raw, clock=self._clock)
+
+    def enqueue(self, from_conn, to_conn, msg):
+        env = self.envelope(from_conn, msg)
+        self.log.append((from_conn, to_conn, env))
+        super().enqueue(from_conn, to_conn, env)
+
+    def enqueue_except(self, from_conn, exclude_conn, msg):
+        env = self.envelope(from_conn, msg)
+        self.log.append((from_conn, exclude_conn, env))
+        super().enqueue_except(from_conn, exclude_conn, env)
+
+
+class SignedTransport(InMemoryTransport):
+    """The production mode, declared. Session refuses to guess."""
+
+    delivers_verified_envelopes = True
+
+
+def signed_table(tmp_path, n=2, policy=None, tamper=None):
+    """n wire-mode Sessions, each with its OWN identity and master secret.
+
+    Joiners are admitted by completing the real handshake and authenticate
+    the host against the key their invite pins -- no back door, because the
+    point is that the composed path works, and a hole carved through
+    admission would be a hole in the thing under test.
+    """
+    from holdem.p2p import admission as _adm
+    from holdem.p2p import identity as _identity
+    from tests import admission_helpers as AH
+
+    clock = _DependencyClock()
+    bus = SignedBus(clock, tamper=tamper)
+    order = [f"peer{i}" for i in range(n)]
+
+    # One identity file per peer: distinct Ed25519 keys, the production way.
+    signers = {cid: _identity.load_or_create(tmp_path / f"{cid}.json")
+               for cid in order}
+    keys = {cid: signers[cid].public_key_bytes() for cid in order}
+    assert len({bytes(k) for k in keys.values()}) == n, \
+        "peers did not get distinct signing keys"
+
+    host_key = keys["peer0"]
+    sessions = {}
+    for i, cid in enumerate(order):
+        if i == 0:
+            # No clock override: HostAdmission wants a CALLABLE and uses it
+            # for challenge expiry only. The handshake below completes
+            # immediately, so its default monotonic source is correct and
+            # passing the FakeClock object would just raise.
+            guard = dict(admission=_adm.HostAdmission(
+                admission_secret=JH.TEST_ADMISSION_SECRET,
+                host_pubkey=host_key))
+        else:
+            guard = dict(joiner_admission=JH.joiner_admission(
+                host_pubkey=host_key, joiner_pubkey=keys[cid]))
+        s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
+                    transport=SignedTransport(bus, cid),
+                    clock=clock,
+                    # Distinct per peer: a shared secret cannot show a
+                    # composition defect in anything derived from it.
+                    master_secret=bytes([i + 1]) * 32,
+                    **guard)
+        s.local_conn_id = cid
+        bus.register(cid, s)
+        bus.register_signer(cid, signers[cid])
+        sessions[cid] = s
+
+    host = sessions["peer0"]
+    for cid in order[1:]:
+        AH.admit(host._admission, cid, keys[cid],
+                 JH.TEST_ADMISSION_SECRET, host_key)
+        JH.authenticate_host(sessions[cid], "peer0", host_key)
+        sessions[cid]._host_conn_id = "peer0"
+
+    # The roster the host is authoritative for, carrying the key each peer
+    # actually signs with -- what _bind_seat_keys freezes seats onto.
+    for i, cid in enumerate(order):
+        host.players[cid] = Player(conn_id=cid, peer_id=cid,
+                                   nickname=f"P{i}", avatar_b64="",
+                                   is_host=(i == 0),
+                                   ed25519_pubkey_hex=keys[cid].hex())
+    # The joiners learn those keys the way production joiners do: from the
+    # host's roster broadcast. Without it their rosters carry no keys, and
+    # _bind_seat_keys refuses the hand outright in wire mode rather than
+    # starting one in which every seat is refused at message time.
+    with host._owner:
+        host._broadcast_player_list()
+    bus.drain()
+
+    host.start_game({
+        Session.CONTINUATION_POLICY_SETTING: Session.CONTINUATION_END_TABLE,
+        KEY: policy if policy is not None else BG,
+    })
+    bus.drain()
+    for cid in order[1:]:
+        roster = sessions[cid].players
+        assert roster.get(cid) is not None and roster[cid].ed25519_pubkey_hex,             f"{cid} never received a roster carrying signing keys"
+    return bus, sessions, order, keys
+
+
+def test_the_signed_table_really_is_the_production_arrangement(tmp_path):
+    """Guards everything below it.
+
+    If this table quietly ran in compat mode, or left seat keys unbound,
+    the hand below would prove no more than the existing one -- which is
+    exactly how #181 happened.
+    """
+    bus, sessions, order, keys = signed_table(tmp_path, 3)
+    for cid in order:
+        s = sessions[cid]
+        assert s.author_mode == AUTHOR_MODE_WIRE, f"{cid} is not in wire mode"
+        assert s._deal_policy == BG
+    host = sessions["peer0"]
+    assert len({p.ed25519_pubkey_hex for p in host.players.values()}) == 3, \
+        "the roster does not carry three distinct keys"
+
+
+@pytest.mark.parametrize("n", [2, 3])
+def test_full_prevention_hand_over_verified_envelopes(tmp_path, n):
+    """The integration proof #181 asked for, on the production path.
+
+    Convergence under prevention is only reachable if every round's proof
+    was generated, signed, verified, decoded and checked by every peer. The
+    difference from the compat version above is what carries the authority:
+    here each peer signs with its OWN key and the seats are frozen onto
+    those keys, so a message authorized by the delivering connection rather
+    than by its author would be refused rather than silently accepted.
+    """
+    bus, sessions, order, keys = signed_table(tmp_path, n)
+    # start_p2p_hand, not begin_hand. Every production caller uses it
+    # (ice_room, lan_session, sidecar_launcher) and only it binds seat keys;
+    # begin_hand says in its own comment that it exists for "tests and
+    # harnesses". The compat integration this replaces uses begin_hand,
+    # where an unbound map is legitimate -- a second reason it could not
+    # see a composition defect in the keyed path.
+    for cid in order:
+        sessions[cid].start_p2p_hand(
+            hand_no=1, names=[f"P{i}" for i in range(n)],
+            stacks=[500] * n, sb=5, bb=10, button=0)
+    bus.drain()
+
+    decks = [[ct.to_hex() for ct in sessions[c]._deal_driver.deal.deck]
+             for c in order]
+    assert all(deck == decks[0] for deck in decks), "decks diverged"
+    for cid in order:
+        s = sessions[cid]
+        deal = s._deal_driver.deal
+        assert deal.prevention is True
+        assert deal.abort_reason is None, f"{cid} aborted: {deal.abort_reason}"
+        assert deal.is_shuffle_complete(), f"{cid} shuffle incomplete"
+        assert deal.hole_complete(), f"{cid} holes incomplete"
+        # Proof that the authorization above was author-based: seats are
+        # bound, and bound to the keys the peers actually sign with.
+        assert s._seat_keys, f"{cid} bound no seat keys"
+        bound = {bytes.fromhex(v) if isinstance(v, str) else bytes(v)
+                 for v in s._seat_keys.values()}
+        assert bound == {bytes(keys[c]) for c in order}, (
+            f"{cid} bound seats onto {bound!r}")
+
+
+def _deal_hand(bus, sessions, order, n):
+    for cid in order:
+        sessions[cid].start_p2p_hand(
+            hand_no=1, names=[f"P{i}" for i in range(n)],
+            stacks=[500] * n, sb=5, bb=10, button=0)
+    bus.drain()
+
+
+def _forgery_fixture(tmp_path):
+    """A dealt 3-seat signed table plus the pieces a forgery needs.
+
+    Returns (bus, sessions, order, keys, target, replica, seat, owner,
+    impostor) where ``seat`` is the real current actor, ``owner`` the peer
+    whose key that seat is frozen onto, and ``impostor`` a third peer --
+    never the target, whose own messages take the self-delivery exemption.
+    """
+    n = 3
+    bus, sessions, order, keys = signed_table(tmp_path, n)
+    _deal_hand(bus, sessions, order, n)
+    target = sessions["peer0"]
+    replica = target._replica
+    seat = replica.actor
+    assert seat is not None, "no actor to impersonate"
+    owner = order[seat]
+    impostor = next(cid for cid in order
+                    if cid not in (owner, target.local_conn_id))
+    return bus, sessions, order, keys, target, replica, seat, owner, impostor
+
+
+def _call_envelope(bus, target, signer_cid, seat, replica):
+    """A legitimate call for ``seat``, signed by ``signer_cid``.
+
+    Every field is the correct one for the real actor -- sequence number,
+    hand, action, and the next unused number in that seat's author stream
+    -- so the ONLY thing a refusal can be about is who signed it.
+    """
+    seen = target._author_seq_seen.get((1, seat), {})
+    return bus.envelope(signer_cid, {
+        "type": "bet_action", "hand": 1, "seat": seat,
+        "seq": replica.next_seq, "action": "call", "amount": 0,
+        "author_seq": max(seen, default=AUTHOR_SEQ_START - 1) + 1})
+
+
+def test_an_action_from_a_peer_that_does_not_own_the_seat_is_refused(tmp_path):
+    """Seat authorship, reached deliberately.
+
+    Delivered over the IMPOSTOR'S OWN connection and signed with the
+    impostor's own key, so the admission binding between a connection and
+    the key it was admitted with is satisfied -- and what is left to refuse
+    the message is _author_owns_seat, which is the subject.
+
+    A first version sent the forgery over the seat owner's connection
+    instead. It passed, and it passed with _author_owns_seat removed, because
+    the admission binding refused it first: "signed by <impostor> but that
+    connection was admitted as <owner>". A control above the one under
+    test, answering first -- the shape audit #125, #166, #190 and #172 all
+    turned out to have.
+
+    The positive control at the end is what makes the refusal mean
+    something: the identical decision, signed by the key the seat is bound
+    to, must be applied.
+    """
+    (bus, sessions, order, keys, target, replica,
+     seat, owner, impostor) = _forgery_fixture(tmp_path)
+
+    before = replica.state_digest()
+    forged = _call_envelope(bus, target, impostor, seat, replica)
+    assert forged["pubkey"] == keys[impostor].hex(), \
+        "the bus did not sign with the impostor's key"
+    target.handle_message(impostor, forged)
+    assert replica.state_digest() == before, (
+        f"{impostor} acted for seat {seat}, which is bound to {owner}")
+
+    honest = _call_envelope(bus, target, owner, seat, replica)
+    assert honest["pubkey"] == keys[owner].hex()
+    target.handle_message(owner, honest)
+    assert replica.state_digest() != before, (
+        "the correctly signed control action was refused too, so the "
+        "refusal above says nothing about authorship")
+
+
+def test_an_envelope_signed_by_another_peer_is_refused_on_that_connection(
+        tmp_path):
+    """The control that masked the one above, pinned in its own right.
+
+    Admission binds a connection to the key it was admitted with, so an
+    envelope arriving over one peer's connection carrying another peer's
+    signature is refused before any seat rule is consulted. Worth a test of
+    its own precisely because it is strong enough to hide the seat rule's
+    absence.
+    """
+    (bus, sessions, order, keys, target, replica,
+     seat, owner, impostor) = _forgery_fixture(tmp_path)
+
+    before = replica.state_digest()
+    # Correct in every respect for the seat, signed by the impostor, but
+    # delivered over the OWNER'S connection: signature and connection
+    # disagree.
+    crossed = _call_envelope(bus, target, impostor, seat, replica)
+    target.handle_message(owner, crossed)
+    assert replica.state_digest() == before, (
+        f"an envelope signed by {impostor} was accepted on {owner}'s "
+        f"connection")
+
+    honest = _call_envelope(bus, target, owner, seat, replica)
+    target.handle_message(owner, honest)
+    assert replica.state_digest() != before, (
+        "the matching control was refused too, so the refusal above says "
+        "nothing about the connection binding")
+
+
+def test_a_replayed_signed_deal_message_is_not_relayed_again(tmp_path):
+    """Replay of REAL traffic, observed where the replica cannot hide it.
+
+    Every envelope the hand produced is recorded, so this re-delivers one
+    byte-for-byte: valid signature, valid author, a seat that really owns
+    it -- everything except novelty.
+
+    Asserted on the HOST'S RELAY, deliberately. A first version checked
+    only that the deal state had not moved, and that passed with
+    _sequence_ok removed: the deal state machine ignores a round it has
+    already consumed, so it dedupes replays on its own and the gate's
+    absence was invisible. This is the same reason audit #144's mutant was
+    reported unreachable. _admit_hostless relays only AFTER the sequencing
+    gate, so what the gate uniquely protects is the host declining to
+    amplify a replay -- and that is observable on the bus.
+    """
+    n = 3
+    bus, sessions, order, keys = signed_table(tmp_path, n)
+    _deal_hand(bus, sessions, order, n)
+    host = sessions["peer0"]
+    assert host.is_host
+
+    replayable = [(src, env) for src, _dst, env in bus.log
+                  if env.get("type") == "deck_round" and src != "peer0"]
+    assert replayable, "the hand produced no deck_round to replay"
+    src, env = replayable[-1]
+
+    deal = host._deal_driver.deal
+    before_deal = ([ct.to_hex() for ct in deal.deck], deal.abort_reason,
+                   deal.is_shuffle_complete())
+    before_sent = len(bus.log)
+
+    host.handle_message(src, dict(env))
+    bus.drain()
+
+    assert len(bus.log) == before_sent, (
+        f"the host re-broadcast a replayed deal message "
+        f"({len(bus.log) - before_sent} new envelopes)")
+    after_deal = ([ct.to_hex() for ct in deal.deck], deal.abort_reason,
+                  deal.is_shuffle_complete())
+    assert after_deal == before_deal, "a replayed deal message moved the deal"
+
+
+@pytest.mark.parametrize("how", ["dropped", "corrupted"])
+def test_a_bad_shuffle_proof_aborts_the_hand(tmp_path, how):
+    """A peer that signs a bad proof must abort the hand, not be believed.
+
+    The tamper runs before signing, so what arrives is validly signed by
+    its real author -- the prevention check is the only thing standing
+    between a wrong shuffle and a dealt hand.
+    """
+    seen = []
+
+    def tamper(from_conn, msg):
+        if msg.get("type") != "deck_round" or "proof" not in msg:
+            return msg
+        if seen:
+            return msg                      # only the first one
+        seen.append(from_conn)
+        bad = dict(msg)
+        if how == "dropped":
+            bad.pop("proof")
+        else:
+            raw = bad["proof"]
+            # Flip one hex digit somewhere inside the encoded proof, which
+            # leaves its shape intact -- so this exercises verification
+            # rather than the decoder's length checks.
+            blob = json.dumps(raw)
+            cut = len(blob) // 2
+            for i in range(cut, len(blob)):
+                if blob[i] in "0123456789abcdef":
+                    blob = blob[:i] + ("f" if blob[i] != "f" else "0") + blob[i + 1:]
+                    break
+            bad["proof"] = json.loads(blob)
+        return bad
+
+    n = 2
+    bus, sessions, order, keys = signed_table(tmp_path, n, tamper=tamper)
+    _deal_hand(bus, sessions, order, n)
+    assert seen, "no deck_round carrying a proof crossed the bus"
+
+    aborted = [cid for cid in order
+               if sessions[cid]._deal_driver is not None
+               and sessions[cid]._deal_driver.deal.abort_reason]
+    assert aborted, (
+        "a bad shuffle proof was accepted: "
+        + repr({cid: (sessions[cid]._deal_driver.deal.abort_reason,
+                      sessions[cid]._deal_driver.deal.is_shuffle_complete())
+                for cid in order
+                if sessions[cid]._deal_driver is not None}))
+    reason = sessions[aborted[0]]._deal_driver.deal.abort_reason
+    assert "proof" in reason, f"aborted for an unrelated reason: {reason}"
+    for cid in order:
+        driver = sessions[cid]._deal_driver
+        if driver is not None and driver.deal.abort_reason:
+            assert not driver.deal.hole_complete(), \
+                f"{cid} dealt holes from an unproven shuffle"
