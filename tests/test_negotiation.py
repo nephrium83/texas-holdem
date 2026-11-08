@@ -132,10 +132,18 @@ def test_seat_order_cannot_be_rewritten_mid_session():
     victim = sessions["peer1"]
     before = list(victim._seat_order)
 
-    victim.handle_message("peer2", {
+    # From the HOST, carrying the table's OWN settings, differing only in
+    # seat order. Both details matter: a non-host sender is refused by the
+    # non-host gate, and empty settings are refused by policy adoption --
+    # either way the mid-session freeze below them is never reached, and
+    # could be deleted entirely without this test noticing.
+    victim.handle_message("peer0", {
         "type": "game_start",
         "payload": {"seat_order": ["peer2", "peer1", "peer0"],
-                    "table_settings": {}},
+                    "table_settings": {
+                        Session.CONTINUATION_POLICY_SETTING:
+                            Session.CONTINUATION_END_TABLE,
+                        KEY: BG}},
     })
     assert victim._seat_order == before, "seat order was rewritten mid-session"
 
