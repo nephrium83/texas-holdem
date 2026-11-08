@@ -106,9 +106,10 @@ def test_full_deal_over_sessions(n):
         assert _keys(cards) == _keys(expected)
 
 
-def test_hole_cards_are_private_across_sessions():
-    """No session recovers another seat's hole cards -- each holds only its
-    own two, and the union across the table has no duplicates."""
+def test_hole_cards_are_unique_across_sessions():
+    """Every session recovers two hole cards and the union across the table
+    has no duplicates. (Uniqueness only -- confidentiality is pinned by
+    test_no_session_can_decode_another_seats_hole_cards; audit #176.)"""
     bus, sessions, order = make_table(3)
     _begin_all(sessions, order)
     bus.drain()
@@ -118,6 +119,36 @@ def test_hole_cards_are_private_across_sessions():
         assert all(c is not None for c in cards)
         every.extend(_keys(cards))
     assert len(set(every)) == len(every)        # 6 distinct cards, no overlap
+
+
+def test_no_session_can_decode_another_seats_hole_cards():
+    """Confidentiality, not uniqueness (audit #176). Given one peer's whole
+    deal state -- everything it received -- it holds at most n-1 shares for
+    every OTHER seat's hole positions and never the owner's, so the
+    plaintext cannot be combined; and no foreign hole card appears anywhere
+    in its recovered state."""
+    bus, sessions, order = make_table(3)
+    _begin_all(sessions, order)
+    bus.drain()
+    n = len(order)
+    hp = dmap.hole_positions(0, list(range(n)))
+    by_pos = _omniscient(sessions[order[0]]._deal_driver.deal.deck, sessions, order)
+    for me, cid in enumerate(order):
+        deal = sessions[cid]._deal_driver.deal
+        for owner, positions in hp.items():
+            if owner == me:
+                continue
+            for pos in positions:
+                held = set(deal._shares.get(pos, {}))
+                assert owner not in held, (
+                    f"seat {me} holds the owner's share for seat {owner}'s hole")
+                assert len(held) <= n - 1
+        mine = {by_pos[p] for p in hp[me]}
+        foreign = {by_pos[p] for o, ps in hp.items() if o != me for p in ps}
+        recovered = {c for c in deal.hole_cards if c is not None}
+        assert recovered == mine
+        assert not (recovered & foreign)
+        assert not (set(c for c in deal.board if c is not None) & foreign)
 
 
 def test_board_reveals_street_by_street_over_sessions():
