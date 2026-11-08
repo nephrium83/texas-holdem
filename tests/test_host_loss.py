@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from holdem.p2p.timeout import FakeClock as _DependencyClock
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
-from holdem.p2p.session import Player, Session
+from holdem.p2p.session import CommandRefused, Player, Session
 
 
 def make_peers(n=3):
@@ -167,12 +167,23 @@ def test_host_loss_clears_held_messages_and_blocks_mutation():
     peer1 = sessions["peer1"]
     peer1.begin_hand(hand_no=1, button=0)
     assert peer1._deal_driver is not None
+
+    # The precondition the old version never established. It read _held
+    # only AFTER the transition, behind `if deal is not None`, and asserted
+    # it was empty -- which an always-empty _held satisfies, and which a
+    # dropped _deal_driver skipped altogether. Plant one, so "cleared" can
+    # be told apart from "never there".
+    deal = peer1._deal_driver.deal
+    deal._held.append({"type": "deck_round", "round": 9, "seat": 1,
+                       "deck": []})
+    assert deal._held, "could not establish a held message to clear"
+
     peer1.handle_disconnect("peer0")
 
     assert peer1.terminal_state == "HOST_LOST"
-    deal = peer1._deal_driver.deal if peer1._deal_driver else None
-    if deal is not None:
-        assert not deal._held, "held messages survived a terminal transition"
+    # Asserted on the driver that was there, not on whatever is there now:
+    # `if deal is not None` turned a dropped driver into a silent pass.
+    assert not deal._held, "held messages survived a terminal transition"
     # A later protocol message must not mutate a terminated session.
     before = peer1._hand_no
     peer1.handle_message("peer2", {"type": "deck_round", "round": 1,
@@ -182,14 +193,40 @@ def test_host_loss_clears_held_messages_and_blocks_mutation():
 
 def test_terminated_session_does_not_rebuild_from_last_game_state():
     """_last_game_state exists for a host-migration engine rebuild. Nothing
-    may use it to continue an interrupted hand."""
+    may use it to continue an interrupted hand.
+
+    The old second assertion was `_replica is None or terminal_state is not
+    None`. The line above it had already asserted terminal_state ==
+    "HOST_LOST", so the right operand was unconditionally true and the
+    assertion held whatever _replica contained -- it could not fail.
+
+    Note what this can and cannot prove. _last_game_state currently has no
+    reader anywhere in holdem/ (written at session.py:3936, read nowhere),
+    so there is no live rebuild path to catch. What is pinned instead: the
+    planted state is not consumed, no replica appears, and every restart
+    path refuses -- which is what a future reader would have to break.
+    """
     bus, sessions, order = make_peers(3)
     _start_playing(sessions, order)
     peer1 = sessions["peer1"]
-    peer1._last_game_state = {"pot": 999, "players": []}
+    planted = {"pot": 999, "players": []}
+    peer1._last_game_state = dict(planted)
     peer1.handle_disconnect("peer0")
+
     assert peer1.terminal_state == "HOST_LOST"
-    assert peer1._replica is None or peer1.terminal_state is not None
+    assert peer1._replica is None, "a replica appeared after termination"
+    assert peer1._last_game_state == planted, "the stored state was consumed"
+    for restart in (lambda: peer1.begin_hand(hand_no=1, button=0),
+                    lambda: peer1.next_p2p_hand(),
+                    lambda: peer1.start_p2p_hand(
+                        hand_no=1, names=["P0", "P1", "P2"],
+                        stacks=[500] * 3, sb=5, bb=10, button=0)):
+        try:
+            restart()
+        except CommandRefused:
+            pass                       # refusing loudly is the point
+    assert peer1._replica is None, "a restart path rebuilt after termination"
+    assert peer1._last_game_state == planted, "a restart path consumed it"
 
 
 # ----------------------------------------------- non-host loss in lobby
