@@ -5074,8 +5074,14 @@ class Session:
         apart, which is liveness, not disagreement.
 
         No proposal is sent. A message every recipient refuses is noise on
-        the wire and a warning in each of their logs; the forensics belong
-        in the terminal record, where they survive the transition.
+        the wire and a warning in each of their logs. The forensics go two
+        places instead: the phase and the seat waited on are named in
+        terminal_reason, which TerminalRecord carries, while the
+        structured detail -- token_phase, action_seq, author_seq_holes --
+        rides on the sidecar_stopping event terminate() emits from its
+        `event` argument. TerminalRecord's own fields are fixed and gain
+        nothing here (correction from Codex's review of bb44ca0, which
+        this docstring had described wrongly).
 
         Scoped to _STALL_ENDS_PHASES -- the deal phases, which every peer
         waits on identically. A betting deadline is asymmetric by design
