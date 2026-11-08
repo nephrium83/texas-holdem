@@ -136,6 +136,35 @@ def test_each_authors_numbers_start_at_zero_and_do_not_repeat():
             f"{key} is not contiguous from {AUTHOR_SEQ_START}: {sorted(nums)}")
 
 
+def test_each_hand_restarts_the_senders_numbering():
+    """Keyed per (hand, seat), not per seat.
+
+    A counter that never reset would still be unique and contiguous
+    WITHIN any single hand, so one hand cannot tell the difference --
+    which is why the coverage above, which stops at hand 1, stayed green
+    with the per-hand reset removed.
+    """
+    bus = RecordingBus()
+    _, sessions, order = make_table(2, bus=bus)
+    for hand in (1, 2):
+        for cid in order:
+            sessions[cid].begin_hand(hand_no=hand, button=0)
+        bus.drain()
+
+    streams = {}
+    for frm, m in bus.carried:
+        if m.get("type") not in HOSTLESS or "author_seq" not in m:
+            continue
+        streams.setdefault((m.get("hand"), frm), []).append(m["author_seq"])
+
+    assert {1, 2} <= {h for h, _ in streams}, (
+        f"expected sequenced traffic for both hands, saw {sorted(streams)}")
+    for (hand, frm), nums in streams.items():
+        assert min(nums) == AUTHOR_SEQ_START, (
+            f"hand {hand} from {frm} did not restart at "
+            f"{AUTHOR_SEQ_START}: {sorted(nums)}")
+
+
 @pytest.mark.parametrize("mtype", HOSTLESS)
 def test_the_stamping_point_stamps_every_type(mtype):
     """Every hostless type, driven through _send_hostless directly.
