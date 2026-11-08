@@ -4309,12 +4309,47 @@ class Session:
         if am_new_host:
             self.is_host = True
             self._host_conn_id = self.local_conn_id
+            # The roster is the OTHER representation of host identity, and
+            # it is the one clients render the lobby from. Setting only
+            # self.is_host left the winner broadcasting a roster in which
+            # nobody was host, so every peer faithfully adopted "no host"
+            # -- the same divergence audit #152 names, in the second place
+            # it is recorded. The departed host is already out of
+            # self.players: handle_disconnect removes it before calling
+            # this, so no stale is_host=True entry is left behind.
+            with self._lock:
+                me = self.players.get(self.local_conn_id)
+                if me is not None:
+                    me.is_host = True
             self._broadcast_player_list()
             if self.state == "PLAYING" and self.on_host_changed:
                 self.on_host_changed(True)
             elif self.on_host_changed:
                 self.on_host_changed(True)
         else:
+            # Record who WAS elected, not merely that it was not us.
+            #
+            # Every peer computes the same _join_order[0], so this is
+            # convergent rather than a local guess. Without it a
+            # non-candidate kept _host_conn_id pointing at the host that
+            # just left, and _on_pause, _on_resume, _on_kick and
+            # _on_adjust_blinds all gate on `conn_id != self._host_conn_id`
+            # -- so it refused admin traffic from the real new host, and
+            # would have accepted it from the departed one had that conn_id
+            # come back. _on_player_list has the same gate, so the new
+            # host's roster was refused too and the peer never learned the
+            # host identity by any other route either.
+            #
+            # Audit #152 named this exactly: "an implementation that
+            # promotes peer1 locally but leaves other peers targeting or
+            # trusting the departed host would pass". It did pass.
+            #
+            # Safe here: every _host_conn_id comparison in
+            # handle_disconnect is made before it calls this, the guards
+            # above restrict this to LOBBY on a non-terminal session, and
+            # AUTHOR_MODE_WIRE terminates instead of electing, so a pinned
+            # host identity is never reassigned.
+            self._host_conn_id = new_host_conn
             if self.on_host_changed:
                 self.on_host_changed(False)
 
