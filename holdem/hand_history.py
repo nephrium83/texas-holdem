@@ -16,6 +16,7 @@ Usage (wired in gui.py):
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 import logging
 import time
 
@@ -40,6 +41,7 @@ class HandRecord:
     winners: Set[int]
     pot_final: int
     boards: Dict[int, List[str]] = field(default_factory=dict)
+    cashout: Optional[dict] = None
 
     @property
     def ts_label(self) -> str:
@@ -60,6 +62,19 @@ class HandRecord:
     @property
     def winner_names(self) -> str:
         return ", ".join(self.seat_name(seat) for seat in sorted(self.winners))
+
+
+def cashout_history_lines(record):
+    receipt = record.cashout
+    if not receipt:
+        return []
+    lines = ["Cashout distribution"]
+    lines += [f"{record.seat_name(int(seat))} received {int(amount)}"
+              for seat, amount in receipt["payouts"].items()]
+    if receipt.get("refund"):
+        seat, amount = receipt["refund"]
+        lines.append(f"Uncalled returned to {record.seat_name(int(seat))}: {int(amount)}")
+    return lines
 
 
 # ----------------------------------------------------------------- logger
@@ -131,6 +146,9 @@ class HandLogger:
         rec.pot_final = sum(
             pt.get("amount", 0) for pt in result.get("pots", [])
         )
+        rec.cashout = deepcopy(result.get("cashout"))
+        if rec.cashout and rec.cashout.get("v") == 1:
+            rec.pot_final = rec.cashout["total_pot"]
 
         self.records.append(rec)
         self._persist(rec)
@@ -185,6 +203,7 @@ class HandLogger:
                     },
                     "winners": sorted(rec.winners),
                     "pot_final": rec.pot_final,
+                    "cashout": rec.cashout,
                 }
                 fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
         except Exception as exc:
@@ -249,7 +268,7 @@ def open_history_viewer(parent, logger: HandLogger, theme: dict) -> None:
     hands = logger.last_n(10)
     for rec in hands:
         label = (f"{rec.ts_label}  pot {rec.pot_final}\n"
-                 f"  ⇒ {rec.winner_names or '?'}")
+                 f"  ⇒ {'Cashout distribution' if rec.cashout else rec.winner_names or '?'}")
         lb.insert("end", label)
 
     # ---- Right: action detail ------------------------------------------
@@ -320,7 +339,7 @@ def open_history_viewer(parent, logger: HandLogger, theme: dict) -> None:
                     card = " ".join(rec.community[2])
                     lines.append(("street", f"── River [{card}] ──"))
                 elif st == "showdown":
-                    lines.append(("street", "── Showdown ──"))
+                    lines.append(("street", "── Cashout cards ──" if rec.cashout else "── Showdown ──"))
                 else:
                     lines.append(("street", f"── {street_label} ──"))
                 cur_street = st
@@ -331,7 +350,7 @@ def open_history_viewer(parent, logger: HandLogger, theme: dict) -> None:
 
         # showdown hole cards
         if rec.hole_cards:
-            lines.append(("street", "── Showdown ──"))
+            lines.append(("street", "── Cashout cards ──" if rec.cashout else "── Showdown ──"))
             for seat_idx, cards in sorted(rec.hole_cards.items()):
                 seat_name = rec.seat_name(seat_idx)
                 lines.append(("hole",
@@ -341,7 +360,9 @@ def open_history_viewer(parent, logger: HandLogger, theme: dict) -> None:
             if run > 1:
                 lines.append(("street", f"── Run {run}  [{' '.join(board)}] ──"))
         winner_names = rec.winner_names
-        if winner_names:
+        if rec.cashout:
+            lines.extend(("info", line) for line in cashout_history_lines(rec))
+        elif winner_names:
             lines.append(("info",
                           f"Winner: {winner_names}  +{rec.pot_final}"))
         return lines

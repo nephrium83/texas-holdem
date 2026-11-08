@@ -91,6 +91,8 @@ def _scheduled_ai(ui):
     """Turn every scheduled callback that is an ai_turn lambda into its seat."""
     seats = []
     for fn in ui.root.scheduled:
+        import inspect
+        fn = inspect.unwrap(fn) if fn is not None else None
         if fn is not None and getattr(fn, "__defaults__", None) and \
                 "ai_turn" in getattr(fn, "__code__", None).co_names:
             seats.append(fn.__defaults__[0])
