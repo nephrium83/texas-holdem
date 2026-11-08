@@ -1,7 +1,41 @@
 # Current delivery
 
-Verified October 27, 2026. This is a delivery and coordination record. It does
-not change poker rules, protocol contracts, or authorize another feature.
+Source status updated November 7, 2026. Packaged-baseline evidence below
+was last verified October 27. This is a delivery and coordination record;
+it does not change rules, protocol contracts, or authorize another feature.
+
+## Current source and audit delivery
+
+[PR #135](https://github.com/nephrium83/texas-holdem/pull/135) merged at
+`b45f12b14b7b55892301e96617006ef544ff66b5` after all ten required CI checks
+passed. The Codex audit allocations have no implementation-open findings:
+the first allocation has 70 resolved entries and one not reproducible entry;
+the second has all 46 entries resolved. These allocation counts do not mean
+the entire historical audit or Claude's remaining work is complete.
+
+The final delivery includes negotiated legacy-GUI rules, conserved solo
+practice-wallet transfers, truthful aggregate cashout receipts, stronger
+admission/routing assertions, and standalone test-runner failure propagation.
+259 focused integration tests passed; a real legacy-GUI smoke run completed
+15 hands. These source checks do not update or certify the installed preview.
+
+AI Pair is parked. Codex and Claude are working directly under file ownership.
+Claude's open PRs and remaining protocol/test follow-through remain separate
+from the delivered Codex allocations. For audit #194, the owner selected
+automatic recovery under the agreed casual-table rules, or a clear session
+end when recovery is impossible. That is a product decision, not a claim
+that its timeout implementation has shipped.
+
+The existing embedding contract is a Python API for a trusted host; it is
+not yet a native Godot, Unity, Unreal, C++ or C# SDK. See
+[EMBEDDING.md](EMBEDDING.md) for host responsibilities and limits, and
+[PACKAGING.md](PACKAGING.md) for the isolated installed-wheel acceptance.
+At the source revision above, 149 embedding, package and core-boundary
+checks passed. The wheel was installed without dependencies in a fresh
+virtual environment outside the checkout. Its copied tavern example
+completed two tables, checked private views and duplicate-payout handling,
+and retained total funds of 8000. This verifies the existing Python-host
+path; it does not establish another engine's native integration.
 
 ## Delivered baseline
 
