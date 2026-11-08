@@ -49,6 +49,49 @@ from holdem.p2p.replica_table import PHASE_BETTING, PHASE_SETTLED
 # Helpers
 # ---------------------------------------------------------------------------
 
+#: See audit #195. Same reasoning as MAX_ACTIONS_PER_HAND in
+#: test_session_match: a bound exists so a stalled state machine produces a
+#: diagnosis instead of consuming the worker.
+MAX_ACTIONS_PER_HAND = 160
+
+
+def _progress(replica):
+    """What accepting an action has to change."""
+    return (replica.phase, replica.actor, replica.next_seq,
+            replica.state_digest())
+
+
+def drive_betting(bus, sessions, order, ref_session, *, while_street=None):
+    """Call down the betting round, bounded and checking every step.
+
+    The loops this replaces were `while phase == PHASE_BETTING` with the
+    verdict of send_bet_action DISCARDED, so an action that was rejected --
+    or accepted without advancing the actor, street or phase -- span here
+    until CI gave up, with no indication of which invariant had broken.
+    """
+    for n in range(MAX_ACTIONS_PER_HAND):
+        r = ref_session.replica
+        if r.phase != PHASE_BETTING:
+            return
+        if while_street is not None and r.engine.street != while_street:
+            return
+        before = _progress(r)
+        seat = r.actor
+        assert seat is not None, f"betting with no actor after {n} actions"
+        verdict = sessions[order[seat]].send_bet_action("call")
+        assert verdict == "applied", (
+            f"action {n}: seat {seat} call -> {verdict}")
+        bus.drain()
+        assert _progress(ref_session.replica) != before, (
+            f"action {n} was accepted but changed nothing: "
+            f"phase={before[0]} actor={before[1]} seq={before[2]}")
+    r = ref_session.replica
+    raise AssertionError(
+        f"betting did not end within {MAX_ACTIONS_PER_HAND} actions; last "
+        f"state phase={r.phase} actor={r.actor} seq={r.next_seq} "
+        f"street={r.engine.street} digest={r.state_digest()[:16]}")
+
+
 def make_table(n, stacks=None, sb=5, bb=10, hand=1, button=0,
                clocks: Optional[list] = None):
     """N sessions wired to a shared bus, hand already begun."""
@@ -284,10 +327,7 @@ class TestDeadlineLifecycle:
         bus, sessions, order = make_table(2)
         s0 = sessions[order[0]]
         # Drive to settlement
-        while s0.replica.phase == PHASE_BETTING:
-            seat = s0.replica.actor
-            sessions[order[seat]].send_bet_action("call")
-            bus.drain()
+        drive_betting(bus, sessions, order, s0)
         # Hand settled — no deadline
         assert s0._current_deadline_token is None
 
@@ -397,13 +437,7 @@ class TestBettingTimeout:
         bus, sessions, order = make_table(2)
         s0 = sessions[order[0]]
         # Drain preflop by having everyone call until postflop
-        while s0.replica.phase == PHASE_BETTING and \
-              s0.replica.engine.street == "preflop":
-            seat = s0.replica.actor
-            sessions[order[seat]].send_bet_action("call")
-            bus.drain()
-            if s0.replica.phase != PHASE_BETTING:
-                break
+        drive_betting(bus, sessions, order, s0, while_street="preflop")
 
         if s0.replica.phase != PHASE_BETTING:
             pytest.skip("hand settled before postflop")

@@ -192,3 +192,10 @@ if __name__ == "__main__":
             except Exception as exc:
                 print(f"  {name}{'['+str(c)+']' if params else ''}: FAIL - {exc}")
     print(f"{passed}/{total} passed")
+    # Exit nonzero when anything failed. Without this the process reported
+    # success after printing its own failures, so any script or automation
+    # running this file directly read a green exit code off a red run
+    # (audit #169). The same pattern exists in several other test files;
+    # the ones outside this owner's paths are recorded as a handoff in the
+    # tracker rather than edited here.
+    sys.exit(0 if passed == total else 1)
