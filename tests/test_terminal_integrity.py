@@ -310,9 +310,18 @@ def test_concurrent_terminal_requests_yield_one_winner():
         # participate, or it would wait for a party that never arrives.
         gate = threading.Barrier(3)
 
+        errors = []
+
         def fire(state, reason):
-            gate.wait()
-            s.terminate(state, reason)
+            # Both the barrier wait and terminate() are inside the guard: a
+            # worker that died before reaching the barrier used to break it
+            # for the others, and an unbounded join() then hung the suite
+            # for 500 trials with no output.
+            try:
+                gate.wait()
+                s.terminate(state, reason)
+            except BaseException as exc:   # noqa: BLE001 - surfaced below
+                errors.append(exc)
 
         threads = [
             threading.Thread(target=fire, args=(Session.HOST_LOST, "A")),
@@ -322,7 +331,11 @@ def test_concurrent_terminal_requests_yield_one_winner():
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(10)
+        assert all(not t.is_alive() for t in threads), "a terminate() thread hung"
+        # Previously these raised into the interpreter's stderr and the test
+        # went green regardless.
+        assert not errors, f"a terminate() thread raised: {errors[:3]}"
         assert len(seen) == 1, f"{len(seen)} notifications"
         assert s.terminal_record is seen[0]
 
