@@ -122,7 +122,16 @@ _HOSTLESS_PAYLOAD_TYPES = frozenset({
     "bet_action", "hand_void", "session_end",
     "timeout_proposal", "peer_lost", "hand_settled", "casual_clock_fault",
     "casual_drop_observed", "casual_drop", "casual_drop_ack", "casual_drop_dispute",
+    "stall_notice",
 })
+
+# Phases a stalled-deal notice may end a table on (audit #194). Deal phases
+# only, and deliberately not "betting": a betting deadline is asymmetric by
+# design -- _maybe_start_deadline sets none on the actor itself -- so ending
+# on one ends every peer EXCEPT the one being waited for. The owner decided
+# on 2026-11-08 that a slow betting actor on a non-casual table stays the
+# host application's business (OWNER_DECISION_BETTING_STALL_20261108).
+_STALL_NOTICE_PHASES = frozenset({"deal_shuffle", "deal_decrypt"})
 
 
 @dataclass
@@ -951,6 +960,8 @@ class Session:
             self._on_session_end(conn_id, body)
         elif t == "timeout_proposal":
             self._on_timeout_proposal(conn_id, body)
+        elif t == "stall_notice":
+            self._on_stall_notice(conn_id, body)
         elif t == "peer_lost":
             self._on_peer_lost(conn_id, body)
         elif t in ("casual_drop_observed", "casual_drop", "casual_drop_ack",
@@ -4887,6 +4898,202 @@ class Session:
         _log.warning("session: refusing timeout_proposal from %s -- no game "
                      "applies one until there is a timekeeper", conn_id)
 
+    # ------------------------------------------------------------------
+    # The timekeeper for a stalled deal (audit #194)
+    #
+    # _on_timeout_proposal, directly above, refuses every proposal because
+    # a clock may decide when a game ACTS and never what a signed message
+    # DOES. That left a non-casual table hanging for good on a withheld
+    # deal contribution: check_deadlines had no production caller, and when
+    # driven it reported the wait once and cleared the deadline.
+    #
+    # The first attempt at a fix (PR #138, withdrawn) terminated locally on
+    # the expired deadline. Three measured asymmetries killed it, and they
+    # are one cause: every predicate available to a single peer is local.
+    #
+    #   1. the acting peer is exempt from its own betting deadline, so
+    #      ending on any expired deadline ended peer0/peer2 while peer1 --
+    #      the actor -- stayed live;
+    #   2. deal_done() is MentalDeal.is_done(), true only after the
+    #      post-hand audit, so an ordinary betting turn carries a
+    #      "deal_shuffle" label and ending on the label killed a healthy
+    #      table where nothing had been withheld;
+    #   3. public_waits() is irreducibly local -- omitting one deal_share
+    #      ended that peer alone while the others played on.
+    #
+    # And narrowing cannot rescue it, because two cases need OPPOSITE
+    # rules: a hole share withheld from one peer leaves it waiting on
+    # "holes" while the others wait on nothing, so ending on "holes"
+    # splits; a withheld shuffle round leaves it on "shuffle" while the
+    # others are on "holes", so NOT ending on "holes" splits.
+    #
+    # So the decision has to TRAVEL rather than be re-derived. One seat
+    # decides, the decision is a signed message, and receivers follow it
+    # without consulting their own state -- then no local divergence can
+    # change the outcome, because no local state is consulted.
+    # ------------------------------------------------------------------
+
+    @owned
+    def _stall_timekeeper_seat(self) -> Optional[int]:
+        """The one seat whose clock may end a stalled deal.
+
+        Derived from SHARED replica state, so every peer names the same
+        seat: the host, or -- once the host is no longer dealt into the
+        hand -- the lowest-numbered seat that is, mirroring rule 9's
+        handover to the lowest-numbered player still playing.
+
+        No election, no epoch and no handover protocol, unlike
+        CasualContinuation.timekeeper(). That machinery exists because a
+        membership boundary must be serialized: the table SURVIVES it, so
+        two overlapping boundaries would leave peers holding different
+        chips. Termination needs none of it -- terminate() is idempotent
+        and single-winner, and no chips move -- so two overlapping notices
+        are harmless: both end the table and the first one wins.
+        """
+        host = self._host_seat()
+        replica = self._replica
+        if replica is None:
+            return host
+        playing = sorted(replica.seats_dealt)
+        if host is not None and host in playing:
+            return host
+        return playing[0] if playing else None
+
+    @owned
+    def _maybe_send_stall_notice(self) -> None:
+        """Announce a stalled deal once this seat's own clock has expired.
+
+        The clock decides WHEN this seat sends, never what any seat does
+        with what it sends -- standing invariant 3, unchanged.
+
+        Two independent conditions, both required and neither sufficient:
+
+        SYMMETRY -- only the elected timekeeper sends, and only on a phase
+        every peer waits on alike (_STALL_NOTICE_PHASES).
+
+        SUBSTANCE -- the deal must actually report a missing public
+        contribution. The phase LABEL is not evidence; see reason 2 in the
+        block above, where trusting it ended a table on which one player
+        had merely taken thirty seconds.
+        """
+        if self.terminal_state is not None or self._replica is None:
+            return
+        if self._casual_reliability or self.author_mode != AUTHOR_MODE_WIRE:
+            return
+        if self.local_conn_id not in self._seat_order:
+            return
+        token = self._current_deadline_token
+        if token is None or token.phase not in _STALL_NOTICE_PHASES:
+            return
+        if self.local_seat != self._stall_timekeeper_seat():
+            return
+        if not self._deadline_expired():
+            return
+        deal = getattr(self._deal_driver, "deal", None)
+        waits = deal.public_waits() if deal is not None else []
+        if not waits:
+            return
+        notice = {
+            "type":  "stall_notice",
+            "hand":  self._hand_no,
+            "seat":  self.local_seat,
+            "token": {"hand_id":    token.hand_id,
+                      "phase":      token.phase,
+                      "actor":      token.actor,
+                      "action_seq": token.action_seq},
+            "waits": waits,
+            # Forensics, read HERE and nowhere earlier: a sequence hole is
+            # not a failure on its own, because delivery may reorder and a
+            # late message closes it harmlessly. It is only evidence once a
+            # deadline has already decided that waiting became failure.
+            "author_seq_holes": self.author_seq_hole_report(),
+        }
+        self._send_hostless(dict(notice))
+        # The sender takes the RECEIVER's path, so it cannot diverge from
+        # what it just told everyone else to do. The deadline is not
+        # cleared first: clearing before acting is what made
+        # _broadcast_timeout_proposal report each stall once and forget it.
+        self._on_stall_notice(self.local_conn_id, notice)
+
+    @owned
+    def _on_stall_notice(self, conn_id: str, msg: dict) -> None:
+        """End this table on the timekeeper's signed stalled-deal notice.
+
+        Followed WITHOUT consulting local state. That is the whole design:
+        the notice's own ``waits`` are forensics for the terminal record,
+        never a condition re-checked here, because re-checking them locally
+        is exactly what reinstates the asymmetry (reason 3 above).
+
+        ABORTED_PROTOCOL, not PEER_LOST: no disconnection is established --
+        the awaited peer may be connected and withholding.
+
+        Terminate, never void. A void refunds, and a refund is what made
+        the time-zero timeout proposal a profitable undo button
+        (docs/CASUAL_P2P_RULES.md, "Time-zero timeout proposal"):
+        _apply_deal_timeout voids the hand and hands the blinds back.
+        Termination returns nothing, so standing invariant 1 holds -- a
+        timekeeper that ends the table early gains nothing it can carry
+        anywhere, because stakes are confined to one table.
+
+        Every refusal below logs and returns. A refused notice ends
+        nothing.
+        """
+        if self.terminal_state is not None:
+            return
+        if self.author_mode != AUTHOR_MODE_WIRE:
+            # Seat authority falls back to the delivering conn_id in compat
+            # mode, so nothing here proves the sender is the timekeeper --
+            # it would be trust-whoever-handed-us-the-bytes, which is the
+            # failure Control N on PR #31 found.
+            _log.warning("session: refusing stall_notice from %s -- compat "
+                         "mode cannot prove the sender's seat", conn_id)
+            return
+        if self._casual_reliability:
+            # Rule 9 already recovers these by signed drop notice. A second
+            # ending path competing with it would be a regression.
+            _log.warning("session: refusing stall_notice from %s -- casual "
+                         "tables recover under rule 9", conn_id)
+            return
+        seat = msg.get("seat")
+        if not _is_seat(seat) or seat != self._stall_timekeeper_seat():
+            _log.warning("session: refusing stall_notice from seat %r -- not "
+                         "this table's timekeeper (%r)", seat,
+                         self._stall_timekeeper_seat())
+            return
+        if msg.get("hand") != self._hand_no:
+            _log.warning("session: refusing stall_notice for hand %r -- this "
+                         "game is on hand %r", msg.get("hand"), self._hand_no)
+            return
+        token = msg.get("token")
+        if not isinstance(token, dict) or token.get("phase") not in _STALL_NOTICE_PHASES:
+            _log.warning("session: refusing stall_notice on phase %r -- only "
+                         "%s may end a table",
+                         (token or {}).get("phase") if isinstance(token, dict)
+                         else None, sorted(_STALL_NOTICE_PHASES))
+            return
+        # Forensics only, so a malformed or empty list is reported as-is and
+        # never blocks the ending. Requiring substance HERE would be
+        # requiring a local predicate, which is the defect this replaces.
+        waits = msg.get("waits")
+        waits = waits if isinstance(waits, list) else []
+        missing = ", ".join(
+            "seat {} ({} {})".format(w.get("actor"), w.get("phase"),
+                                     w.get("detail", "")).strip().rstrip(" )") + ")"
+            for w in waits if isinstance(w, dict))
+        self.terminate(
+            self.ABORTED_PROTOCOL,
+            "stalled deal: seat {} was still waiting on {} when the {} "
+            "timeout expired".format(
+                seat, missing or "a contribution it did not name",
+                token.get("phase")),
+            seat=seat,
+            event={"token_phase":      token.get("phase"),
+                   "action_seq":       token.get("action_seq"),
+                   "public_waits":     waits,
+                   "author_seq_holes": msg.get("author_seq_holes"),
+                   "timekeeper_seat":  seat},
+        )
+
     def _apply_timeout(self, token: DeadlineToken) -> None:
         """Apply the phase-specific consequence of a timeout.
 
@@ -5024,6 +5231,11 @@ class Session:
         elif self._casual_reliability:
             from holdem.p2p.casual_runtime import runtime
             runtime(self).tick(self)
+        elif self.author_mode == AUTHOR_MODE_WIRE:
+            # Casual tables recover under rule 9. This is the other path:
+            # no agreed recovery, so a stalled deal is ended clearly by its
+            # timekeeper instead of hanging (audit #194).
+            self._maybe_send_stall_notice()
 
     @owned
     def reliability_started(self) -> None:
