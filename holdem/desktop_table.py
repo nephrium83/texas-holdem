@@ -77,8 +77,11 @@ class DesktopTable:
                     self._nickname = nickname
                     self._mode = "host" if command == "host_internet" else "join"
                 elif command == "local_game":
+                    bots = payload.get("bots", self._seats - 1)
+                    if type(bots) is not int or not 1 <= bots <= 8:
+                        raise ValueError("Choose between 1 and 8 bots")
+                    self._create_local(bots + 1, nickname)
                     self._nickname = nickname
-                    self._create_local()
                 else:
                     from holdem.lan_session import LanTable
                     self._nickname = nickname
@@ -124,13 +127,13 @@ class DesktopTable:
         return {"type": "command_result", "command": command,
                 "ok": ok, "verdict": verdict}
 
-    def _create_local(self):
+    def _create_local(self, seats, nickname):
         from holdem.sidecar_launcher import (
             _make_sessions, _wrap_with_drain,
             _wire_hand_start, _make_start_table,
         )
         from holdem.paced_bots import PacedBotDriver
-        bus, sessions, order = _make_sessions(self._seats, nickname=self._nickname)
+        bus, sessions, order = _make_sessions(seats, nickname=nickname)
         human = sessions[order[0]]
         _wrap_with_drain(human, bus)
         self._local_bots = PacedBotDriver(

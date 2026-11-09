@@ -33,7 +33,7 @@ var _local_ready := false
 
 
 func _ready() -> void:
-	%LocalGameButton.pressed.connect(func(): _request("local_game", _identity()))
+	%LocalGameButton.pressed.connect(_on_local_pressed)
 	%HostLanButton.pressed.connect(func(): _request("host_lan", _identity()))
 	%HostInternetButton.pressed.connect(func(): _request("host_internet", _identity()))
 	%JoinLanButton.pressed.connect(func(): _on_join_pressed("join_lan"))
@@ -155,6 +155,12 @@ func _apply_roster(raw_players: Variant) -> void:
 				if bool(player.get("is_you", false)):
 					_local_ready = bool(player.get("ready", false))
 	_roster.text = "\n".join(lines) if not lines.is_empty() else "Waiting for players..."
+
+
+func _on_local_pressed() -> void:
+	var payload := _identity()
+	payload["bots"] = int(%BotCount.value)
+	_request("local_game", payload)
 
 
 func _identity() -> Dictionary:
