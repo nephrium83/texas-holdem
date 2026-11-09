@@ -4951,13 +4951,36 @@ class Session:
         are harmless: both end the table and the first one wins.
         """
         host = self._host_seat()
-        replica = self._replica
-        if replica is None:
-            return host
-        playing = sorted(replica.seats_dealt)
+        playing = self._stall_seats_in_play()
         if host is not None and host in playing:
             return host
         return playing[0] if playing else None
+
+    def _stall_seats_in_play(self) -> list:
+        """The seats the TABLE is playing, as every peer would name them.
+
+        Three states, because "in play" is not one question:
+
+        * eliminated or spectating -- the retained replica is stale ON
+          PURPOSE (see _eliminated), since the seats with chips dealt on
+          without this one. _followed carries the stacks it last saw
+          settle, which is the shared fact, so authority comes from there
+          and a busted host still recognises its successor.
+        * settled, between hands -- seats_dealt belongs to the hand that
+          just ended, so chips decide who deals next.
+        * mid-hand -- seats_dealt is exactly the shared membership.
+        """
+        replica = self._replica
+        if self._eliminated():
+            known = (list(self._followed[1]) if self._followed is not None
+                     else (list(replica.stacks) if replica is not None else []))
+        elif replica is None:
+            return []
+        elif self.hand_result is not None:
+            known = list(replica.stacks)
+        else:
+            return sorted(replica.seats_dealt)
+        return sorted(seat for seat, chips in enumerate(known) if chips > 0)
 
     @owned
     def _maybe_send_stall_notice(self) -> None:
@@ -5060,16 +5083,23 @@ class Session:
                          "this table's timekeeper (%r)", seat,
                          self._stall_timekeeper_seat())
             return
-        if msg.get("hand") != self._hand_no:
+        hand = msg.get("hand")
+        if type(hand) is not int or hand < self._hand_no:
+            # Behind us, or not a hand number at all. A hand AHEAD of us is
+            # followed: see the directional note above.
             _log.warning("session: refusing stall_notice for hand %r -- this "
-                         "game is on hand %r", msg.get("hand"), self._hand_no)
+                         "game has reached hand %r", hand, self._hand_no)
             return
         token = msg.get("token")
-        if not isinstance(token, dict) or token.get("phase") not in _STALL_NOTICE_PHASES:
+        phase = token.get("phase") if isinstance(token, dict) else None
+        # The type is checked before membership, not with it: `[] in
+        # frozenset(...)` raises TypeError on the unhashable value, so a
+        # signed notice carrying a list reached this line and crashed the
+        # handler instead of being refused.
+        if not isinstance(phase, str) or phase not in _STALL_NOTICE_PHASES:
             _log.warning("session: refusing stall_notice on phase %r -- only "
-                         "%s may end a table",
-                         (token or {}).get("phase") if isinstance(token, dict)
-                         else None, sorted(_STALL_NOTICE_PHASES))
+                         "%s may end a table", phase,
+                         sorted(_STALL_NOTICE_PHASES))
             return
         # Forensics only, so a malformed or empty list is reported as-is and
         # never blocks the ending. Requiring substance HERE would be
@@ -5084,10 +5114,9 @@ class Session:
             self.ABORTED_PROTOCOL,
             "stalled deal: seat {} was still waiting on {} when the {} "
             "timeout expired".format(
-                seat, missing or "a contribution it did not name",
-                token.get("phase")),
+                seat, missing or "a contribution it did not name", phase),
             seat=seat,
-            event={"token_phase":      token.get("phase"),
+            event={"token_phase":      phase,
                    "action_seq":       token.get("action_seq"),
                    "public_waits":     waits,
                    "author_seq_holes": msg.get("author_seq_holes"),

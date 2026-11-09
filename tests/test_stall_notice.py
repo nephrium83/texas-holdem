@@ -257,15 +257,144 @@ def test_a_betting_phase_notice_is_refused(tmp_path):
         f"a betting notice ended the table: {s.terminal_reason}"
 
 
-def test_a_notice_for_another_hand_is_refused(tmp_path):
+def test_a_notice_from_a_hand_ahead_is_followed(tmp_path):
+    """Codex's P1 on 4dd4e48, through real signed ingress.
+
+    Peers advance hands independently -- next_p2p_hand is called once per
+    peer and hand-scoped buffering absorbs the skew -- so the timekeeper
+    can be on hand N+1, stalled waiting for a peer still on N. The first
+    version refused that notice for naming "another hand". The lagging peer
+    then advanced into N+1 against a timekeeper that had already
+    terminated, and sat there live and blocked for good.
+
+    That refusal was local progress deciding the outcome, which is the
+    exact thing this exchange exists to remove. A notice from a hand this
+    peer has not reached proves the timekeeper got there and ended; no
+    amount of local progress can un-end it.
+    """
     bus, sessions, order = stalled_table(tmp_path, 3)
+    keeper = sessions["peer0"]
+    ahead = keeper._hand_no + 1
+
+    # Sent by the real timekeeper, signed by its own key, through the bus
+    # -- so ingress authorizes it exactly as production would.
+    with keeper._owner:
+        keeper._send_hostless({
+            "type": "stall_notice", "hand": ahead, "seat": 0,
+            "token": {"hand_id": keeper._deal_session_id(),
+                      "phase": "deal_shuffle", "actor": None,
+                      "action_seq": keeper.replica.next_seq},
+            "waits": [{"phase": "keygen", "actor": 1, "detail": ""}],
+            "author_seq_holes": []})
+    bus.drain()
+
+    for cid in order[1:]:
+        s = sessions[cid]
+        assert s._hand_no < ahead, (
+            f"{cid} is not behind the notice, so this proves nothing: "
+            f"{s._hand_no} vs {ahead}")
+        assert s.terminal_state == Session.ABORTED_PROTOCOL, (
+            f"{cid} refused its timekeeper's notice for naming a later hand, "
+            f"so it would advance into that hand and block for good")
+
+
+def test_a_notice_from_a_hand_already_behind_is_refused(tmp_path):
+    """The other direction, which must NOT be lost to the fix above: a
+    notice about a hand this game has already left is stale."""
+    bus, sessions, order = stalled_table(tmp_path, 3, hand=2)
     s = sessions["peer0"]
+    assert s._hand_no == 2, "the table did not start where this test needs it"
+
     s._on_stall_notice("peer0", {
-        "type": "stall_notice", "hand": s._hand_no + 1, "seat": 0,
+        "type": "stall_notice", "hand": 1, "seat": 0,
         "token": {"hand_id": s._deal_session_id(), "phase": "deal_shuffle",
                   "actor": None, "action_seq": s.replica.next_seq},
         "waits": [], "author_seq_holes": []})
-    assert s.terminal_state is None, "a later hand's notice ended this one"
+
+    assert s.terminal_state is None, "a stale notice ended a later hand"
+
+
+def test_a_notice_without_a_hand_number_is_refused(tmp_path):
+    bus, sessions, order = stalled_table(tmp_path, 3)
+    s = sessions["peer0"]
+    for bad in (None, "1", True, 1.0):
+        s._on_stall_notice("peer0", {
+            "type": "stall_notice", "hand": bad, "seat": 0,
+            "token": {"hand_id": s._deal_session_id(),
+                      "phase": "deal_shuffle", "actor": None,
+                      "action_seq": s.replica.next_seq},
+            "waits": [], "author_seq_holes": []})
+        assert s.terminal_state is None, f"hand={bad!r} ended the table"
+
+
+def test_a_malformed_phase_is_refused_rather_than_raising(tmp_path):
+    """Codex's third finding. `[] in frozenset(...)` raises TypeError on the
+    unhashable value, so a signed notice carrying a list reached the
+    membership test and crashed the handler instead of being refused. The
+    type is now checked before membership."""
+    bus, sessions, order = stalled_table(tmp_path, 3)
+    s = sessions["peer0"]
+
+    for bad in ([], {}, set(), None, 7, ["deal_shuffle"]):
+        s._on_stall_notice("peer0", {
+            "type": "stall_notice", "hand": s._hand_no, "seat": 0,
+            "token": {"hand_id": s._deal_session_id(), "phase": bad,
+                      "actor": None, "action_seq": s.replica.next_seq},
+            "waits": [], "author_seq_holes": []})
+        assert s.terminal_state is None, f"phase={bad!r} ended the table"
+
+
+def test_a_busted_seat_agrees_with_the_players_on_the_timekeeper(tmp_path):
+    """Codex's P2 on 4dd4e48.
+
+    next_p2p_hand keeps an eliminated seat's last replica and hand number
+    ON PURPOSE -- the seats with chips deal on without it. So
+    replica.seats_dealt is NOT shared between a busted peer and the
+    players, which is the assumption _stall_timekeeper_seat was built on. A
+    busted host answered 0, itself, while the survivors answered the lowest
+    surviving seat: the survivors' legitimate notice was relayed by the
+    host and then refused by the host's own authority check, so the players
+    ended and the host stayed live.
+
+    Authority now comes from _followed -- the stacks the seat last saw
+    settle -- which is the shared fact, and is what
+    CasualContinuation.timekeeper() reads for this same reason.
+    """
+    bus, sessions, order = stalled_table(tmp_path, 3)
+    busted_stacks = [0, 500, 500]
+
+    host = sessions["peer0"]
+    host._p2p_spectator = True
+    host._followed = (host._hand_no, list(busted_stacks))
+    assert host._eliminated(), "the host is not eliminated, so nothing is stale"
+
+    # The survivors are between hands, so chips decide who deals next --
+    # the same arithmetic, reached by the other branch.
+    for cid in order[1:]:
+        s = sessions[cid]
+        s.hand_result = {"winners": []}
+        # replica.stacks is derived from the engine's players, so the bust
+        # is applied where it really lives rather than shadowed.
+        for seat, chips in enumerate(busted_stacks):
+            s.replica.engine.players[seat].stack = chips
+        assert s.replica.stacks == busted_stacks, "the bust did not take"
+
+    keepers = {cid: sessions[cid]._stall_timekeeper_seat() for cid in order}
+    assert set(keepers.values()) == {1}, (
+        f"a busted seat and the players disagree on the timekeeper: {keepers}")
+
+    # And the harm itself: the successor's notice must now end the busted
+    # host, instead of being refused by its own stale authority check.
+    host._on_stall_notice("peer1", {
+        "type": "stall_notice", "hand": host._hand_no, "seat": 1,
+        "token": {"hand_id": host._deal_session_id(), "phase": "deal_shuffle",
+                  "actor": None, "action_seq": host.replica.next_seq},
+        "waits": [{"phase": "shuffle", "actor": 2, "detail": "1"}],
+        "author_seq_holes": []})
+
+    assert host.terminal_state == Session.ABORTED_PROTOCOL, (
+        "the busted host refused its successor's notice and stayed live "
+        "while the players ended")
 
 
 def test_a_compat_table_refuses_the_notice():
