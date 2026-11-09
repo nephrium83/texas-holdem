@@ -76,6 +76,19 @@ placeholder_text = "Your name"
 unique_name_in_owner = true
 theme_override_constants/separation = 16
 
+[node name="BotCountRow" type="HBoxContainer" parent="ConnectionPanel/Margin/Content/ModeMenu"]
+theme_override_constants/separation = 16
+
+[node name="BotCountLabel" type="Label" parent="ConnectionPanel/Margin/Content/ModeMenu/BotCountRow"]
+text = "Bots for practice (1–8)"
+
+[node name="BotCount" type="SpinBox" parent="ConnectionPanel/Margin/Content/ModeMenu/BotCountRow"]
+unique_name_in_owner = true
+min_value = 1.0
+max_value = 8.0
+step = 1.0
+value = 1.0
+
 [node name="ModeButtons" type="HBoxContainer" parent="ConnectionPanel/Margin/Content/ModeMenu"]
 theme_override_constants/separation = 18
 
