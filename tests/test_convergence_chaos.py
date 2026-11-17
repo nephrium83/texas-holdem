@@ -351,12 +351,18 @@ def test_selective_omission_terminates_deterministically(victim):
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "Known liveness gap (audit #194): on the core session path a stalled deal "
-    "has no public recovery -- timeout_proposals are refused everywhere until "
-    "rule 9's timekeeper exists (Session._on_timeout_proposal), so a withheld "
-    "shuffle round stalls the hand. Casual-continuation tables have their own "
-    "reliability path. strict=True: this flips to a FAILURE the moment a "
-    "timekeeper makes it pass, so the marker cannot outlive the gap."))
+    "Audit #194 is fixed, but not on THIS table. The stall_notice timekeeper "
+    "requires AUTHOR_MODE_WIRE, and make_table above builds InMemoryTransport, "
+    "which is AUTHOR_MODE_COMPAT: seat authority there falls back to the "
+    "delivering conn_id, so nothing proves a notice came from the timekeeper "
+    "and Session._on_stall_notice refuses it. A compat table therefore still "
+    "stalls, by design and not by omission -- see the compat refusal's own "
+    "test in tests/test_stall_notice.py. The fixed case is covered on the "
+    "production arrangement by test_stall_notice.py::"
+    "test_a_withheld_shuffle_round_ends_every_peer_alike, over real "
+    "identities and verified envelopes. strict=True is kept: if this table "
+    "ever gains provable seat authority the marker must fail rather than "
+    "outlive its reason."))
 @pytest.mark.parametrize("victim", ["peer1", "peer2"])
 def test_selective_omission_reaches_a_terminal_outcome(victim):
     def omit(msg, from_conn, to_conn):
