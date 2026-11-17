@@ -241,6 +241,7 @@ def test_there_is_one_explicit_hostless_type_registry():
         "peer_lost", "hand_settled",
         "casual_clock_fault", "casual_drop_observed", "casual_drop",
         "casual_drop_ack", "casual_drop_dispute",
+        "stall_notice",
     })
 
 
@@ -266,6 +267,7 @@ EXPECTED_HANDLER = {
     "casual_drop":          "receive_drop",
     "casual_drop_ack":      "receive_ack",
     "casual_drop_dispute":  "receive_dispute",
+    "stall_notice":         "_on_stall_notice",
 }
 
 
@@ -312,7 +314,8 @@ def test_the_dispatch_covers_every_registered_hostless_type():
     # rather than silently install a recorder nothing ever calls.
     for attr in ("_on_deal_message", "_on_bet_action", "_on_hand_void",
                  "_on_hand_settled", "_on_session_end",
-                 "_on_timeout_proposal", "_on_peer_lost"):
+                 "_on_timeout_proposal", "_on_peer_lost",
+                 "_on_stall_notice"):
         assert hasattr(s, attr), f"Session has no {attr}"
         setattr(s, attr, _recorder(attr))
 
