@@ -2,6 +2,7 @@
 import math
 import os
 import platform
+from pathlib import Path
 import statistics
 import subprocess
 import sys
@@ -44,10 +45,13 @@ def metadata(checkout):
     from holdem.p2p import ristretto
     commit = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
     dirty = bool(subprocess.check_output(["git", "-C", str(checkout), "status", "--porcelain"], text=True).strip())
+    processor = platform.processor()
+    if not processor and sys.platform.startswith("linux"):
+        processor = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines() if line.startswith("model name")), "unknown")
     return {
         "working_tree": "dirty" if dirty else "clean",
         "commit": commit, "python": platform.python_version(),
-        "platform": platform.platform(), "processor": platform.processor(),
+        "platform": platform.platform(), "processor": processor,
         "cpu_count": os.cpu_count(), "libsodium": ristretto.libsodium_version(),
         "quantile_method": "nearest rank: ceil(p * sample_count)",
         "memory_scope": "OS process-lifetime peak RSS, includes native allocations and setup; run one configuration per process",
