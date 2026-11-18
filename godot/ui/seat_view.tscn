@@ -20,7 +20,7 @@ content_margin_right = 10.0
 content_margin_bottom = 8.0
 
 [node name="SeatView" type="PanelContainer"]
-custom_minimum_size = Vector2(150, 150)
+custom_minimum_size = Vector2(150, 176)
 theme_override_styles/panel = SubResource("StyleSeat")
 script = ExtResource("1_script")
 
@@ -32,7 +32,8 @@ unique_name_in_owner = true
 theme_override_colors/font_color = Color(0.96, 0.93, 0.84, 1)
 theme_override_font_sizes/font_size = 14
 text = "Empty seat"
-autowrap_mode = 2
+clip_text = true
+text_overrun_behavior = 3
 
 [node name="InfoRow" type="HBoxContainer" parent="Content"]
 theme_override_constants/separation = 6
@@ -51,12 +52,17 @@ text = ""
 
 [node name="BetLabel" type="Label" parent="Content/InfoRow"]
 unique_name_in_owner = true
+size_flags_horizontal = 3
+clip_text = true
+text_overrun_behavior = 3
 theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
 theme_override_font_sizes/font_size = 12
 text = ""
 
 [node name="StatusLabel" type="Label" parent="Content"]
 unique_name_in_owner = true
+clip_text = true
+text_overrun_behavior = 3
 theme_override_colors/font_color = Color(0.61, 0.72, 0.66, 1)
 theme_override_font_sizes/font_size = 12
 text = ""

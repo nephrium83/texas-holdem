@@ -17,7 +17,11 @@ extends PanelContainer
 @onready var _card_b: CardView = %CardB
 
 
-func apply_seat(seat: Dictionary, is_action_on: bool) -> void:
+## hand_live is false once the hand is settled, void or closed. A seat's
+## last_action is the last thing it did, and the engine keeps it through
+## settlement, so without this a finished hand still read "BET 600" beside
+## a seat whose bet was 0 and whose chips had already moved.
+func apply_seat(seat: Dictionary, is_action_on: bool, hand_live := true) -> void:
 	if not bool(seat.get("in_seat", false)):
 		_apply_empty()
 		return
@@ -34,7 +38,7 @@ func apply_seat(seat: Dictionary, is_action_on: bool) -> void:
 	var pos: Variant = seat.get("pos")
 	_pos_badge.text = str(pos) if pos != null else ""
 
-	_status_label.text = _status_text(seat)
+	_status_label.text = _status_text(seat, hand_live)
 	_turn_indicator.text = "ACTING" if is_action_on else ""
 	_apply_cards(seat)
 
@@ -62,13 +66,17 @@ func _apply_empty() -> void:
 	_card_b.clear()
 
 
-func _status_text(seat: Dictionary) -> String:
+func _status_text(seat: Dictionary, hand_live: bool) -> String:
+	# Outcomes outlive the hand: they say who was still in it.
 	if bool(seat.get("folded", false)):
 		return "Folded"
 	if bool(seat.get("all_in", false)):
 		return "All in"
 	if bool(seat.get("sitting_out", false)):
 		return "Sitting out"
+	# A wager does not. Once the pot is awarded nothing is out any more.
+	if not hand_live:
+		return ""
 	return str(seat.get("last_action", ""))
 
 
