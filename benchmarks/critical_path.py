@@ -4,7 +4,7 @@ Both in-process benchmarks run every seat one after another on one CPU, so
 their totals are the SUM of all seats' work. Real seats are separate
 machines working at the same time; what a player waits through is the
 critical path. This replays a real hand through the MentalDeal coordinators,
-measures the CPU cost of every handle() call on every seat, and schedules
+measures the wall cost of every handle() call on every seat, and schedules
 those measured costs on per-seat clocks:
 
   - a seat handles one message at a time, in the order it received them;
@@ -156,7 +156,7 @@ def main():
               "scope": "modeled parallel wait from measured coordinator wall costs; excludes real transport and bandwidth contention"}
     print("prevention (Bayer-Groth); p50 over %d warm hands; ms" % a.hands)
     print("%-6s %10s %8s %8s | %-9s %8s %14s %14s" % (
-        "seats", "CPU sum", "prove", "verify", "latency", "wait",
+        "seats", "work sum", "prove", "verify", "latency", "wait",
         "if verify=0", "if prove=0"))
     with _Split(bg_shuffle) as split:
         for n in a.seats:

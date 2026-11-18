@@ -53,8 +53,9 @@ def test_signed_sample_cleans_generated_identity_directory_on_failure(monkeypatc
     assert created and not created[0].exists()
 
 
-def test_coordinator_metadata_is_available_as_a_package_import():
+def test_coordinator_metadata_is_available_as_a_package_import(monkeypatch):
     from benchmarks import mental_deal_startup
+    monkeypatch.setattr(mental_deal_startup.R, "libsodium_version", lambda: "test-version")
     report = mental_deal_startup._metadata()
     assert len(report["commit"]) == 40
     assert report["memory_scope"].startswith("OS process-lifetime peak RSS")
