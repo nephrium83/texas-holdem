@@ -27,8 +27,12 @@ func test_menu_actions_carry_the_entered_name():
 		var control := _control()
 		control.apply_lobby({"mode": "menu", "state": "idle"})
 		control.get_node("%NicknameInput").text = " Ada "
+		var expected := {"nickname": "Ada"}
+		if pair[1] == "local_game":
+			control.get_node("%BotCount").value = 8
+			expected["bots"] = 8
 		control.get_node("%" + pair[0]).pressed.emit()
-		assert_signal_emitted_with_parameters(control, "command_requested", [pair[1], {"nickname": "Ada"}])
+		assert_signal_emitted_with_parameters(control, "command_requested", [pair[1], expected])
 
 
 func test_join_sends_the_pasted_invite_without_changing_it():
