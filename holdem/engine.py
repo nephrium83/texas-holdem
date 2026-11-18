@@ -311,6 +311,19 @@ STYLES = {
 }
 AI_STYLES = ("Nit", "Solid", "Loose", "Maniac")
 
+#: Chen-score shift applied to every preflop threshold, by how many players
+#: were dealt into the hand. The STYLES thresholds are full-ring ones and
+#: the bot's only positional adjustment is "act late", so before this a
+#: Solid dealer played 39% of hands whether the table had nine players or
+#: two -- heads-up it folded 61% of its dealer hands, half the practice
+#: hands against one bot had no decision in them (playtest 2026-11-17).
+#: Fewer opponents means fewer hands that can beat yours, so every style
+#: widens short-handed; five or more players keep the original thresholds.
+#: Measured on 3000 folded-to deals: a Solid dealer now enters 72% of
+#: pots heads-up, 50% three-handed, 45% four-handed, and 38% at six as
+#: before; Nit < Solid < Loose < Maniac holds at every table size.
+SHORT_HANDED_SHIFT = {2: -2.5, 3: -1.0, 4: -0.5}
+
 
 class Player:
     def __init__(self, idx, name, stack, style="Solid", level=2, human=False):
@@ -1421,9 +1434,11 @@ class Brain:
         if p.level == 3:
             pos_adj *= 1.4
 
-        open_t = st["open"] + pos_adj
-        call_t = st["call"] + pos_adj
-        three_t = st["three"] + pos_adj
+        dealt = sum(1 for q in e.players if q.in_seat)
+        short = SHORT_HANDED_SHIFT.get(dealt, 0.0)
+        open_t = st["open"] + pos_adj + short
+        call_t = st["call"] + pos_adj + short
+        three_t = st["three"] + pos_adj + short
 
         bb_stacks = p.stack / max(1, e.bb)
         raised = e.current_bet > e.bb
