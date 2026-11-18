@@ -9,6 +9,9 @@ extends Control
 
 const MAX_SEATS := 9
 
+## turn.state values under which no hand is being played, whatever phase says.
+const _FINISHED_STATES := ["table_closed", "match_complete", "eliminated", "hand_complete", "voided"]
+
 @onready var _seat_views: Array[SeatView] = [
 	%Seat0, %Seat1, %Seat2, %Seat3, %Seat4, %Seat5, %Seat6, %Seat7, %Seat8,
 ]
@@ -22,8 +25,11 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 	var action_on := int(snapshot.get("action_on", -1))
 	var phase := str(snapshot.get("phase", "betting"))
 	var state := str(snapshot.get("turn", {}).get("state", ""))
-	if phase != "betting" or state in ["table_closed", "match_complete", "eliminated", "hand_complete", "voided"]:
+	if phase != "betting" or state in _FINISHED_STATES:
 		action_on = -1
+	# Narrower than the ACTING rule on purpose: blinds posted while the
+	# cards are still being dealt are live wagers and keep their labels.
+	var hand_live := not (phase in ["settled", "void"] or state in _FINISHED_STATES)
 	var you: Dictionary = snapshot.get("you", {})
 	var in_lobby := str(snapshot.get("phase", "")) == "lobby"
 	for i in range(MAX_SEATS):
@@ -35,7 +41,7 @@ func apply_snapshot(snapshot: Dictionary) -> void:
 			if bool(seat.get("is_you", false)):
 				seat = _with_own_hole(seat, you.get("hole"))
 			var is_action_on := int(seat.get("seat", i)) == action_on
-			_seat_views[i].apply_seat(seat, is_action_on)
+			_seat_views[i].apply_seat(seat, is_action_on, hand_live)
 		else:
 			_seat_views[i].apply_seat({}, false)
 

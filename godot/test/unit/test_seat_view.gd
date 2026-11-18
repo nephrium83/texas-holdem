@@ -94,3 +94,30 @@ func test_showdown_hole_reveals_actual_cards():
 	view.apply_seat({"in_seat": true, "name": "Ada", "hole": ["Ah", "Kd"]}, false)
 	assert_eq(view.get_node("%CardA/CardLabel").text, "A♥")
 	assert_eq(view.get_node("%CardB/CardLabel").text, "K♦")
+
+
+func test_a_wager_label_is_not_shown_once_the_hand_is_over():
+	# A seat's last_action is the last thing it DID. The engine clears it at
+	# each new street and each new hand, but not at settlement, so the
+	# snapshot of a finished hand still says "BET 600" beside a seat whose
+	# bet is 0 and whose chips have already moved. Shown as a status, that
+	# reads as a wager still on the table.
+	var view := _seat()
+	var seat := {"in_seat": true, "name": "Cy", "bet": 0, "last_action": "BET 600"}
+	view.apply_seat(seat, false, true)
+	assert_eq(view.get_node("%StatusLabel").text, "BET 600",
+		"a live hand must still show what the seat just did")
+	view.apply_seat(seat, false, false)
+	assert_eq(view.get_node("%StatusLabel").text, "",
+		"a finished hand must not show a wager that is no longer out")
+
+
+func test_folded_and_all_in_still_show_once_the_hand_is_over():
+	# Those are outcomes, not wagers: they explain who was still in the hand.
+	var view := _seat()
+	view.apply_seat({"in_seat": true, "name": "Cy", "folded": true,
+		"last_action": "FOLD"}, false, false)
+	assert_eq(view.get_node("%StatusLabel").text, "Folded")
+	view.apply_seat({"in_seat": true, "name": "Cy", "all_in": true,
+		"last_action": "ALL-IN 400"}, false, false)
+	assert_eq(view.get_node("%StatusLabel").text, "All in")
