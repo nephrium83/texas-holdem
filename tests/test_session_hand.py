@@ -269,3 +269,28 @@ def test_deal_cheat_voids_hand_with_attribution():
 if __name__ == "__main__":
     # Preserve fixtures, parametrization and a failing process exit status.
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
+
+def test_the_hand_log_heading_follows_the_session_across_hands():
+    """The symptom itself, through the real session and the client view:
+    the panel and the table said "Hand #3" while the log beneath them still
+    said "Hand #1". Each hand's log must open with that hand's number."""
+    from holdem import client_view
+
+    bus, sessions, order = make_table(3)
+    for hand in (1, 2, 3):
+        for cid in order:
+            s = sessions[cid]
+            assert s._hand_no == hand, (cid, s._hand_no)
+            snap = client_view.snapshot(s)
+            assert snap["hand_num"] == hand
+            headings = [e["text"] for e in snap["events"]
+                        if e["text"].startswith("--- Hand #")]
+            assert headings == [f"--- Hand #{hand}  (5/10) ---"], (cid, headings)
+            assert {e.get("hand_num") for e in snap["events"]} == {hand}, cid
+        while sessions[order[0]].replica.phase == PHASE_BETTING:
+            act(bus, sessions, order, "fold")
+        if hand < 3:
+            for cid in order:
+                assert sessions[cid].next_p2p_hand() == "started"
+            bus.drain()
