@@ -6,11 +6,6 @@ Coverage:
 - Clock injection and FakeClock mechanics
 - Deadline starts when a remote peer is the actor
 - Deadline clears when the actor changes to local or hand ends
-- check_deadlines() reports an expired deadline once, as a timeout_proposal,
-  and applies nothing itself
-- Betting timeout consequence: fold when facing a bet, check when not
-- Deal timeout consequence: voids the hand, preserves stacks, marks peer
-  unavailable
 - Refusal: no game applies a timeout proposal -- current or stale, at time
   zero or after its own deadline (docs/CASUAL_P2P_RULES.md, "Time-zero
   timeout proposal")
@@ -18,6 +13,12 @@ Coverage:
 - Race: proposal-beats-action (proposal refused → the late action applies)
 - Idempotency: two proposals for the same token change nothing
 - Convergence: one proposal on staggered clocks cannot split replicas
+
+Nothing here sends a proposal through game code: since audit #194 stage 3
+no honest game sends one. The tests send it themselves, as an old or
+modified client could, because what matters is what a RECEIVER does with
+one. Stalled deals now end by the timekeeper's stall notice, covered in
+tests/test_stall_notice.py.
 """
 from __future__ import annotations
 
@@ -355,124 +356,21 @@ class TestDeadlineLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# Betting timeout — check_deadlines reports; the consequence awaits a timekeeper
+# Refusal on two replicas with expired deadlines
 # ---------------------------------------------------------------------------
 
-class TestBettingTimeout:
-    def _make_betting_session(self, clk=None):
-        """Session in betting phase with peer1 (remote) as the first actor.
-        No deal driver — replica injected directly, so _maybe_start_deadline
-        goes straight to the betting branch."""
-        if clk is None:
-            clk = FakeClock()
-        bus = InMemoryBus()
-        s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "peer0"), clock=clk,
-                    master_secret=b"test-session-secret")
-        s.local_conn_id = "peer0"
-        s.configure_seats(["peer0", "peer1"])
-        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
-
-        from holdem.p2p.replica_table import ReplicaTable
-        r = ReplicaTable(
-            session_id="poker|peer0|peer1", hand_no=1,
-            names=["Alice", "Bob"], stacks=[1000, 1000],
-            sb=5, bb=10, structure="No-Limit",
-        )
-        # button=0 → peer0 is BB, peer1 is SB and acts first preflop
-        r.start_hand(0)
-        s._replica = r
-        s._hand_no = 1
-        s._maybe_start_deadline()  # sets betting deadline for peer1
-
-        if r.actor is None or s.seat_order[r.actor] == "peer0":
-            pytest.skip("local peer ended up as first actor")
-
-        return clk, bus, s, r
-
-    def test_check_deadlines_broadcasts_proposal_after_timeout(self):
-        """The expired deadline is reported once, and the game reporting it
-        applies nothing: no game applies a timeout proposal, the one that
-        sends it included."""
-        clk, bus, s, r = self._make_betting_session()
-        assert s._current_deadline_token is not None
-        seq, actor = r.next_seq, r.actor
-
-        proposals = []
-        original_broadcast = s._transport.broadcast
-        s._transport.broadcast = lambda m: (proposals.append(m),
-                                             original_broadcast(m))[-1]
-
-        clk.advance(31.0)
-        s.check_deadlines()
-        assert [m.get("type") for m in proposals] == ["timeout_proposal"]
-        assert r.next_seq == seq
-        assert not r.engine.players[actor].folded
-
-        s.check_deadlines()
-        assert len(proposals) == 1, "the same wait was reported twice"
-
-    def test_betting_timeout_folds_actor_facing_bet(self):
-        """The consequence kept for the timekeeper (see
-        Session._apply_timeout): an actor facing a bet is folded."""
-        clk, bus, s, r = self._make_betting_session()
-        actor_seat = r.actor
-        to_call = r.engine.legal(actor_seat).get("to_call", 0)
-        if to_call == 0:
-            pytest.skip("initial actor has no bet to face")
-
-        s._apply_timeout(s._current_deadline_token)
-        assert r.engine.players[actor_seat].folded
-
-    def test_betting_timeout_checks_actor_no_bet(self):
-        """When there is no bet to face and the actor times out, they are checked.
-
-        Tracked in https://github.com/nephrium83/texas-holdem/issues/11
-        Requires a real mental-poker deal to reach a genuine postflop state;
-        remove the skip below once the integration harness supports that.
-        """
-        # Find a game state where the first actor has no bet to face.
-        # Preflop: UTG always faces a BB, so we need to get to postflop.
-        bus, sessions, order = make_table(2)
-        s0 = sessions[order[0]]
-        # Drain preflop by having everyone call until postflop
-        drive_betting(bus, sessions, order, s0, while_street="preflop")
-
-        if s0.replica.phase != PHASE_BETTING:
-            pytest.skip("hand settled before postflop")
-
-        actor_seat = s0.replica.actor
-        legal = s0.replica.engine.legal(actor_seat)
-        if legal.get("to_call", 0) > 0:
-            pytest.skip("postflop actor still faces a bet")
-
-        actor_conn = order[actor_seat]
-        if actor_conn == order[0]:
-            pytest.skip("local peer is the postflop actor")
-
-        # The consequence kept for the timekeeper (see Session._apply_timeout).
-        s0._apply_timeout(DeadlineToken(
-            hand_id    = s0._deal_session_id(),
-            phase      = "betting",
-            actor      = actor_conn,
-            action_seq = s0.replica.next_seq,
-        ))
-        bus.drain()
-
-        # Actor was checked — action_on should have advanced past them
-        new_actor = s0.replica.actor
-        assert new_actor != actor_seat or s0.replica.phase != PHASE_BETTING
-
+class TestTwoReplicaRefusal:
     def test_timeout_convergence_two_replicas(self):
-        """Both deadlines have expired and one game reports its own. Neither
-        game applies the proposal, the one that sent it included, so the
+        """Both deadlines have expired and one game sends a proposal for its
+        own. Neither game applies it, the one that sent it included, so the
         hand is not voided and the replicas stay on one state."""
         clk0 = FakeClock()
         clk1 = FakeClock()
         bus, sessions, order = make_table(2, clocks=[clk0, clk1])
         s0, s1 = sessions[order[0]], sessions[order[1]]
         seq = s0.replica.next_seq
+        token = s0._current_deadline_token or s1._current_deadline_token
+        assert token is not None, "neither game has a deadline to expire"
 
         sent = []
         original_broadcast = s0._transport.broadcast
@@ -481,7 +379,10 @@ class TestBettingTimeout:
 
         clk0.advance(31.0)
         clk1.advance(31.0)
-        s0.check_deadlines()
+        with s0._owner:
+            s0._send_hostless(proposal_msg(token, hand=s0._hand_no))
+            s0._on_timeout_proposal(s0.local_conn_id,
+                                    proposal_msg(token, hand=s0._hand_no))
         bus.drain()
 
         assert any(m.get("type") == "timeout_proposal" for m in sent)
@@ -489,104 +390,6 @@ class TestBettingTimeout:
             assert not s.hand_voided, s.void_reason
             assert s.replica.next_seq == seq
         assert s0.replica.state_digest() == s1.replica.state_digest()
-
-
-# ---------------------------------------------------------------------------
-# Deal timeout
-# ---------------------------------------------------------------------------
-
-class TestDealTimeout:
-    def test_deal_timeout_voids_hand_and_preserves_stacks(self):
-        """What a future authenticated timekeeper notice would apply (no
-        proposal does now): the hand is voided and stacks are unchanged."""
-        clk = FakeClock()
-        bus = InMemoryBus()
-        order = ["A", "B"]
-        sessions: dict[str, Session] = {}
-        for i, cid in enumerate(order):
-            s = Session(is_host=(i == 0), nickname=f"P{i}", avatar_b64="",
-                        transport=InMemoryTransport(bus, cid), clock=clk,
-                        master_secret=b"test-session-secret")
-            s.local_conn_id = cid
-            s.configure_seats(list(order))
-            s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-            s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
-            bus.register(cid, s)
-            sessions[cid] = s
-
-        # Build a valid token that matches the deal phase
-        sA = sessions["A"]
-        # Start a hand so replica exists
-        sA._table_cfg = {
-            "names": ["Alice", "Bob"], "sb": 5, "bb": 10,
-            "structure": "No-Limit", "button": 0, "total_chips": 2000,
-        }
-        sessions["B"]._table_cfg = dict(sA._table_cfg)
-
-        stacks = [1000, 1000]
-        # Manually construct a deal-phase token (simulate deal not completing)
-        from holdem.p2p.replica_table import ReplicaTable
-        replica = ReplicaTable(
-            session_id="poker|A|B", hand_no=1,
-            names=["Alice", "Bob"], stacks=stacks,
-            sb=5, bb=10, structure="No-Limit",
-        )
-        replica.start_hand(0)
-        # Blinds are posted during start_hand; capture chip total now
-        chips_in_play = sum(p.stack for p in replica.engine.players)
-        sA._replica = replica
-        sA._seat_order = ["A", "B"]
-        sA._hand_no = 1
-
-        token = DeadlineToken(
-            hand_id    = "poker|A|B",
-            phase      = "deal_shuffle",
-            actor      = None,
-            action_seq = 0,
-        )
-        sA._current_deadline_token = token
-        sA._deadline_started_at   = 0.0
-
-        # Apply the deal timeout directly
-        sA._apply_deal_timeout(token)
-        assert sA.hand_voided
-        assert "deal timeout" in (sA.void_reason or "")
-        # Void must not destroy chips — total in player stacks unchanged by void
-        assert sum(p.stack for p in sA.replica.engine.players) == chips_in_play
-
-    def test_deal_timeout_marks_known_peer_unavailable(self):
-        """If actor is specified in the deal token, that peer is marked unavailable."""
-        bus = InMemoryBus()
-        s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "host"),
-                    clock=FakeClock(),
-                    master_secret=b"test-session-secret")
-        s.local_conn_id = "host"
-        from holdem.p2p.session import Player
-        with s._lock:
-            s.players["peerA"] = Player(
-                conn_id="peerA", peer_id="", nickname="A", avatar_b64="")
-
-        from holdem.p2p.replica_table import ReplicaTable
-        r = ReplicaTable(
-            session_id="poker|host|peerA", hand_no=1,
-            names=["H", "A"], stacks=[500, 500], sb=5, bb=10,
-            structure="No-Limit",
-        )
-        r.start_hand(0)
-        s._replica = r
-        s._seat_order = ["host", "peerA"]
-        s._hand_no = 1
-
-        token = DeadlineToken(
-            hand_id    = "poker|host|peerA",
-            phase      = "deal_shuffle",
-            actor      = "peerA",
-            action_seq = 0,
-        )
-        s._apply_deal_timeout(token)
-        assert s.hand_voided
-        assert s.players["peerA"].unavailable is True
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +647,8 @@ class TestConvergence:
     def test_one_proposal_cannot_split_replicas_on_staggered_clocks(self):
         """Each game starts a deadline when it reaches it, so deadlines are
         staggered: here the late watcher's started 21 s after the early
-        one's, and the early one reports its expired deadline. Judged by
+        one's, and the early one sends a proposal for its expired deadline,
+        as an old or modified client could. Judged by
         each game's own clock, the proposal folded the actor on the early
         game alone. Judged by the token alone, it folded the actor
         everywhere but on the actor's own game, which sets no deadline on
@@ -868,7 +672,8 @@ class TestConvergence:
         original_broadcast = reporter._transport.broadcast
         reporter._transport.broadcast = lambda m: (sent.append(m),
                                                     original_broadcast(m))[-1]
-        reporter.check_deadlines()
+        with reporter._owner:
+            reporter._send_hostless(proposal_msg(token, hand=reporter._hand_no))
         bus.drain()
 
         proposal = next(m for m in sent if m.get("type") == "timeout_proposal")

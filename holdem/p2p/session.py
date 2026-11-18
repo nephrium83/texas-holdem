@@ -142,7 +142,7 @@ class Player:
     avatar_b64:        str
     is_host:           bool  = False
     ready:             bool  = False
-    unavailable:       bool  = False   # set by timeout; peer stays seated
+    unavailable:       bool  = False   # nothing sets this since #194 stage 3; kept for roster shape
     seat_index:        int   = -1
     # X25519 pubkey for hole-card encryption (populated from player_info)
     x25519_pubkey_hex: str   = ""
@@ -4817,62 +4817,15 @@ class Session:
     # Timeout machinery (Phase 3)
     # ------------------------------------------------------------------
 
-    @owned
-    def check_deadlines(self) -> None:
-        """Report the current deadline to the table once it has expired.
-
-        Call this periodically from the event loop (e.g. every second).
-        Tests advance the FakeClock then call this directly — no sleeping.
-        The report is a timeout_proposal, which no game applies, this one
-        included (see _on_timeout_proposal).
-        """
-        if self._deadline_expired():
-            self._broadcast_timeout_proposal(self._current_deadline_token)
-
     def _deadline_expired(self) -> bool:
         """Has the current deadline run its phase's time on this game's own
-        clock? Decides only when this game reports it, never what any game
-        does with a report (see _on_timeout_proposal)."""
+        clock? Decides only WHEN the timekeeper sends a stall notice, never
+        what any game does with one (see _on_stall_notice)."""
         token = self._current_deadline_token
         if token is None or self._deadline_started_at is None:
             return False
         elapsed = self._clock.monotonic() - self._deadline_started_at
         return elapsed >= self._phase_timeout.get(token.phase, 30.0)
-
-    def _broadcast_timeout_proposal(self, token: DeadlineToken) -> None:
-        # Sequence holes are read HERE and nowhere earlier. A hole is not a
-        # failure on its own -- delivery may reorder, and a late message
-        # closes it with no gameplay consequence -- so it is only evidence
-        # once an existing deadline has already decided that waiting has
-        # become failure. This adds no timer and shortens no deadline: the
-        # timeout fires on exactly the schedule it always did, and the holes
-        # ride along to say what was observed missing when it did.
-        holes = self.author_seq_hole_report()
-        self._safe_emit(
-            "timeout_proposed",
-            hand        = self._hand_no,
-            seq         = token.action_seq,
-            phase       = self._replica.phase if self._replica else "unknown",
-            actor       = token.actor,
-            token_phase = token.phase,
-            author_seq_holes = holes,
-        )
-        self._send_hostless({
-            "type":         "timeout_proposal",
-            "hand":         self._hand_no,
-            "token": {
-                "hand_id":    token.hand_id,
-                "phase":      token.phase,
-                "actor":      token.actor,
-                "action_seq": token.action_seq,
-            },
-            "missing_seat": None,
-            "author_seq_holes": holes,
-        })
-        # A report, not a transition: no game applies a timeout proposal, so
-        # neither does the one that sends it (see _on_timeout_proposal).
-        # Cleared so that each wait is reported once, not on every poll.
-        self._clear_deadline()
 
     @owned
     def _on_timeout_proposal(self, conn_id: str, msg: dict) -> None:
@@ -4889,14 +4842,16 @@ class Session:
         decide when a game acts, never what a signed message does (standing
         invariant 3 in the same document: evidence decides, clocks do not).
 
-        So a proposal changes nothing until rule 9's timekeeper exists,
-        whose signed notice every game can follow alike; _apply_timeout
-        keeps the consequences for it. No honest game sends one meanwhile:
-        check_deadlines has no production caller, and the game that sends
-        a proposal applies nothing either.
+        So a proposal changes nothing, whoever sends it. A stalled deal is
+        ended instead by the timekeeper's signed stall_notice
+        (_on_stall_notice), which every game follows alike and which
+        terminates rather than voids. No honest game sends a proposal any
+        more: the code that sent one went in audit #194 stage 3, together
+        with the refunding _apply_timeout path it was kept for. This
+        refusal stays, because an old or modified client still can.
         """
         _log.warning("session: refusing timeout_proposal from %s -- no game "
-                     "applies one until there is a timekeeper", conn_id)
+                     "applies one; stalls end by stall_notice", conn_id)
 
     # ------------------------------------------------------------------
     # The timekeeper for a stalled deal (audit #194)
@@ -5034,8 +4989,8 @@ class Session:
         self._send_hostless(dict(notice))
         # The sender takes the RECEIVER's path, so it cannot diverge from
         # what it just told everyone else to do. The deadline is not
-        # cleared first: clearing before acting is what made
-        # _broadcast_timeout_proposal report each stall once and forget it.
+        # cleared first: clearing before acting is what made the old
+        # timeout-proposal path report each stall once and forget it.
         self._on_stall_notice(self.local_conn_id, notice)
 
     @owned
@@ -5053,7 +5008,8 @@ class Session:
         Terminate, never void. A void refunds, and a refund is what made
         the time-zero timeout proposal a profitable undo button
         (docs/CASUAL_P2P_RULES.md, "Time-zero timeout proposal"):
-        _apply_deal_timeout voids the hand and hands the blinds back.
+        _apply_deal_timeout voided the hand and handed the blinds back
+        (removed in audit #194 stage 3).
         Termination returns nothing, so standing invariant 1 holds -- a
         timekeeper that ends the table early gains nothing it can carry
         anywhere, because stakes are confined to one table.
@@ -5122,75 +5078,6 @@ class Session:
                    "author_seq_holes": msg.get("author_seq_holes"),
                    "timekeeper_seat":  seat},
         )
-
-    def _apply_timeout(self, token: DeadlineToken) -> None:
-        """Apply the phase-specific consequence of a timeout.
-
-        Nothing triggers one yet: a timeout_proposal is refused everywhere
-        (see _on_timeout_proposal), so this waits for the timekeeper's
-        signed notice. Tests drive it directly.
-        """
-        self._clear_deadline()
-        # Forensics, not cause. The timeout remains the liveness reason; the
-        # holes only say what was already missing when it fired. When the
-        # suppressed message is the LAST one in a stream there is no hole to
-        # report and this is empty -- the timeout behaves exactly as before.
-        self._safe_emit(
-            "timeout_applied",
-            hand        = self._hand_no,
-            seq         = token.action_seq,
-            phase       = self._replica.phase if self._replica else token.phase,
-            digest      = self._replica.state_digest() if self._replica else "",
-            actor       = token.actor,
-            token_phase = token.phase,
-            author_seq_holes = self.author_seq_hole_report(),
-        )
-        if token.phase == "betting":
-            self._apply_betting_timeout(token)
-        elif token.phase in ("deal_shuffle", "deal_decrypt"):
-            self._apply_deal_timeout(token)
-        else:
-            _log.warning("session: unhandled timeout phase %r", token.phase)
-
-    def _apply_betting_timeout(self, token: DeadlineToken) -> None:
-        """Fold (if facing a bet) or check (if not) on behalf of the timed-out actor.
-
-        The action goes through the normal apply_action path so digest
-        checking and _pump_hand stay on the single happy path.
-        """
-        if self._replica is None or self.hand_voided:
-            return
-        try:
-            seat = self._seat_order.index(token.actor)
-        except ValueError:
-            _log.warning("session: betting timeout actor %r not in seat order",
-                         token.actor)
-            return
-        legal  = self._replica.engine.legal(seat)
-        action = "fold" if legal.get("to_call", 0) > 0 else "check"
-        verdict = self._replica.apply_action(token.action_seq, seat, action, 0)
-        if verdict == "applied":
-            self._pump_hand()
-            self._notify_state_changed()
-
-    @owned
-    def _apply_deal_timeout(self, token: DeadlineToken) -> None:
-        """Void the hand when a deal-phase contribution never arrived.
-
-        Stacks are preserved (existing void-and-redeal path). The missing
-        peer (if identifiable) is marked unavailable; it is NOT removed.
-        """
-        if self._replica is None or self.hand_voided:
-            return
-        actor = token.actor
-        reason = f"deal timeout: {token.phase}"
-        if actor is not None:
-            reason += f" (peer {actor!r} did not contribute)"
-            with self._lock:
-                if actor in self.players:
-                    self.players[actor].unavailable = True
-            self._safe_emit("peer_unavailable", conn_id=actor)
-        self._void_hand(reason)
 
     @owned
     def _maybe_start_deadline(self) -> None:

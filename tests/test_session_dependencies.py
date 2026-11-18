@@ -312,23 +312,20 @@ def test_event_and_terminal_records_use_the_supplied_clock():
     assert sink.of_type("sidecar_stopping")[-1]["ts"] == 1_700_086_405.0
 
 
-def test_wall_clock_jumps_do_not_expire_a_monotonic_deadline(monkeypatch):
+def test_wall_clock_jumps_do_not_expire_a_monotonic_deadline():
+    """Deadlines run on the monotonic clock. The stall notice reads
+    _deadline_expired, so a wall-clock jump must not end a table early."""
     clock = FakeClock(100.0, wall_start=1_700_000_000.0)
     session = _session(clock=clock)
     token = DeadlineToken("memory-hand", "betting", "remote", 0)
-    proposed = []
-    monkeypatch.setattr(session, "_broadcast_timeout_proposal", proposed.append)
     with session._owner:
         session._start_deadline(token)
     clock.advance_wall(1_000_000.0)
-    session.check_deadlines()
-    assert proposed == []
+    assert not session._deadline_expired()
     clock.advance(29.0)
-    session.check_deadlines()
-    assert proposed == []
+    assert not session._deadline_expired()
     clock.advance(1.0)
-    session.check_deadlines()
-    assert proposed == [token]
+    assert session._deadline_expired()
 
 
 def test_fake_clock_has_separate_wall_and_monotonic_origins():

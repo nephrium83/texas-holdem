@@ -20,10 +20,10 @@ from typing import Optional, Protocol
 class Clock(Protocol):
     """Monotonic time for deadlines and records, wall time for timestamps.
 
-    A local deadline decides when to report a timeout proposal. What a
-    proposal does is never the clock's to say: clocks on different machines
-    disagree, and one signed message must have the same effect on every
-    replica.
+    A local deadline decides only when the timekeeper sends a stall notice.
+    What a notice does is never the clock's to say: clocks on different
+    machines disagree, and one signed message must have the same effect on
+    every replica.
     """
 
     def monotonic(self) -> float: ...
@@ -77,7 +77,7 @@ class DeadlineToken:
     ``actor``      -- conn_id of the awaited peer, or None for multi-peer
                       phases (shuffle, decrypt) where any missing peer ends it.
     ``action_seq`` -- replica.next_seq at the moment the deadline was set;
-                      proposals with a different seq are stale and dropped.
+                      a new action restarts the deadline with a new token.
     """
 
     hand_id:    str

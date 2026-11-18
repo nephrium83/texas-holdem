@@ -535,8 +535,7 @@ def test_a_refused_deal_leaves_no_bettable_table():
     blinds, opening betting -- and only then call begin_hand, which this
     mandate gave new refusal paths. A refusal there left a table that
     accepted bets (send_bet_action gates on _replica alone) and could never
-    settle, because settling needs a deal that was refused. There is no
-    timeout to rescue it: check_deadlines has no production caller.
+    settle, because settling needs a deal that was refused.
     """
     bus = InMemoryBus()
     order = ["peer0", "peer1"]

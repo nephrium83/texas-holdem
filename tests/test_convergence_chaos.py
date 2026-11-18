@@ -163,9 +163,10 @@ def assert_converged(sessions, order):
 
 
 def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
-    """Liveness: advance every peer's clock past its deadline, run the
-    public timeout path, deliver what it emits -- until every peer has
-    reached a terminal outcome for the hand (or fail)."""
+    """Liveness: advance every peer's clock past its deadline, run each
+    peer's reliability tick (the production timekeeper path), deliver what
+    it emits -- until every peer has reached a terminal outcome for the
+    hand (or fail)."""
     def terminal(s):
         return s.hand_voided or s.hand_result is not None or s.terminal_state
     for _ in range(rounds):
@@ -173,7 +174,7 @@ def drive_to_terminal(bus, sessions, order, rounds=40, step=3600.0):
             return
         for c in order:
             sessions[c]._clock.advance(step)
-            sessions[c].check_deadlines()
+            sessions[c].reliability_tick()
         bus.drain()
     stuck = [c for c in order if not terminal(sessions[c])]
     pytest.fail(f"peers never reached a terminal outcome: {stuck}")
