@@ -134,7 +134,10 @@ def main():
     from holdem.p2p import ristretto as R
     from tests.test_session_prevention import signed_table
 
-    from benchmark_support import metadata, peak_rss_bytes
+    if __package__:
+        from .benchmark_support import metadata, peak_rss_bytes
+    else:
+        from benchmark_support import metadata, peak_rss_bytes
     report = {"metadata": {**metadata(a.checkout),
         "python": platform.python_version(), "platform": platform.platform(),
         "libsodium": R.libsodium_version(), "measures":

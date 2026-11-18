@@ -186,7 +186,10 @@ def _configuration(count: int, prevention: bool, hands: int) -> dict:
     first = _run_hand(seats, prevention, hand_no=1)
     warm = [_run_hand(seats, prevention, hand_no=h)
             for h in range(2, hands + 1)]
-    from benchmark_support import peak_rss_bytes
+    if __package__:
+        from .benchmark_support import peak_rss_bytes
+    else:
+        from benchmark_support import peak_rss_bytes
     return {
         "peak_rss_bytes": peak_rss_bytes(),
         "seats": count,
@@ -208,7 +211,10 @@ def _commit() -> str:
 
 
 def _metadata() -> dict:
-    from benchmark_support import metadata
+    if __package__:
+        from .benchmark_support import metadata
+    else:
+        from benchmark_support import metadata
     return {
         **metadata(Path(__file__).resolve().parents[1]),
         "python": platform.python_version(),

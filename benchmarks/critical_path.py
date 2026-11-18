@@ -148,7 +148,10 @@ def main():
     from holdem.p2p.mental_deal import MentalDeal, Phase
 
     from holdem.p2p import bg_shuffle
-    from benchmark_support import metadata, peak_rss_bytes, summary
+    if __package__:
+        from .benchmark_support import metadata, peak_rss_bytes, summary
+    else:
+        from benchmark_support import metadata, peak_rss_bytes, summary
     report = {"metadata": metadata(a.checkout), "configurations": [],
               "scope": "modeled parallel wait from measured coordinator wall costs; excludes real transport and bandwidth contention"}
     print("prevention (Bayer-Groth); p50 over %d warm hands; ms" % a.hands)

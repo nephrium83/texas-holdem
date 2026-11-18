@@ -1,7 +1,6 @@
 """Numerical/reporting contracts, independent of cryptographic timing noise."""
 import importlib.util
 from pathlib import Path
-import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,3 +51,10 @@ def test_signed_sample_cleans_generated_identity_directory_on_failure(monkeypatc
     with pytest.raises(RuntimeError, match="fixture failure"):
         session.sample(2, None, None)
     assert created and not created[0].exists()
+
+
+def test_coordinator_metadata_is_available_as_a_package_import():
+    from benchmarks import mental_deal_startup
+    report = mental_deal_startup._metadata()
+    assert len(report["commit"]) == 40
+    assert report["memory_scope"].startswith("OS process-lifetime peak RSS")
