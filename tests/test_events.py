@@ -14,9 +14,6 @@ Coverage:
 - action_received fires for remote actions
 - digest_changed fires when replica state advances
 - hand_voided fires when _void_hand is called
-- peer_unavailable fires before hand_voided on deal timeout
-- timeout_proposed fires when check_deadlines reports, and nothing is applied
-- timeout_applied fires when a timeout's consequence is applied
 - sidecar_stopping fires at session end
 - Schema version and required fields present on every event
 - _emit_event never raises even with a broken sink
@@ -35,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from holdem.p2p.events import EventSink, ListSink, NullSink, StdoutSink, SCHEMA_VERSION
 from holdem.p2p.session import Session
 from holdem.p2p.inmemory_transport import InMemoryBus, InMemoryTransport
-from holdem.p2p.timeout import DeadlineToken, FakeClock
+from holdem.p2p.timeout import FakeClock
 
 from crypto_gate import initialize_for_tests, NativeCryptoUnavailable
 
@@ -425,104 +422,11 @@ class TestHandVoided:
         assert len(sinks[0].of_type("hand_voided")) == 1
 
 
-# ---------------------------------------------------------------------------
-# timeout events
-# ---------------------------------------------------------------------------
+# timeout_proposed, timeout_applied and peer_unavailable went with the old
+# timeout-proposal path in audit #194 stage 3. A stalled deal now ends by
+# the timekeeper's stall notice; its sidecar_stopping payload is tested in
+# tests/test_stall_notice.py.
 
-class TestTimeoutEvents:
-    def _betting_session(self):
-        sink = ListSink()
-        bus = InMemoryBus()
-        clk = FakeClock()
-        s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "peer0"),
-                    clock=clk, sink=sink,
-                    master_secret=b"test-session-secret")
-        s.local_conn_id = "peer0"
-        s.configure_seats(["peer0", "peer1"])
-        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
-        from holdem.p2p.replica_table import ReplicaTable
-        r = ReplicaTable(session_id="poker|peer0|peer1", hand_no=1,
-                         names=["Alice", "Bob"], stacks=[1000, 1000],
-                         sb=5, bb=10, structure="No-Limit")
-        r.start_hand(0)   # peer1 acts first
-        s._replica = r
-        s._hand_no = 1
-        s._maybe_start_deadline()
-        if r.actor is None or s.seat_order[r.actor] == "peer0":
-            pytest.skip("local peer is first actor")
-        return clk, sink, s, r
-
-    def test_timeout_proposed_fires_and_nothing_is_applied(self):
-        """check_deadlines reports the wait and applies nothing: no game
-        applies a timeout proposal, the one that sends it included."""
-        clk, sink, s, r = self._betting_session()
-        clk.advance(31.0)
-        s.check_deadlines()
-
-        assert sink.last("timeout_proposed") is not None
-        assert sink.last("timeout_applied") is None
-
-    def test_timeout_proposed_has_actor_and_token_phase(self):
-        clk, sink, s, r = self._betting_session()
-        clk.advance(31.0)
-        s.check_deadlines()
-
-        ev = sink.last("timeout_proposed")
-        assert ev is not None
-        assert ev["actor"] == "peer1"
-        assert ev["token_phase"] == "betting"
-
-    def test_timeout_applied_has_digest(self):
-        """The consequence kept for the timekeeper (see
-        Session._apply_timeout) records the digest it applied at."""
-        clk, sink, s, r = self._betting_session()
-        s._apply_timeout(s._current_deadline_token)
-
-        ev = sink.last("timeout_applied")
-        assert ev is not None
-        assert "digest" in ev
-
-    def test_peer_unavailable_fires_before_hand_voided(self):
-        """Deal timeout: peer_unavailable emitted, then hand_voided."""
-        sink = ListSink()
-        bus = InMemoryBus()
-        s = Session(is_host=True, nickname="H", avatar_b64="",
-                    transport=InMemoryTransport(bus, "host"), sink=sink,
-                    clock=FakeClock(),
-                    master_secret=b"test-session-secret")
-        s.local_conn_id = "host"
-        s.configure_seats(["host", "peerA"])
-        s._adopt_deal_policy(Session.DEAL_POLICY_DETECTION)
-        s._adopt_continuation_policy(Session.CONTINUATION_END_TABLE)
-        from holdem.p2p.session import Player
-        with s._lock:
-            s.players["peerA"] = Player(
-                conn_id="peerA", peer_id="", nickname="A", avatar_b64="")
-        from holdem.p2p.replica_table import ReplicaTable
-        r = ReplicaTable(session_id="poker|host|peerA", hand_no=1,
-                         names=["H","A"], stacks=[500,500],
-                         sb=5, bb=10, structure="No-Limit")
-        r.start_hand(0)
-        s._replica = r
-        s._hand_no = 1
-
-        token = DeadlineToken(hand_id="poker|host|peerA",
-                              phase="deal_shuffle", actor="peerA", action_seq=0)
-        s._apply_deal_timeout(token)
-
-        events = [e["event"] for e in sink.events]
-        unavail_idx = next((i for i, e in enumerate(events) if e == "peer_unavailable"), None)
-        void_idx    = next((i for i, e in enumerate(events) if e == "hand_voided"), None)
-        assert unavail_idx is not None
-        assert void_idx is not None
-        assert unavail_idx < void_idx
-
-
-# ---------------------------------------------------------------------------
-# sidecar_stopping
-# ---------------------------------------------------------------------------
 
 class TestSidecarStopping:
     def test_fires_when_session_ends(self):

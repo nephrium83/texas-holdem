@@ -274,7 +274,7 @@ def test_disconnect_message_timeout_and_shutdown_race(trial):
                                             "seq": 0, "seat": 2,
                                             "action": "call", "amount": 0}),
          False),
-        ("check_deadlines", lambda: s.check_deadlines(), False),
+        ("reliability_tick", lambda: s.reliability_tick(), False),
         ("terminate",
          lambda: s.terminate(Session.LOCAL_SHUTDOWN, "user quit"), False),
         ("_void_hand", lambda: s._void_hand("protocol failure"), True),

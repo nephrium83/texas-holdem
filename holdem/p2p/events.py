@@ -13,10 +13,7 @@ peer_connected     -- a player (local or remote) joined the session
 hand_started       -- a new hand has been initialized
 action_received    -- a remote bet-action message arrived and passed validation
 action_applied     -- apply_action returned "applied" (local or remote)
-timeout_proposed   -- this peer broadcast a timeout_proposal
-timeout_applied    -- a timeout was accepted and acted on
 hand_voided        -- the current hand is being voided
-peer_unavailable   -- a peer was marked unavailable (deal timeout)
 digest_changed     -- the replica state digest moved to a new value
 sidecar_stopping   -- the session has finished (winner decided or ended)
 
