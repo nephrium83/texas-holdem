@@ -512,6 +512,48 @@ def test_the_notice_carries_the_senders_forensics_into_the_record(tmp_path):
     assert stopping[-1]["author_seq_holes"] == [{"seat": 1}]
 
 
+def test_every_peer_records_the_timekeepers_sequence_holes(tmp_path):
+    """The forensic report rides on the notice, so every peer's terminal
+    record carries what the TIMEKEEPER saw missing, not its own view.
+
+    It used to ride on the timeout_proposed event, which went with the old
+    timeout-proposal path in audit #194 stage 3. A receiver substituting
+    its own report would make peers record different evidence for one
+    ending, which is the kind of quiet divergence this exchange removes.
+    """
+    def omit(from_conn, to_conn, env):
+        return env.get("type") == "deck_round" and to_conn == "peer1"
+
+    bus, sessions, order = stalled_table(tmp_path, 3, omit=omit)
+    keeper = sessions["peer0"]
+    report = [{"seat": 1, "missing": [7]}]
+    keeper.author_seq_hole_report = lambda hand=None: report
+    for cid in order[1:]:
+        assert sessions[cid].author_seq_hole_report() != report, (
+            f"{cid} already sees the keeper's report, so this proves nothing")
+
+    events = {cid: [] for cid in order}
+
+    class _Sink:
+        def __init__(self, bucket):
+            self.bucket = bucket
+
+        def emit(self, payload):
+            self.bucket.append(payload)
+
+    for cid in order:
+        sessions[cid]._log_sink = _Sink(events[cid])
+
+    tick_all(bus, sessions, order)
+
+    for cid in order:
+        assert sessions[cid].terminal_state == Session.ABORTED_PROTOCOL, cid
+        stopping = [e for e in events[cid] if e.get("event") == "sidecar_stopping"]
+        assert stopping, f"{cid} emitted no sidecar_stopping"
+        assert stopping[-1]["author_seq_holes"] == report, (
+            cid, stopping[-1].get("author_seq_holes"))
+
+
 if __name__ == "__main__":
     # Preserve fixtures, parametrization and a failing process exit status.
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))

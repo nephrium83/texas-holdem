@@ -128,6 +128,13 @@ class ReplicaTable:
             self.engine.bb_seat = bb_seat
         if sb_seat is not None:
             self.engine.sb_seat = sb_seat
+        # Each hand gets a fresh Engine, whose own counter starts at 0, and
+        # Engine.start_hand increments it into the "--- Hand #N" heading and
+        # the hand_num of every public event -- what the log panel and the
+        # hand history read. Without this every hand was logged as hand 1
+        # (playtest 2026-11-17). state_digest hashes self.hand_no, not the
+        # engine's counter, so no digest changes and peers cannot disagree.
+        self.engine.hand_no = self.hand_no - 1
         ok = self.engine.start_hand(deck=Deck.from_indices(list(range(52))))
         self._recompute_phase()
         return bool(ok)

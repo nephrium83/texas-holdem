@@ -446,35 +446,14 @@ def test_an_identical_replay_is_not_mistaken_for_equivocation():
 
 # ── timeout integration ───────────────────────────────────────────────────
 
-def _arm(session, phase="deal_shuffle"):
-    """Put a real deadline on the session, then let it expire naturally.
+def test_a_suppressed_message_shows_as_a_hole_in_the_report():
+    """Suppress N, deliver N+1: the forensic report names the missing number.
 
-    These tests must not skip. Skipping on "no active deadline in this
-    phase" would leave the timeout integration -- the only thing that turns
-    a hole into an outcome -- asserted by nothing at all, while still
-    reporting green.
-
-    The deadline is a genuine DeadlineToken through the session's own
-    _start_deadline, so check_deadlines() fires on exactly the schedule it
-    always would; the test advances a FakeClock rather than shortening it.
-    """
-    from holdem.p2p.timeout import DeadlineToken
-    token = DeadlineToken(
-        hand_id=session._deal_session_id(), phase=phase,
-        actor=None,
-        action_seq=session._replica.next_seq if session._replica else 0)
-    session._start_deadline(token)
-    return token
-
-
-
-
-def test_a_hole_is_reported_by_the_timeout_that_was_going_to_fire_anyway():
-    """Holes ride along with the existing deadline; they do not cause it.
-
-    Suppress N, deliver N+1, let the ordinary deadline expire: the timeout
-    outcome must carry the missing number. No second timer, and the
-    deadline is the same one that would have fired regardless.
+    The report is read by the stall notice when a deadline has already
+    decided that waiting became failure, and carried to every peer's
+    sidecar_stopping event -- that hand-off is tested in
+    tests/test_stall_notice.py. It used to ride on timeout_proposed, which
+    went with the old timeout-proposal path in audit #194 stage 3.
     """
     clk = FakeClock()
     bus = RecordingBus()
@@ -495,27 +474,17 @@ def test_a_hole_is_reported_by_the_timeout_that_was_going_to_fire_anyway():
     assert victim.author_seq_holes(1, 0) == [top + 1]
     report = victim.author_seq_hole_report(1)
     assert report == [{"seat": 0, "missing": [top + 1]}], (
-        f"the snapshot the timeout path reads is wrong: {report}")
-
-    _arm(victim)
-    emitted = []
-    victim._safe_emit = lambda name, **kw: emitted.append((name, kw))
-    clk.advance(1000.0)
-    victim.check_deadlines()
-    proposed = [kw for name, kw in emitted if name == "timeout_proposed"]
-    assert proposed, "the existing deadline did not fire"
-    assert proposed[0].get("author_seq_holes") == report, (
-        "the timeout did not carry the observed holes")
+        f"the snapshot the stall notice reads is wrong: {report}")
 
 
-def test_a_suppressed_tail_leaves_no_hole_and_the_timeout_still_fires():
+def test_a_suppressed_tail_leaves_no_hole():
     """The stated blind spot, pinned so nobody assumes coverage.
 
     Suppressing the LAST message of a stream leaves no higher number to
-    reveal it. author_seq_holes() is therefore empty, and the ordinary
-    phase deadline -- not sequencing -- is what catches the missing
-    progress. Sequence numbers cannot reveal a message whose existence was
-    never observed.
+    reveal it. author_seq_holes() is therefore empty, and the phase
+    deadline -- not sequencing -- is what catches the missing progress.
+    Sequence numbers cannot reveal a message whose existence was never
+    observed.
     """
     clk = FakeClock()
     bus = RecordingBus()
@@ -531,17 +500,7 @@ def test_a_suppressed_tail_leaves_no_hole_and_the_timeout_still_fires():
     assert victim.author_seq_holes(1, 0) == [], (
         "a suppressed tail must not manufacture a hole -- there is no "
         "higher number to reveal it")
-
-    _arm(victim)
-    emitted = []
-    victim._safe_emit = lambda name, **kw: emitted.append((name, kw))
-    clk.advance(1000.0)
-    victim.check_deadlines()
-    proposed = [kw for name, kw in emitted if name == "timeout_proposed"]
-    assert proposed, (
-        "the ordinary timeout must still fire when the tail is suppressed")
-    assert proposed[0].get("author_seq_holes") == [], (
-        "there was no hole to report; the timeout stands on its own")
+    assert victim.author_seq_hole_report(1) == []
 
 
 def test_a_future_hand_message_survives_being_buffered_and_replayed():

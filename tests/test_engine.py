@@ -679,3 +679,87 @@ if __name__ == "__main__":
                 patch.undo()
         print(f"  {name}: ok")
     print(f"ALL PASS ({len(fns)} tests)")
+
+
+# ---------------------------------------------------------------------------
+# Short-handed preflop ranges (playtest 2026-11-17)
+# ---------------------------------------------------------------------------
+
+def _dealer_entry_rate(style, n, deals=1500, seed=11):
+    """How often a dealer of `style` enters the pot when everyone before it
+    folds, at an n-player table. Seeded, so the figure is deterministic."""
+    rng = random.Random(seed)
+    brain = Brain(random.Random(seed + 1))
+    entered = measured = 0
+    for _ in range(deals):
+        ps = [Player(i, f"P{i}", 2000, style=style) for i in range(n)]
+        e = Engine(ps, 25, 50, "No-Limit", rng)
+        e.button = n - 1
+        e.start_hand()
+        while e.actor is not None and e.actor != e.button:
+            e.act(e.actor, "fold")
+        if e.actor != e.button:
+            continue
+        action, _amount = brain.decide(e, e.button)
+        measured += 1
+        entered += action != "fold"
+    assert measured > deals * 0.9, "the dealer was rarely reached"
+    return entered / measured
+
+
+def test_a_solid_dealer_plays_most_hands_heads_up():
+    """Before the short-handed shift a Solid dealer entered 39% of pots at
+    every table size, so heads-up it folded 61% of its dealer hands -- in
+    the playtest it folded all five, and half the practice had no decision
+    in it. Heads-up a tight-solid player still plays about three in four."""
+    heads_up = _dealer_entry_rate("Solid", 2)
+    assert heads_up >= 0.65, heads_up
+    assert heads_up > _dealer_entry_rate("Solid", 6) + 0.25
+    # Not an over-correction: a Nit that plays most hands is not a Nit.
+    assert _dealer_entry_rate("Nit", 2) < 0.6
+
+
+def test_every_style_widens_as_the_table_shrinks():
+    for style in AI_STYLES:
+        rates = [_dealer_entry_rate(style, n) for n in (2, 3, 4, 6)]
+        assert rates == sorted(rates, reverse=True), (style, rates)
+
+
+def test_the_styles_keep_their_order_at_every_table_size():
+    for n in (2, 3, 6):
+        rates = [_dealer_entry_rate(style, n) for style in AI_STYLES]
+        assert rates == sorted(rates), (n, dict(zip(AI_STYLES, rates)))
+        assert len(set(rates)) == len(rates), (n, rates)
+
+
+def test_full_tables_decide_exactly_as_before(monkeypatch):
+    """Five or more players keep the original thresholds: the same deals
+    and seeds give the same decisions with the shift table emptied.
+
+    Decisions are taken after a random number of folds too, so a version
+    that counted players still IN the hand rather than players DEALT into
+    it -- which would widen a six-handed button once three have folded --
+    is caught here."""
+    import holdem.engine as engine_module
+
+    def decisions(n):
+        rng = random.Random(23)
+        brain = Brain(random.Random(24))
+        out = []
+        for _ in range(300):
+            ps = [Player(i, f"P{i}", 2000, style=rng.choice(AI_STYLES))
+                  for i in range(n)]
+            e = Engine(ps, 25, 50, "No-Limit", rng)
+            e.button = n - 1
+            e.start_hand()
+            for _fold in range(rng.randrange(n - 1)):
+                e.act(e.actor, "fold")
+            out.append(brain.decide(e, e.actor))
+        return out
+
+    for n in (5, 6, 9):
+        shifted = decisions(n)
+        monkeypatch.setattr(engine_module, "SHORT_HANDED_SHIFT", {})
+        original = decisions(n)
+        monkeypatch.undo()
+        assert shifted == original, n

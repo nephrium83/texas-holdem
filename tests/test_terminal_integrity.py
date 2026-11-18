@@ -131,7 +131,7 @@ MUTATORS = [
     ("add_local_player", lambda s: s.add_local_player(
         "intruder", public_key=bytes(range(32)))),
     ("set_ready", lambda s: s.set_ready("peer2", True)),
-    ("check_deadlines", lambda s: s.check_deadlines()),
+    ("reliability_tick", lambda s: s.reliability_tick()),
     ("broadcast_game_state", lambda s: s.broadcast_game_state()),
     ("handle_disconnect", lambda s: s.handle_disconnect("peer2")),
     ("handle_disconnect/host", lambda s: s.handle_disconnect("peer0")),

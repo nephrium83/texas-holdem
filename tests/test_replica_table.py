@@ -518,3 +518,26 @@ def test_seeded_fuzz_hands_stay_in_sync(seed):
 if __name__ == "__main__":
     # Preserve fixtures, parametrization and a failing process exit status.
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
+
+def test_the_engine_numbers_its_hand_as_the_replica_does():
+    """The playtest of 2026-11-17 found every hand's log headed "Hand #1".
+
+    Each hand of a continuous session builds a fresh ReplicaTable, and with
+    it a fresh Engine whose own counter starts at 0. Engine.start_hand
+    increments that counter and writes it into the "--- Hand #N" heading
+    and into the hand_num of every public event -- which is what the log
+    panel (contract.event_views) and the hand history read. The replica was
+    told the real number and never handed it down.
+
+    state_digest hashes the REPLICA's hand_no, not the engine's, so peers
+    never disagreed; only what the player is shown was wrong.
+    """
+    (r,) = make_replicas(1, ["A", "B", "C"], [500, 500, 500], hand=7)
+    assert r.engine.hand_no == 7
+    events = r.engine.public_events
+    started = [e for e in events if e["event"] == "hand_started"]
+    assert len(started) == 1
+    assert started[0]["text"].startswith("--- Hand #7 "), started[0]["text"]
+    assert {e["hand_num"] for e in events} == {7}, (
+        "events from one hand carry different hand numbers")
