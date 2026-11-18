@@ -96,6 +96,125 @@ def test_local_turn_checks_when_no_call_is_due_and_board_unlocks_normally():
     _synced(table)
 
 
+def test_postflop_free_check_is_applied_once_on_the_actors_own_clock():
+    """Issue #11, retargeted: the approved casual auto-check, on a genuine
+    POSTFLOP turn, through a real mental-poker hand.
+
+    The check test above reaches a free check too, but it is the big
+    blind's preflop option -- it asserts the street BECOMES the flop after
+    the check. A postflop turn is a different state: the board has been
+    unlocked by real deal shares and nobody has put in a chip on the
+    street. The original issue asked for this through the session-layer
+    timeout proposal, which no game applies and which a non-casual host is
+    not supposed to act on at all; the approved auto-action lives here, in
+    the casual runtime, so this is where it is proven.
+
+    Whose clock acts is tested in both directions. A BYSTANDER's clock
+    reaches thirty seconds first and nothing happens: no action, and no
+    auto-action event from a game whose turn it is not. Then the ACTOR's
+    clock reaches thirty and exactly one check is applied. Every game takes
+    a turn's time from its own clock and acts only for its own seat --
+    receivers never compare elapsed clocks.
+    """
+    table = _table()
+    while table.sessions["P0"].replica.engine.street == "preflop":
+        _act(table)
+
+    # The state this test exists for, asserted rather than assumed. Each
+    # of these failing means the test would otherwise pass for a reason
+    # other than the one in its name.
+    for cid, peer in table.sessions.items():
+        assert peer._deal_driver is not None, f"{cid} has no real deal driver"
+        assert type(peer.replica).__name__ == "ReplicaTable", cid
+        assert peer.replica.engine.street == "flop", (
+            f"{cid} is on {peer.replica.engine.street!r}, not a postflop street")
+        assert len(peer.replica.engine.board) == 3, (
+            f"{cid} has no unlocked flop: {peer.replica.engine.board}")
+        assert peer.replica.phase == "betting", cid
+        assert peer.hand_result is None and not peer.hand_voided, cid
+    _synced(table)
+
+    seat, s = _actor(table)
+    legal = s.replica.engine.legal(seat)
+    assert legal["can_check"] and legal["to_call"] == 0, (
+        f"the postflop actor is not free to check: {legal}")
+
+    before = {cid: peer.replica.next_seq for cid, peer in table.sessions.items()}
+    live = [p.total_live for p in s.replica.engine.players]
+    sent_before = len([m for m in s._transport.sent if m["type"] == "bet_action"])
+    events = []
+
+    class _Sink:
+        def emit(self, payload):
+            events.append(payload)
+
+    s._log_sink = _Sink()
+    actor_clock = table.clocks[seat]
+
+    bystander_seat = next(i for i in range(3) if i != seat)
+    bystander = table.sessions[table.order[bystander_seat]]
+    bystander_events = []
+
+    class _BystanderSink:
+        def emit(self, payload):
+            bystander_events.append(payload)
+
+    bystander._log_sink = _BystanderSink()
+
+    for peer in table.sessions.values():
+        peer.reliability_view()             # starts each game's countdown
+    table.advance(29.999)
+    for peer in table.sessions.values():
+        peer.reliability_tick()
+    table.drain()
+    assert s.replica.next_seq == before[s.local_conn_id],         "the game acted before the thirty seconds were up"
+
+    # A bystander's clock gets there first. Its game must not act for a
+    # seat that is not its own, nor report that it did.
+    table.clocks[bystander_seat].advance(.001)
+    bystander.reliability_tick()
+    table.drain()
+    for cid, peer in table.sessions.items():
+        assert peer.replica.next_seq == before[cid], (
+            f"{cid} applied an action on a BYSTANDER's expired clock")
+    assert not [e for e in bystander_events
+                if e.get("event") == "casual_auto_action"], (
+        "a bystander's game reported acting for a seat that is not its own")
+
+    actor_clock.advance(.001)
+    for peer in table.sessions.values():    # every game ticks; one may act
+        peer.reliability_tick()
+    table.drain()
+
+    # Exactly one action, and it was a check.
+    for cid, peer in table.sessions.items():
+        assert peer.replica.next_seq == before[cid] + 1, (
+            f"{cid} applied {peer.replica.next_seq - before[cid]} actions, "
+            f"not exactly one")
+        assert not peer.replica.engine.players[seat].folded, (
+            f"{cid} saw the actor FOLD when checking was free")
+        assert [p.total_live for p in peer.replica.engine.players] == live, (
+            f"{cid} saw chips move on a check")
+    sent = [m for m in s._transport.sent if m["type"] == "bet_action"]
+    assert len(sent) == sent_before + 1,         f"the actor sent {len(sent) - sent_before} bet actions, not one"
+    # The engine's "call" command checks when nothing is owed; "check" is
+    # the label the event carries.
+    assert sent[-1]["payload"]["action"] == "call"
+    assert sent[-1]["payload"].get("amount", 0) == 0
+    auto = [e for e in events if e.get("event") == "casual_auto_action"]
+    assert len(auto) == 1, f"expected one auto action, saw {auto}"
+    assert auto[0]["action"] == "check" and auto[0]["seat"] == seat
+
+    # It is no longer that seat's turn, and nothing fires twice.
+    assert _actor(table)[0] != seat or s.replica.engine.street != "flop"
+    for peer in table.sessions.values():
+        peer.reliability_tick()
+    table.drain()
+    for cid, peer in table.sessions.items():
+        assert peer.replica.next_seq == before[cid] + 1,             f"{cid} applied a second action on a repeated tick"
+    _synced(table)
+
+
 def test_timekeeper_drops_a_stalled_actor_at_45_without_receiver_elapsed_checks():
     table = _table()
     while _actor(table)[0] == 0:
