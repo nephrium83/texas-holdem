@@ -182,8 +182,26 @@ def test_desktop_local_leave_and_create_again_are_complete_transitions():
             table.apply_command("host_lan", {"nickname": "Alice"})
         assert table.apply_command("leave_table", {})["verdict"] == "left"
         assert table.snapshot()["lobby"]["mode"] == "menu"
-        table.apply_command("local_game", {"nickname": "Bob"})
-        assert table.snapshot()["lobby"]["nickname"] == "Bob"
+        for invalid in (0, 9, True, 2.5):
+            with pytest.raises(ValueError, match="between 1 and 8"):
+                table.apply_command("local_game", {"nickname": "Bob", "bots": invalid})
+        assert table.snapshot()["lobby"]["mode"] == "menu"
+        table.apply_command("local_game", {"nickname": "Bob", "bots": 8})
+        lobby = table.snapshot()["lobby"]
+        assert lobby["nickname"] == "Bob"
+        assert len(lobby["players"]) == 9
+    finally:
+        table.close()
+
+
+def test_desktop_starts_a_nine_seat_bot_hand():
+    from crypto_gate import require_crypto
+
+    require_crypto()
+    table = _desktop()
+    try:
+        table.apply_command("local_game", {"nickname": "Bob", "bots": 8})
+        assert table.apply_command("start_game", {})["ok"]
     finally:
         table.close()
 
