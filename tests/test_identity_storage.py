@@ -263,6 +263,48 @@ else:
             process.communicate(timeout=10)
 
 
+def _replace_after_prestat(monkeypatch, path, replacement, times):
+    """Atomically swap PATH, as another process's upgrade would, between the
+    unlocked read's name check and its open."""
+    real, swaps = storage._prestat, []
+    def racing(directory, name, supplied):
+        info = real(directory, name, supplied)
+        if name == path.name and len(swaps) < times:
+            temp = path.with_name(f"{path.name}.{len(swaps)}.race")
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            os.write(fd, replacement)
+            os.close(fd)
+            os.replace(temp, path)
+            swaps.append(True)
+        return info
+    monkeypatch.setattr(storage, "_prestat", racing)
+    return swaps
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="POSIX name check")
+def test_unlocked_read_adopts_identity_published_during_open(tmp_path, monkeypatch):
+    # CI on Nov 18 2026: a second launch read a legacy file while the first
+    # launch published its upgrade, and the swapped inode was refused.
+    path = tmp_path / "identity.json"
+    _legacy(path)
+    upgraded = tmp_path / "upgraded.json"
+    expected = identity.load_or_create(upgraded)
+    swaps = _replace_after_prestat(monkeypatch, path, upgraded.read_bytes(), times=1)
+    loaded = identity.load_or_create(path)
+    assert swaps == [True]
+    assert loaded.public_key_bytes() == expected.public_key_bytes()
+    assert loaded.x25519_public_key_bytes() == expected.x25519_public_key_bytes()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="POSIX name check")
+def test_unlocked_read_refuses_a_name_that_never_settles(tmp_path, monkeypatch):
+    path = tmp_path / "identity.json"
+    _legacy(path)
+    _replace_after_prestat(monkeypatch, path, path.read_bytes(), times=1000)
+    with pytest.raises(storage.InsecureKeyStorage, match="object binding"):
+        storage.load_identity_bytes(path)
+
+
 @pytest.mark.parametrize('suffix', ['../identity.json', 'alias/../identity.json'])
 def test_parent_traversal_refuses_before_side_effects(tmp_path, monkeypatch, suffix):
     monkeypatch.setattr(os, 'mkdir', lambda *a, **k: pytest.fail('mkdir before refusal'))
