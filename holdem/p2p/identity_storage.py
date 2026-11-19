@@ -205,16 +205,28 @@ def _walk_posix(path, resources, *, create):
     return fd
 
 
+# An unlocked read can race a locked writer's atomic rename: the name is
+# checked, another process commits a replacement, and the open returns the new
+# object. Re-check a few times before treating a moving name as unsafe.
+_READ_BINDING_ATTEMPTS = 5
+
+
 def _read_posix(path, directory, resources):
-    before = _prestat(directory, path.name, path)
-    if before is None:
-        raise FileNotFoundError(path)
-    if (before.st_uid != os.geteuid() or before.st_mode & 0o7077
-            or before.st_dev != os.fstat(directory).st_dev):
-        raise _refuse(path, 'existing identity owner, modes or device is unsafe')
-    fd = resources.own(os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW |
-                             os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory),
-                       os.close, 'leaf close')
+    for attempt in range(_READ_BINDING_ATTEMPTS):
+        before = _prestat(directory, path.name, path)
+        if before is None:
+            raise FileNotFoundError(path)
+        if (before.st_uid != os.geteuid() or before.st_mode & 0o7077
+                or before.st_dev != os.fstat(directory).st_dev):
+            raise _refuse(path, 'existing identity owner, modes or device is unsafe')
+        fd = resources.own(os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW |
+                                 os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory),
+                           os.close, 'leaf close')
+        opened = os.fstat(fd)
+        if ((opened.st_dev, opened.st_ino) == (before.st_dev, before.st_ino)
+                or attempt == _READ_BINDING_ATTEMPTS - 1):
+            break
+        resources.release(fd)  # replaced between check and open; check again
     info = _verify_leaf(fd, directory, path, before=before)
     try:
         data = _read_all(fd)
